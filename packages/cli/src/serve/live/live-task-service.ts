@@ -7,9 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   partToString,
-  SessionService,
   stripTerminalControlSequences,
   type ChatRecord,
+  type SessionService,
 } from '@qwen-code/qwen-code-core';
 import {
   SessionArchivedError,
@@ -29,11 +29,17 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from '../workspace-runtime-storage.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from './session-source.js';
+} from '../conversations/session-source.js';
+import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -500,7 +506,7 @@ export class LiveTaskService {
     const all = (
       await Promise.all(
         this.options.workspaceRegistry
-          .list()
+          .listAll()
           .map((runtime) => this.listRuntimeThreads(runtime, limit)),
       )
     )
@@ -547,6 +553,7 @@ export class LiveTaskService {
           group: 'all',
           ...(cursor ? { cursor } : {}),
         },
+        { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
       );
       for (const session of result.sessions) {
         const pinned = session.isPinned === true;
@@ -641,8 +648,10 @@ export class LiveTaskService {
         cwd: located.summary.workspaceCwd,
         createdAt: epochSeconds(located.summary.createdAt),
         updatedAt: epochSeconds(
-          located.summary.updatedAt ??
+          laterActivityTimestamp(
+            located.summary.updatedAt,
             located.persisted?.conversation.lastUpdated,
+          ),
         ),
       },
       page: {
@@ -826,8 +835,10 @@ export class LiveTaskService {
             eventId: task.runtime.bridge.getSessionLastEventId(target.threadId),
           }
         : {}),
-      updatedAt:
-        task.summary.updatedAt ?? task.persisted?.conversation.lastUpdated,
+      updatedAt: laterActivityTimestamp(
+        task.summary.updatedAt,
+        task.persisted?.conversation.lastUpdated,
+      ),
     });
     const { reset: cursorReset } = decodeCursor(
       target.afterCursor,
@@ -851,9 +862,10 @@ export class LiveTaskService {
       task.summary.clientCount > 0
         ? task.runtime.bridge.getSessionLastEventId(target.threadId)
         : epochSeconds(
-            task.summary.updatedAt ??
-              task.persisted?.conversation.lastUpdated ??
-              task.summary.createdAt,
+            laterActivityTimestamp(
+              task.summary.updatedAt,
+              task.persisted?.conversation.lastUpdated,
+            ) ?? task.summary.createdAt,
           );
     return {
       schemaVersion: 1,
@@ -1045,7 +1057,7 @@ export class LiveTaskService {
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
-    const service = new SessionService(task.runtime.workspaceCwd);
+    const service = createWorkspaceRuntimeSessionService(task.runtime);
     const metadata =
       task.runtime.provenance === 'live-conversation'
         ? await readLoadableLiveConversationMetadata(
@@ -1102,9 +1114,14 @@ export class LiveTaskService {
       removed = false;
     }
     if (removed) {
-      await new SessionService(runtime.workspaceCwd)
-        .removeSession(session.sessionId)
-        .catch(() => undefined);
+      const persistedRemoved = await runWithWorkspaceRuntimeStorage(
+        runtime,
+        () =>
+          createWorkspaceRuntimeSessionService(runtime)
+            .removeSession(session.sessionId)
+            .catch(() => false),
+      );
+      if (persistedRemoved) runtime.bridge.markSessionCatalogChanged();
     }
     if (projectless && removed) {
       await this.options
@@ -1119,16 +1136,23 @@ export class LiveTaskService {
     if (live.kind === 'ambiguous') {
       throw new Error(`Task id is ambiguous: ${threadId}`);
     }
+    if (live.kind === 'unavailable') {
+      throw conversationRuntimeUnavailableError();
+    }
     const runtimes =
       live.kind === 'found'
         ? [live.runtime]
         : (
             await Promise.all(
-              this.options.workspaceRegistry.list().map(async (runtime) => ({
+              (
+                this.options.workspaceRegistry.listAll?.() ??
+                this.options.workspaceRegistry.list()
+              ).map(async (runtime) => ({
                 runtime,
-                exists: await new SessionService(
-                  runtime.workspaceCwd,
-                ).sessionExists(threadId),
+                exists:
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).sessionExists(threadId),
               })),
             )
           )
@@ -1138,7 +1162,7 @@ export class LiveTaskService {
     if (runtimes.length > 1)
       throw new Error(`Task id is ambiguous: ${threadId}`);
     const runtime = runtimes[0]!;
-    const service = new SessionService(runtime.workspaceCwd);
+    const service = createWorkspaceRuntimeSessionService(runtime);
     const persisted = await service.loadSession(threadId);
     let summary: BridgeSessionSummary;
     try {
@@ -1160,6 +1184,7 @@ export class LiveTaskService {
             size: 100,
             ...(cursor ? { cursor } : {}),
           },
+          { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
         );
         found = listed.sessions.find((item) => item.sessionId === threadId);
         cursor = listed.nextCursor;

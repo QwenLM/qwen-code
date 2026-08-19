@@ -150,13 +150,23 @@ describe('Trusted Folders Loading', () => {
       expect(folders.isPathTrusted('/trustedparent/trustme')).toBe(true);
 
       // No explicit rule covers this file
-      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(
-        undefined,
-      );
-      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(
-        undefined,
-      );
+      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(false);
+      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(false);
       expect(folders.isPathTrusted('/user/someotherfolder')).toBe(undefined);
+    });
+
+    it('uses the deepest matching rule for both trust directions', () => {
+      const { folders } = setup({
+        config: {
+          '/projects': TrustLevel.DO_NOT_TRUST,
+          '/projects/good': TrustLevel.TRUST_FOLDER,
+          '/projects/good/private': TrustLevel.DO_NOT_TRUST,
+        },
+      });
+
+      expect(folders.isPathTrusted('/projects/evil/src')).toBe(false);
+      expect(folders.isPathTrusted('/projects/good/src')).toBe(true);
+      expect(folders.isPathTrusted('/projects/good/private/src')).toBe(false);
     });
   });
 
@@ -558,10 +568,10 @@ describe('isWorkspaceTrusted', () => {
     });
   });
 
-  it('should return undefined for a child of an untrusted folder', () => {
+  it('should return false for a child of an untrusted folder', () => {
     mockCwd = '/home/user/untrusted/src';
     mockRules['/home/user/untrusted'] = TrustLevel.DO_NOT_TRUST;
-    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
+    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBe(false);
   });
 
   it('should return undefined when no rules match', () => {
@@ -571,12 +581,12 @@ describe('isWorkspaceTrusted', () => {
     expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
   });
 
-  it('should prioritize trust over distrust', () => {
+  it('should prioritize exact distrust over ancestor trust', () => {
     mockCwd = '/home/user/projectA/untrusted';
     mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
     mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
     expect(isWorkspaceTrusted(mockSettings)).toEqual({
-      isTrusted: true,
+      isTrusted: false,
       source: 'file',
     });
   });
@@ -701,6 +711,18 @@ describe('getWorkspaceTrustStatus', () => {
     ).toMatchObject({
       effective: { state: 'unknown', source: 'none' },
       explicitTrustLevel: null,
+    });
+  });
+
+  it('reports exact distrust over ancestor trust', () => {
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectA/untrusted'),
+    ).toMatchObject({
+      effective: { state: 'untrusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.DO_NOT_TRUST,
     });
   });
 

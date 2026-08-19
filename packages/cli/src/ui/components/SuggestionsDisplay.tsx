@@ -187,12 +187,10 @@ export function SuggestionsDisplay({
               </Box>
             );
           })}
-          {/* Mention Ctrl+Tab as an alternative since many terminals
-              intercept Ctrl+←/→ for word-jump (#8069). */}
+          {/* Bare ←/→: the original Ctrl+←/→ was unreachable because terminals
+              and macOS Mission Control intercept it (#8069). */}
           <Box marginLeft={2}>
-            <Text color={theme.text.secondary}>
-              {t('(Ctrl+Tab / Ctrl+Shift+Tab or Ctrl+←/→ to switch)')}
-            </Text>
+            <Text color={theme.text.secondary}>{t('(←/→ to switch)')}</Text>
           </Box>
         </Box>
       )}

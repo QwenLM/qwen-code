@@ -411,6 +411,68 @@ describe('ToolApproval accessibility', () => {
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
 
+  it('defaults an agent-launch dialog to the one-shot allow, not Reject', () => {
+    render(undefined, {
+      id: 'req-agent-launch',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+      'cancel',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed_once',
+    ]);
+    // Launching the agent is the proposed next action: focus and initial
+    // selection land on the one-shot allow instead of the reject button.
+    expect(document.activeElement).toBe(opts[3]);
+    expect(opts[3]!.tabIndex).toBe(0);
+  });
+
+  it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
+    render(undefined, {
+      id: 'req-agent-no-once',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    // No one-shot allow: the default must be the reject, never a permanent
+    // allow rule.
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('cancel');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
   it('leaves Enter to native button activation (no double-press guard)', () => {
     render(undefined);
     const opts = optionButtons();

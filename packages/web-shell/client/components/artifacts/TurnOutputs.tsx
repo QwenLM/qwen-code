@@ -78,6 +78,14 @@ export type TurnOutputOpenRequest = (
       workspaceId?: string;
     }
   | {
+      id: 'image';
+      kind: 'image';
+      title: string;
+      turnId: string;
+      src: string;
+      alt?: string;
+    }
+  | {
       id: string;
       kind: 'artifact';
       title: string;
@@ -336,7 +344,11 @@ function TurnOutputsComponent({
         <ArtifactCard
           key={artifact.id}
           artifact={artifact}
-          onOpen={() => openArtifact(artifact)}
+          onOpen={
+            canOpenWorkspaceArtifact(artifact)
+              ? () => openArtifact(artifact)
+              : undefined
+          }
           onError={onError}
           onDownload={
             canDownloadArtifact(artifact) && workspaceActions
@@ -371,7 +383,7 @@ function ArtifactCard({
   onError,
 }: {
   artifact: DaemonSessionArtifact;
-  onOpen: () => void;
+  onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
   onError?: (error: unknown, fallback: string) => void;
 }) {
@@ -388,6 +400,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
   const downloadName =
     (artifact.workspacePath &&
       normalizePath(artifact.workspacePath).split('/').at(-1)) ||
@@ -421,7 +434,9 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
+            {[getArtifactTypeLabel(artifact), size, blockedReason]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>
@@ -441,7 +456,8 @@ function ArtifactCard({
             type="button"
             className={styles.reviewButton}
             onClick={onOpen}
-            title={artifact.title}
+            title={blockedReason ?? artifact.title}
+            disabled={!onOpen}
           >
             {t('common.open')}
           </button>
@@ -648,6 +664,27 @@ function canDownloadArtifact(
     artifact.status === 'available' &&
     Boolean(artifact.workspacePath)
   );
+}
+
+export function canOpenWorkspaceArtifact(
+  artifact: DaemonSessionArtifact,
+): boolean {
+  if (artifact.storage !== 'workspace') {
+    return true;
+  }
+  return artifact.status === 'available' || artifact.status === 'changed';
+}
+
+export function getWorkspaceArtifactOpenBlockReason(
+  artifact: DaemonSessionArtifact,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | undefined {
+  if (canOpenWorkspaceArtifact(artifact)) {
+    return undefined;
+  }
+  return artifact.workspacePath
+    ? t('turnOutputs.artifactUnavailable', { path: artifact.workspacePath })
+    : t('turnOutputs.artifactMissing');
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {

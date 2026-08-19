@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.7",
+  "version": "0.21.11",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -24,6 +24,10 @@
     "./memoryScopes": {
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
+    },
+    "./toolWriteOrigin": {
+      "types": "./dist/src/services/tool-write-origin.d.ts",
+      "import": "./dist/src/services/tool-write-origin.js"
     },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
@@ -53,6 +57,7 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.0.1",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",
@@ -87,7 +92,7 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.0",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",

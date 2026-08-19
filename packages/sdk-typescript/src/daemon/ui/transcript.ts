@@ -15,14 +15,25 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
-import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  isUnrecognizedDiagnosticReason,
+} from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
 import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+/**
+ * Cap for the `unrecognizedDiagnostics` sidechannel. Forward-compat noise
+ * must stay inspectable without growing unboundedly in long sessions.
+ */
+export const UNRECOGNIZED_DIAGNOSTICS_LIMIT = 50;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
@@ -53,6 +64,7 @@ export function createDaemonTranscriptState(
     activeThoughtBlockByParent: createIndex(),
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: createIndex(),
+    unrecognizedDiagnostics: [],
     awaitingResync: false,
     resyncRequiredCount: 0,
     nextOrdinal: 1,
@@ -104,6 +116,7 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    files?: Array<{ name: string; mimeType: string }>;
     meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
@@ -120,22 +133,25 @@ export function appendLocalUserTranscriptMessage(
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
   }
+  if (opts.files && opts.files.length > 0) {
+    (block as DaemonTextTranscriptBlock).files = [...opts.files];
+  }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
 }
 
-// Freeze retained blocks at the dispatch boundary to catch consumers that
-// mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
-// This is a dev/CI safety net; in production it is pure O(blocks) overhead on
-// every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
-// does not depend on it, so skip it there. App bundlers statically replace
-// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
-// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// Freeze retained COW collections at the dispatch boundary to catch consumers
+// that mutate a shared snapshot (see reduceDaemonTranscriptEvents). This is a
+// dev/CI safety net; the reducer's own ownership discipline does not depend on
+// it, so skip the O(blocks) freeze in production. App bundlers statically
+// replace `process.env.NODE_ENV`, folding the check to `false`. The `typeof
+// process` guard keeps an unbundled browser consumer from throwing a
+// ReferenceError —
 // this module sits on the browser-hostile `daemon/ui` surface and Vite lib
 // builds preserve `process.env.NODE_ENV` in their output — matching the
 // existing SDK idiom (see ProcessTransport, cliPath).
-const FREEZE_TRANSCRIPT_BLOCKS =
+const FREEZE_TRANSCRIPT_COLLECTIONS =
   typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
@@ -147,17 +163,12 @@ export function reduceDaemonTranscriptEvents(
   const next = cloneTranscriptState(state, opts);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
   const result = trimTranscriptState(next);
-  // With lazy COW, `state.blocks` is shared across
-  // sidechannel-only snapshots. A misbehaving consumer doing
-  // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
-  // EVERY snapshot that shares the reference (previously only the
-  // current one). Freeze the array at the dispatch boundary so external
-  // in-place mutation throws in strict mode instead of silently
-  // poisoning future snapshots. Internal reducer mutation goes through
-  // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
-  // shared reference is never touched in-place by the next dispatch.
-  if (FREEZE_TRANSCRIPT_BLOCKS) {
+  // With lazy COW, blocks and their index can be shared across snapshots.
+  // Freeze both at the dispatch boundary so external in-place mutation throws
+  // in strict mode instead of poisoning every snapshot sharing the reference.
+  if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
+    Object.freeze(result.blockIndexById);
   }
   return result;
 }
@@ -169,6 +180,7 @@ export function finalizeOfflineDaemonTranscriptState(
   finishAssistant(next);
   next.activeUserBlockId = undefined;
   Object.freeze(next.blocks);
+  Object.freeze(next.blockIndexById);
   return next;
 }
 
@@ -245,8 +257,9 @@ function applyDaemonTranscriptEvent(
           '',
           event.eventId,
           event.serverTimestamp,
-          undefined,
+          event.meta,
           event.sourceRecordIds,
+          event.promptId,
         ) as DaemonTextTranscriptBlock;
         block.images = [{ data: event.data, mimeType: event.mimeType }];
         appendBlock(next, block);
@@ -257,6 +270,7 @@ function applyDaemonTranscriptEvent(
           | DaemonTextTranscriptBlock
           | undefined;
         if (block && block.kind === 'user') {
+          if (event.meta) block.meta = { ...block.meta, ...event.meta };
           // Use immutable update to avoid mutating a shared array reference
           block.images = [
             ...(block.images ?? []),
@@ -277,6 +291,23 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
+      if (
+        event.branchRecordId &&
+        event.promptId &&
+        event.reason === 'end_turn'
+      ) {
+        const assistant = getWritableBlockById(
+          next,
+          findFinalVisibleAssistantForPrompt(next, event.promptId),
+        );
+        if (assistant?.kind === 'assistant') {
+          assistant.branchRecordId = event.branchRecordId;
+          assistant.sourceRecordIds = unionStrings(
+            assistant.sourceRecordIds,
+            event.sourceRecordIds,
+          );
+        }
+      }
       finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
@@ -341,6 +372,10 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      if (isUnrecognizedDiagnostic(event)) {
+        appendUnrecognizedDiagnostic(next, event);
+        break;
+      }
       appendStatusBlock(next, event.type, event.text, event, {
         clearActiveText: event.clearActiveText,
       });
@@ -655,6 +690,15 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
+    // The merge predicate admits deltas when one side omits `promptId`;
+    // backfill so a late exact-promptId lookup (e.g. `assistant.done`
+    // attaching the branch checkpoint) still matches the merged block.
+    if (existing.promptId === undefined && event.promptId !== undefined) {
+      existing.promptId = event.promptId;
+    }
+    if (kind === 'assistant' && event.branchRecordId) {
+      existing.branchRecordId = event.branchRecordId;
+    }
     if (kind !== 'user') existing.streaming = true;
     return;
   }
@@ -671,7 +715,11 @@ function appendTextDelta(
     event.serverTimestamp,
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
+    event.promptId,
   );
+  if (kind === 'assistant' && event.branchRecordId) {
+    block.branchRecordId = event.branchRecordId;
+  }
   if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
@@ -711,10 +759,34 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (
+    existing.promptId !== undefined &&
+    event.promptId !== undefined &&
+    existing.promptId !== event.promptId
+  )
+    return false;
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+}
+
+function findFinalVisibleAssistantForPrompt(
+  state: DaemonTranscriptState,
+  promptId: string,
+): string | undefined {
+  for (let index = state.blocks.length - 1; index >= 0; index--) {
+    const block = state.blocks[index];
+    if (
+      block?.kind === 'assistant' &&
+      block.parentToolCallId === undefined &&
+      block.promptId === promptId &&
+      block.text.trim().length > 0
+    ) {
+      return block.id;
+    }
+  }
+  return undefined;
 }
 
 function finishAssistant(
@@ -942,6 +1014,8 @@ function discardToolBlock(
   takeBlocksOwnership(state);
   state.blocks = state.blocks.filter((block) => block.id !== blockId);
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   delete state.toolBlockByCallId[toolCallId];
   delete state.toolProgress[toolCallId];
   if (state.currentToolCallId === toolCallId) {
@@ -1212,6 +1286,75 @@ function resolvePermissionBlock(
   clearActiveText(state);
 }
 
+type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
+  type: 'debug';
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+};
+
+function isUnrecognizedDiagnostic(
+  event: DaemonUiStatusEvent,
+): event is UnrecognizedDiagnosticEvent {
+  return (
+    event.type === 'debug' && isUnrecognizedDiagnosticReason(event.debugReason)
+  );
+}
+
+/**
+ * Route forward-compatibility noise to the bounded `unrecognizedDiagnostics`
+ * sidechannel instead of `blocks[]`. Appending it as a status block would
+ * run the default `clearActiveText`, finalizing the streaming assistant/
+ * thought block so a following `assistant.usage` frame is dropped, and each
+ * block would consume the `maxBlocks` budget — repeated noise then evicts
+ * real conversation content in `trimTranscriptState`. Renderer-side
+ * filtering runs strictly after these mutations, so hiding the block later
+ * cannot prevent either symptom. `malformed_payload` diagnostics and
+ * client-dispatched debug events keep their block semantics.
+ */
+function appendUnrecognizedDiagnostic(
+  state: DaemonTranscriptState,
+  event: UnrecognizedDiagnosticEvent,
+): void {
+  // The replaced `appendStatusBlock` path also reset the user pointer
+  // (its non-user block append runs `state.activeUserBlockId = undefined`).
+  // Keep that reset: diagnostics carry no association with the active user
+  // block, and a stale pointer lets a later mergeable `user.text.delta`
+  // with no promptId stamp (e.g. a peer client's `$ <cmd>` echo) append
+  // onto an earlier user block, collapsing two turns into one and skewing
+  // `rewindTranscriptToUserTurn`'s turn indexing. The streaming
+  // assistant/thought pointer stays untouched — that is the whole point of
+  // the sidechannel (see the doc above).
+  state.activeUserBlockId = undefined;
+  // The replaced `appendStatusBlock` path capped exactly these diagnostics at
+  // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
+  // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.
+  // Shares `truncateTextAtLimit` with the block path; the only delta is the
+  // truncation report, which has no block id to report under.
+  const diagnostic: DaemonUnrecognizedDiagnostic = {
+    debugReason: event.debugReason,
+    text: truncateTextAtLimit(event.text),
+    clientReceivedAt: state.now,
+    ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
+    ...(event.sourceRecordIds !== undefined
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
+    ...(event.branchRecordId !== undefined
+      ? { branchRecordId: event.branchRecordId }
+      : {}),
+    ...(event.originatorClientId !== undefined
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  const diagnostics = [...state.unrecognizedDiagnostics, diagnostic];
+  state.unrecognizedDiagnostics =
+    diagnostics.length > UNRECOGNIZED_DIAGNOSTICS_LIMIT
+      ? diagnostics.slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT)
+      : diagnostics;
+}
+
 function appendStatusBlock(
   state: DaemonTranscriptState,
   kind: 'status' | 'error' | 'debug',
@@ -1247,6 +1390,10 @@ function appendStatusBlock(
     ...((event?.type === 'status' || event?.type === 'debug') &&
     event.data !== undefined
       ? { data: event.data }
+      : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') &&
+    event.debugReason
+      ? { debugReason: event.debugReason }
       : {}),
     ...(event?.type === 'session.branched'
       ? {
@@ -1295,6 +1442,7 @@ function createTextBlock(
   serverTimestamp?: number,
   meta?: Record<string, unknown>,
   sourceRecordIds?: readonly string[],
+  promptId?: string,
 ): DaemonTextTranscriptBlock {
   const blockId = allocateBlockId(state, kind);
   return {
@@ -1307,6 +1455,7 @@ function createTextBlock(
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
 }
@@ -1363,6 +1512,9 @@ function cloneTranscriptState(
     // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
     // that don't touch the suggestion.
     lastFollowupSuggestion: state.lastFollowupSuggestion,
+    // Same reference-stability contract: the reducer replaces the whole
+    // array when appending, never mutates it in-place.
+    unrecognizedDiagnostics: state.unrecognizedDiagnostics,
   };
   const onTruncation = opts.onTruncation ?? truncationCallbacks.get(state);
   if (onTruncation) truncationCallbacks.set(next, onTruncation);
@@ -1378,10 +1530,10 @@ function trimTranscriptState(
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
-  // Trim replaces both arrays with fresh objects; register that this
-  // state now owns its blocks so future appends in the same dispatch
-  // don't double-copy.
+  // Trim replaces both collections with fresh objects; register ownership so
+  // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
@@ -1455,7 +1607,7 @@ function shouldRecreateTrimmedToolBlock(
 }
 
 /**
- * Lazy copy-on-write for `state.blocks` / `state.blockIndexById`.
+ * Lazy copy-on-write for `state.blocks`.
  *
  * `cloneTranscriptState` shares the parent's `blocks` reference (not
  * eager-copies) so non-block-mutating events keep the same array
@@ -1473,12 +1625,21 @@ const ownedBlocks = new WeakMap<
   DaemonTranscriptState,
   readonly DaemonTranscriptBlock[]
 >();
+const ownedBlockIndexes = new WeakMap<
+  DaemonTranscriptState,
+  Readonly<Record<string, number>>
+>();
 
 function takeBlocksOwnership(state: DaemonTranscriptState): void {
   if (ownedBlocks.get(state) === state.blocks) return;
   state.blocks = [...state.blocks];
-  state.blockIndexById = createIndex(state.blockIndexById);
   ownedBlocks.set(state, state.blocks);
+}
+
+function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
+  if (ownedBlockIndexes.get(state) === state.blockIndexById) return;
+  state.blockIndexById = createIndex(state.blockIndexById);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 // Applies a daemon rewind event to this in-memory transcript only. The target
@@ -1514,6 +1675,7 @@ function truncateTranscriptBeforeBlock(
   state.blocks = state.blocks.slice(0, blockIndex);
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
@@ -1529,7 +1691,6 @@ function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
-
   const liveToolCallIds = new Set<string>();
   for (const block of state.blocks) {
     if (block.kind === 'tool') {
@@ -1552,7 +1713,9 @@ function appendBlock(
   block: DaemonTranscriptBlock,
 ): void {
   takeBlocksOwnership(state);
-  state.blockIndexById[block.id] = state.blocks.length;
+  takeBlockIndexOwnership(state);
+  (state.blockIndexById as Record<string, number>)[block.id] =
+    state.blocks.length;
   (state.blocks as DaemonTranscriptBlock[]).push(block);
 }
 
@@ -1629,6 +1792,15 @@ function appendBoundedText(
   return truncateText(state, block.id, block.sourceRecordIds, existing + text);
 }
 
+function truncateTextAtLimit(text: string): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  const keepLength = Math.max(
+    0,
+    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
+  );
+  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
 function truncateText(
   state: DaemonTranscriptState,
   blockId: string,
@@ -1637,11 +1809,7 @@ function truncateText(
 ): string {
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
   reportTextTruncation(state, blockId, sourceRecordIds);
-  const keepLength = Math.max(
-    0,
-    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
-  );
-  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+  return truncateTextAtLimit(text);
 }
 
 function reportTextTruncation(
@@ -1818,6 +1986,19 @@ export function selectLastFollowupSuggestion(
   state: DaemonTranscriptState,
 ): { suggestion: string; promptId: string } | undefined {
   return state.lastFollowupSuggestion;
+}
+
+/**
+ * Forward-compatibility diagnostics mirrored from normalizer-classified
+ * `unrecognized_event` / `unrecognized_session_update` debug events. These
+ * live outside `blocks[]` (see `appendUnrecognizedDiagnostic`), so developer
+ * tooling can still inspect them after renderers hide them. Bounded by
+ * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`, newest last.
+ */
+export function selectUnrecognizedDiagnostics(
+  state: DaemonTranscriptState,
+): readonly DaemonUnrecognizedDiagnostic[] {
+  return state.unrecognizedDiagnostics;
 }
 
 /**

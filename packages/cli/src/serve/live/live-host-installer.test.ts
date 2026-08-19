@@ -4,13 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 import {
+  downloadLiveHostRelease,
   isExpectedLiveHostSignature,
   LiveHostInstaller,
+  LIVE_HOST_DOWNLOAD_TIMEOUT_MS,
+  LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS,
+  LIVE_HOST_OSS_BASE_URL,
   LIVE_HOST_RELEASE_BASE_URL,
   parseLiveHostReleaseManifest,
+  resolveLiveHostAssetUrls,
+  resolveLiveHostManifestUrls,
 } from './live-host-installer.js';
 
 const sha = 'a'.repeat(64);
@@ -36,11 +46,187 @@ function manifest() {
   };
 }
 
+function manifestForBytes(version: string, bytes: Buffer) {
+  const checksum = createHash('sha256').update(bytes).digest('hex');
+  return {
+    ...manifest(),
+    version,
+    assets: {
+      arm64: {
+        name: 'Qwen-Live-Host-arm64.zip',
+        size: bytes.byteLength,
+        sha256: checksum,
+      },
+      x64: {
+        name: 'Qwen-Live-Host-x64.zip',
+        size: bytes.byteLength,
+        sha256: checksum,
+      },
+    },
+  };
+}
+
 describe('LiveHostInstaller', () => {
-  it('downloads only from the independent stable Live Host feed', () => {
+  it('prefers the OSS mirror and retains the independent GitHub fallback', () => {
+    expect(LIVE_HOST_OSS_BASE_URL).toBe(
+      'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/live-host',
+    );
     expect(LIVE_HOST_RELEASE_BASE_URL).toBe(
       'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
     );
+    expect(resolveLiveHostManifestUrls()).toEqual([
+      `${LIVE_HOST_OSS_BASE_URL}/latest/Qwen-Live-Host-manifest.json`,
+      `${LIVE_HOST_RELEASE_BASE_URL}/Qwen-Live-Host-manifest.json`,
+    ]);
+    expect(
+      resolveLiveHostAssetUrls('0.1.0', 'Qwen-Live-Host-arm64.zip'),
+    ).toEqual([
+      `${LIVE_HOST_OSS_BASE_URL}/v0.1.0/Qwen-Live-Host-arm64.zip`,
+      `${LIVE_HOST_RELEASE_BASE_URL}/Qwen-Live-Host-arm64.zip`,
+    ]);
+  });
+
+  it('falls back with a matching GitHub manifest and asset pair', async () => {
+    const ossBytes = Buffer.from('oss-archive');
+    const githubBytes = Buffer.from('github-archive');
+    const ossManifest = manifestForBytes('0.1.0', ossBytes);
+    const githubManifest = manifestForBytes('0.2.0', githubBytes);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(ossManifest))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(Response.json(githubManifest))
+      .mockResolvedValueOnce(
+        new Response(githubBytes, {
+          headers: { 'content-length': String(githubBytes.byteLength) },
+        }),
+      );
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      const release = await downloadLiveHostRelease(
+        'arm64',
+        destination,
+        () => {},
+        fetchImpl,
+      );
+      expect(release.manifest).toEqual(githubManifest);
+      await expect(fsp.readFile(destination)).resolves.toEqual(githubBytes);
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+        resolveLiveHostManifestUrls()[0],
+        resolveLiveHostAssetUrls(
+          ossManifest.version,
+          ossManifest.assets.arm64.name,
+        )[0],
+        resolveLiveHostManifestUrls()[1],
+        resolveLiveHostAssetUrls(
+          githubManifest.version,
+          githubManifest.assets.arm64.name,
+        )[1],
+      ]);
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a checksum-invalid OSS archive before falling back', async () => {
+    const expectedOssBytes = Buffer.from('expected-oss-archive');
+    const corruptOssBytes = Buffer.alloc(expectedOssBytes.byteLength, 0x78);
+    const githubBytes = Buffer.from('github-archive');
+    const ossManifest = manifestForBytes('0.1.0', expectedOssBytes);
+    const githubManifest = manifestForBytes('0.2.0', githubBytes);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(ossManifest))
+      .mockResolvedValueOnce(
+        new Response(corruptOssBytes, {
+          headers: { 'content-length': String(corruptOssBytes.byteLength) },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json(githubManifest))
+      .mockResolvedValueOnce(
+        new Response(githubBytes, {
+          headers: { 'content-length': String(githubBytes.byteLength) },
+        }),
+      );
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      const release = await downloadLiveHostRelease(
+        'arm64',
+        destination,
+        () => {},
+        fetchImpl,
+      );
+      expect(release.manifest).toEqual(githubManifest);
+      await expect(fsp.readFile(destination)).resolves.toEqual(githubBytes);
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports both source failures and removes the destination', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 503 }));
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      await expect(
+        downloadLiveHostRelease('arm64', destination, () => {}, fetchImpl),
+      ).rejects.toMatchObject({
+        message:
+          'Qwen Live Host download failed. OSS: Live Host manifest download failed (503). GitHub: Live Host manifest download failed (503).',
+        errors: [
+          { message: 'OSS: Live Host manifest download failed (503).' },
+          { message: 'GitHub: Live Host manifest download failed (503).' },
+        ],
+      });
+      await expect(fsp.stat(destination)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('passes separate bounded signals to manifest and archive requests', async () => {
+    const bytes = Buffer.from('signed-live-host-archive');
+    const expected = manifestForBytes('0.1.0', bytes);
+    const manifestSignal = AbortSignal.abort('manifest');
+    const downloadSignal = AbortSignal.abort('download');
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValueOnce(manifestSignal)
+      .mockReturnValueOnce(downloadSignal);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(expected))
+      .mockResolvedValueOnce(new Response(bytes));
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      await downloadLiveHostRelease('arm64', destination, () => {}, fetchImpl);
+      expect(LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS).toBe(5 * 60 * 1000);
+      expect(LIVE_HOST_DOWNLOAD_TIMEOUT_MS).toBe(60 * 60 * 1000);
+      expect(fetchImpl.mock.calls[0]?.[1]?.signal).toBe(manifestSignal);
+      expect(fetchImpl.mock.calls[1]?.[1]?.signal).toBe(downloadSignal);
+    } finally {
+      timeout.mockRestore();
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('accepts only the Qwen Developer ID team', () => {

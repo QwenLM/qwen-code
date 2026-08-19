@@ -19,10 +19,13 @@ import {
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
@@ -55,6 +58,7 @@ export interface TranscriptReplayStateV1 {
   readonly pendingToolCalls: readonly PendingTranscriptToolCall[];
   readonly cumulativeUsage: TranscriptReplayUsageState;
   readonly goalState?: GoalSnapshotV2;
+  readonly goalCause?: GoalStateCause;
 }
 
 export interface TranscriptReplayToolMetadata {
@@ -152,6 +156,12 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   'cleared',
   'failed',
   'aborted',
+  // A paused goal is not running, and dropping the card here is not neutral:
+  // the replay stream is what feeds the goal renderer, so the older `set` card
+  // stays newest and every surface keeps claiming autonomous work is under way.
+  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
+  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  'paused',
   'checking',
 ]);
 
@@ -248,6 +258,31 @@ export function createTranscriptImageUpdate(
     content: { type: 'image', data: options.data, mimeType: options.mimeType },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+function createTranscriptMediaReferenceUpdate(
+  reference: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  if (
+    (reference['type'] !== 'image' && reference['type'] !== 'audio') ||
+    typeof reference['mediaId'] !== 'string' ||
+    typeof reference['mimeType'] !== 'string' ||
+    typeof reference['size'] !== 'number'
+  ) {
+    return undefined;
+  }
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: reference['type'],
+      mediaId: reference['mediaId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
 }
 
 export function createTranscriptUsageUpdate(
@@ -411,6 +446,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   };
   private finalized = false;
   private goalState: GoalSnapshotV2 | undefined;
+  private goalCause: GoalStateCause | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -419,6 +455,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     );
     this.usage = { ...initialState.cumulativeUsage };
     this.goalState = initialState.goalState;
+    this.goalCause = initialState.goalCause;
     for (const pending of initialState.pendingToolCalls) {
       this.pendingToolCalls.set(pending.callId, pending);
       this.usedToolCallIds.add(pending.callId);
@@ -527,6 +564,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       })),
       cumulativeUsage: { ...this.usage },
       ...(this.goalState ? { goalState: this.goalState } : {}),
+      ...(this.goalCause ? { goalCause: this.goalCause } : {}),
     };
   }
 
@@ -538,6 +576,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    const replayMeta: UpdateMetaOptions =
+      record.subtype === 'mid_turn_user_message'
+        ? {
+            ...meta,
+            extra: {
+              ...meta.extra,
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : meta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -548,6 +597,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload && typeof payload['displayText'] === 'string'
           ? payload['displayText']
           : undefined;
+      if (record.subtype === 'mid_turn_user_message' && displayText === '') {
+        const media = [
+          ...this.projectUserMediaReferences(payload, emit, replayMeta),
+        ];
+        if (media.length > 0) {
+          yield* media;
+          return;
+        }
+      }
       if (displayText) {
         const isNotification = record.subtype === 'notification';
         const backgroundTask =
@@ -558,7 +616,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
-            ...meta,
+            ...replayMeta,
             ...(isNotification
               ? {
                   extra: {
@@ -572,6 +630,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
+        yield* this.projectUserMediaReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
@@ -583,13 +642,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         record,
         'user',
         emit,
-        meta,
+        replayMeta,
         undefined,
         replaceTextPartsForDisplay(
           record.message?.parts,
           projection.displayText,
         ),
       );
+      yield* this.projectUserMediaReferences(payload, emit, replayMeta);
       return;
     }
 
@@ -597,10 +657,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       record,
       'user',
       emit,
-      meta,
+      replayMeta,
       undefined,
       projection.parts,
     );
+    yield* this.projectUserMediaReferences(payload, emit, replayMeta);
+  }
+
+  private *projectUserMediaReferences(
+    payload: Record<string, unknown> | undefined,
+    emit: (update: SessionUpdate) => TranscriptReplayEmission,
+    meta: UpdateMetaOptions,
+  ): Iterable<TranscriptReplayEmission> {
+    const references = payload?.['mediaReferences'];
+    if (!Array.isArray(references)) return;
+    for (const reference of references) {
+      if (!isObjectRecord(reference)) continue;
+      const update = createTranscriptMediaReferenceUpdate(reference, meta);
+      if (update) yield emit(update);
+    }
   }
 
   private *projectAssistantRecord(
@@ -837,11 +912,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
+      const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+        cause: payload.cause,
+        previousCause: this.goalCause,
+        previous: this.goalState,
+        next: payload.snapshot,
+      });
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
       this.goalState = payload.snapshot;
+      this.goalCause = payload.cause;
+      if (bookkeepingOnly) return;
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1149,6 +1232,17 @@ function parseInitialState(
       affectsCompleteness: true,
     });
   }
+  const rawGoalCause = value['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (rawGoalCause !== undefined && !goalCause) {
+    onDiagnostic?.({
+      code: 'invalid_replay_state',
+      severity: 'warning',
+      message: 'Dropped a malformed Goal cause from replay state.',
+      affectsCompleteness: true,
+    });
+  }
   return {
     v: 1,
     pendingToolCalls,
@@ -1161,6 +1255,7 @@ function parseInitialState(
         }
       : emptyUsage(),
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 

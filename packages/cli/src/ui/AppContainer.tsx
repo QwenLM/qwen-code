@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
@@ -155,8 +156,9 @@ import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
+  titleStatusPrefix,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -166,7 +168,13 @@ import {
 } from './hooks/useGeminiStream.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
+  isBtwCommand,
+  isContextFilesAnnouncement,
+  isSlashCommand,
+} from './utils/commandUtils.js';
 import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
@@ -624,6 +632,13 @@ interface AppContainerProps {
   initializationResult: InitializationResult;
   initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
+  /**
+   * VP wake/SIGCONT repaint: clear the viewport and replay the last frame
+   * (Ink skips unchanged-output redraws, so a bare clear would blank the
+   * screen). Absent under QWEN_CODE_LEGACY_RESIZE_ERASE: the VP wake path
+   * stays write-free (static remount bump only), matching pre-PR behavior.
+   */
+  repaintViewport?: () => void;
 }
 
 /**
@@ -639,8 +654,13 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult, initialUseVirtualViewport } =
-    props;
+  const {
+    settings,
+    config,
+    initializationResult,
+    initialUseVirtualViewport,
+    repaintViewport,
+  } = props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -830,6 +850,39 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // One-shot announcement of the context files (QWEN.md / context.fileName)
+  // attached to the system prompt, shown alongside the first real prompt so
+  // users can verify discovery (e.g., catch typos in context.fileName)
+  // without digging into debug logs (#5267).
+  const contextFilesAnnouncedRef = useRef(false);
+  // /clear and other same-process session switches wipe the emitted INFO
+  // item without remounting this component while context files stay
+  // attached, so re-arm the latch for the new session's first prompt.
+  useEffect(() => {
+    contextFilesAnnouncedRef.current = false;
+  }, [sessionStats.sessionId]);
+  // Wrap loadHistory to reconcile the announcement latch after any history
+  // replacement (rewind, /restore, /resume of the current session). If the
+  // restored history contains a context-files announcement the latch is
+  // consumed (prevents duplicates); otherwise it's armed (allows
+  // re-announcement). This covers /restore and same-id /resume, which the
+  // sessionId effect does not catch because the id is unchanged.
+  // Destructure loadHistory so the useCallback can depend on the function
+  // (stable, empty-deps) instead of the whole historyManager object, whose
+  // identity changes on every history mutation — passing the wrapper into
+  // useSlashCommandProcessor would otherwise put `history` back into the
+  // commandContext useMemo deps (the historyRef pattern exists to avoid
+  // exactly that).
+  const { loadHistory: rawLoadHistory } = historyManager;
+  const loadHistoryWithLatchReconciliation = useCallback(
+    (newHistory: HistoryItem[]) => {
+      rawLoadHistory(newHistory);
+      contextFilesAnnouncedRef.current = newHistory.some(
+        isContextFilesAnnouncement,
+      );
+    },
+    [rawLoadHistory],
+  );
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -931,7 +984,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        historyManager.loadHistory(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
@@ -1287,15 +1340,16 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
-  // region via ink 7 native overflow clipping. Writing clearTerminal /
-  // cursorTo+eraseDown would be a wasted flash and would also corrupt the
-  // in-app scroll position. The remount-key bump is also a near-no-op for
-  // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // keeping the bump is harmless because the startup-scoped VP decision
-  // is intentionally restart-only to match Ink's alternateScreen lifetime.
-  // The visible refresh in VP mode comes for free from the React tree
-  // re-reading `mergedHistory` / `allVirtualItems` on whatever state
-  // change triggered refreshStatic (Ctrl+O, model change, etc.).
+  // region via ink 7 native overflow clipping. The remount-key bump is
+  // write-free but not inert: one-shot <Static> output keyed by it (agent
+  // tab history in AgentChatContent) is only re-emitted on a bump.
+  // refreshStatic must stay write-free in VP: ordinary callers (Ctrl+O,
+  // model change, /clear, ...) get their visible refresh from the state
+  // change that triggered them, and replaying the pre-change frame would
+  // flash stale content. Only the wake/SIGCONT path (wakeRepaint below) does
+  // a physical clear-and-replay, because there the terminal buffer may be
+  // stale or rearranged while Ink both erases with a stale relative count
+  // and skips redraws whose output is unchanged.
   const [useTerminalBuffer] = useState(
     () =>
       initialUseVirtualViewport ??
@@ -1305,13 +1359,68 @@ export const AppContainer = (props: AppContainerProps) => {
         isInteractiveTerminal(),
       ),
   );
+
+  // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
+  // <Static> content from the viewport just like the wake path; pair it with
+  // the same remount bump so keyed statics (agent tab history) re-emit. The
+  // window's CLEAR_VIEWPORT substitutes wipe the just-re-emitted statics on
+  // every in-window redraw, so bump again once the window closes.
+  const prevTerminalWidthRef = useRef(terminalWidth);
+  const shrinkRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(() => {
+    const prev = prevTerminalWidthRef.current;
+    prevTerminalWidthRef.current = terminalWidth;
+    if (useTerminalBuffer && terminalWidth < prev) {
+      remountStaticHistory();
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+      // Slightly past CLEAR_WINDOW_MS (600) so the last window clear lands
+      // before the re-emit.
+      shrinkRemountTimerRef.current = setTimeout(remountStaticHistory, 650);
+    }
+  }, [terminalWidth, useTerminalBuffer, remountStaticHistory]);
+  useEffect(
+    () => () => {
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     }
+    // VP stays write-free for ordinary callers (/clear, model change, Ctrl+O,
+    // ...): replaying the pre-change frame would flash stale content. Their
+    // visible refresh comes from the state change that triggered them. The
+    // wake/SIGCONT path repaints separately via useWakeRepaint below.
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
+
+  // Wake/SIGCONT: the terminal buffer may be stale or rearranged, and Ink
+  // both erases with a stale relative count and skips redraws whose output
+  // is unchanged — so VP repaints by replaying the last frame over a clean
+  // viewport (viewport-only: clearTerminal's 3J would destroy scrollback /
+  // Warp history) and bumps the static remount key so one-shot <Static>
+  // history (agent tabs) is re-emitted over the clear. Static mode uses the
+  // ordinary refreshStatic. Selection extracted (buildWakeRepaint) for unit
+  // coverage.
+  const wakeRepaint = useMemo(
+    () =>
+      buildWakeRepaint({
+        isVP: useTerminalBuffer,
+        repaintViewport,
+        refreshStatic,
+        remountStaticHistory,
+      }),
+    [useTerminalBuffer, repaintViewport, refreshStatic, remountStaticHistory],
+  );
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -1359,6 +1468,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setThemeError,
     historyManager.addItem,
     initializationResult.themeError,
+    config,
   );
 
   const {
@@ -1418,7 +1528,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
-  } = useEditorSettings(settings, setEditorError, historyManager.addItem);
+  } = useEditorSettings(
+    settings,
+    setEditorError,
+    historyManager.addItem,
+    config,
+  );
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
@@ -1513,6 +1628,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     settings,
     historyManager,
+    // Route the interactive /resume through the latch-reconciling wrapper
+    // so same-id resume (no sessionId change → no effect re-arm) still
+    // re-arms the latch when the rebuilt history has no announcement.
+    loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
@@ -1796,7 +1915,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
-    historyManager.loadHistory,
+    loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
     isProcessing,
@@ -1939,6 +2058,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (config.isSafeMode()) {
       config.setUserMemory('');
       config.setGeminiMdFileCount(0);
+      config.setContextFilePaths([]);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
@@ -1961,27 +2081,33 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount, conditionalRules, projectRoot } =
-        await loadHierarchicalGeminiMemory(
-          process.cwd(),
-          settings.merged.context?.loadFromIncludeDirectories
-            ? config.getWorkspaceContext().getDirectories()
-            : [],
-          config.getFileService(),
-          config.getExtensionContextFilePaths(),
-          config.isTrustedFolder(),
-          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-          config.getContextRuleExcludes(),
-          {
-            loadReason: 'refresh',
-            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
-              config.getHookSystem(),
-            ),
-          },
-        );
+      const {
+        memoryContent,
+        fileCount,
+        contextFilePaths,
+        conditionalRules,
+        projectRoot,
+      } = await loadHierarchicalGeminiMemory(
+        config.getWorkingDir(),
+        settings.merged.context?.loadFromIncludeDirectories
+          ? config.getWorkspaceContext().getDirectories()
+          : [],
+        config.getFileService(),
+        config.getExtensionContextFilePaths(),
+        config.isTrustedFolder(),
+        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+        config.getContextRuleExcludes(),
+        {
+          loadReason: 'refresh',
+          onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+            config.getHookSystem(),
+          ),
+        },
+      );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry(conditionalRules, projectRoot),
       );
@@ -2461,6 +2587,44 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
+      // Heuristically mirror the downstream input classification (see
+      // consumesContextAnnouncementLatch) so the latch is consumed by the
+      // submission most likely to start the first main model turn. This is a
+      // prediction, not an admission guarantee: rare post-admission aborts
+      // (ESC, expansion errors) and built-in submit_prompt commands without
+      // the modelInvocable flag are not re-armed here; consuming at the true
+      // admission choke point is a deeper refactor deferred for this feature.
+      // Known gap: /cd, /directory add, and performMemoryRefresh swap the
+      // attached context-file set within the same session but do not re-arm
+      // the latch, so the new file set is never announced after the first
+      // prompt consumes it. A self-healing latch that watches the
+      // context-file set would cover these centrally; deferred as a
+      // follow-up. (/restore and same-id /resume are handled by the
+      // loadHistory wrapper above.)
+      const trimmedPrompt = userPromptText.trim();
+      if (
+        !contextFilesAnnouncedRef.current &&
+        consumesContextAnnouncementLatch(trimmedPrompt, {
+          shellModeActive,
+          slashCommands,
+        })
+      ) {
+        const contextFilePaths = config.getContextFilePaths();
+        if (contextFilePaths.length > 0) {
+          // Consume the latch only when something was actually announced;
+          // files attached before the first prompt still get their one-shot
+          // notice. Files attached after (e.g. /directory add,
+          // performMemoryRefresh) are a known gap — see above.
+          contextFilesAnnouncedRef.current = true;
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} ${contextFilePaths.join(', ')}`,
+            },
+            Date.now(),
+          );
+        }
+      }
       const recoveredAgentsNotice =
         !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
           ? config.consumePendingRecoveredAgentsNotice()
@@ -2524,12 +2688,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
@@ -2683,6 +2847,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
       setBufferText,
+      shellModeActive,
       vimEnabled,
     ],
   );
@@ -2942,6 +3107,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleClearScreen = useCallback(() => {
     clearPendingStateRef.current();
+    // Ctrl-L wipes the emitted INFO item without a session switch, so re-arm
+    // the latch or the remaining attached files go unannounced afterwards.
+    contextFilesAnnouncedRef.current = false;
     historyManager.clearItems();
     clearScreen();
     remountStaticHistory();
@@ -3077,7 +3245,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // causes transient heap peaks that trigger OOM (#4624).
       const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        // On by default: the schema declares `default: true`, but
+        // `mergeSettings` doesn't apply schema defaults, so an unset value is
+        // `undefined` and a `=== true` gate left the cache-aware fork as dead
+        // code unless the flag was explicitly set (#9230). Same treatment as
+        // `enableFollowupSuggestions` above — only an explicit `false` opts
+        // out.
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -3402,7 +3576,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
   // Ink's frame-diff state still reflects the pre-sleep output, so the next
   // render strands border characters on screen.
-  useWakeRepaint(refreshStatic);
+  useWakeRepaint(wakeRepaint);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -3590,7 +3764,7 @@ export const AppContainer = (props: AppContainerProps) => {
             originalHistory.filter((h) => h.id < userItem.id),
           );
           clearPendingStateRef.current();
-          historyManager.loadHistory(truncatedUi);
+          loadHistoryWithLatchReconciliation(truncatedUi);
 
           refreshStatic();
 
@@ -3661,7 +3835,13 @@ export const AppContainer = (props: AppContainerProps) => {
         setIsRewindSelectorOpen(false);
       }
     },
-    [config, historyManager, refreshStatic, buffer],
+    [
+      config,
+      historyManager,
+      loadHistoryWithLatchReconciliation,
+      refreshStatic,
+      buffer,
+    ],
   );
 
   const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
@@ -4236,7 +4416,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    const title = formatSessionWindowTitle(sessionName, folderName);
+    const title = formatSessionWindowTitle(
+      sessionName,
+      folderName,
+      titleStatusPrefix(streamingState),
+    );
 
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== title) {
@@ -4249,6 +4433,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
     sessionName,
+    streamingState,
     settings.merged.ui?.hideWindowTitle,
     settings.merged.ui?.showStatusInTitle,
     config,

@@ -335,6 +335,84 @@ describe('useResumeCommand', () => {
     expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
+  it('handleResume routes history replacement through the loadHistory override', async () => {
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const overrideLoadHistory = vi.fn();
+
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => ({
+        initialize: vi.fn().mockResolvedValue(undefined),
+      }),
+      startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice: vi.fn(),
+      }),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        // AppContainer passes its latch-reconciling wrapper here; the
+        // rebuilt history must flow through it, not the raw manager.
+        loadHistory: overrideLoadHistory,
+        startNewSession: vi.fn(),
+      }),
+    );
+
+    resumeMocks.resolvePendingLoadSession({
+      conversation: resumeMocks.makeConversation([
+        { role: 'user', parts: [{ text: 'hello' }] },
+      ]),
+    });
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+
+    expect(overrideLoadHistory).toHaveBeenCalledTimes(1);
+    expect(overrideLoadHistory).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.anything()]),
+    );
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
+  });
+
   it('adds a recovery notice when resuming an interrupted tool turn', async () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
@@ -602,6 +680,15 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(true),
+        getAll: vi.fn().mockReturnValue([
+          {
+            agentId: 'bg_ab12cd34',
+            isBackgrounded: true,
+            status: 'running',
+            description: 'long-running research',
+            startTime: Date.now(),
+          },
+        ]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -615,6 +702,7 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -647,13 +735,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
@@ -667,6 +756,7 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
+        getAll: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -679,12 +769,15 @@ describe('useResumeCommand', () => {
           {
             monitorId: 'mon_123',
             status: 'running',
+            description: 'tail -f /var/log/app.log',
+            startTime: Date.now(),
           },
         ]),
         reset: vi.fn(),
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -717,13 +810,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[mon_123]');
   });
 
   it('rolls core back when persisted Goal state is malformed', async () => {

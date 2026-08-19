@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionResponse,
 } from '../types.js';
 
@@ -88,6 +89,10 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for events belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -127,6 +132,7 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -273,11 +279,95 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
   modelId: string;
 }
 
+/**
+ * Why the normalizer produced a `debug` projection instead of a typed event.
+ *
+ * `unrecognized_*` means the daemon sent a frame this normalizer has no case
+ * for — expected whenever the daemon runs ahead of the client, and the payload
+ * is developer diagnostics rather than conversation content. `malformed_*`
+ * means a frame the normalizer *does* know arrived with an unusable payload,
+ * which signals an actual defect.
+ *
+ * Renderers should branch on this instead of pattern-matching the debug text:
+ * client-dispatched debug events (e.g. Web Shell's model-switch summary) carry
+ * no `debugReason` at all and must keep rendering.
+ */
+export const DAEMON_UI_DEBUG_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+  'malformed_payload',
+] as const;
+
+export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
+
+/**
+ * Debug reasons that classify forward-compatibility noise — frames this
+ * normalizer has no case for. These diagnostics are routed to the bounded
+ * `unrecognizedDiagnostics` sidechannel instead of `blocks[]`; `malformed_*`
+ * diagnostics stay in the transcript because they signal an actual defect.
+ *
+ * A runtime const array (the package's established pattern for reason
+ * unions, see `DAEMON_UI_DEBUG_REASONS`): type-only exports are erased by
+ * esbuild, so a type-level subset gives the router nothing to test against,
+ * and a third reason added only to the type would compile cleanly while
+ * falling through to `appendStatusBlock` (#8823 review).
+ */
+export const DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+] as const satisfies readonly DaemonUiDebugReason[];
+
+export type DaemonUnrecognizedDiagnosticReason =
+  (typeof DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS)[number];
+
+/**
+ * Membership over the runtime reason array, exported so every routing guard
+ * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * classifies against one source. A reason added to the array routes onto the
+ * sidechannel everywhere without hand-editing each consumer (#8823 review).
+ */
+export function isUnrecognizedDiagnosticReason(
+  reason: DaemonUiDebugReason | string | undefined,
+): reason is DaemonUnrecognizedDiagnosticReason {
+  return (
+    reason !== undefined &&
+    (DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]).includes(
+      reason,
+    )
+  );
+}
+
+/**
+ * One forward-compatibility diagnostic mirrored onto the transcript
+ * sidechannel. Carries the normalizer classification, the correlation
+ * fields `createBase` stamps onto every normalized projection, and the SSE
+ * envelope coordinates a developer console needs — without ever entering
+ * `blocks[]` (so it cannot finalize a streaming assistant/thought block or
+ * consume the `maxBlocks` budget).
+ */
+export interface DaemonUnrecognizedDiagnostic {
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+  text: string;
+  promptId?: string;
+  sourceRecordIds?: readonly string[];
+  branchRecordId?: string;
+  originatorClientId?: string;
+  eventId?: number;
+  serverTimestamp?: number;
+  /** Reducer receive time (`state.now` at dispatch). */
+  clientReceivedAt: number;
+}
+
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
   source?: string;
   data?: unknown;
+  /**
+   * Set only on normalizer-produced `debug` events. Absent on `status` events
+   * and on debug events dispatched by clients themselves.
+   */
+  debugReason?: DaemonUiDebugReason;
   /**
    * Client-dispatch opt-out: `false` inserts the status block without
    * finalizing the active assistant/thought block, so read-only command
@@ -454,6 +544,7 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   key: string;
   scope: string;
   value: unknown;
+  mutation?: DaemonSkillToggleMutation;
 }
 
 export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
@@ -802,6 +893,10 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for content belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
@@ -828,6 +923,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   /** Images attached to this user message (base64 data URIs). */
   images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * Text file attachments on this user message (display metadata only —
+   * the content rides the prompt's resource blocks and is never stored
+   * on the block). Local optimistic messages only; daemon replays carry
+   * no attachment metadata.
+   */
+  files?: Array<{ name: string; mimeType: string }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -914,6 +1016,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
+  /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
+  debugReason?: DaemonUiDebugReason;
 }
 
 export interface DaemonPromptCancelledTranscriptBlock
@@ -978,6 +1082,16 @@ export interface DaemonTranscriptSidechannelState {
     suggestion: string;
     promptId: string;
   };
+  /**
+   * Bounded sidechannel for forward-compatibility diagnostics
+   * (`unrecognized_event` / `unrecognized_session_update`). These never
+   * enter `blocks[]`, so they cannot finalize a streaming assistant/thought
+   * block (orphaning a subsequent `assistant.usage` frame) and cannot
+   * consume the `maxBlocks` budget that real conversation content relies
+   * on. Newest entries are kept; the array is capped at
+   * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`.
+   */
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
   pendingUserShellCommand?: {
     command: string;
     cwd?: string;
@@ -992,8 +1106,9 @@ export interface DaemonTranscriptState
   // lazy COW). Match the runtime contract at the type level so
   // consumers get a compile-time error for `state.blocks.sort()` /
   // `.push()` instead of a runtime `TypeError`. Internal reducer
-  // mutation goes through `takeBlocksOwnership` which casts away
-  // readonly after copying — the only place that's allowed.
+  // mutation goes through the ownership helpers which cast away readonly after
+  // copying — the only place that's allowed. The block index follows the same
+  // COW contract.
   blocks: readonly DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;
@@ -1001,7 +1116,7 @@ export interface DaemonTranscriptState
   activeThoughtBlockId?: string;
   activeAssistantBlockByParent: Record<string, string>;
   activeThoughtBlockByParent: Record<string, string>;
-  blockIndexById: Record<string, number>;
+  blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
@@ -1032,6 +1147,7 @@ export interface DaemonTranscriptStore {
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
     meta?: DaemonTextDeltaMeta,
+    files?: Array<{ name: string; mimeType: string }>,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

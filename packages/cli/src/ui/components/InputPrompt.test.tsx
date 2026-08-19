@@ -37,6 +37,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import stripAnsi from 'strip-ansi';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { StreamingState } from '../types.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
   useAgentViewActions,
@@ -2708,7 +2709,7 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should NOT switch category on Ctrl+left/right when availableCategories is exactly 2', async () => {
+  it('should NOT switch category on left/right when availableCategories is exactly 2', async () => {
     const switchCategory = vi.fn();
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2725,18 +2726,18 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    stdin.write('\x1b[C'); // right arrow
     await wait();
-    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    stdin.write('\x1b[D'); // left arrow
     await wait();
 
     // With only 2 entries (all + one real category) the tab bar is hidden,
-    // so Ctrl+arrows must not trigger category switching.
+    // so the arrows must not trigger category switching.
     expect(switchCategory).not.toHaveBeenCalled();
     unmount();
   });
 
-  it('should switch category on Ctrl+left/right when availableCategories > 2', async () => {
+  it('should switch category on plain arrows before Vim handling', async () => {
     const switchCategory = vi.fn();
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2752,49 +2753,125 @@ describe('InputPrompt', () => {
       switchCategory,
     });
     props.buffer.setText('@');
-
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
-
-    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
-    await wait();
-
-    expect(switchCategory).toHaveBeenCalledWith(1);
-
-    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
-    await wait();
-
-    expect(switchCategory).toHaveBeenCalledWith(-1);
-    unmount();
-  });
-
-  it('should NOT switch category on plain left/right when availableCategories > 2 (caret stays free)', async () => {
-    const switchCategory = vi.fn();
-    mockedUseCommandCompletion.mockReturnValue({
-      ...mockCommandCompletion,
-      completionMode: CompletionMode.AT,
-      showSuggestions: true,
-      suggestions: [
-        { label: 'file.ts', value: 'file.ts', category: 'file' },
-        { label: 'sess', value: 'sess', category: 'session' },
-      ],
-      activeSuggestionIndex: 0,
-      isPerfectMatch: false,
-      availableCategories: ['all', 'file', 'session'],
-      switchCategory,
-    });
-    props.buffer.setText('@');
+    props.vimHandleInput = vi.fn().mockReturnValue(true);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
     stdin.write('\x1b[C'); // plain right arrow
     await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
     stdin.write('\x1b[D'); // plain left arrow
     await wait();
 
-    // Plain arrows must not be hijacked for tab switching, so they remain
-    // available to move the caret in the editable buffer.
+    expect(switchCategory).toHaveBeenCalledWith(-1);
+    expect(props.vimHandleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on bare arrows while command search is active', async () => {
+    props.shellModeActive = false;
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@ses');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x12');
+    await wait();
+    stdin.write('\x1b[C');
+    await wait();
+    stdin.write('\x1b[D');
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should hide category tabs and keep bare arrows for attachments', async () => {
+    const isWindows = process.platform === 'win32';
+    vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+    vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
+      path.join('test', 'project', '.qwen', 'tmp', 'clipboard.png'),
+    );
+    vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
+      undefined,
+    );
+
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <InputPrompt {...props} />,
+    );
+    await wait();
+
+    stdin.write(isWindows ? '\x1Bv' : '\x16');
+    await wait();
+    stdin.write('\x1b[A');
+    await wait();
+    stdin.write('\x1b[C');
+    await wait();
+    stdin.write('\x1b[D');
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('(←/→ to switch)');
+    unmount();
+  });
+
+  it('should NOT consume Ctrl+left/right for category switching (#8069)', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    await wait();
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    await wait();
+
+    // Ctrl+arrows are no longer bound: terminals and macOS Mission Control
+    // intercept them, so they are left to fall through to the terminal.
     expect(switchCategory).not.toHaveBeenCalled();
     unmount();
   });
@@ -5687,6 +5764,160 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(true);
       unmountEdited();
+    });
+  });
+
+  describe('ESC during active agent response (#8201)', () => {
+    it('does not pop queued messages into input when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued message'],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // popAllQueuedMessages must NOT be called when agent is responding
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // ...and the shared buffer must stay empty so AppContainer's global ESC
+      // handler takes its cancel branch instead of "input has content".
+      expect(props.buffer.text).toBe('');
+      unmount();
+    });
+
+    it('does not silently clear typed input on single ESC when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Buffer must NOT be cleared - double-ESC confirmation still applies
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
+    });
+
+    it('does not pop the queue or clear the buffer on ESC when responding with an empty buffer', async () => {
+      // Pins the no-side-effect contract for ESC while the agent is Responding
+      // and both the buffer and the queue are empty. This branch consumes the
+      // key (returns true) but mutates nothing; AppContainer's broadcast ESC
+      // handler runs after this one regardless of return values and cancels
+      // because the buffer stayed empty. #8201.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('');
+      const setTextSpy = vi.spyOn(props.buffer, 'setText');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // No queue pop, no buffer mutation - the branch returns false so
+      // AppContainer's broadcast ESC handler is the one that acts.
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      expect(setTextSpy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not pop queued messages on ESC when responding with typed text AND a queue (#8201)', async () => {
+      // R6-1: the pop-skip guard is pinned only for the empty-buffer case
+      // without this. A mutation to `!== Responding || buffer.text !== ''`
+      // survives all tests unless this combination is covered.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued follow-up'],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Queue must NOT be popped (guard fires regardless of buffer content).
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // Typed text survives single ESC (double-press still required).
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
+    });
+
+    it('still clears typed input on double-ESC while responding (#8201)', async () => {
+      // R6-2: the double-press contract this diff preserves - double-ESC
+      // clears typed input even while Responding - had no test. Without it,
+      // adding `if (streamingState === Responding) return true` before the
+      // double-ESC block ships green.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      props.buffer.setText('draft to clear');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait(50);
+      // First ESC: show double-press prompt, buffer preserved.
+      expect(props.buffer.text).toBe('draft to clear');
+
+      stdin.write('\x1B');
+      await wait(50);
+      // Second ESC within the timeout: clear typed input.
+      expect(props.buffer.text).toBe('');
+      unmount();
     });
   });
 });

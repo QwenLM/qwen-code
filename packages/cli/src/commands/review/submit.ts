@@ -44,15 +44,30 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { ghWithInput, resolveGhHost, setGhHost } from './lib/gh.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import {
+  ghWithInput,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { composeReview, type ComposeReviewInput } from './compose-review.js';
-import { reviewWriteAuthorization } from './lib/authorization.js';
+import {
+  composeReview,
+  normalizeSeverityFloor,
+  type ComposeReviewInput,
+} from './compose-review.js';
+import {
+  recordedSeverityFloor,
+  reviewWriteAuthorization,
+} from './lib/authorization.js';
+import { getPlatformReader, isAoneHost } from './lib/platform/registry.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -60,9 +75,14 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
-  REVIEW_FOOTER_RE,
+  commentMarker,
   footerVersion,
+  rendersAsNothing,
   reviewFooter,
+  stripForgedFooterLines,
+  stripForUnattributedPost,
+  stripReviewFooter,
+  swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -132,9 +152,12 @@ function normalizeInlineComments(
   comments: ReviewComment[],
   modelId: unknown,
   cliVersion: string,
+  attribution: boolean,
 ): ReviewComment[] {
-  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
-  const footer = reviewFooter(modelId, cliVersion);
+  const footer =
+    attribution && typeof modelId === 'string' && modelId.trim() !== ''
+      ? reviewFooter(modelId, cliVersion)
+      : undefined;
   return comments.map((comment) =>
     // An empty body stays empty: this runs BEFORE the consistency check, and
     // a footer pasted onto '' would hide the emptiness from the refusal that
@@ -142,7 +165,15 @@ function normalizeInlineComments(
     typeof comment.body === 'string' && comment.body.trim() !== ''
       ? {
           ...comment,
-          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+          // Forged footers are stripped even with attribution off: a comment
+          // authored by the model must not carry one the operator turned
+          // off. The off leg also strips footer-shaped lines mid-body — the
+          // trailing strip leaves those, and here they would be the only
+          // attribution the post carries.
+          body:
+            footer === undefined
+              ? stripForgedFooterLines(stripReviewFooter(comment.body))
+              : `${stripReviewFooter(comment.body)}\n\n${footer}`,
         }
       : comment,
   );
@@ -162,9 +193,18 @@ function normalizeInlineComments(
  * user typed, and why it binds to a target rather than acting as a bearer
  * token.
  */
-function authorization(args: SubmitArgs): { ok: boolean; why: string } {
+function authorization(
+  args: SubmitArgs,
+  defaultComment: boolean,
+): {
+  ok: boolean;
+  why: string;
+  recordedHost?: string;
+  recordedUnbound?: boolean;
+} {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
+    defaultComment,
     skillArgs: args.skillArgs,
     pr: args.pr,
     repo: args.repo,
@@ -195,10 +235,19 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
 function compose(
   payload: ReviewPayload,
   cliVersion: string,
+  attribution: boolean,
+  runtimeModelId: string | undefined,
 ): {
   event: string;
   body: string;
   cappedBy: string[];
+  /**
+   * Indices of drafted comments compose-review's floor enforcement moved
+   * into the body's deferral list — the caller removes exactly these from
+   * the posting set. Same array, same order: `draftedComments` below IS
+   * `payload.comments`, so the indices line up by construction.
+   */
+  floorEnforced: number[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -232,8 +281,15 @@ function compose(
       draftedComments: comments,
     },
     cliVersion,
+    attribution,
+    runtimeModelId,
   );
-  return { event: r.event, body: r.body, cappedBy: r.cappedBy };
+  return {
+    event: r.event,
+    body: r.body,
+    cappedBy: r.cappedBy,
+    floorEnforced: r.floorEnforced,
+  };
 }
 
 /** What the caller may not bring. Checked before the verdict is computed from it. */
@@ -299,7 +355,11 @@ function structuralProblems(payload: ReviewPayload): string[] {
   return problems;
 }
 
-function inconsistencies(payload: ReviewPayload, event: string): string[] {
+function inconsistencies(
+  payload: ReviewPayload,
+  event: string,
+  attribution: boolean,
+): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
 
@@ -335,6 +395,36 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
       );
     }
 
+    // A body that renders as nothing is the empty case wearing scaffolding.
+    // The check runs the FULL post-transform chain (plus the canonical
+    // footer that normalize may have appended) and projects through
+    // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
+    // hollowed-fence residue all render as nothing on GitHub, and a
+    // scaffolded-but-invisible comment that posts counts toward the verdict
+    // and re-promotes as an unanswerable blocker.
+    if (c.body && severityOf(c) !== null) {
+      const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
+      if (rendersAsNothing(stripped)) {
+        problems.push(
+          `${at} renders as nothing (marker-only, empty comment, or ` +
+            `otherwise invisible) — redraft it with the finding's description`,
+        );
+      } else if (!attribution && swallowsAppendedMarker(stripped)) {
+        // The prefix strip can move a fence delimiter to line-leading
+        // position on a draft whose delimiter sat mid-line; the unclosed
+        // fence then swallows the appended invisible marker as visible
+        // code and the claim into its info string. The exposure is
+        // created by the strip, so the check runs on the post-strip
+        // shape, mirroring the fence refusal the body lists apply.
+        problems.push(
+          `${at} leaves a code fence open in its posted shape — the ` +
+            `invisible marker this mode appends would post inside it as ` +
+            `visible code. Redraft it quoting the code inline or ` +
+            `indented instead`,
+        );
+      }
+    }
+
     if (!isDiffLine(c.line)) {
       problems.push(
         `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
@@ -368,28 +458,28 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-/**
- * `owner/repo` — and neither half may be a dot segment.
- *
- * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
- * `..` are made of legal characters and mean something else entirely once they
- * reach a URL path.
- */
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
-function isRepo(repo: string): boolean {
-  const parts = repo.split('/');
-  return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
-  );
-}
-
-export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
+export function runSubmit(
+  args: SubmitArgs,
+  cliVersion = 'unknown',
+  opts: {
+    /** Append the model/version attribution footer (the `review.attribution` setting). */
+    attribution?: boolean;
+    /** The standing `review.comment` setting, for the authorization gate. */
+    defaultComment?: boolean;
+    /**
+     * The standing `review.severityFloor` setting, raw — handed to the
+     * authorization gate's args re-parse so the floor enforcement below can
+     * prefer the OPERATOR'S recorded floor over the state's transcription.
+     */
+    defaultSeverityFloor?: string;
+  } = {},
+): void {
+  const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!isRepo(args.repo)) {
+  if (!isOwnerRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
     );
@@ -411,22 +501,106 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
   }
 
-  const auth = authorization(args);
+  const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
     // report, and the user can ask for them to be posted.
+    // The advice must match the refusal class, or it misdirects the retry:
+    // the gate refuses either because comment was never requested (its `why`
+    // carries `` `--comment` was ``) or because nothing recorded authorises
+    // this target — a binding miss, or no recorded arguments at all. The
+    // second arm's preamble stays neutral ("Nothing recorded…") because a
+    // setting-driven missing-args refusal lands here too, and "The recorded
+    // arguments do not bind" would contradict its `why` ("no review
+    // arguments were recorded"). `--comment` cannot fix the second class —
+    // the flag stands in for nothing a target binding needs, and the
+    // `review.comment` setting already stood in for the flag on exactly
+    // those refusals — so advising it there buys the futile retry loop
+    // authorization.ts's refusal wording exists to prevent.
+    const advice = auth.why.includes('`--comment` was')
+      ? `This is the correct outcome of a review the user did not ask to ` +
+        `publish — report the findings in the terminal and stop. Re-run with ` +
+        `\`--comment\`, or pass --user-authorized only after the user has ` +
+        `asked, in a message they typed, for this review to be published.`
+      : `Nothing recorded authorises binding this target — report the ` +
+        `findings in the terminal and stop. Posting to this pull request ` +
+        `needs a review invoked naming it, or --user-authorized after the ` +
+        `user has asked, in a message they typed, for this review to be ` +
+        `published.`;
     writeStderrLine(
       `REFUSED to post to ${args.repo}#${args.pr}: ${auth.why}.\n` +
         `Posting is a public, irreversible write, and this run has no ` +
-        `authorisation for one. This is the correct outcome of a review the ` +
-        `user did not ask to publish — report the findings in the terminal and ` +
-        `stop. Re-run with \`--comment\`, or pass --user-authorized only after ` +
-        `the user has asked, in a message they typed, for this review to be ` +
-        `published.`,
+        `authorisation for one. ${advice}`,
     );
     writeStdoutLine(
       JSON.stringify({ posted: false, reason: auth.why }, null, 2),
+    );
+    process.exitCode = 3;
+    return;
+  }
+
+  // Posting is GitHub-only in this phase. On an Aone target the Create
+  // Review API does not exist — refuse with the SAME shape as an
+  // unauthorised refusal (stderr explanation, stdout `{"posted": false}`,
+  // exit 3): the skill's Step 7 treats that shape as a complete, correct
+  // outcome, and a throw instead would surface as a failed command an agent
+  // might retry or route around. The refusal sits BELOW the authorisation
+  // gate on purpose — an unauthorised Aone run takes the normal exit-3
+  // path above, and the command no longer dies with a throw before the gate
+  // can rule (an authorised Aone `--dry-run` lands on this same exit-3
+  // refusal: a payload that can never post has no posting-consistency to
+  // validate).
+  //
+  // The platform decision is bound in BOTH directions, because the
+  // runtime-effective host alone fails both ways:
+  //  - Recorded Aone target + non-Aone effective host (an ambient GH_HOST
+  //    export beside a bare-MR-number Aone review) must still refuse —
+  //    otherwise the read-only guarantee leaks and the review POSTs to the
+  //    wrong host's same-named repo. So a recorded Aone host always
+  //    refuses, whatever the environment resolves.
+  //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
+  //    by the cwd probe from an Aone-origin clone — the recorded binding
+  //    is the explicit signal the registry's precedence documents.
+  //  - RECORDED but hostless (a bare-MR-number recording with no `--host`
+  //    flag — the canonical Aone invocation shape carries no URL): the
+  //    recording proves a review exists but not WHERE it lives, and the
+  //    runtime environment cannot prove it either. For a public,
+  //    irreversible write that is fail-CLOSED: refuse and name the remedy
+  //    (`--host`), instead of trusting the environment and posting the
+  //    review at github.com's same-named repo.
+  //  - No recording at all: fall back to the flag, then GH_HOST (ghEnv
+  //    inherits the operator's export when no module host is set, so an
+  //    Aone-pointing GH_HOST must hit this refusal, not an opaque gh
+  //    failure), then the cwd clone.
+  // resolveGhHost trims, so a padded `--host` cannot slip past detection.
+  // The findings are not lost: they are in the terminal output and the
+  // saved report.
+  const recordedHost = auth.recordedHost;
+  const aoneWrite =
+    isAoneHost(recordedHost) ||
+    auth.recordedUnbound === true ||
+    (recordedHost === undefined &&
+      (isAoneHost(resolveGhHost(args.host)) ||
+        getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
+          'aone'));
+  if (aoneWrite) {
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
+        `to Aone Code is not supported yet (read-only phase). The findings ` +
+        `are in the terminal output and the saved report; post them ` +
+        `manually or wait for the write phase.` +
+        (auth.recordedUnbound === true && !isAoneHost(recordedHost)
+          ? ` (the recorded target names no platform — pass \`--host\` to ` +
+            `prove it is not an Aone MR)`
+          : ''),
+    );
+    writeStdoutLine(
+      JSON.stringify(
+        { posted: false, reason: 'aone-read-only-phase' },
+        null,
+        2,
+      ),
     );
     process.exitCode = 3;
     return;
@@ -449,15 +623,83 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
       payload.comments ?? [],
       payload.state?.modelId,
       cliVersion,
+      attribution,
     ),
   };
+
+  // The operator's floor, from the CLI's verbatim record — never only the
+  // state's transcription of it. The state field is a model-written copy of
+  // the operator's policy, and a copy that can drift must not decide
+  // whether enforcement stands down. The recovery is the SHARED helper both
+  // posting boundaries call with the SAME identity formula — this command's
+  // CLI-typed target first (`--pr`/`--repo`/the effective host, all
+  // mandatory-and-validated here), the plan filling only axes the caller
+  // did not supply — so the archived compose and this post cannot resolve
+  // different floors for one review. Caller-first because the plan's PATH
+  // arrives through that same model-written state: plan-first let a
+  // parseable-but-wrong plan choose which identity the operator's record
+  // was tested against and silently stand the recovery down. The recovered
+  // value wins whenever the recovery yields one that differs; when it
+  // yields nothing — no record, unreadable, no floor decision in it,
+  // another PR's or repo's record — the state's value stands, the same
+  // fail-open the enforcement itself applies. The note names the TRUE
+  // source (flag vs setting): "the record outranks the state" over a
+  // setting-sourced floor sent auditors hunting the record for a flag
+  // nobody typed.
+  const recovered = recordedSeverityFloor({
+    planPath:
+      typeof payload.state?.planPath === 'string'
+        ? payload.state.planPath
+        : undefined,
+    callerPr: args.pr,
+    callerRepo: args.repo,
+    callerHost: resolveGhHost(args.host),
+    defaultSeverityFloor: opts.defaultSeverityFloor,
+    skillArgs: args.skillArgs,
+  });
+  // The guard compares the NORMALISED state floor: a case- or
+  // whitespace-drifted transcription of the same floor is agreement, and
+  // announcing an override over it would put a false claim on the audit
+  // channel.
+  if (
+    recovered !== undefined &&
+    payload.state != null &&
+    normalizeSeverityFloor(payload.state.severityFloor) !== recovered.floor
+  ) {
+    writeStderrLine(
+      `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +
+        (recovered.source === 'explicit'
+          ? 'the recorded `--severity-floor` flag'
+          : 'the `review.severityFloor` setting resolved against the recorded invocation') +
+        `, over the state's ` +
+        `${JSON.stringify(payload.state.severityFloor ?? null)} — the ` +
+        `CLI's verbatim record outranks the state JSON.`,
+    );
+    payload = {
+      ...payload,
+      state: { ...payload.state, severityFloor: recovered.floor },
+    };
+  }
 
   // The verdict, computed here. It was never in the payload.
   let event: string;
   let body: string;
   let cappedBy: string[];
+  let floorEnforced: number[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion));
+    ({ event, body, cappedBy, floorEnforced } = compose(
+      payload,
+      cliVersion,
+      attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -465,7 +707,27 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
   }
 
-  const problems = inconsistencies(payload, event);
+  // The floor, enforced: compose-review already described the reduced set —
+  // the body's deferral list carries these findings and the ledger work
+  // list excludes them — so posting the full array would make the review
+  // disagree with its own body. The removal happens BEFORE the consistency
+  // gate: a rerouted comment is no longer posting, so it is no longer the
+  // gate's business (an unmarked comment is never rerouted and still
+  // refuses below).
+  if (floorEnforced.length > 0) {
+    const drop = new Set(floorEnforced);
+    payload = {
+      ...payload,
+      comments: (payload.comments ?? []).filter((_, i) => !drop.has(i)),
+    };
+    writeStderrLine(
+      `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
+        `drafted past the resolved critical floor were moved into the ` +
+        `body's deferral list and will not post inline.`,
+    );
+  }
+
+  const problems = inconsistencies(payload, event, attribution);
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
@@ -479,7 +741,33 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     commit_id: payload.commit_id,
     event,
     body,
-    comments: payload.comments ?? [],
+    // Attribution-off strips the severity markers from the POSTED bodies —
+    // the one place the bracket-prefix template is visible. Everything above
+    // (counting, the unmarked gate, the ledger) already ran on the marked
+    // payload, so the verdict this post carries is unchanged. The invisible
+    // comment marker goes on in the markers' place, carrying the severity
+    // the visible prefix carried: presubmit dedups on it, and pr-context
+    // re-promotes an unresolved Critical to the re-check section off it.
+    // Pre-existing marker strings are stripped first — the shape is public,
+    // and a reviewed file can quote it into a comment body; only the
+    // canonical trailing marker may survive.
+    comments: attribution
+      ? (payload.comments ?? [])
+      : (payload.comments ?? []).map((c) => {
+          if (typeof c.body !== 'string') return c;
+          // The gate above refuses unmarked bodies, so the severity is
+          // always known here.
+          const sev = severityOf(c);
+          if (sev === null) return c;
+          return {
+            ...c,
+            // Exactly the body the gate above validated: a forged footer
+            // the fixpoint chain exposes at the tail survives the
+            // anywhere-strips' caps, and only the trailing strip removes
+            // it — posting the gate's view is how the two cannot drift.
+            body: `${stripReviewFooter(stripForUnattributedPost(c.body))}\n\n${commentMarker(sev)}`,
+          };
+        }),
   };
 
   const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;
@@ -490,7 +778,14 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, wouldPost: true, target, event, cappedBy },
+        {
+          posted: false,
+          wouldPost: true,
+          target,
+          event,
+          cappedBy,
+          floorEnforced: floorEnforced.length,
+        },
         null,
         2,
       ),
@@ -511,6 +806,21 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     '--input',
     '-',
   );
+  // GitHub's answer, read best-effort: `id` feeds the bypass-audit receipt
+  // below; `html_url` is the deep link to the review just created, surfaced in
+  // both output channels so the summary the user reads can carry it — without
+  // it, "view what was posted" means hand-assembling a PR URL.
+  let reviewId: number | undefined;
+  let reviewUrl: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { id?: number; html_url?: string };
+    if (typeof parsed.id === 'number') reviewId = parsed.id;
+    if (typeof parsed.html_url === 'string' && parsed.html_url.trim() !== '') {
+      reviewUrl = parsed.html_url;
+    }
+  } catch {
+    /* response metadata only — the post itself succeeded */
+  }
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -525,7 +835,6 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   // add this one, dedupe, write back. Best-effort: a receipt failure must
   // never fail a review that DID post.
   try {
-    const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath);
@@ -542,7 +851,8 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
-      '.',
+      '.' +
+      (reviewUrl ? ` ${reviewUrl}` : ''),
   );
   writeStdoutLine(
     JSON.stringify(
@@ -551,6 +861,8 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        floorEnforced: floorEnforced.length,
+        ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
       2,
@@ -583,7 +895,7 @@ export const submitCommand: CommandModule = {
       .option('skill-args', {
         type: 'string',
         describe:
-          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
+          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` — or the standing `review.comment` setting — is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
       })
       .option('user-authorized', {
         type: 'boolean',
@@ -605,6 +917,11 @@ export const submitCommand: CommandModule = {
     const cliVersion =
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
       (await getCliVersion());
-    runSubmit(argv as unknown as SubmitArgs, cliVersion);
+    const review = operatorReviewSettings();
+    runSubmit(argv as unknown as SubmitArgs, cliVersion, {
+      attribution: review.attribution,
+      defaultComment: review.comment,
+      defaultSeverityFloor: review.severityFloor,
+    });
   },
 };

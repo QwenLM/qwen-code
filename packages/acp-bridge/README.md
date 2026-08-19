@@ -96,7 +96,11 @@ Lift history (#4175 Mode B daemon roadmap):
   `fs.writeFile` / `fs.readFile` proxy. Production `qwen serve` injects
   `WorkspaceFileSystem` for final ACP `writeTextFile` content writes and for
   defensive handling of unexpected or capability-violating delegated reads;
-  normal same-host text reads stay in the child.
+  normal same-host text reads stay in the child. The interface remains
+  workspace-scoped by default. A daemon-owned adapter may recognize the
+  strict versioned provenance of a final built-in-tool write and use its
+  same-host writer for an external target; this is not a generic ACP
+  capability or authorization token.
 
 ## Imports — root vs subpaths
 

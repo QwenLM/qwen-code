@@ -29,18 +29,15 @@ This document is the single owner of that tradeoff list. Other documents
 reference it rather than restating the limits, so tuning one of them does not
 leave stale copies behind.
 
-### What this does not fix
+### Final writes
 
-Reads become child-local; final ACP text writes stay delegated. The reported
-failure in #8618 therefore still reproduces for the `write_file`, `replace`,
-and `notebook_edit` family, only later in the sequence: the pre-read now
-succeeds locally, the diff renders, the user approves, and the delegated write
-is then refused by the workspace filesystem because the target is outside the
-workspace. The model can still fall back to shell at that point. Moving writes
-child-local as well would give up the trust gate, symlink rejection, TOCTOU
-protection, atomic temp-and-rename with mode preservation, and the write audit,
-which is a materially larger concession than the read change; it is deliberately
-out of scope here and tracked separately.
+Reads become child-local, while final ACP text writes stay delegated. A narrow
+same-host route now closes the approved external-write failure for built-in
+text tools without moving writes wholesale into the child: marked final calls
+from `write_file`, `edit`, `notebook_edit`, and simulated sed retain trust,
+symlink, size, generation, atomic-write, mode and audit enforcement. Generic
+ACP and HTTP writes remain workspace-scoped. The complete boundary and threat
+model live in [Daemon external built-in text writes](./daemon-external-tool-text-writes.md).
 
 ### Pre-approval exposure in the daemon
 
@@ -54,10 +51,10 @@ because that framing is easy to read past.
 
 HTTP filesystem routes such as `/glob` and `/list` remain workspace-scoped.
 Agent `glob`, `ls`, `grep`, and other discovery-tool behavior is unchanged by
-this capability. Final ACP `writeTextFile` content writes stay delegated through
-`WorkspaceFileSystem`, retaining workspace, trust, symlink, atomic-write, and
-audit enforcement. This does not imply that every agent write or helper
-operation goes through WFS.
+this capability. Final ACP `writeTextFile` content writes stay delegated. They
+use WFS inside the workspace and the narrowly gated host writer outside it;
+both retain trust, symlink, atomic-write, size and audit enforcement. This does
+not imply that every agent write or helper operation goes through WFS.
 
 ## Resource and audit boundaries
 

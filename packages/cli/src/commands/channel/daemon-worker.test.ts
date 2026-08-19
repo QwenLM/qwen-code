@@ -66,6 +66,7 @@ const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
 );
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLineSafe = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSelectFirstModel = vi.hoisted(() =>
   vi.fn(
@@ -120,7 +121,7 @@ const mockDefaultDaemonClient = vi.hoisted(() =>
 );
 const mockDefaultDaemonSessionClient = vi.hoisted(() => ({
   createOrAttach: vi.fn(),
-  load: vi.fn(),
+  resume: vi.fn(),
 }));
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -157,7 +158,7 @@ const mockChannelLoopScheduler = vi.hoisted(() =>
   })),
 );
 const mockDaemonChannelBridge = vi.hoisted(() =>
-  vi.fn(() => ({
+  vi.fn((_options?: unknown) => ({
     get availableCommands() {
       return [];
     },
@@ -219,6 +220,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLineSafe,
   writeStdoutLine: mockWriteStdoutLine,
 }));
 
@@ -309,6 +311,11 @@ const deliveryRequest = {
 };
 
 function createSdk() {
+  const deleteSessionsData = vi.fn().mockResolvedValue({
+    removed: ['classifier-session'],
+    notFound: [],
+    errors: [],
+  });
   const client = {
     capabilities: vi.fn().mockResolvedValue({
       v: 1,
@@ -317,6 +324,7 @@ function createSdk() {
       modelServices: [],
       workspaceCwd: '/workspace',
     }),
+    workspaceByCwd: vi.fn(() => ({ deleteSessionsData })),
   };
   const DaemonClient = vi.fn(() => client);
   const DaemonSessionClient = {
@@ -329,7 +337,7 @@ function createSdk() {
       setModel: vi.fn(),
       respondToPermission: vi.fn(),
     }),
-    load: vi.fn().mockResolvedValue({
+    resume: vi.fn().mockResolvedValue({
       sessionId: 'loaded-session',
       workspaceCwd: '/workspace',
       prompt: vi.fn(),
@@ -339,7 +347,7 @@ function createSdk() {
       respondToPermission: vi.fn(),
     }),
   };
-  return { client, DaemonClient, DaemonSessionClient };
+  return { client, DaemonClient, DaemonSessionClient, deleteSessionsData };
 }
 
 beforeEach(() => {
@@ -429,7 +437,7 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
@@ -469,7 +477,7 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
@@ -508,7 +516,7 @@ describe('createDaemonSessionFactory', () => {
     );
     // The load branch never re-stamps creation attribution: no sourceId in the
     // load request even when the factory request carried one.
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
@@ -648,6 +656,27 @@ describe('createDaemonChannelBridgeFacade', () => {
     expect(respondToPermission).toHaveBeenCalledWith('req-1', response);
   });
 
+  it('forwards permanent internal-session deletion when present', async () => {
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      deleteSessionData,
+    };
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    await facade.deleteSessionData?.('classifier-session');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('classifier-session');
+  });
+
   it('omits permission responses when absent on bridge', () => {
     const bridge = {
       availableCommands: [],
@@ -665,6 +694,7 @@ describe('createDaemonChannelBridgeFacade', () => {
 
     expect('respondToPermission' in facade).toBe(false);
     expect('discardSession' in facade).toBe(false);
+    expect('deleteSessionData' in facade).toBe(false);
   });
 
   it('omits listSessions when absent on bridge', () => {
@@ -714,6 +744,94 @@ describe('createDaemonChannelBridgeFacade', () => {
 });
 
 describe('runChannelDaemonWorker', () => {
+  it('wires permanent classifier-session deletion to the worker workspace', async () => {
+    const sdk = createSdk();
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (sessionId: string) => Promise<void>;
+    };
+
+    await options.deleteSessionData?.('classifier-session');
+
+    expect(sdk.client.workspaceByCwd).toHaveBeenCalledWith('/workspace');
+    expect(sdk.deleteSessionsData).toHaveBeenCalledWith(['classifier-session']);
+    await handle.close();
+  });
+
+  it('treats an already-deleted classifier session as deletion success', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: ['classifier-session'],
+      errors: [],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (sessionId: string) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session'),
+    ).resolves.toBeUndefined();
+    await handle.close();
+  });
+
+  it('propagates per-session daemon deletion errors as a rejection', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 'classifier-session', error: 'storage locked' }],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (sessionId: string) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session'),
+    ).rejects.toThrow('storage locked');
+    await handle.close();
+  });
+
+  it('rejects when the deletion result omits the session entirely', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (sessionId: string) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session'),
+    ).rejects.toThrow('Session classifier-session was not deleted.');
+    await handle.close();
+  });
+
   it('forwards router discard through the daemon bridge facade', async () => {
     const sdk = createSdk();
     const handle = await runChannelDaemonWorker({
@@ -753,6 +871,7 @@ describe('runChannelDaemonWorker', () => {
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
       daemonToken: 'secret-token',
+      promptAuthorization: 'worker-prompt-token',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       loadDaemonSdk: async () => sdk,
@@ -773,6 +892,7 @@ describe('runChannelDaemonWorker', () => {
       expect.objectContaining({
         cwd: '/workspace',
         modelServiceId: 'qwen-plus',
+        promptAuthorization: 'worker-prompt-token',
       }),
     );
     const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {
@@ -2002,6 +2122,42 @@ describe('daemonWorkerCommand', () => {
     expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       '[Channel] daemon worker failed: --channel requires a non-empty channel name.',
+    );
+  });
+
+  // Regression for #8653: in dev mode the supervisor spawns the worker with
+  // the daemon's loader-carrying base env (the harness tsx loader must reach
+  // the worker's .ts entry). The worker must self-scrub like the ACP child
+  // so nothing it spawns inherits them into another workspace. Production
+  // base envs are scrubbed before the freeze, making this a no-op there.
+  it('scrubs inherited loader env vars before starting channels', async () => {
+    mockProcessExit();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv(
+      'npm_config_node-options',
+      '--import file:///other-checkout/hook.mjs',
+    );
+
+    try {
+      await expect(
+        daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
+
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['npm_config_node-options']).toBeUndefined();
+    // Pin the channel-boundary breadcrumb, not just the removal: a refactor
+    // onto the silent scrubInheritedLoaderEnv variant deletes the keys the
+    // same way but drops the operator diagnostic — the reason the *AndReport*
+    // helper exists.
+    expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+      expect.stringContaining('scrubbed inherited loader env vars'),
     );
   });
 

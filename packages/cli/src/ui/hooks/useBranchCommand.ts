@@ -22,6 +22,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
@@ -111,7 +112,10 @@ export function useBranchCommand(
         historyManager.addItem(
           {
             type: 'error',
-            text: t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            text: buildBackgroundWorkBlockedMessage(
+              config,
+              t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            ),
           },
           Date.now(),
         );

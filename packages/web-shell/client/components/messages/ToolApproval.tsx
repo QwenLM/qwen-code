@@ -93,7 +93,23 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   return request.title;
 }
 
-function getSafeDefaultIndex(options: PermissionRequest['options']): number {
+function getSafeDefaultIndex(
+  options: PermissionRequest['options'],
+  isAgent = false,
+): number {
+  if (isAgent) {
+    // Launching the agent is the model's proposed next action: default the
+    // selection to the one-shot allow instead of the reject button, and never
+    // to a permanent allow rule.
+    const allowOnceIdx = options.findIndex((o) => o.kind === 'allow_once');
+    if (allowOnceIdx >= 0) return allowOnceIdx;
+    // No one-shot option: fall back to the reject (safe) rather than landing
+    // on a permanent allow rule.
+    const rejectIdx = options.findIndex(
+      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+    );
+    return rejectIdx >= 0 ? rejectIdx : 0;
+  }
   if (
     options.length > 1 &&
     (options[0].kind === 'allow_always' || options[0].kind === 'reject_always')
@@ -208,6 +224,7 @@ export function ToolApproval({
   showPlanPreview = true,
 }: ToolApprovalProps) {
   const { t } = useI18n();
+  const isAgent = isAgentTool(request.toolName);
   const displayOptions = useMemo(
     () => prepareDisplayOptions(request.options),
     [request.options],
@@ -215,8 +232,8 @@ export function ToolApproval({
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
-    () => getSafeDefaultIndex(displayOptions),
-    [displayOptions],
+    () => getSafeDefaultIndex(displayOptions, isAgent),
+    [displayOptions, isAgent],
   );
   // Prefer the localized label. Known producers give every option a distinct
   // i18n key (plan mode's restore_previous has its own), so this normally
@@ -389,7 +406,6 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
-  const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),

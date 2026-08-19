@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { RefreshCwIcon } from 'lucide-react';
+import { FileTextIcon, RefreshCwIcon } from 'lucide-react';
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
@@ -41,13 +41,21 @@ interface UserMessageImage {
   mimeType: string;
 }
 
+interface UserMessageFile {
+  name: string;
+  mimeType: string;
+}
+
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  /** Click an uploaded image to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 function DefaultUserMessageContent({
@@ -96,10 +104,12 @@ function DefaultUserMessageContent({
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  files,
   inputAnnotations,
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
+  onImagePreview,
 }: UserMessageProps) {
   const { t } = useI18n();
   const {
@@ -117,6 +127,7 @@ export const UserMessage = memo(function UserMessage({
     const explicit = renderUserMessageContent?.({
       content,
       images,
+      files,
       inputAnnotations,
     });
     if (explicit !== undefined && explicit !== null) return explicit;
@@ -154,6 +165,7 @@ export const UserMessage = memo(function UserMessage({
   }, [
     content,
     images,
+    files,
     inputAnnotations,
     onComposerTagClick,
     parseUserMessageContent,
@@ -208,11 +220,37 @@ export const UserMessage = memo(function UserMessage({
                       key={index}
                       src={src}
                       alt={t('user.uploadedImage', { index: index + 1 })}
-                      className={styles.chatImageThumb}
+                      className={`${styles.chatImageThumb}${
+                        onImagePreview
+                          ? ` ${styles.chatImageThumbInteractive}`
+                          : ''
+                      }`}
+                      onClick={
+                        onImagePreview
+                          ? () =>
+                              onImagePreview(
+                                src,
+                                t('user.uploadedImage', { index: index + 1 }),
+                              )
+                          : undefined
+                      }
                       onLoad={measureOverflow}
                     />
                   );
                 })}
+              </div>
+            )}
+            {files && files.length > 0 && (
+              <div className={styles.chatFiles}>
+                {files.map((file, index) => (
+                  <span
+                    key={`${file.name}-${index}`}
+                    className={styles.chatFileChip}
+                  >
+                    <FileTextIcon size={13} aria-hidden="true" />
+                    <span className={styles.chatFileName}>{file.name}</span>
+                  </span>
+                ))}
               </div>
             )}
             {renderedContent}

@@ -570,64 +570,67 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('renders non-image inlineData as a text block (avoids invalid image media_type)', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call-1',
-                  name: 'Read',
-                  args: {},
+    it.each(['audio/mpeg', 'image/bmp'])(
+      'renders unsupported %s inlineData as a text block',
+      (mimeType) => {
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'Read',
+                    args: {},
+                  },
                 },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call-1',
-                  name: 'Read',
-                  response: { output: 'Audio content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'audio/mpeg',
-                        data: 'base64encodedaudiodata',
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'Read',
+                    response: { output: 'Unsupported content' },
+                    parts: [
+                      {
+                        inlineData: {
+                          mimeType,
+                          data: 'base64encodeddata',
+                        },
                       },
-                    },
-                  ],
+                    ],
+                  },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(messages).toHaveLength(2);
-      expect(messages[1]?.role).toBe('user');
+        expect(messages).toHaveLength(2);
+        expect(messages[1]?.role).toBe('user');
 
-      const toolResult = messages[1]?.content?.[0] as {
-        type: string;
-        content: Array<{ type: string; text?: string }>;
-      };
-      expect(toolResult.type).toBe('tool_result');
-      expect(Array.isArray(toolResult.content)).toBe(true);
-      expect(toolResult.content[0]).toEqual({
-        type: 'text',
-        text: 'Audio content',
-      });
-      expect(toolResult.content[1]?.type).toBe('text');
-      expect(toolResult.content[1]?.text).toContain(
-        'Unsupported inline media type',
-      );
-      expect(toolResult.content[1]?.text).toContain('audio/mpeg');
-    });
+        const toolResult = messages[1]?.content?.[0] as {
+          type: string;
+          content: Array<{ type: string; text?: string }>;
+        };
+        expect(toolResult.type).toBe('tool_result');
+        expect(Array.isArray(toolResult.content)).toBe(true);
+        expect(toolResult.content[0]).toEqual({
+          type: 'text',
+          text: 'Unsupported content',
+        });
+        expect(toolResult.content[1]?.type).toBe('text');
+        expect(toolResult.content[1]?.text).toContain(
+          'Unsupported inline media type',
+        );
+        expect(toolResult.content[1]?.text).toContain(mimeType);
+      },
+    );
 
     it('converts inlineData with PDF into document block', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({

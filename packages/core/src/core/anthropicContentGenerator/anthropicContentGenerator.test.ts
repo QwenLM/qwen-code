@@ -2266,6 +2266,38 @@ describe('AnthropicContentGenerator', () => {
         });
       });
 
+      it('selects adaptive for dotted-minor aliases (claude-opus-4.7 / 4.8, claude-sonnet-4.6)', async () => {
+        // LiteLLM/Vertex/Bedrock-style proxies expose Anthropic Model Groups
+        // with dotted minor versions. A hyphen-only parser silently degrades
+        // these to `minor=0`, sending `thinking.type.enabled` to an adaptive-
+        // only model group and taking a 400. parseClaudeModelVersion must
+        // accept `[-.]` between major and minor so the version-gated shape
+        // is picked correctly regardless of alias convention.
+        expect(await thinkingFor('claude-opus-4.7')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-4.8')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-sonnet-4.6')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
+      it('selects adaptive for dotted-minor Opus 5 aliases (claude-opus-5.0 / 5.1)', async () => {
+        expect(await thinkingFor('claude-opus-5.0')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-5.1')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
       it('keeps the budget_tokens config for older 4.x models (e.g. claude-opus-4-5)', async () => {
         expect(await thinkingFor('claude-opus-4-5')).toEqual({
           type: 'enabled',

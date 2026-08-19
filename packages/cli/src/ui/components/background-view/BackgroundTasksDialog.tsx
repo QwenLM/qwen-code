@@ -11,7 +11,14 @@
  */
 
 import type React from 'react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -25,6 +32,8 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
+  isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
   MAX_RECENT_ACTIVITIES,
   type AgentTask,
   type BackgroundApproval,
@@ -58,8 +67,8 @@ import {
   treeRowPrefix,
 } from './agent-forest.js';
 
-// `DialogEntry['status']` widens the shell status union with the agent-only
-// `paused` state, so dialog handlers can switch on a single combined enum.
+// `DialogEntry['status']` widens the shared terminal states with the active
+// states used by agents and workflows.
 type EntryStatus = DialogEntry['status'];
 
 // Bounds MaxSizedBox's per-tick layout work when a live activity carries a
@@ -81,6 +90,8 @@ function statusVerb(status: EntryStatus): string {
   switch (status) {
     case 'running':
       return t('Running');
+    case 'pausing':
+      return t('Pausing');
     case 'paused':
       return t('Paused');
     case 'completed':
@@ -140,10 +151,14 @@ interface StatusPresentation {
   labelColor: string;
 }
 
-function terminalStatusPresentation(
-  status: EntryStatus,
-): StatusPresentation | null {
+function statusPresentation(status: EntryStatus): StatusPresentation | null {
   switch (status) {
+    case 'pausing':
+      return {
+        icon: '\u2026',
+        color: theme.status.warning,
+        labelColor: theme.status.warningDim,
+      };
     case 'paused':
       return {
         icon: '\u23F8',
@@ -170,6 +185,27 @@ function terminalStatusPresentation(
       };
     default:
       return null;
+  }
+}
+
+function isStoppableEntry(entry: DialogEntry): boolean {
+  return (
+    entry.status === 'running' ||
+    (entry.kind === 'workflow' && isActiveWorkflowStatus(entry.status))
+  );
+}
+
+function workflowPauseHint(entry: DialogEntry | null): string | undefined {
+  if (entry?.kind !== 'workflow' || !entry.isBackgrounded) return undefined;
+  // 'pausing' deliberately gets no footer hint: it is a status, not a
+  // keybinding; the detail body's Pausing explainer already carries it.
+  switch (entry.status) {
+    case 'running':
+      return 'p pause (cooperative)';
+    case 'paused':
+      return 'p resume (cooperative)';
+    default:
+      return undefined;
   }
 }
 
@@ -371,11 +407,11 @@ const ListBody: React.FC<{
         {visible.map((entry, visibleIdx) => {
           const idx = windowStart + visibleIdx;
           const isSelected = idx === selectedIndex;
-          const terminal = terminalStatusPresentation(entry.status);
+          const presentation = statusPresentation(entry.status);
           const labelColor = isSelected
             ? theme.text.accent
-            : terminal
-              ? terminal.labelColor
+            : presentation
+              ? presentation.labelColor
               : theme.text.primary;
           const treePrefix =
             entry.kind === 'agent'
@@ -491,7 +527,7 @@ const DreamDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = t('Dream');
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.sessionCount !== undefined) {
     dimSubtitleParts.push(formatSessionCount(entry.sessionCount));
@@ -521,9 +557,9 @@ const DreamDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -664,7 +700,7 @@ const AgentDetailBody: React.FC<{
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
@@ -785,9 +821,9 @@ const AgentDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -969,7 +1005,7 @@ const ShellDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Shell')} \u203A ${entry.command}`;
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -994,9 +1030,9 @@ const ShellDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -1050,7 +1086,7 @@ const MonitorDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Monitor')} › ${entry.description}`;
 
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -1086,9 +1122,9 @@ const MonitorDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -1141,7 +1177,7 @@ const WorkflowDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
-  const terminal = terminalStatusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.agentsDispatched > 0) {
     dimSubtitleParts.push(
@@ -1192,9 +1228,9 @@ const WorkflowDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -1205,6 +1241,23 @@ const WorkflowDetailBody: React.FC<{
           <Box />
           <Box>
             <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {(entry.status === 'pausing' || entry.status === 'paused') && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning}>
+              {entry.status === 'pausing'
+                ? t(
+                    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+                  )
+                : t(
+                    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+                  )}
+            </Text>
           </Box>
         </Fragment>
       )}
@@ -1228,7 +1281,7 @@ const WorkflowDetailBody: React.FC<{
           )}
           {visiblePhases.map((phaseTitle, i) => {
             const isCurrent =
-              entry.status === 'running' &&
+              isActiveWorkflowStatus(entry.status) &&
               i === visiblePhases.length - 1 &&
               entry.currentPhase === phaseTitle;
             const marker = isCurrent ? '▸' : '·';
@@ -1329,6 +1382,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     exitDetail,
     cancelSelected,
     resumeSelected,
+    toggleSelectedWorkflowPause,
+    setSelectedIndex,
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
@@ -1374,6 +1429,31 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (!isDetailMode) setSaveActive(false);
   }, [isDetailMode]);
+
+  // A rejected cooperative pause/resume (the registry returns false when the
+  // run's state raced away mid-request) flashes a short footer note instead
+  // of being swallowed, matching the explicit error /workflows p reports.
+  // The flash is keyed to the entry that produced it (moving the selection
+  // away hides it); each rejection sets a fresh object, so the effect's
+  // timer re-arms on a repeat rejection, and an accepted retry clears it.
+  const [pauseRejected, setPauseRejected] = useState<{
+    entryKey: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!pauseRejected) return;
+    const timer = setTimeout(() => setPauseRejected(null), 3000);
+    return () => clearTimeout(timer);
+  }, [pauseRejected]);
+
+  const toggleWorkflowPauseWithFeedback = useCallback(() => {
+    const target = entries[selectedIndex];
+    const verdict = toggleSelectedWorkflowPause();
+    if (verdict === false && target) {
+      setPauseRejected({ entryKey: entryId(target) });
+    } else if (verdict === true) {
+      setPauseRejected(null);
+    }
+  }, [entries, selectedIndex, toggleSelectedWorkflowPause]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1497,21 +1577,26 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // fire when tools run, but duration needs to advance even when the agent
   // is quietly thinking — otherwise the "33s" line freezes between tool uses.
   const selectedStatus = selectedEntry?.status;
+  const selectedShouldTick =
+    selectedEntry?.kind === 'workflow'
+      ? isActiveWorkflowStatus(selectedEntry.status)
+      : selectedStatus === 'running';
   useEffect(() => {
-    if (
-      !dialogOpen ||
-      !isDetailMode ||
-      !selectedEntryId ||
-      selectedStatus !== 'running'
-    )
+    if (!dialogOpen || !isDetailMode || !selectedEntryId || !selectedShouldTick)
       return;
     const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    selectedEntryId,
+    selectedShouldTick,
+  ]);
 
-  // Auto-fallback to the list view when the selected agent reaches a
+  // Auto-fallback to the list view when the selected entry reaches a
   // terminal state while the user is watching it live. We only exit on
-  // the running → terminal *transition* — if the user deliberately
+  // an active → terminal *transition* — if the user deliberately
   // opened an already-completed entry, they stay on it. The detail
   // view itself renders terminal state fine, so this is a UX choice
   // (return focus to the running roster) rather than a correctness fix.
@@ -1530,11 +1615,36 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // registry — but the entry could disappear if the registry is reset.
     if (!selectedEntryId) {
       initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
       exitDetail();
       return;
     }
     const seen = initialDetailStatusRef.current;
-    if (!seen || seen.entryId !== selectedEntryId) {
+    if (seen && seen.entryId !== selectedEntryId) {
+      // Selection is index-based while the roster re-sorts on every
+      // status change, so a *different* entry can move into the pinned
+      // index while the viewed entry is still alive in the list.
+      // Re-anchor the selection to its new position; only exit when the
+      // entry is genuinely gone.
+      const driftedIndex = entries.findIndex(
+        (candidate) => entryId(candidate) === seen.entryId,
+      );
+      if (driftedIndex >= 0) {
+        setSelectedIndex(driftedIndex);
+        return;
+      }
+      initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
+      exitDetail();
+      return;
+    }
+    if (!seen) {
       // First render in detail mode for this entry — remember the status we
       // opened with so we can detect a transition away from 'running' later.
       if (selectedStatus) {
@@ -1545,11 +1655,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
       return;
     }
-    if (
-      seen.status === 'running' &&
-      selectedStatus &&
-      selectedStatus !== 'running'
-    ) {
+    const seenWasActive =
+      seen.status === 'running' ||
+      seen.status === 'pausing' ||
+      seen.status === 'paused';
+    const selectedIsTerminal =
+      selectedStatus === 'completed' ||
+      selectedStatus === 'failed' ||
+      selectedStatus === 'cancelled';
+    if (seenWasActive && selectedIsTerminal) {
+      setPendingCancelEntryId(null);
       exitDetail();
     }
   }, [
@@ -1559,6 +1674,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntryId,
     selectedStatus,
     exitDetail,
+    entries,
+    setSelectedIndex,
   ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
@@ -1567,12 +1684,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const handleCancelKey = () => {
     if (!selectedEntry) return;
     // `x` only has a meaning for entries the user can still act on:
-    // `running` → cancel, `paused` (agent kind) → abandon. Terminal
+    // Active workflows and running tasks → cancel; paused agents → abandon. Terminal
     // statuses (completed/failed/cancelled) ignore the keypress so a
     // foreground entry that just settled can't display the misleading
     // "x again to confirm stop" line during the brief window before it
     // unregisters.
-    const isCancelable = selectedEntry.status === 'running';
+    const isCancelable = isStoppableEntry(selectedEntry);
     const isAbandonable =
       selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
     if (!isCancelable && !isAbandonable) return;
@@ -1651,6 +1768,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           void resumeSelected();
           return;
         }
+        if (key.sequence === 'p' && !key.ctrl && !key.meta) {
+          toggleWorkflowPauseWithFeedback();
+          return;
+        }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
           handleCancelKey();
           return;
@@ -1673,7 +1794,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         !key.meta &&
         config &&
         selectedEntry?.kind === 'workflow' &&
-        selectedEntry.status !== 'running' &&
+        isTerminalWorkflowStatus(selectedEntry.status) &&
         !!selectedEntry.script
       ) {
         setSaveActive(true);
@@ -1703,6 +1824,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         void resumeSelected();
         return;
       }
+      if (key.sequence === 'p' && !key.ctrl && !key.meta) {
+        toggleWorkflowPauseWithFeedback();
+        return;
+      }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
         handleCancelKey();
         return;
@@ -1723,13 +1848,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const workflowSaveTarget =
     config &&
     selectedEntry?.kind === 'workflow' &&
-    selectedEntry.status !== 'running' &&
+    isTerminalWorkflowStatus(selectedEntry.status) &&
     selectedEntry.script
       ? selectedEntry
       : null;
 
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+  const selectedWorkflowPauseHint = workflowPauseHint(selectedEntry);
   const showCancelConfirmHint =
     pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
@@ -1753,7 +1879,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     );
   } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntry && isStoppableEntry(selectedEntry)) {
+      hints.push('x stop');
+    }
+    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
@@ -1761,7 +1890,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntry && isStoppableEntry(selectedEntry)) {
+      hints.push('x stop');
+    }
+    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
@@ -1839,7 +1971,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         />
       ) : (
         <Box marginTop={1} paddingX={1}>
-          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          {pauseRejected && pauseRejected.entryKey === selectedEntryKey ? (
+            <Text color={theme.status.warning}>
+              {t(
+                'Pause/resume was rejected; the workflow state changed. Try again.',
+              )}
+            </Text>
+          ) : (
+            <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          )}
         </Box>
       )}
     </Box>

@@ -310,13 +310,14 @@ function setupAcpTest(
     stderr,
     sessionUpdates,
     permissionRequests,
+    agent,
   };
 }
 
 (IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
   it('basic smoke test', async () => {
     const rig = new TestRig();
-    rig.setup('acp load session');
+    await rig.setup('acp load session');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -356,7 +357,7 @@ function setupAcpTest(
 
   it('initializes and allows setting mode', async () => {
     const rig = new TestRig();
-    rig.setup('acp mode and model');
+    await rig.setup('acp mode and model');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -420,7 +421,7 @@ function setupAcpTest(
 
   it('returns internal error details when model auth is required', async () => {
     const rig = new TestRig();
-    rig.setup('acp auth methods in error data', {
+    await rig.setup('acp auth methods in error data', {
       settings: {
         modelProviders: {
           openai: [
@@ -486,7 +487,7 @@ function setupAcpTest(
     }
   });
 
-  it('supports session/set_config_option for mode and model', async () => {
+  it('supports session/set_config_option for mode, model, and reasoning effort', async () => {
     const rig = new TestRig();
     // Inject a deterministic openai provider model so `availableModels` always
     // contains a settable openai entry. The previous version relied on the
@@ -496,7 +497,7 @@ function setupAcpTest(
     // below). A registry model configured via `modelProviders` is always
     // enumerated and switchable without inference, making this test
     // deterministic regardless of how the ambient openai credentials resolve.
-    rig.setup('acp set config option', {
+    await rig.setup('acp set config option', {
       settings: {
         modelProviders: {
           openai: [
@@ -533,8 +534,25 @@ function setupAcpTest(
         models: {
           availableModels: Array<{ modelId: string }>;
         };
+        configOptions: Array<{
+          id: string;
+          category?: string;
+          currentValue: string;
+          options: Array<{ value: string; name: string }>;
+        }>;
       };
       expect(newSession.sessionId).toBeTruthy();
+
+      const initialReasoningOption = newSession.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(initialReasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(
+        initialReasoningOption?.options.map((option) => option.value),
+      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -598,6 +616,57 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
+      expect(
+        setModelResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      const setReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        setReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('xhigh');
+
+      const resetReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        resetReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      await expect(
+        sendRequest('session/set_config_option', {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: -32602,
+          message:
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+        },
+      });
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
@@ -610,7 +679,7 @@ function setupAcpTest(
 
   it('returns error for invalid configId in set_config_option', async () => {
     const rig = new TestRig();
-    rig.setup('acp set config option error');
+    await rig.setup('acp set config option error');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -657,7 +726,7 @@ function setupAcpTest(
 
   it('receives available_commands_update with slash commands after session creation', async () => {
     const rig = new TestRig();
-    rig.setup('acp slash commands');
+    await rig.setup('acp slash commands');
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
 
@@ -717,25 +786,31 @@ function setupAcpTest(
 
   it('handles exit plan mode with permission request and mode update notification', async () => {
     const rig = new TestRig();
-    rig.setup('acp exit plan mode');
+    await rig.setup('acp exit plan mode');
 
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests } =
-      setupAcpTest(rig, {
-        permissionHandler: (request) => {
-          // Track all permission requests for later verification
-          // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
-          if (request.toolCall?.kind === 'switch_mode') {
-            planModeRequests.push(request);
-            // Return proceed_always to switch to auto-edit mode
-            return { optionId: 'proceed_always' };
-          }
-          // Auto-approve all other requests
-          return { optionId: 'proceed_once' };
-        },
-      });
+    const {
+      sendRequest,
+      cleanup,
+      stderr,
+      sessionUpdates,
+      permissionRequests,
+      agent,
+    } = setupAcpTest(rig, {
+      permissionHandler: (request) => {
+        // Track all permission requests for later verification
+        // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
+        if (request.toolCall?.kind === 'switch_mode') {
+          planModeRequests.push(request);
+          // Return proceed_always to switch to auto-edit mode
+          return { optionId: 'proceed_always' };
+        }
+        // Auto-approve all other requests
+        return { optionId: 'proceed_once' };
+      },
+    });
 
     try {
       // Initialize
@@ -762,21 +837,60 @@ function setupAcpTest(
       })) as unknown;
       expect(setModeResult).toEqual({});
 
-      // Send a prompt that should trigger the LLM to call exit_plan_mode
-      // The prompt is designed to trigger planning behavior
-      const promptResult = await sendRequest('session/prompt', {
-        sessionId: newSession.sessionId,
-        prompt: [
-          {
-            type: 'text',
-            text: 'Create a simple hello world function in Python. Make a brief plan and when ready, use the exit_plan_mode tool to present it for approval.',
-          },
-        ],
-      });
-      expect(promptResult).toBeDefined();
+      // Send a prompt that should trigger the LLM to call exit_plan_mode.
+      // The prompt is designed to trigger planning behavior, but LLM
+      // behavior is non-deterministic — it may take too long or never call
+      // exit_plan_mode. Catch timeouts so the test can still verify any
+      // notifications that were received.
+      try {
+        const promptResult = await sendRequest('session/prompt', {
+          sessionId: newSession.sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'Create a simple hello world function in Python. Make a brief plan and when ready, use the exit_plan_mode tool to present it for approval.',
+            },
+          ],
+        });
+        expect(promptResult).toBeDefined();
+      } catch (e) {
+        // Only the harness's own 60s request timeout is acceptable — LLM
+        // behavior is non-deterministic. JSON-RPC errors (errors with a
+        // `response` property) indicate a real problem and must be surfaced.
+        if (
+          !(e instanceof Error) ||
+          'response' in e ||
+          !/^Request \d+ \(session\/prompt\) timed out$/.test(e.message)
+        ) {
+          throw e;
+        }
+        // A dead agent also manifests as a timeout. Surface the crash instead
+        // of swallowing it as an acceptable slow-LLM path.
+        if (agent.exitCode !== null || agent.signalCode !== null) {
+          throw e;
+        }
+        console.error(
+          'session/prompt did not complete (continuing with partial verification):',
+          e,
+        );
+      }
 
-      // Give time for all notifications to be processed
-      await delay(1000);
+      // Poll for mode_update notification after switch_mode, bounded at 5 s.
+      // A fixed delay races the slow-LLM path: switch_mode can arrive just
+      // after the timeout, and mode_update may land after the wait window.
+      await rig.poll(
+        () => {
+          const hasSwitchMode = permissionRequests.some(
+            (req) => req.toolCall?.kind === 'switch_mode',
+          );
+          if (!hasSwitchMode) return false;
+          return sessionUpdates.some(
+            (update) => update.update?.sessionUpdate === 'current_mode_update',
+          );
+        },
+        5000,
+        250,
+      );
 
       // Verify: If exit_plan_mode was called, we should have received:
       // 1. A permission request with kind: "switch_mode"
@@ -833,7 +947,7 @@ function setupAcpTest(
 
   it('blocks write tools in plan mode (issue #1806)', async () => {
     const rig = new TestRig();
-    rig.setup('acp plan mode enforcement');
+    await rig.setup('acp plan mode enforcement');
 
     const toolCallEvents: Array<{
       toolName: string;
@@ -942,7 +1056,7 @@ function setupAcpTest(
       },
     }));
     const rig = new TestRig();
-    rig.setup('acp usage metadata', {
+    await rig.setup('acp usage metadata', {
       settings: {
         model: {
           generationConfig: { contextWindowSize: 128_000 },
@@ -1024,7 +1138,7 @@ function setupAcpTest(
   () => {
     it('should work with deprecated --experimental-acp flag and show warning', async () => {
       const rig = new TestRig();
-      rig.setup('acp backward compatibility');
+      await rig.setup('acp backward compatibility');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: false,
@@ -1070,7 +1184,7 @@ function setupAcpTest(
 
     it('should work with new --acp flag without warnings', async () => {
       const rig = new TestRig();
-      rig.setup('acp new flag');
+      await rig.setup('acp new flag');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: true,

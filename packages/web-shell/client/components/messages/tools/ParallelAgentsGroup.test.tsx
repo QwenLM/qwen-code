@@ -110,29 +110,192 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="ruler"]')).toBeNull();
   });
 
-  it('keeps the task and current tool in separate stable fields', () => {
+  it('keeps task, current activity, and metrics in compact stable fields', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:08Z'));
+      const container = renderExpandedGroup([
+        agent({
+          callId: 'active',
+          status: 'in_progress',
+          startTime: Date.now() - 8_000,
+          args: {
+            description: 'Inspect the message list',
+            subagent_type: 'reviewer',
+          },
+          subTools: [
+            {
+              callId: 'read',
+              toolName: 'Read',
+              status: 'in_progress',
+              args: { file_path: 'src/MessageList.tsx' },
+            },
+          ],
+        }),
+      ]);
+
+      expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+        'Inspect the message list',
+      );
+      expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
+        'reviewer:',
+      );
+      expect(
+        container.querySelector('[class*="rowActivity"]')?.textContent,
+      ).toContain('MessageList.tsx');
+      expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+        '8s',
+      );
+      expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+        '10s',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('omits the default agent type while keeping its task description', () => {
     const container = renderExpandedGroup([
       agent({
-        callId: 'active',
-        status: 'in_progress',
+        callId: 'default-type',
         args: { description: 'Inspect the message list' },
-        subTools: [
-          {
-            callId: 'read',
-            toolName: 'Read',
-            status: 'in_progress',
-            args: { file_path: 'src/MessageList.tsx' },
-          },
-        ],
       }),
     ]);
 
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
     expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
       'Inspect the message list',
     );
-    expect(
-      container.querySelector('[class*="rowTool"]')?.textContent,
-    ).toContain('MessageList.tsx');
+    expect(container.querySelector('[class*="rowActivity"]')).toBeNull();
+    expect(container.querySelector('[class*="rowStats"]')).toBeNull();
+  });
+
+  it('does not duplicate a non-default type when the task has no description', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'type-only',
+        args: { subagent_type: 'reviewer' },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'reviewer',
+    );
+  });
+
+  it('omits a case-variant default agent type', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'case-variant-default',
+        args: {
+          description: 'Inspect the message list',
+          subagent_type: 'General-Purpose',
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
+  });
+
+  it('omits the untyped task fallback while keeping its task description', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'untyped-task',
+        toolName: 'task',
+        args: { description: 'Inspect the message list' },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
+  });
+
+  it('caps a long agent type label at the row width limit', () => {
+    const longType = 'reviewer-' + 'x'.repeat(90);
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'long-type',
+        args: {
+          description: 'Inspect the message list',
+          subagent_type: longType,
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
+      `${longType.slice(0, 50)}...:`,
+    );
+  });
+
+  it('keeps completed duration and tokens separate from the task text', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'completed',
+        status: 'completed',
+        args: { description: 'Audit the session route' },
+        rawOutput: {
+          type: 'task_execution',
+          tokenCount: 214,
+          executionSummary: { totalDurationMs: 8_000 },
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '8s · 214 tokens',
+    );
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Audit the session route',
+    );
+  });
+
+  it('shows tokens when completed output has no duration', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'tokens-only',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          tokenCount: 214,
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '214 tokens',
+    );
+  });
+
+  it('keeps a cancellation reason in the activity field', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'cancelled',
+        status: 'completed',
+        args: { description: 'Audit the session route' },
+        rawOutput: {
+          type: 'task_execution',
+          status: 'cancelled',
+          reason: 'Cancelled by user',
+          tokenCount: 214,
+          executionSummary: { totalDurationMs: 8_000 },
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowActivity"]')?.textContent).toBe(
+      '(Cancelled by user)',
+    );
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '8s · 214 tokens',
+    );
   });
 
   it('auto-expands active agents and collapses 1.5s after completion', () => {
@@ -1061,6 +1224,48 @@ describe('ParallelAgentsGroup activity rendering', () => {
     }
   });
 
+  it('keeps the pending-approval row inert while siblings stay clickable', () => {
+    const approval: PermissionRequest = {
+      id: 'approval',
+      toolCallId: 'a1',
+      content: [],
+      options: [],
+    };
+    const { container } = renderManagedGroup(
+      [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'completed' }),
+      ],
+      { autoManageExpansion: true, pendingApproval: approval },
+    );
+
+    const pendingRow = container.querySelector(
+      'div[aria-disabled="true"]',
+    ) as HTMLElement;
+    // R2-5: the inert placeholder keeps the status so the dot keeps its
+    // active color instead of falling back to the muted default.
+    expect(pendingRow).not.toBeNull();
+    expect(pendingRow.getAttribute('data-agent-status')).toBe('active');
+    // R2-6: the pending row must not advertise a running agent.
+    expect(
+      pendingRow
+        .querySelector('[class*="rowStatus"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('pending');
+    // The pending row is a plain div: no button, no click affordance.
+    expect(
+      container.querySelector('button[data-agent-status="active"]'),
+    ).toBeNull();
+    expect(pendingRow.tagName).toBe('DIV');
+
+    // The sibling whose approval is not pending stays fully interactive.
+    const sibling = container.querySelector(
+      'button[data-agent-status="completed"]',
+    ) as HTMLButtonElement;
+    expect(sibling).not.toBeNull();
+    expect(sibling.hasAttribute('aria-disabled')).toBe(false);
+  });
+
   it('hands focus to the summary when the automatic exit starts under a focused row', () => {
     vi.useFakeTimers();
     try {
@@ -1116,6 +1321,73 @@ describe('ParallelAgentsGroup activity rendering', () => {
       expect(
         container.querySelectorAll('[data-agent-status="active"]'),
       ).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a failed count in the collapsed summary', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({ callId: 'failed', status: 'failed' }),
+    ]);
+
+    expect(container.textContent).toContain('2/2 done');
+    expect(container.textContent).toContain('1 failed');
+    expect(container.textContent).not.toContain('Failed');
+    expect(
+      groupSummary(container).querySelector('[class*="iconError"]'),
+    ).toBeNull();
+    // The failed count must precede the done counter: summaryText truncates
+    // from the tail, so this order keeps failure evidence visible when the
+    // row is narrow.
+    const summaryText = groupSummary(container).textContent ?? '';
+    expect(summaryText.indexOf('1 failed')).toBeGreaterThanOrEqual(0);
+    expect(summaryText.indexOf('1 failed')).toBeLessThan(
+      summaryText.indexOf('2/2 done'),
+    );
+  });
+
+  it('counts a cancelled agent in the failed count', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({
+        callId: 'cancelled',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'cancelled',
+          reason: 'Cancelled by user',
+        },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('1 failed');
+  });
+
+  it('shows the failed count alongside live progress', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = renderExpandedGroup([
+        agent({
+          callId: 'done',
+          status: 'completed',
+          startTime: 1_000,
+          endTime: 5_000,
+        }),
+        agent({
+          callId: 'failed',
+          status: 'failed',
+          startTime: 2_000,
+          endTime: 6_000,
+        }),
+        agent({ callId: 'running', status: 'pending', startTime: 3_000 }),
+      ]);
+
+      expect(container.textContent).toContain('7s');
+      expect(container.textContent).toContain('2/3 done');
+      expect(container.textContent).toContain('1 failed');
     } finally {
       vi.useRealTimers();
     }
@@ -1258,10 +1530,15 @@ describe('ParallelAgentsGroup activity rendering', () => {
     const row = container.querySelector('[class*="row"]') as HTMLButtonElement;
 
     expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('data-detail-mode')).toBe('inline');
+    expect(row.title).toBe('Toggle agent stream details');
     expect(row.getAttribute('aria-expanded')).toBe('false');
     act(() => row.click());
     expect(container.textContent).toContain('nested agent output');
     expect(row.getAttribute('aria-expanded')).toBe('true');
+    act(() => row.click());
+    expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('opens nested agents through the details provider when available', () => {
@@ -1284,6 +1561,9 @@ describe('ParallelAgentsGroup activity rendering', () => {
       (container.querySelector('[aria-expanded]') as HTMLElement).click(),
     );
     const row = container.querySelector('[class*="row"]') as HTMLElement;
+    expect(row.getAttribute('data-detail-mode')).toBe('panel');
+    expect(row.getAttribute('title')).toBe('Open subagent details');
+    expect(row.querySelector('[class*="rowAction"]')).not.toBeNull();
     expect(row.hasAttribute('aria-expanded')).toBe(false);
     act(() => row.click());
 

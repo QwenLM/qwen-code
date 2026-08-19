@@ -53,13 +53,6 @@
   display: block;
 }
 
-.summaryStatus {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  line-height: 1;
-}
-
 .summaryToolIcon {
   width: 14px;
   height: 14px;
@@ -256,14 +249,16 @@
 .row {
   position: relative;
   overflow: hidden;
-  width: 100%;
+  width: calc(100% + 12px);
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 0;
+  min-height: 28px;
+  margin: 0 -6px;
+  padding: 4px 6px;
   min-width: 0;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: 5px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -278,8 +273,23 @@
 
 .row:hover,
 .row:focus-visible {
-  background: var(--secondary);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.row:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
   outline: none;
+}
+
+/* Pending-approval rows are inert placeholders: no pointer affordance, no
+   hover highlight. */
+.row[aria-disabled='true'] {
+  cursor: default;
+}
+
+.row[aria-disabled='true']:hover,
+.row[aria-disabled='true']:focus-visible {
+  background: transparent;
 }
 
 .rowStatus {
@@ -323,28 +333,69 @@
 .rowText {
   display: flex;
   align-items: baseline;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
-  color: var(--muted-foreground);
   overflow: hidden;
   flex: 1;
   min-width: 0;
 }
 
 .rowTask,
-.rowTool {
+.rowActivity {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.rowType {
+  max-width: 30%;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  flex-shrink: 1;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rowTask {
+  color: var(--foreground);
+  font-weight: 500;
   flex-shrink: 1;
 }
 
-.rowTool {
+.rowActivity {
   color: var(--muted-foreground);
-  flex-shrink: 2;
+  flex: 1 2 auto;
+  min-width: 0;
+}
+
+.rowAction {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  opacity: 0.7;
+  stroke-width: 1.8;
+}
+
+.row:hover .rowAction,
+.row:focus-visible .rowAction {
+  color: var(--foreground);
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rowAction {
+    transition:
+      color 120ms ease,
+      opacity 120ms ease,
+      transform 120ms ease;
+  }
+}
+
+.row[data-detail-mode='inline'][aria-expanded='true'] .rowAction {
+  transform: rotate(90deg);
 }
 
 .detail {

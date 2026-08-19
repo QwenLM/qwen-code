@@ -3,8 +3,8 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
-} from '../adapters/types';
-import { isSubAgentToolCall } from '../adapters/toolClassification';
+} from '../adapters/types.js';
+import { isSubAgentToolCall } from '../adapters/toolClassification.js';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and

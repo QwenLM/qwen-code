@@ -27,6 +27,10 @@ export default defineConfig({
         __dirname,
         '../core/src/memory/scopes.ts',
       ),
+      '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
+        __dirname,
+        '../core/src/services/tool-write-origin.ts',
+      ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private
@@ -140,6 +144,10 @@ export default defineConfig({
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
     testTimeout: 15000,
+    // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+    maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? '25%'
+      : undefined,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
     environment: 'jsdom',
@@ -150,6 +158,15 @@ export default defineConfig({
       junit: 'junit.xml',
     },
     setupFiles: ['./test-setup.ts'],
+    // Fail fast with an actionable message when workspace dist/ output or
+    // generated files are missing (fresh clone, new worktree, deep clean).
+    // See scripts/vitest-global-setup.js and issue #9149.
+    // Resolved against this config file (not vitest's root/cwd) so the guard
+    // also loads when vitest is launched from elsewhere with --config.
+    globalSetup: path.resolve(
+      __dirname,
+      '../../scripts/vitest-global-setup.js',
+    ),
     coverage: {
       enabled: true,
       provider: 'v8',
@@ -163,12 +180,6 @@ export default defineConfig({
         'cobertura',
         ['json-summary', { outputFile: 'coverage-summary.json' }],
       ],
-    },
-    poolOptions: {
-      threads: {
-        minThreads: 8,
-        maxThreads: 16,
-      },
     },
     server: {
       deps: {

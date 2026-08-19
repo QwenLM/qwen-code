@@ -8,6 +8,7 @@ import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -29,6 +30,7 @@ interface RegisterCapabilitiesRoutesDeps {
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
   languageCodes: string[];
 }
 
@@ -37,11 +39,17 @@ export function registerCapabilitiesRoutes(
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
   app.get('/capabilities', (_req, res) => {
-    const entries = deps.workspaceRegistry.listEntries();
+    const entries = deps.workspaceRegistry
+      .listAllEntries()
+      .filter(
+        (entry) =>
+          !entry.internal ||
+          (entry.state === 'active' && entry.current !== undefined),
+      );
     const activePrimary = entries.find(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
-    const multiWorkspace = entries.length > 1;
+    const multipleAdmissionPools = entries.length > 1;
     const features = deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
@@ -68,7 +76,11 @@ export function registerCapabilitiesRoutes(
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
-        ...(multiWorkspace
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
+        ...(features.includes('workspace_file_upload')
+          ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(multipleAdmissionPools
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
                 deps.maxSessionsPerWorkspace,
