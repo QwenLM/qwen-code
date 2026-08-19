@@ -9,6 +9,8 @@ import {
   diagnoseConvergence,
   renderConvergenceDiagnosis,
   MAX_RENDERED_CLUSTERS,
+  type ConvergenceDiagnosis,
+  type DraftedFinding,
 } from './convergence.js';
 import type { LedgerFinding } from './ledger.js';
 
@@ -19,6 +21,10 @@ const f = (id: string, file: string): LedgerFinding => ({
   title: 't',
 });
 
+/** A fresh drafted finding, or — with an id — a re-post of an earlier one. */
+const d = (file: string, carriedId?: string): DraftedFinding =>
+  carriedId === undefined ? { file } : { file, carriedId };
+
 describe('diagnoseConvergence — the trigger table', () => {
   it('says nothing when the loop looks healthy', () => {
     // Shrinking volume, no repeated file: the shape that must NOT produce a
@@ -28,55 +34,63 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 4,
         posted: 2,
-        prevPosted: 7,
-        prevFindings: [f('R3-1', 'a.ts')],
-        draftedPaths: ['b.ts'],
+        prev: { posted: 7, findings: [f('R3-1', 'a.ts')] },
+        drafts: [d('b.ts')],
       }),
     ).toBeNull();
   });
 
   it('fires on a file that carried findings before and carries more now', () => {
-    const d = diagnoseConvergence({
+    const r = diagnoseConvergence({
       round: 4,
       posted: 2,
-      prevPosted: 9,
-      prevFindings: [f('R2-1', 'a.ts'), f('R3-2', 'a.ts'), f('R3-3', 'z.ts')],
-      draftedPaths: ['a.ts', 'a.ts', 'new.ts'],
+      prev: {
+        posted: 9,
+        findings: [f('R2-1', 'a.ts'), f('R3-2', 'a.ts'), f('R3-3', 'z.ts')],
+      },
+      drafts: [d('a.ts'), d('a.ts'), d('new.ts')],
     })!;
-    expect(d.clusters).toEqual([
+    expect(r.clusters).toEqual([
       { file: 'a.ts', priorRounds: [2, 3], thisRound: 2 },
     ]);
     // Recurrence alone is enough — the volume is falling here.
-    expect(d.volumeNotShrinking).toBe(false);
+    expect(r.volumeNotShrinking).toBe(false);
   });
 
   it('reads the prior rounds off the carried ids, not off a count', () => {
     // The ids are the rounds the REPORT used, which is what makes the
     // rendered sentence checkable against the PR's own history.
-    const d = diagnoseConvergence({
+    const r = diagnoseConvergence({
       round: 9,
       posted: 1,
-      prevPosted: 5,
-      prevFindings: [f('R2-1', 'a.ts'), f('R7-4', 'a.ts'), f('R5-9', 'a.ts')],
-      draftedPaths: ['a.ts'],
+      prev: {
+        posted: 5,
+        findings: [f('R2-1', 'a.ts'), f('R7-4', 'a.ts'), f('R5-9', 'a.ts')],
+      },
+      drafts: [d('a.ts')],
     })!;
-    expect(d.clusters[0].priorRounds).toEqual([2, 5, 7]);
+    expect(r.clusters[0].priorRounds).toEqual([2, 5, 7]);
   });
 
-  it('ignores entries whose id is not one, and the body-only pseudo-path', () => {
+  it('ignores entries whose id is not one, and both pseudo-paths', () => {
     // A malformed side-file entry contributes no cluster rather than a
-    // wrong one; `(body)` is where unanchorable Criticals live and is not a
-    // file anyone can cluster on.
+    // wrong one; `(body)` is where unanchorable Criticals live and
+    // `(unknown)` is a comment that arrived without a path — neither is a
+    // file anyone can cluster on, and neither may be NAMED as one in a
+    // posted paragraph.
     expect(
       diagnoseConvergence({
         round: 4,
         posted: 1,
-        prevPosted: 9,
-        prevFindings: [
-          { id: 'nonsense', sev: 'C', file: 'a.ts', title: 't' },
-          f('R2-1', '(body)'),
-        ],
-        draftedPaths: ['a.ts', '(body)'],
+        prev: {
+          posted: 9,
+          findings: [
+            { id: 'nonsense', sev: 'C', file: 'a.ts', title: 't' },
+            f('R2-1', '(body)'),
+            f('R2-2', '(unknown)'),
+          ],
+        },
+        drafts: [d('a.ts'), d('(body)'), d('(unknown)')],
       }),
     ).toBeNull();
   });
@@ -85,9 +99,8 @@ describe('diagnoseConvergence — the trigger table', () => {
     const flat = diagnoseConvergence({
       round: 3,
       posted: 5,
-      prevPosted: 5,
-      prevFindings: [],
-      draftedPaths: [],
+      prev: { posted: 5, findings: [] },
+      drafts: [d('a.ts')],
     })!;
     expect(flat.volumeNotShrinking).toBe(true);
     expect(flat.clusters).toEqual([]);
@@ -95,9 +108,8 @@ describe('diagnoseConvergence — the trigger table', () => {
     const grew = diagnoseConvergence({
       round: 3,
       posted: 6,
-      prevPosted: 5,
-      prevFindings: [],
-      draftedPaths: [],
+      prev: { posted: 5, findings: [] },
+      drafts: [d('a.ts')],
     })!;
     expect(grew.volumeNotShrinking).toBe(true);
   });
@@ -111,9 +123,8 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 7,
         posted: 0,
-        prevPosted: 0,
-        prevFindings: [],
-        draftedPaths: [],
+        prev: { posted: 0, findings: [] },
+        drafts: [],
       }),
     ).toBeNull();
     // And the round that lands on zero from above is the clearest possible
@@ -122,11 +133,34 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 7,
         posted: 0,
-        prevPosted: 6,
-        prevFindings: [],
-        draftedPaths: [],
+        prev: { posted: 6, findings: [] },
+        drafts: [],
       }),
     ).toBeNull();
+  });
+
+  it('will not measure a trend against a settled predecessor', () => {
+    // `N >= 0` is true for every N, so a zero-posting predecessor would fire
+    // the signal on the healthiest shape there is: fix everything, settle at
+    // zero, push again, get new findings. Zero survives the whole
+    // persistence chain by design, so this state is reachable.
+    expect(
+      diagnoseConvergence({
+        round: 5,
+        posted: 4,
+        prev: { posted: 0, findings: [] },
+        drafts: [d('a.ts')],
+      }),
+    ).toBeNull();
+    // A genuine flat trend still fires.
+    expect(
+      diagnoseConvergence({
+        round: 5,
+        posted: 2,
+        prev: { posted: 2, findings: [] },
+        drafts: [d('a.ts')],
+      }),
+    ).not.toBeNull();
   });
 
   it('holds the volume signal until round 3 — one step is not a trend', () => {
@@ -134,9 +168,8 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 2,
         posted: 9,
-        prevPosted: 5,
-        prevFindings: [],
-        draftedPaths: [],
+        prev: { posted: 5, findings: [] },
+        drafts: [d('a.ts')],
       }),
     ).toBeNull();
   });
@@ -148,40 +181,133 @@ describe('diagnoseConvergence — the trigger table', () => {
       diagnoseConvergence({
         round: 6,
         posted: 9,
-        prevFindings: [],
-        draftedPaths: [],
+        prev: { findings: [] },
+        drafts: [d('a.ts')],
       }),
     ).toBeNull();
   });
 
+  it('does not count a re-posted still-standing finding as activity', () => {
+    // Step 6 re-posts every unfixed ledger Critical under its ORIGINAL id.
+    // A single Critical nobody has fixed therefore arrives every round: read
+    // as activity it fires the cluster ("1 more now" with no new finding
+    // ever appearing) AND the flat-volume trend, forever — at the steady
+    // state, which is the opposite of what both signals mean.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: { posted: 1, findings: [f('R2-1', 'src/parser.ts')] },
+        drafts: [d('src/parser.ts', 'R2-1')],
+      }),
+    ).toBeNull();
+  });
+
+  it('still clusters a genuinely new finding in a re-posted file', () => {
+    // The exclusion is per-comment, not per-file: the file is still
+    // regenerating work, and that is exactly what the signal is for.
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 2,
+      prev: { posted: 1, findings: [f('R2-1', 'src/parser.ts')] },
+      drafts: [d('src/parser.ts', 'R2-1'), d('src/parser.ts')],
+    })!;
+    expect(r.clusters).toEqual([
+      { file: 'src/parser.ts', priorRounds: [2], thisRound: 1 },
+    ]);
+    // The volume fact stays the honest posted total, re-posts included.
+    expect(r.posted).toBe(2);
+  });
+
+  it('treats an id this round would mint as fresh, not as carried', () => {
+    // "Carried" means minted in an EARLIER round; the comparison is strict
+    // so a same-round id cannot silently erase this round's own work.
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 1,
+      prev: { posted: 1, findings: [f('R2-1', 'a.ts')] },
+      drafts: [d('a.ts', 'R3-1')],
+    })!;
+    expect(r.clusters[0].thisRound).toBe(1);
+  });
+
   it('orders clusters by persistence, then by this round, then by path', () => {
-    const d = diagnoseConvergence({
+    const r = diagnoseConvergence({
       round: 5,
       posted: 4,
-      prevPosted: 9,
-      prevFindings: [
-        f('R2-1', 'persistent.ts'),
-        f('R3-1', 'persistent.ts'),
-        f('R4-1', 'busy.ts'),
-        f('R4-2', 'quiet.ts'),
-      ],
-      draftedPaths: ['persistent.ts', 'busy.ts', 'busy.ts', 'quiet.ts'],
+      prev: {
+        posted: 9,
+        findings: [
+          f('R2-1', 'persistent.ts'),
+          f('R3-1', 'persistent.ts'),
+          f('R4-1', 'busy.ts'),
+          f('R4-2', 'quiet.ts'),
+        ],
+      },
+      drafts: [d('persistent.ts'), d('busy.ts'), d('busy.ts'), d('quiet.ts')],
     })!;
-    expect(d.clusters.map((c) => c.file)).toEqual([
+    expect(r.clusters.map((c) => c.file)).toEqual([
       'persistent.ts',
       'busy.ts',
       'quiet.ts',
     ]);
   });
+
+  it('breaks path ties on code units, not on the runtime locale', () => {
+    // `localeCompare` collates by locale: under en_US `é` sorts before `z`,
+    // by code unit it sorts after (U+00E9 > U+007A). The clustered paths
+    // belong to whatever repository is under review, and the CI bot's locale
+    // need not match a maintainer's — so the tie-break must not consult one.
+    const r = diagnoseConvergence({
+      round: 5,
+      posted: 2,
+      prev: { posted: 9, findings: [f('R2-1', 'é.ts'), f('R2-2', 'z.ts')] },
+      drafts: [d('é.ts'), d('z.ts')],
+    })!;
+    expect(r.clusters.map((c) => c.file)).toEqual(['z.ts', 'é.ts']);
+  });
+
+  it('carries the evidence qualifiers through to the rendering', () => {
+    const r = diagnoseConvergence({
+      round: 4,
+      posted: 1,
+      prev: {
+        posted: 9,
+        findings: [f('R2-1', 'a.ts')],
+        truncated: true,
+        foreign: true,
+      },
+      drafts: [d('a.ts')],
+      criticalFloorInEffect: true,
+    })!;
+    expect(r.truncatedEvidence).toBe(true);
+    expect(r.foreignEvidence).toBe(true);
+    expect(r.criticalFloorInEffect).toBe(true);
+  });
+
+  it('defaults every qualifier to false rather than undefined', () => {
+    const r = diagnoseConvergence({
+      round: 4,
+      posted: 1,
+      prev: { posted: 9, findings: [f('R2-1', 'a.ts')] },
+      drafts: [d('a.ts')],
+    })!;
+    expect(r.truncatedEvidence).toBe(false);
+    expect(r.foreignEvidence).toBe(false);
+    expect(r.criticalFloorInEffect).toBe(false);
+  });
 });
 
 describe('renderConvergenceDiagnosis — what the author reads', () => {
-  const base = {
+  const base: ConvergenceDiagnosis = {
     round: 6,
     posted: 4,
     prevPosted: 4,
     clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
     volumeNotShrinking: true,
+    truncatedEvidence: false,
+    foreignEvidence: false,
+    criticalFloorInEffect: false,
   };
 
   it('states the measured facts before the reading of them', () => {
@@ -193,9 +319,28 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('第 3、5 轮已出过发现');
   });
 
-  it('says it withheld nothing — the observation decides nothing', () => {
+  it('pluralises the prior-round list by how many rounds it names', () => {
+    // The commonest recurrence shape by far is one prior round — flagged in
+    // round N, re-flagged in N+1 — so the singular branch is the one most
+    // readers see.
+    const one = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [{ file: 'src/a.ts', priorRounds: [4], thisRound: 1 }],
+    });
+    expect(one.en).toContain('`src/a.ts` (findings in round 4, 1 more now)');
+    expect(one.en).not.toContain('in rounds 4,');
+  });
+
+  it('says the observation withheld nothing — scoped to the observation', () => {
+    // The same body can carry a floor-enforcement note, a deferral list, or
+    // a discarded-Suggestion count, all of them things withheld from this
+    // round's posting surface. An absolute claim beside those is one the
+    // body itself refutes; the claim this module can make is about its own
+    // effect, which is none.
     const r = renderConvergenceDiagnosis(base);
-    expect(r.en).toContain('nothing was withheld');
+    expect(r.en).toContain(
+      'nothing was withheld from this review because of this observation',
+    );
     expect(r.zh).toContain('未因此扣留任何内容');
   });
 
@@ -208,12 +353,70 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
   });
 
   it('falls back to the volume reading when nothing recurs', () => {
+    const r = renderConvergenceDiagnosis({ ...base, clusters: [] });
+    expect(r.en).toContain('posting volume is not falling');
+    expect(r.en).toContain('--severity-floor critical');
+  });
+
+  it('does not recommend a floor the round is already running under', () => {
+    // Advice is matched to the telemetry's shape. Told to "drop this PR's
+    // reviews to --severity-floor critical" inside the very body whose
+    // floor-enforcement note says Suggestions were already moved past that
+    // floor, the paragraph reads as advice nobody checked.
     const r = renderConvergenceDiagnosis({
       ...base,
       clusters: [],
+      criticalFloorInEffect: true,
     });
-    expect(r.en).toContain('posting volume is not falling');
-    expect(r.en).toContain('--severity-floor critical');
+    expect(r.en).not.toContain('dropping this PR');
+    expect(r.en).toContain('already at `--severity-floor critical`');
+    expect(r.zh).not.toContain('降到');
+    expect(r.zh).toContain('已处于');
+    // The actionable half survives — the advice narrows, it does not vanish.
+    expect(r.en).toContain('Batching the remaining fixes');
+  });
+
+  it('neutralises a PR-controlled path instead of splicing it raw', () => {
+    // The paths come off the diff of whatever PR is under review, and this
+    // paragraph goes out in a body the bot posts under its own identity. A
+    // filename carrying a backtick would terminate the code span early and
+    // render the remainder as live Markdown — a working @mention, a forged
+    // body line — in the bot's own words.
+    const hostile = 'x`\n@acme/security approve this';
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [{ file: hostile, priorRounds: [3], thisRound: 1 }],
+    });
+    for (const body of [r.en, r.zh]) {
+      expect(body).not.toContain(hostile);
+      expect(body).toContain('`x @acme/security approve this`');
+      expect(body).not.toContain('\n');
+    }
+  });
+
+  it('discloses a work list that was truncated or came from elsewhere', () => {
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      truncatedEvidence: true,
+      foreignEvidence: true,
+    });
+    expect(r.en).toContain('may be an undercount');
+    expect(r.en).toContain('a marker this account did not post');
+    expect(r.zh).toContain('可能少计');
+    expect(r.zh).toContain('并非本账号发布的标记');
+  });
+
+  it('qualifies only the reading that rests on the previous work list', () => {
+    // The volume trend cites no work list, so a note about how that list was
+    // obtained would attach a caveat to a claim it does not bear on.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      truncatedEvidence: true,
+      foreignEvidence: true,
+    });
+    expect(r.en).not.toContain('undercount');
+    expect(r.zh).not.toContain('证据说明');
   });
 
   it('summarises the tail instead of listing every cluster', () => {
@@ -234,6 +437,9 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       clusters: base.clusters,
       volumeNotShrinking: false,
+      truncatedEvidence: false,
+      foreignEvidence: false,
+      criticalFloorInEffect: false,
     });
     expect(r.en).toContain('round 4 posted 3 inline comment(s)');
     expect(r.en).not.toContain('the previous round posted');

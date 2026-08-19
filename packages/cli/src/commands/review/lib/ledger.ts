@@ -171,6 +171,21 @@ export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
 /**
+ * The pseudo-paths a finding carries when it has no file to name: a body-only
+ * Critical anchors to the review body itself, and a drafted comment that
+ * arrived without a path anchors to nothing at all.
+ *
+ * Named here because BOTH ends must agree. The ledger builder stamps them into
+ * `findings[].file`, and every reader that must not treat them as real files
+ * compares against them — the convergence join excludes them from clustering.
+ * Spelled as bare literals on each end, a rename on one end alone turns a
+ * pseudo-path into an ordinary file the reader clusters on and NAMES in a
+ * posted paragraph: the same two-ends drift the shared id constants above
+ * exist to prevent.
+ */
+export const LEDGER_BODY_FILE = '(body)';
+export const LEDGER_UNKNOWN_FILE = '(unknown)';
+/**
  * The longest model id the marker can carry — and it carries one WHOLE or
  * not at all: a truncated id is a prefix, and a prefix can equal a DIFFERENT
  * model's full id, which the same-model gate would then accept past code it

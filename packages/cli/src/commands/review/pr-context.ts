@@ -752,6 +752,15 @@ export interface RecoveredLedger {
   ledger: Ledger;
   commitId: string | null;
   /**
+   * The winning marker was posted by another account. Recovery adopts the
+   * highest-round marker whoever posted it (bounded by
+   * `FOREIGN_ROUND_HEADROOM`), so a work list can carry rounds this account
+   * never ran — and the convergence diagnosis CITES those round numbers in a
+   * body this account posts. Persisted beside the list so the citation can
+   * disclose where it came from instead of publishing it bare.
+   */
+  foreign: boolean;
+  /**
    * The winning review's own id — persisted so Step 6 can find WHICH body's
    * not-reviewed disclosures bind the code-age rule: with several summaries
    * on the PR, "check the previous round's review body" is ambiguous, and
@@ -1184,6 +1193,11 @@ export function persistRecoveredLedger(
             ...recovered.ledger,
             ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
             reviewId: recovered.reviewId,
+            // Provenance travels WITH the list it describes. Written even
+            // when false, so the field's absence means only "a version
+            // before this wrote the file" — which degrades to no disclosure,
+            // the same reading a pre-telemetry predecessor already gets.
+            foreign: recovered.foreign,
           },
           null,
           2,

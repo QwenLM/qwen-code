@@ -44,7 +44,7 @@ describe('persistRecoveredLedger', () => {
     try {
       persistRecoveredLedger(
         side,
-        { ledger, commitId: 'a'.repeat(40), reviewId: 42 },
+        { ledger, commitId: 'a'.repeat(40), reviewId: 42, foreign: false },
         { noOwnReview: true, identityKnown: true },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
@@ -52,8 +52,29 @@ describe('persistRecoveredLedger', () => {
         ...ledger,
         commitId: 'a'.repeat(40),
         reviewId: 42,
+        foreign: false,
       });
       expect(written.sha).toBe('deadbeef00112233');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records that the winning marker came from another account', () => {
+    // The convergence diagnosis CITES the round numbers carried in this work
+    // list, in a body this account posts. Recovery adopts the highest-round
+    // marker whoever posted it, so those rounds can be ones this account
+    // never ran — and the provenance is knowable only here, at the moment of
+    // recovery. Dropped on the way to disk, the citation goes out bare.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        { ledger, commitId: null, reviewId: 9, foreign: true },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -135,6 +156,7 @@ describe('persistRecoveredLedger', () => {
           ledger: { ...ledger, round: 2 },
           commitId: 'a'.repeat(40),
           reviewId: 20,
+          foreign: false,
         },
         { noOwnReview: false, identityKnown: true },
       );
@@ -142,14 +164,24 @@ describe('persistRecoveredLedger', () => {
       // Same round, older reviewId: also kept.
       persistRecoveredLedger(
         side,
-        { ledger: { ...ledger, round: 7 }, commitId: null, reviewId: 60 },
+        {
+          ledger: { ...ledger, round: 7 },
+          commitId: null,
+          reviewId: 60,
+          foreign: false,
+        },
         { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // A genuinely newer recovery still writes.
       persistRecoveredLedger(
         side,
-        { ledger: { ...ledger, round: 8 }, commitId: null, reviewId: 80 },
+        {
+          ledger: { ...ledger, round: 8 },
+          commitId: null,
+          reviewId: 80,
+          foreign: false,
+        },
         { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).round).toBe(8);
@@ -198,6 +230,7 @@ describe('persistRecoveredLedger', () => {
           },
           commitId: 'c'.repeat(40),
           reviewId: 101,
+          foreign: false,
         },
         { noOwnReview: false, identityKnown: false },
       );
@@ -246,6 +279,7 @@ describe('persistRecoveredLedger', () => {
           },
           commitId: 'c'.repeat(40),
           reviewId: 200,
+          foreign: false,
         },
         { noOwnReview: true, identityKnown: false },
       );
@@ -272,7 +306,12 @@ describe('persistRecoveredLedger', () => {
     try {
       persistRecoveredLedger(
         side,
-        { ledger: { ...ledger, round: 4 }, commitId: null, reviewId: 40 },
+        {
+          ledger: { ...ledger, round: 4 },
+          commitId: null,
+          reviewId: 40,
+          foreign: false,
+        },
         { noOwnReview: false, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));

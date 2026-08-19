@@ -70,18 +70,23 @@ import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
   LEDGER_MAX_BYTES,
+  LEDGER_MAX_FILE,
   LEDGER_MAX_ROUND,
+  LEDGER_UNKNOWN_FILE,
   serializeLedger,
   volumeOf,
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
+import { mdField } from './lib/md-field.js';
 import {
   diagnoseConvergence,
   renderConvergenceDiagnosis,
-  type ConvergenceDiagnosis,
+  type DraftedFinding,
+  type PrevRound,
 } from './lib/convergence.js';
 import {
   CRITICAL_PREFIX,
@@ -411,6 +416,33 @@ export function normalizeSeverityFloor(value: unknown): string | undefined {
 }
 
 /**
+ * Does the posting floor resolve to `critical` for the round being composed?
+ *
+ * The ONE statement of that rule. `floorEnforcedReroute` ACTS on it, moving
+ * otherwise-postable Suggestions into the deferral channel; the convergence
+ * rendering READS it so its handling advice never recommends a posture the
+ * round is already running under — a paragraph telling the author to drop to
+ * `--severity-floor critical` inside the very body whose floor-enforcement
+ * note says Suggestions were already moved past that floor.
+ */
+export function criticalFloorInEffect(
+  severityFloor: unknown,
+  contextUnavailable: boolean,
+  prevRound: number,
+): boolean {
+  const floor = normalizeSeverityFloor(severityFloor);
+  // `prevRound` is the PREVIOUS posted round, so the review being composed
+  // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
+  // reads as a fencepost error against SKILL Step 6's "from round 6 it is
+  // critical".
+  const thisRound = prevRound + 1;
+  return (
+    floor === 'critical' ||
+    (floor === 'auto' && !contextUnavailable && thisRound >= 6)
+  );
+}
+
+/**
  * The posting floor, enforced in code — the backstop for the posture SKILL
  * Step 6 resolves in prose.
  *
@@ -446,16 +478,9 @@ export function floorEnforcedReroute(
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
 ): { indices: number[]; entries: DeferredEntry[] } {
-  const floor = normalizeSeverityFloor(severityFloor);
-  // `prevRound` is the PREVIOUS posted round, so the review being composed
-  // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
-  // reads as a fencepost error against SKILL Step 6's "from round 6 it is
-  // critical".
-  const thisRound = prevRound + 1;
-  const enforced =
-    floor === 'critical' ||
-    (floor === 'auto' && !contextUnavailable && thisRound >= 6);
-  if (!enforced) return { indices: [], entries: [] };
+  if (!criticalFloorInEffect(severityFloor, contextUnavailable, prevRound)) {
+    return { indices: [], entries: [] };
+  }
   const indices: number[] = [];
   const entries: DeferredEntry[] = [];
   drafted.forEach((c, i) => {
@@ -1206,28 +1231,39 @@ export function composeReview(
       })(),
     };
   }
-  // Is the loop settling? Measured from facts this round already holds —
-  // the previous work list and volume from the side file, this round's
-  // drafts — and rendered as an observation. It changes nothing about what
-  // the round posts: no finding is withheld, no verdict capped. A round
-  // that looks healthy produces no diagnosis at all rather than an empty
-  // section.
-  const diagnosis = diagnoseConvergence({
-    round: prevRound + 1,
-    posted: (effective.draftedComments ?? []).length,
-    ...(prevFacts.posted === undefined ? {} : { prevPosted: prevFacts.posted }),
-    prevFindings: prevFacts.findings,
-    draftedPaths: (effective.draftedComments ?? [])
-      .map((c) => (typeof c.path === 'string' ? c.path : ''))
-      .filter((p) => p !== ''),
-  });
+  // Is the loop settling? Measured from facts this round already holds — the
+  // previous work list and volume from the side file, this round's drafts —
+  // and rendered as an observation. It changes nothing about what the round
+  // posts: no finding is withheld, no verdict capped. A round that looks
+  // healthy produces no diagnosis at all rather than an empty section.
+  //
+  // The INPUTS travel; the diagnosis is composed inside `composeReviewBody`,
+  // beside the `postedInline` the marker and the terminal VOLUME line are
+  // taken from. Composed here it would be a second derivation of the same
+  // number — equal today, and free to drift the moment either derivation is
+  // edited, leaving one posted body stating two volumes for one round.
   const result = composeReviewBody(
     effective,
     cliVersion,
     attribution,
     prevRound,
     reroute,
-    diagnosis,
+    {
+      prev: {
+        ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
+        findings: prevFacts.findings,
+        truncated: prevFacts.truncated,
+        foreign: prevFacts.foreign,
+      },
+      // Read from the same input `floorEnforcedReroute` just acted on, through
+      // the one predicate both share — so the advice cannot recommend a floor
+      // the enforcement above already applied.
+      criticalFloorInEffect: criticalFloorInEffect(
+        input.severityFloor,
+        input.contextUnavailable === true,
+        prevRound,
+      ),
+    },
   );
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
@@ -1272,6 +1308,18 @@ export function composeReview(
 }
 
 /**
+ * Nothing recovered: round 1, no volume to compare against, no work list to
+ * find recurrence in, and therefore no evidence to qualify. Named once so the
+ * three ways this read gives up cannot drift apart as fields are added.
+ */
+const EMPTY_PREV_FACTS = {
+  round: 0,
+  findings: [] as LedgerFinding[],
+  truncated: false,
+  foreign: false,
+};
+
+/**
  * The previous posted round's number AND its posting volume, recovered from
  * the side file `pr-context` wrote — never from the model.
  *
@@ -1298,20 +1346,27 @@ function prevLedgerFacts(planPath: string | undefined): {
    * as "the previous round found nothing".
    */
   findings: LedgerFinding[];
+  /** Its marker shed findings to fit the byte budget: the list is partial. */
+  truncated: boolean;
+  /** It was recovered from a marker this account did not post. */
+  foreign: boolean;
 } {
   try {
-    if (!planPath) return { round: 0, findings: [] };
+    if (!planPath) return EMPTY_PREV_FACTS;
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       prNumber?: unknown;
     };
     const pr = plan?.prNumber;
-    if (!isPositivePrNumber(pr)) return { round: 0, findings: [] };
+    if (!isPositivePrNumber(pr)) return EMPTY_PREV_FACTS;
     const prev = JSON.parse(
       readFileSync(
         join(dirname(planPath), `qwen-review-pr-${pr}-prev-ledger.json`),
         'utf8',
       ),
-    ) as Ledger;
+      // `foreign` is a side-file field, not a marker field: it records how
+      // THIS machine obtained the list, which is nothing the marker riding a
+      // public body could be trusted to state about itself.
+    ) as Ledger & { foreign?: unknown };
     const round =
       Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
     // Read through the ledger's own volume reader rather than a local
@@ -1337,10 +1392,28 @@ function prevLedgerFacts(planPath: string | undefined): {
     return {
       round,
       ...(posted === undefined || round === 0 ? {} : { posted }),
-      findings,
+      // Gated on the round for the same reason the volume is: a work list
+      // travels WITH the round that produced it or not at all. A side file
+      // whose `round` is missing or unusable (partially written, hand-edited)
+      // still parses, and its `R5-2` ids would then seed the recurrence join
+      // for a round this read calls 0 — the posted body would cite rounds 5
+      // and up beside a marker stamping round 1.
+      findings: round === 0 ? [] : findings,
+      // The marker had to shed findings to fit its byte budget, so what came
+      // back is known-incomplete (measured at up to 35 shed per round on the
+      // worst PRs this diagnosis speaks to). Carried rather than dropped: the
+      // cluster evidence is still the best there is, and the paragraph
+      // discloses the undercount instead of presenting a partial list whole.
+      truncated:
+        round !== 0 && typeof prev.dropped === 'number' && prev.dropped > 0,
+      // Whoever posted the marker that won recovery. `pr-context` adopts the
+      // highest-round marker on the PR — bounded, but not restricted to this
+      // account — so a cited round may be one this account never ran. The
+      // rendering says so rather than publishing the citation bare.
+      foreign: round !== 0 && prev.foreign === true,
     };
   } catch {
-    return { round: 0, findings: [] };
+    return EMPTY_PREV_FACTS;
   }
 }
 
@@ -1577,12 +1650,37 @@ function composeReviewBody(
     indices: [],
     entries: [],
   },
-  diagnosis: ConvergenceDiagnosis | null = null,
+  /**
+   * What the convergence diagnosis needs and this function cannot derive: the
+   * previous round as the side file recovered it, and the posting floor this
+   * round resolved to. Null in the direct-call tests that compose a body with
+   * no PR history behind it.
+   */
+  convergence: {
+    prev: PrevRound;
+    criticalFloorInEffect: boolean;
+  } | null = null,
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
   // post-enforcement one, so the count needs no second derivation and
   // cannot disagree with the marker's.
   const postedInline = (input.draftedComments ?? []).length;
+  const diagnosis = convergence
+    ? diagnoseConvergence({
+        // Clamped like every other public round surface in this function —
+        // the ledger marker stamp and the deferred-posture clause both clamp
+        // identically. An unclamped `+1` at the cap names round 10001 in the
+        // posted prose beside a marker stamping 10000, with this round's own
+        // findings stamped `R10000-*`.
+        round: Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+        // The SAME count the marker and the VOLUME line carry, not a second
+        // derivation of it.
+        posted: postedInline,
+        prev: convergence.prev,
+        drafts: draftedFindingsOf(input.draftedComments ?? []),
+        criticalFloorInEffect: convergence.criticalFloorInEffect,
+      })
+    : null;
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -3329,19 +3427,27 @@ function composeReviewBody(
     trim: 2,
   }));
 
-  // The resumed-run continuity note: the run reused certified work from an
-  // interrupted earlier attempt. Disclosed on every verdict — Approve
-  // included — and never capping: the recovered agents were re-certified
-  // from the harness records and COUNT as reviewed.
   // The convergence observation: rendered on every event, capping nothing,
   // and only when a signal actually fired. It sits beside the other
   // disclosure paragraphs because it is addressed to the same reader — the
   // author deciding what to do next — and it is deliberately the only
   // paragraph here that comments on the SHAPE of the review history rather
   // than on the diff.
+  //
+  // `trim: 1` — the FIRST thing the overflow ladder sheds. An untagged block
+  // ranks with the blockers and the verdict-qualifying sentences, and the
+  // rounds this fires on are precisely the high-volume rounds most likely to
+  // overflow: unranked, an advisory paragraph that decides nothing survived
+  // while the deferral list and the not-reviewed disclosures were spent.
+  // Nothing here is load-bearing for the verdict, so it yields first.
   const convergenceBlock: Bi[] = diagnosis
-    ? [renderConvergenceDiagnosis(diagnosis)]
+    ? [{ ...renderConvergenceDiagnosis(diagnosis), trim: 1 }]
     : [];
+
+  // The resumed-run continuity note: the run reused certified work from an
+  // interrupted earlier attempt. Disclosed on every verdict — Approve
+  // included — and never capping: the recovered agents were re-certified
+  // from the harness records and COUNT as reviewed.
   const continuityBlock: Bi[] = recoveredFromPriorAttempt
     ? [
         {
@@ -3620,9 +3726,13 @@ function composeReviewBody(
   //     precedes the list (non-capping).
   clauses.push(...unlicensedDeferralBlock);
   clauses.push(...deferredSuggestionsBlock);
-  // 6e. Resumed-run continuity (non-capping) — reused work that COUNTS as
-  //     reviewed, disclosed so the author knows two attempts fed this verdict.
+
+  // 6f. Convergence observation (non-capping) — is this loop settling, and if
+  //     not, what shape is it. About the review HISTORY, not the diff.
   clauses.push(...convergenceBlock);
+
+  // 6g. Resumed-run continuity (non-capping) — reused work that COUNTS as
+  //     reviewed, disclosed so the author knows two attempts fed this verdict.
   clauses.push(...continuityBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
@@ -3959,25 +4069,6 @@ export function scriptLintGate(planPath: string): {
     );
   }
   return { criticals, unreviewed, disclosed };
-}
-
-/**
- * Render a PR-controlled segment — a diff file path, a linter's message — safe to
- * splice into the review body we POST to GitHub. Git allows almost any byte in a
- * filename, so an unescaped path could carry `@mentions`, HTML, Markdown, or a
- * newline that forges body structure. An inline code span makes Markdown/HTML/`@`
- * inert; stripping backticks and newlines stops the value breaking out of the span
- * or forging new lines. (`capture-local`'s `display()` does the terminal-side
- * equivalent for stderr; this is the Markdown-body side.)
- */
-function mdField(s: unknown): string {
-  return (
-    '`' +
-    String(s)
-      .replace(/[`\r\n]+/g, ' ')
-      .trim() +
-    '`'
-  );
 }
 
 /**
@@ -4396,6 +4487,70 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
+ * The first line of what follows the severity marker, minus any carried id.
+ * A carried-forward finding names its ORIGINAL id right after the marker —
+ * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
+ * here is what makes the machine ledger agree with the report it rides in,
+ * instead of renumbering the entry to a fresh `R<round>-<n>` the report
+ * never used.
+ *
+ * Module-level rather than a closure inside the ledger builder, because the
+ * builder is no longer its only consumer: the convergence diagnosis reads the
+ * same id to tell a re-posted still-standing finding from fresh activity, and
+ * a second restatement would let one end call a comment carried while the
+ * other calls it new.
+ */
+function readClaim(rest: string): { id?: string; title: string } {
+  const line = rest.split('\n')[0].trim();
+  const carried = LEDGER_ID_READBACK.exec(line);
+  return {
+    id: carried?.[1],
+    title: (carried ? line.slice(carried[0].length) : line).trim(),
+  };
+}
+
+/**
+ * A drafted comment's claim line, projected the way every id consumer must
+ * read it: severity marker stripped, forged footer spans and comment-marker
+ * lines removed, leading render-nothing residue gone. Residue or a forged
+ * span between the marker and a carried id defeats the id anchor — the
+ * ledger would silently renumber the finding, and the diagnosis would count
+ * a re-post as new work. Stated once so the projections cannot diverge.
+ */
+function ledgerClaimLine(body: unknown): string {
+  const claim = carriedClaimLine(typeof body === 'string' ? body : '');
+  return claim === null
+    ? ''
+    : stripFooterSpans(stripCommentMarkerLines(claim)).replace(
+        LEADING_INVISIBLE_RE,
+        '',
+      );
+}
+
+/**
+ * This round's drafts in the shape the convergence diagnosis reads.
+ *
+ * The path is canonicalised to `LEDGER_MAX_FILE` because the OTHER side of
+ * the recurrence join already is: the ledger caps `file` at write and at
+ * readback, so an uncapped drafted path could never equal a recovered entry
+ * for any file past the cap — the signal would be silently, permanently
+ * blind to deep vendor and generated trees, and a path equal to a longer
+ * file's 200-char prefix would cluster under the wrong file's history.
+ */
+function draftedFindingsOf(
+  drafted: ReadonlyArray<{ path?: unknown; body?: unknown }>,
+): DraftedFinding[] {
+  return drafted.map((c) => {
+    const path = typeof c.path === 'string' ? c.path : '';
+    const { id } = readClaim(ledgerClaimLine(c.body));
+    return {
+      file: path.slice(0, LEDGER_MAX_FILE),
+      ...(id === undefined ? {} : { carriedId: id }),
+    };
+  });
+}
+
+/**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
  * never reach either input (they are terminal-only), so the ledger holds only
@@ -4423,22 +4578,6 @@ export function buildLedger(
     return id;
   };
   /**
-   * The first line of what follows the severity marker, minus any carried id.
-   * A carried-forward finding names its ORIGINAL id right after the marker —
-   * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
-   * here is what makes the machine ledger agree with the report it rides in,
-   * instead of renumbering the entry to a fresh `R<round>-<n>` the report
-   * never used.
-   */
-  const titleOf = (rest: string): { id?: string; title: string } => {
-    const line = rest.split('\n')[0].trim();
-    const carried = LEDGER_ID_READBACK.exec(line);
-    return {
-      id: carried?.[1],
-      title: (carried ? line.slice(carried[0].length) : line).trim(),
-    };
-  };
-  /**
    * A title the next round can act on. The field's job is "enough to re-locate
    * the claim", and a comment that is nothing but its severity marker leaves it
    * empty — which does not merely degrade the entry, it jams the review: the
@@ -4460,22 +4599,14 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    // carriedClaimLine is the ONE readback statement shared with presubmit's
-    // carried-id extractor — marker + separator (newline-consuming) + first
-    // line. Strip forged footer spans and leading render-nothing residue off
-    // it before titleOf: the ledger rides the posted body as an HTML comment
-    // the autofix grep reads, and residue between the marker and a carried id
-    // would defeat the id anchor and silently renumber the finding.
-    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
-    const { id: carried, title } = titleOf(
-      claim === null
-        ? ''
-        : stripFooterSpans(stripCommentMarkerLines(claim)).replace(
-            LEADING_INVISIBLE_RE,
-            '',
-          ),
-    );
-    const file = typeof c.path === 'string' ? c.path : '(unknown)';
+    // `ledgerClaimLine` is the shared projection — `carriedClaimLine` (the ONE
+    // readback statement, also used by presubmit's carried-id extractor) with
+    // forged footer spans and leading render-nothing residue stripped off it.
+    // The ledger rides the posted body as an HTML comment the autofix grep
+    // reads, and residue between the marker and a carried id would defeat the
+    // id anchor and silently renumber the finding.
+    const { id: carried, title } = readClaim(ledgerClaimLine(c.body));
+    const file = typeof c.path === 'string' ? c.path : LEDGER_UNKNOWN_FILE;
     findings.push({
       id: idFor(carried),
       sev: sev === 'critical' ? 'C' : 'S',
@@ -4494,13 +4625,13 @@ export function buildLedger(
     // Leading render-nothing residue goes too, for the same reason as the
     // drafted-comment leg: residue between the marker and a carried id
     // would defeat the id anchor and silently renumber the finding.
-    const { id: carried, title } = titleOf(
+    const { id: carried, title } = readClaim(
       stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, ''),
     );
     findings.push({
       id: idFor(carried),
       sev: 'C',
-      file: '(body)',
+      file: LEDGER_BODY_FILE,
       title: locatable(title, 'the review body'),
     });
   }
