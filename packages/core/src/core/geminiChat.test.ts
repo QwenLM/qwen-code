@@ -180,6 +180,7 @@ describe('GeminiChat', async () => {
         model: 'test-model',
       }),
       getModel: vi.fn().mockReturnValue('gemini-pro'),
+      getModelRouteIdentity: vi.fn().mockReturnValue('gemini-pro@test0001'),
       setModel: vi.fn(),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
       getTargetDir: vi.fn().mockReturnValue('/test/project/root'),
@@ -15466,6 +15467,71 @@ describe('GeminiChat', async () => {
           info: expect.objectContaining({ newTokenCountIsEstimated: true }),
         }),
       );
+    });
+  });
+
+  // Route-scoped token counts (#9454): API-reported prompt/output token
+  // counts describe the serialization of the route (model + auth type +
+  // endpoint) that produced them. A /model switch rebuilds the content
+  // generator but keeps this GeminiChat instance, so counts recorded for the
+  // previous route must be invalidated — otherwise they anchor admission,
+  // clamp, and compression decisions for a different serialization.
+  describe('route-scoped token counts (#9454)', () => {
+    const switchRoute = (routeKey: string) => {
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
+    };
+
+    it('invalidates API-reported counts when the model route changes', () => {
+      // Count reported by the pre-switch route (authoritative, not estimated).
+      chat.setLastPromptTokenCount(691_000, false);
+      expect(chat.getLastPromptTokenCount()).toBe(691_000);
+
+      // Simulate /model switching to a different route; the same chat
+      // instance survives with its history.
+      switchRoute('anthropic-model@beef1234');
+
+      // The stale count must not size requests for the new route: safety
+      // decisions fall back to the history-walk estimate (count 0).
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(false);
+      // The telemetry mirror must drop the stale count too, or the session
+      // token-limit gate and compression banners keep using it.
+      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
+        0,
+      );
+    });
+
+    it('keeps counts authoritative while the route is unchanged', () => {
+      chat.setLastPromptTokenCount(50_000, false);
+
+      // Repeated reads on the same route keep the API-authoritative count.
+      expect(chat.getLastPromptTokenCount()).toBe(50_000);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(false);
+      expect(chat.getLastPromptTokenCount()).toBe(50_000);
+    });
+
+    it('invalidates seeded resume counts after a later route change', () => {
+      chat.seedResumeTokenCounts(321, 45, false);
+      expect(chat.getLastPromptTokenCount()).toBe(321);
+      expect(chat.getLastOutputTokenCount()).toBe(45);
+
+      switchRoute('other-model@1234abcd');
+
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+    });
+
+    it('accepts counts recorded on the new route after a switch', () => {
+      chat.setLastPromptTokenCount(691_000, false);
+      switchRoute('anthropic-model@beef1234');
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      // First response on the new route re-establishes authoritative counts.
+      chat.setLastPromptTokenCount(120_000, false);
+      expect(chat.getLastPromptTokenCount()).toBe(120_000);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(false);
     });
   });
 

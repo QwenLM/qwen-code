@@ -1846,6 +1846,15 @@ export class GeminiChat {
   private lastOutputTokenCount = 0;
 
   /**
+   * Route identity (model + auth type + endpoint; see
+   * Config.getModelRouteIdentity) of the content generator that produced
+   * the counts above. API-reported sizes are wire-specific: one route's
+   * count cannot size another route's serialization (#9454). Undefined
+   * until the first count is recorded.
+   */
+  private tokenCountsRouteKey: string | undefined = undefined;
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -1956,6 +1965,46 @@ export class GeminiChat {
   }
 
   /**
+   * Identity of the currently active model route. Optional chaining keeps
+   * partial Config test mocks (`{} as Config`) from throwing on count
+   * reads/writes; a missing identity degrades to one stable key, i.e. no
+   * route-change invalidation.
+   */
+  private currentRouteKey(): string {
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  /**
+   * Drop token counts recorded for a different route (model, auth type, or
+   * endpoint). `/model` switches rebuild the content generator but keep
+   * this chat instance, so without this reset the previous route's
+   * API-authoritative counts would anchor admission, output clamping, and
+   * compression decisions for a different serialization (#9454). After
+   * invalidation those decisions fall back to the history-walk estimate,
+   * with reactive overflow recovery as the safety net.
+   */
+  private invalidateTokenCountsIfRouteChanged(): void {
+    if (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0) {
+      return;
+    }
+    const currentRoute = this.currentRouteKey();
+    if (this.tokenCountsRouteKey === currentRoute) {
+      return;
+    }
+    debugLogger.debug(
+      `[token-counts] route changed; invalidating counts recorded for ` +
+        `${this.tokenCountsRouteKey ?? 'unknown'} (now ${currentRoute})`,
+    );
+    this.lastPromptTokenCount = 0;
+    this.lastPromptTokenCountIsEstimated = false;
+    this.lastOutputTokenCount = 0;
+    this.tokenCountsRouteKey = currentRoute;
+    // Keep the telemetry mirror in sync, or the session token-limit gate
+    // and compression banners keep reading the foreign count.
+    this.telemetryService?.setLastPromptTokenCount(0);
+  }
+
+  /**
    * Most recent prompt-token count reported by the model for *this* chat,
    * mirroring the value in {@link UiTelemetryService} for the main session.
    * Subagent chats have no telemetry service wired but still need a per-chat
@@ -1963,11 +2012,13 @@ export class GeminiChat {
    * of whether the global telemetry is updated.
    */
   getLastPromptTokenCount(): number {
+    this.invalidateTokenCountsIfRouteChanged();
     return this.lastPromptTokenCount;
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */
   getLastOutputTokenCount(): number {
+    this.invalidateTokenCountsIfRouteChanged();
     return this.lastOutputTokenCount;
   }
 
@@ -2042,9 +2093,11 @@ export class GeminiChat {
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+    this.tokenCountsRouteKey = this.currentRouteKey();
   }
 
   isLastPromptTokenCountEstimated(): boolean {
+    this.invalidateTokenCountsIfRouteChanged();
     return this.lastPromptTokenCountIsEstimated;
   }
 
@@ -2072,6 +2125,11 @@ export class GeminiChat {
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
+    // Attribute the seeded counts to the active route so a model switch
+    // after resume invalidates them like any API-reported count. (Detecting
+    // a route that already differed at save time requires persisting route
+    // identity in the session transcript; tracked as a follow-up to #9454.)
+    this.tokenCountsRouteKey = this.currentRouteKey();
   }
 
   /**
@@ -2091,6 +2149,9 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    // Counts from a pre-switch route must not anchor compression admission
+    // or sizing for the active route (#9454).
+    this.invalidateTokenCountsIfRouteChanged();
     const originalTokenCountIsEstimated =
       options?.originalTokenCountOverride === undefined &&
       this.promptCountIsEstimateDerived();
@@ -2175,6 +2236,9 @@ export class GeminiChat {
     info: ChatCompressionInfo;
     microcompactMeta?: MicrocompactMeta;
   } {
+    // A pre-switch route's count must not anchor fast-compression sizing
+    // for the active route (#9454).
+    this.invalidateTokenCountsIfRouteChanged();
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
@@ -2245,6 +2309,7 @@ export class GeminiChat {
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
+    this.tokenCountsRouteKey = this.currentRouteKey();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2314,6 +2379,9 @@ export class GeminiChat {
     goalContext?: GoalTurnPermit,
     options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // Counts recorded for a pre-switch route must not anchor this send's
+    // admission/clamp/compression decisions for the active route (#9454).
+    this.invalidateTokenCountsIfRouteChanged();
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -4813,6 +4881,9 @@ export class GeminiChat {
                   thoughtsTokenCount,
                 })
               : 0;
+            // Attribute these counts to the route that reported them so a
+            // later model switch invalidates them (#9454).
+            this.tokenCountsRouteKey = this.currentRouteKey();
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.

@@ -4382,6 +4382,16 @@ export class Config {
   }
 
   /**
+   * Identity of the currently active model route for consumers that cache
+   * route-specific state and must invalidate it when a model/auth/endpoint
+   * switch swaps the content generator — e.g. GeminiChat's API-reported
+   * token counts (#9454). Same identity ⇒ same serialization target.
+   */
+  getModelRouteIdentity(): string {
+    return this.resolvedModelIdentity();
+  }
+
+  /**
    * Returns the configured fast model selector when it resolves to an available
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
