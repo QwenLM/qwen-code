@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -428,13 +428,18 @@ function ModelIdsStep({
   // actually change — hence a key that moves only on a real edit, rather than
   // one that tracks the revision.
   const [modelIdsInputKey, setModelIdsInputKey] = useState(0);
-  // R6-1: the remount above reseeds the caret at offset 0, and the re-derive
-  // deliberately leaves focus where it was — so a swap that lands while the
-  // user is mid-id sends the rest of their keystrokes to the FRONT of the
-  // buffer, and Enter installs the garble. The ids the swap removes are the
-  // ones already finished (they moved to their checkbox); what is left is the
-  // segment still being typed, at the end. Reinstate the caret there so
-  // typing keeps appending across the remount.
+  // R6-1 / R7-1: the remount above reseeds the caret at offset 0, and the
+  // re-derive deliberately leaves focus where it was — so a swap that lands
+  // while the user is mid-id sends the rest of their keystrokes to the FRONT
+  // of the buffer, and Enter installs the garble. R6-1 anchored the reseed at
+  // the end of the re-derived text on the premise that what is left is the
+  // segment still being typed; that premise fails the moment the user arrows
+  // back to fix an earlier segment. Carry the live caret out of the input
+  // instead and reinstate it, clamped to the shorter text.
+  const modelIdsCaretRef = useRef(0);
+  const handleModelIdsCursorChange = useCallback((offset: number) => {
+    modelIdsCaretRef.current = offset;
+  }, []);
   const [modelIdsInputCursorOffset, setModelIdsInputCursorOffset] = useState(0);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
@@ -447,7 +452,9 @@ function ModelIdsStep({
     if (nextCustomModelIdsText !== customModelIdsText) {
       setCustomModelIdsText(nextCustomModelIdsText);
       setModelIdsInputKey((key) => key + 1);
-      setModelIdsInputCursorOffset(cpLen(nextCustomModelIdsText));
+      setModelIdsInputCursorOffset(
+        Math.min(modelIdsCaretRef.current, cpLen(nextCustomModelIdsText)),
+      );
     }
     setSelectedRecommendationKeys(
       getRecommendedSelections(selectedModelIds, modelOptions),
@@ -584,6 +591,7 @@ function ModelIdsStep({
             key={`model-ids-input-${modelIdsInputKey}`}
             value={customModelIdsText}
             initialCursorOffset={modelIdsInputCursorOffset}
+            onCursorChange={handleModelIdsCursorChange}
             onChange={handleCustomModelIdsChange}
             onSubmit={handleSubmitModelIds}
             onDown={() => {

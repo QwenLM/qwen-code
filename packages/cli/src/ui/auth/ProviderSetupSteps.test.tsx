@@ -604,6 +604,82 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps the caret mid-buffer when a swap rewrites the custom-ids text', async () => {
+    // R7-1: R6-1 reseeded the caret at the END of the re-derived text, on the
+    // premise that what is left is the segment still being typed. That premise
+    // is false the moment the user arrows back to fix an earlier segment: the
+    // remount then dropped their correction at the end of the buffer and Enter
+    // installed the garbled id — the same broken-install class R5-1/R6-1 exist
+    // to close, left open for the mid-buffer case.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <FlowHarness first={before} />,
+    );
+
+    // The custom-ids input takes the initial focus. The user types both ids,
+    // then arrows back into the first one to insert the `l` they dropped.
+    const typed = 'my-depoy, qwen3-coder-plus';
+    for (const char of typed) {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    expect(lastFrame() ?? '').toContain(typed);
+
+    // Land between `my-dep` and `oy`.
+    const caretTarget = 'my-dep'.length;
+    for (let i = typed.length; i > caretTarget; i--) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+
+    // The endpoint answers mid-correction and serves `qwen3-coder-plus`, so it
+    // moves out to its checkbox and the buffer is re-derived to `my-depoy`.
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'my-depoy, qwen3-coder-plus',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [
+      { id: 'qwen3-coder-plus' },
+      { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+    ];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+    expect(lastFrame() ?? '').toContain('my-depoy');
+
+    // The correction must land at the caret the user left it at, not at the
+    // end of the re-derived text.
+    await act(async () => {
+      pressLatestKey('l', 'l');
+    });
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['my-deploy', 'qwen3-coder-plus'],
+    });
+    unmount();
+  });
+
   it('drops a typed built-in id the new list no longer offers', async () => {
     // R6-2: `applyDiscoveredModels` prunes a built-in id the endpoint does not
     // serve "whether it was checked by default or typed" — but a typed one
