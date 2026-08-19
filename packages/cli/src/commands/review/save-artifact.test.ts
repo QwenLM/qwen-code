@@ -69,7 +69,10 @@ const verdict = {
   deferredCount: 2,
   // Non-empty for the same reason — absent defaults to [].
   floorEnforced: [1],
-  // Non-zero for the same reason — absent defaults to 0.
+  // Non-zero on purpose too, but for the OPPOSITE reason to its siblings:
+  // this field's absence is preserved, not defaulted, so the fixture value
+  // proves passthrough against a validator that would otherwise omit the
+  // field entirely.
   postedInline: 3,
   // Also non-default on purpose, for the same reason.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
