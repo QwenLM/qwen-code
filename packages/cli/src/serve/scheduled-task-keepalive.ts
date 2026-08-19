@@ -50,7 +50,9 @@ const log = createDebugLogger('SCHED_KEEPALIVE');
  * unbound, or a duplicate of one already collected. The heartbeat pass and the
  * boot rehydrate share this so the "which sessions to keep resident" filter lives
  * in exactly one place and can't drift between them. */
-function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
+export function collectBoundSessionIds(
+  tasks: readonly DurableCronTask[],
+): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
   for (const task of tasks) {

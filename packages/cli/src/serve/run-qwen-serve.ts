@@ -5553,13 +5553,6 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        if (runtimeAdded.provenance === 'live-conversation') return;
-        channelWebhookEnvByWorkspace.set(
-          runtimeAdded.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -5568,6 +5561,13 @@ async function runQwenServeImpl(
           'startScheduledTaskKeepaliveForWorkspace'
         ] as ((runtime: WorkspaceRuntime) => void) | undefined;
         startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
+        if (runtimeAdded.provenance === 'live-conversation') return;
+        channelWebhookEnvByWorkspace.set(
+          runtimeAdded.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
         if (!channelWorkerManager) return;
         try {
           if (runtimeAdded.trusted) {
