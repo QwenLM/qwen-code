@@ -27,13 +27,30 @@ export interface BoardPromptContext {
 }
 
 /**
- * Read board context from the environment. Returns null when this session is
- * not on a board, which is the common case — the section must cost nothing
- * when the feature is unused.
+ * Set at runtime by `/board`, overriding the environment for the rest of the
+ * session. This is what lets a session that was already running join a board:
+ * the environment is fixed at launch, and the case the design exists for is
+ * precisely an agent that started before any coordination did.
+ *
+ * `null` means "not set" and falls through to the environment. Joining takes
+ * effect on the next prompt build, which the caller triggers by refreshing the
+ * system instruction.
+ */
+let runtimeContext: BoardPromptContext | null = null;
+
+export function setBoardPromptContext(ctx: BoardPromptContext | null): void {
+  runtimeContext = ctx;
+}
+
+/**
+ * Read board context: a runtime join first, then the environment `fleet up`
+ * sets. Returns null when this session is on no board, which is the common
+ * case — the section must cost nothing when the feature is unused.
  */
 export function resolveBoardPromptContext(
   env: NodeJS.ProcessEnv = process.env,
 ): BoardPromptContext | null {
+  if (runtimeContext) return runtimeContext;
   const board = env[BOARD_ENV];
   if (!board) return null;
   return { board, as: env[BOARD_PARTICIPANT_ENV] };

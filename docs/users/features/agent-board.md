@@ -127,6 +127,20 @@ Nothing is pushed to any participant. Items sit on the board until someone
 looks, which is exactly why a tool we did not write can take part — running a
 command is the one thing every agent can do.
 
+## Joining from a session that is already running
+
+A session started before any of this can join without restarting:
+
+```
+/board orders as api-worker
+/board            # what am I on?
+/board off        # leave
+```
+
+It takes effect from the next turn. Use it when you already have a session deep
+in a problem and want a second agent to help — the point is that its context
+stays where it is.
+
 ## Working across repositories
 
 The board defaults to a name derived from the current directory, so a single
@@ -165,10 +179,9 @@ how each pane inherits them.
 - **Participation is cooperative.** A board cannot force an agent to claim work
   or answer a question. Agents that are not Qwen Code need `qwen board protocol`
   pasted into them; setting the environment variables is not enough on its own.
-- **A running session cannot join yet.** Board awareness is decided when a
-  session starts, from `QWEN_BOARD`. To bring an already-running Qwen session
-  in, paste `qwen board protocol` into it — it can then use the commands, but it
-  will not check the board on its own.
+- **A running session checks only when it looks.** `/board <name>` brings an
+  already-running session in, but nothing is pushed to it — it sees an item the
+  next time it reads the board.
 - **A named owner is a proposal.** Naming someone on a task records who is
   expected to take it; only claiming it makes it theirs.
 - **There is no chat.** Everything is a task, a question, or a decision. Text

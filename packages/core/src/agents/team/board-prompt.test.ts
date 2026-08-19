@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   resolveBoardPromptContext,
+  setBoardPromptContext,
   getBoardSection,
   BOARD_ENV,
   BOARD_PARTICIPANT_ENV,
 } from './board-prompt.js';
+
+afterEach(() => setBoardPromptContext(null));
 
 describe('board prompt', () => {
   // The common case is a session that is not on a board. The section has to
@@ -35,6 +38,29 @@ describe('board prompt', () => {
       board: 'demo',
       as: undefined,
     });
+  });
+
+  // The environment is fixed at launch, so without a runtime override a
+  // session that was already working when coordination started could never
+  // participate — which is the case the design exists for.
+  it('lets a running session join, and leave again', () => {
+    expect(resolveBoardPromptContext({})).toBeNull();
+
+    setBoardPromptContext({ board: 'joined', as: 'api-worker' });
+    expect(resolveBoardPromptContext({})).toEqual({
+      board: 'joined',
+      as: 'api-worker',
+    });
+
+    setBoardPromptContext(null);
+    expect(resolveBoardPromptContext({})).toBeNull();
+  });
+
+  it('prefers a runtime join over the launch environment', () => {
+    setBoardPromptContext({ board: 'joined' });
+    expect(
+      resolveBoardPromptContext({ [BOARD_ENV]: 'from-launch' })?.board,
+    ).toBe('joined');
   });
 
   it('names the board and the participant it is addressed to', () => {
