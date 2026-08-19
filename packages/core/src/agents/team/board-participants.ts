@@ -114,7 +114,12 @@ export async function joinBoard(
 
   const pid = opts.pid ?? process.pid;
   for (let attempt = 0; attempt < 50; attempt++) {
-    const name = attempt === 0 ? opts.name : `${opts.name}-${attempt + 1}`;
+    // The suffix is appended to an already-validated base, so truncate the
+    // base to leave room: a 64-char base would otherwise claim a name past
+    // the SAFE_NAME limit and produce a record whose filename no reader
+    // (including the next joinBoard) can address.
+    const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+    const name = `${opts.name.slice(0, 64 - suffix.length)}${suffix}`;
     const existing = await readRecord(opts.board, name);
     if (existing && existing.pid !== pid && isPidAlive(existing.pid)) {
       continue;
