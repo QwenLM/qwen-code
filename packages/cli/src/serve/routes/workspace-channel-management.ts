@@ -236,6 +236,29 @@ function errorCode(error: unknown): string | undefined {
   }
 }
 
+function statePersistedFalse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  try {
+    return Reflect.get(error, 'statePersisted') === false;
+  } catch {
+    return false;
+  }
+}
+
+function statePersistFailedWorkspaces(error: unknown): string[] | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  try {
+    const value = Reflect.get(error, 'statePersistFailedWorkspaces');
+    if (!Array.isArray(value)) return undefined;
+    const workspaces = value.filter(
+      (item): item is string => typeof item === 'string',
+    );
+    return workspaces.length > 0 ? workspaces : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const ERROR_STATUS = new Map<string, number>([
   ['invalid_channel_instance_name', 400],
   ['channel_settings_invalid_name', 400],
@@ -252,9 +275,11 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_settings_conflict', 409],
   ['channel_runtime_owner_mismatch', 409],
   ['channel_worker_not_enabled', 409],
+  ['channel_worker_starting', 409],
   ['channel_service_conflict', 409],
   ['channel_worker_start_failed', 502],
   ['channel_worker_stop_failed', 500],
+  ['channel_state_persist_failed', 500],
   ['daemon_draining', 503],
   ['channel_worker_unavailable', 503],
 ]);
@@ -264,9 +289,20 @@ function sendManagementError(res: Response, error: unknown): void {
   const status = code ? ERROR_STATUS.get(code) : undefined;
   if (code && status !== undefined) {
     const raw = error instanceof Error ? error.message : String(error);
+    const failedWorkspaces = statePersistFailedWorkspaces(error);
     res.status(status).json({
       error: sanitizeLogText(redactLogCredentials(raw), MAX_ERROR_LENGTH),
       code,
+      // A failed per-channel stop can still have torn down channels, and
+      // the service marks the error when that record ALSO failed to
+      // persist: the client has no retry handle, so the loss must ride
+      // the error body — mirroring the DELETE route's statePersisted
+      // field (#8975) and carrying the failed workspaces for a targeted
+      // retry (R14).
+      ...(statePersistedFalse(error) ? { statePersisted: false } : {}),
+      ...(failedWorkspaces
+        ? { statePersistFailedWorkspaces: failedWorkspaces }
+        : {}),
     });
     return;
   }

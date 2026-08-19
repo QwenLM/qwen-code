@@ -1,4 +1,5 @@
 export {
+  canonicalizeWorkspacePath,
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   resolvePath,

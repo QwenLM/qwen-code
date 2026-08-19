@@ -154,6 +154,7 @@ import type {
   DaemonChannelControlState,
   DaemonChannelSelection,
   DaemonChannelSetResult,
+  DaemonChannelStopInstanceResult,
   DaemonChannelStopResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
@@ -4183,6 +4184,13 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Stop the channel worker. On success, `statePersisted` is present (and
+   * `false`) only when the stop's `stopped` record failed to persist
+   * (#8975). On FAILURE the same loss signal is typed on
+   * {@link DaemonChannelStopErrorResponse} — cast `DaemonHttpError.body`
+   * to that type to read it.
+   */
   async stopChannelWorker(opts?: {
     clientId?: string;
     timeoutMs?: number;
@@ -4284,10 +4292,17 @@ export class DaemonClient {
     return this.workspaceChannelAction(name, 'start', opts);
   }
 
+  /**
+   * Stop one channel instance. On success, `statePersisted` on
+   * {@link DaemonChannelStopInstanceResult} is present (and `false`) only
+   * when the stop's `stopped` record failed to persist (#8975); on FAILURE
+   * the same signal is typed on {@link DaemonChannelStopErrorResponse} —
+   * cast `DaemonHttpError.body` to that type to read it.
+   */
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
-  ): Promise<DaemonChannelMutationResult> {
+  ): Promise<DaemonChannelStopInstanceResult> {
     return this.workspaceChannelAction(name, 'stop', opts);
   }
 
@@ -5426,10 +5441,17 @@ export class WorkspaceDaemonClient {
     return this.channelAction(name, 'start', opts);
   }
 
+  /**
+   * Stop one channel instance. On success, `statePersisted` on
+   * {@link DaemonChannelStopInstanceResult} is present (and `false`) only
+   * when the stop's `stopped` record failed to persist (#8975); on FAILURE
+   * the same signal is typed on {@link DaemonChannelStopErrorResponse} —
+   * cast `DaemonHttpError.body` to that type to read it.
+   */
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
-  ): Promise<DaemonChannelMutationResult> {
+  ): Promise<DaemonChannelStopInstanceResult> {
     return this.channelAction(name, 'stop', opts);
   }
 
