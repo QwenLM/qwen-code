@@ -7,7 +7,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
@@ -25,13 +24,7 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
-import { extractErrorDetail } from '../../utils/errorDetail';
-import {
-  isDesktopShell,
-  isExternalOpenUrl,
-  openExternalUrl,
-} from '../../utils/externalOpen';
-import { requestToast } from '../ToastHost';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -57,6 +50,10 @@ interface MarkdownProps {
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
 }
+
+// Keep the cost of repeatedly parsing a growing stream bounded. Short streams
+// retain live Markdown; large ones settle into full Markdown once at the end.
+const STREAMING_MARKDOWN_PARSE_LIMIT = 32_000;
 
 const SUPPORTED_LANGUAGES = new Set([
   'javascript',
@@ -716,7 +713,7 @@ function MarkdownLink({
   children?: ReactNode;
 }) {
   const renderMode = useTranscriptRenderMode();
-  const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode === 'readonly') {
       return <span className={styles.link}>{children}</span>;
@@ -740,28 +737,13 @@ function MarkdownLink({
     );
   }
   const safeHref = isSafeHref(href) ? href : undefined;
-  const isExternalHref = isExternalOpenUrl(safeHref);
-  // In the packaged desktop shell the webview's implicit `target="_blank"`
-  // handling silently drops the request on failure, so route external clicks
-  // through the shell's explicit opener and surface errors as toasts. Plain
-  // browsers keep the native anchor behavior.
-  const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
-    if (!isExternalHref || !safeHref || !isDesktopShell()) return;
-    event.preventDefault();
-    openExternalUrl(safeHref).catch((error: unknown) => {
-      requestToast(
-        'error',
-        t('common.openFailed', { message: extractErrorDetail(error) }),
-      );
-    });
-  };
   return (
     <a
       href={safeHref}
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
-      onClick={isExternalHref ? handleClick : undefined}
+      onClick={(event) => openExternalLink(event, safeHref)}
     >
       {children}
     </a>
@@ -916,12 +898,15 @@ export const Markdown = memo(function Markdown({
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderStreamingPlainText =
+    isStreaming === true &&
+    throttledContent.length > STREAMING_MARKDOWN_PARSE_LIMIT;
   const renderedContent = useMemo(
     () =>
       throttledContent && source && sourceMarkdown?.transformMarkdown
         ? sourceMarkdown.transformMarkdown(throttledContent, { source })
         : throttledContent,
-    [throttledContent, source, sourceMarkdown],
+    [source, sourceMarkdown, throttledContent],
   );
 
   const effectiveTableMode = isStreaming
@@ -987,6 +972,18 @@ export const Markdown = memo(function Markdown({
   }, [sourceMarkdown?.rehypePlugins]);
 
   if (!content) return null;
+
+  if (renderStreamingPlainText) {
+    return (
+      <div
+        className={source !== 'thinking' ? styles.content : undefined}
+        data-markdown-source={source}
+        data-markdown-streaming-plain-text="true"
+      >
+        <pre className={styles.streamingPlainText}>{renderedContent}</pre>
+      </div>
+    );
+  }
 
   const renderedMarkdown = (
     <MemoizedMarkdownRenderer

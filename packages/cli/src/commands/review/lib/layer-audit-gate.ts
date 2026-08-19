@@ -55,8 +55,13 @@
 // floor.
 
 import { statSync, readFileSync } from 'node:fs';
-import { readTranscripts } from './transcripts.js';
+import { readRunTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
+import {
+  readRecordedPrompts,
+  wasDeliveredVerbatim,
+  briefPath,
+} from './prompt-record.js';
 import {
   repositoryContextOf,
   type RepositoryContext,
@@ -95,19 +100,71 @@ function readReverseAuditReturns(
 ): AuditorReturns {
   try {
     const since = statSync(planPath).mtimeMs;
-    const auditors = readTranscripts(since, env, diffPath).filter((t) =>
-      t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY),
-    );
+    // Run-scoped: a resumed run's earlier auditors ran in a different session.
+    // `currentDirOptional`: without it a zero-launch resumed continuation
+    // throws here, the catch below reports `identityMatched: 0`, and the
+    // gate DEFERS to the reverse-audit-ran floor — failing open on exactly
+    // the layers the prior attempt never walked.
+    const auditors = readRunTranscripts(planPath, since, env, diffPath, {
+      currentDirOptional: true,
+    }).filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY));
+    // A receipt only counts from an auditor that got the CLI's own prompt
+    // and opened the brief it points at. Territory alone let a compliant
+    // sibling satisfy the floor while a hand-written auditor supplied the
+    // receipt — the launch is exactly what the built record proves.
+    // Fenced: this reads the records as HISTORY, pairing them against the
+    // run's transcripts, and `readRecordedPrompts` documents the fence as
+    // mandatory for exactly that shape — without it a dead attempt's records
+    // survive beside the stable plan path, and an orchestrator that hand
+    // launches a stale record's prompt verbatim gets `corroborated`
+    // non-empty on a run whose builder never emitted an auditor. The failure
+    // direction of a dropped corroboration is withhold, never release.
+    const built = readRecordedPrompts(planPath, since);
+    const delivered = (t: (typeof auditors)[number]): boolean => {
+      // Only reverse-audit records can deliver a reverse-audit receipt:
+      // `wasDeliveredVerbatim` allows additions, so a CONCATENATED launch
+      // (this role's block plus a sibling role's) verbatim-matches the
+      // sibling's record too — and the brief bar was then satisfiable by
+      // the sibling's brief, never this role's instructions. The SAME
+      // concatenation axis exists within the role: a launch carrying two
+      // reverse-audit blocks matches both records, and the territory check
+      // below ranges over the launch-wide UNION of baked ranges — so a walk
+      // of one chunk's territory corroborated both chunks' layers. A
+      // transcript matching more than one record names no territory
+      // specifically and delivers none (retirement's injectivity rule).
+      let matched: string | null = null;
+      for (const [key, prompt] of built) {
+        if (!key.startsWith('reverse-audit')) continue;
+        if (prompt.trim() === '') continue;
+        if (!wasDeliveredVerbatim(t.launchPrompt, prompt)) continue;
+        if (matched !== null) return false;
+        matched = key;
+      }
+      if (matched === null) return false;
+      const needle = JSON.stringify(briefPath(planPath, matched));
+      // READ, not named: `successfulCallArgs` covers every successful
+      // tool, so a grep or listing whose args merely CONTAIN the brief
+      // path cleared this — an auditor that never opened its instructions
+      // supplied a receipt. Only a successful `read_file` of the exact
+      // brief is opening it.
+      return t.successfulReadFileArgs.some((a) => a.includes(needle));
+    };
     const corroborated = auditors
       .filter(
         (t) =>
+          // RETURNED, like every certification consumer: a died-mid-flight
+          // auditor's narration can carry receipt forms followed by tool
+          // traffic, and corroborating layers from it is the RELEASE
+          // direction — the one direction this gate's header rules out.
+          t.returned &&
           t.diffToolCalls > 0 &&
+          delivered(t) &&
           openedTheTerritory(
             t.diffReads,
             bakedRanges(t.launchPrompt, diffPath),
           ),
       )
-      .map((t) => t.finalText ?? '');
+      .map((t) => t.finalText);
     return { corroborated, identityMatched: auditors.length };
   } catch {
     // Could not MEASURE — a missing transcript dir (readTranscripts throws

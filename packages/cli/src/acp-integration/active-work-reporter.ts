@@ -8,6 +8,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  type ActiveWorkHoldCategory,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -51,12 +52,15 @@ export class ActiveWorkReporter {
   #coalescing = false;
   #timer: ReturnType<typeof setInterval> | undefined;
   #disposed = false;
+  readonly #enabledCategories: ReadonlySet<ActiveWorkHoldCategory>;
 
   constructor(
     private readonly send: SendNotification,
     private readonly listSources: () => Iterable<ActiveWorkSource>,
     readonly intervalMs: number,
+    enabledCategories: readonly ActiveWorkHoldCategory[],
   ) {
+    this.#enabledCategories = new Set(enabledCategories);
     this.#timer = setInterval(() => {
       this.#publish();
     }, intervalMs);
@@ -119,7 +123,9 @@ export class ActiveWorkReporter {
       for (const source of this.listSources()) {
         sessions.push({
           sessionId: source.sessionId,
-          holds: source.collectActiveWorkHolds(),
+          holds: source
+            .collectActiveWorkHolds()
+            .filter((hold) => this.#enabledCategories.has(hold.category)),
         });
       }
     } catch (error) {

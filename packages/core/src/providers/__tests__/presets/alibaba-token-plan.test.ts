@@ -38,6 +38,7 @@ describe('token plan provider', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
@@ -72,18 +73,27 @@ describe('token plan provider', () => {
         ?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
+      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      thinkingMandatory: true,
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
+    });
+    expect(
       template
         .filter((model) => model.generationConfig?.modalities !== undefined)
         .map((model) => model.id),
     ).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'kimi-k2.7-code',
       'kimi-k2.5',
     ]);
     expect(version).toBe(
-      '8182c14aa82d412276bb35b237d6e5a85b4985531ceafabf7b0b7153d90562ce',
+      'b80906aaf8dea8cc7aa17fc015d72d313c79f104f3bbb632613e74f9e35caaa5',
     );
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);

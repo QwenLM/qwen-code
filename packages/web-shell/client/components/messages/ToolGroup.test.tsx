@@ -81,6 +81,11 @@ function renderToolLine(
 function renderToolGroup(
   tools: ACPToolCall[],
   customization = {},
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -89,7 +94,7 @@ function renderToolGroup(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} />
+          <ToolGroup tools={tools} thoughts={thoughts} />
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -776,12 +781,122 @@ describe('tool row rendering', () => {
     }
   });
 
-  it('shows failed status in the collapsed chat summary', () => {
+  it('keeps the failed label out of the collapsed chat summary', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'Shell', status: 'failed' }),
     ]);
 
-    expect(container.querySelector('button')?.textContent).toContain('Failed');
+    const summary = container.querySelector('button');
+    expect(summary?.textContent).toContain('Shell');
+    expect(summary?.textContent).not.toContain('Failed');
+    expect(summary?.querySelector('[class*="iconError"]')).toBeNull();
+  });
+
+  it('shows the error icon in a failed tool line header', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'Shell', status: 'failed' }),
+    );
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.getAttribute('role')).toBe('img');
+    expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon instead of the failed label on expanded tool rows', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+      makeTool({ callId: 'call-2', toolName: 'Grep', status: 'completed' }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(errorIcon?.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon in the expanded single-tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+    expect(titleRow?.textContent).not.toContain('Failed');
+  });
+
+  it('renders no status icon in the expanded completed tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'completed',
+        content: [{ type: 'content', content: { text: 'ok' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
+  });
+
+  it('shows an error icon in the expanded failed todo card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'todo_write',
+        status: 'failed',
+        args: {
+          todos: [{ id: '1', content: 'Check UI', status: 'in_progress' }],
+        },
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed read tool', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'read_file',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'Permission denied' } }],
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed tool without result text', () => {
+    const container = renderToolGroup([
+      makeTool({ toolName: 'glob', status: 'failed' }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
   });
 
   it('renders ANSI shell output as styled spans instead of escape text', () => {
@@ -1277,6 +1392,89 @@ describe('tool row rendering', () => {
     expect(onOpen).toHaveBeenCalledWith(tool);
   });
 
+  it('keeps the agent row static while its launch approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: { subagent_type: 'Explore' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-1',
+                toolCallId: tool.callId,
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // No expand affordance while the launch approval is unanswered: the row
+    // must not open details for an agent that has not started yet.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+    act(() => {
+      (container.querySelector('[class*="lineButton"]') as HTMLElement).click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('keeps the agent row openable while a sub-tool approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [{ callId: 'sub-1', toolName: 'web_fetch', status: 'pending' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-sub',
+                toolCallId: 'sub-1',
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // A sub-tool approval is not the agent's own launch approval: the row
+    // stays openable so the pending sub-tool stays reachable in the details
+    // panel.
+    expect(
+      container.querySelector('button[class*="lineButton"]'),
+    ).not.toBeNull();
+    act(() => {
+      (
+        container.querySelector('button[class*="lineButton"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
   it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
     const onOpen = vi.fn();
     const tool = makeTool({
@@ -1353,7 +1551,9 @@ describe('tool row rendering', () => {
 
     act(() => header.click());
 
-    const cardTitle = container.querySelector('[class*="expandedCardTitle"]');
+    const cardTitle = container.querySelector(
+      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+    );
     expect(cardTitle?.textContent).toBe('Shell');
   });
 
@@ -1404,6 +1604,115 @@ describe('tool row rendering', () => {
 
     expect(summary?.textContent).toContain('Running');
     expect(summary?.textContent).toContain('Updated task list');
+  });
+});
+
+describe('thinking rows in the compact summary', () => {
+  it('shows a running summary while a thought is streaming', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'thinking about it', isStreaming: true }],
+    );
+
+    expect(container.querySelector('button')?.textContent).toContain(
+      'Thinking',
+    );
+  });
+
+  it('renders a completed thought line that expands its content on click', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const thoughtHeader = Array.from(
+      container.querySelectorAll('[role="button"]'),
+    ).find((el) =>
+      (el as HTMLElement).textContent?.includes('Done thinking'),
+    ) as HTMLElement;
+    expect(thoughtHeader).toBeTruthy();
+    // Collapsed by default; content appears on click.
+    expect(container.textContent).not.toContain('private chain of thought');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('keeps the single tool compact when thinking is folded in', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'DUMPED CONTENT' },
+            },
+          ],
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    // The single tool renders as a compact line, not a force-expanded dump.
+    expect(container.textContent).not.toContain('DUMPED CONTENT');
+  });
+
+  it('renders thoughts interleaved with their tools in original order', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+        makeTool({ callId: 'tool-2', toolName: 'Glob', status: 'completed' }),
+      ],
+      {},
+      [
+        { content: 'first thought', beforeToolCallId: 'tool-1' },
+        { content: 'second thought', beforeToolCallId: 'tool-2' },
+      ],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+      for (const header of container.querySelectorAll('[role="button"]')) {
+        (header as HTMLElement).click();
+      }
+    });
+    const text = container.textContent ?? '';
+    const positions = [
+      'first thought',
+      'ReadFile',
+      'second thought',
+      'Glob',
+    ].map((marker) => text.indexOf(marker));
+    expect(
+      positions.every((v, i) => v >= 0 && (i === 0 || v > positions[i - 1]!)),
+    ).toBe(true);
   });
 });
 

@@ -82,6 +82,7 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -94,7 +95,10 @@ import {
   startInteractionSpan,
   endInteractionSpan,
   getActiveInteractionSpan,
+  recordInteractionActivity,
+  addAgentInputMessageAttributes,
   addUserPromptAttributes,
+  AgentOutputMessageCapture,
   MemoryRecallDeliveryEvent,
 } from '../telemetry/index.js';
 import type {
@@ -130,7 +134,11 @@ import {
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorType,
+  UnauthorizedError,
+} from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import {
   flatMapTextParts,
@@ -163,6 +171,7 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -289,12 +298,21 @@ function sameActiveGoalProjection(
  * Lifecycle:
  *  1. Created on UserQuery/Cron — the recall promise fires immediately,
  *     `pendingMemoryPrefetch` is set to this handle.
- *  2. Consumed at either of two opportunistic points: a zero-wait
- *     `settledAt !== null` poll just before the UserQuery main request,
- *     or — if recall hadn't settled yet — on the first ToolResult turn.
+ *  2. Consumed at either of two points: a bounded wait just before the
+ *     UserQuery main request, or — if recall remains pending — on the first
+ *     ToolResult turn.
  *  3. Aborted-and-discarded by every cleanup path (resetChat,
  *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
  */
+/**
+ * Publication slot for recall's deterministic result, plus a one-shot
+ * listener for its arrival.
+ */
+type MemoryFastResultBox = {
+  current: RelevantAutoMemoryPromptResult | null;
+  onArrive?: () => void;
+};
+
 type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
@@ -307,6 +325,19 @@ type MemoryPrefetchHandle = {
   terminalLogged: boolean;
   firedAt: number;
   controller: AbortController;
+  /**
+   * Deterministic result published by recall before it blocks on the model
+   * selector. A box rather than a plain field because recall can invoke the
+   * callback before this handle object exists.
+   *
+   * `onArrive` lets the bounded initial wait stop as soon as there is
+   * something to deliver, instead of always spending the whole budget.
+   */
+  fastResultRef: MemoryFastResultBox;
+  /** True after the fast result was injected — prevents double-inject and double-log. */
+  fastDelivered: boolean;
+  /** Paths injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredPaths: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -325,6 +356,10 @@ export class GeminiClient {
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
+  private readonly interactionStartTypeByOwner = new WeakMap<
+    object,
+    SendMessageType
+  >();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -836,11 +871,25 @@ export class GeminiClient {
     handle: MemoryPrefetchHandle,
     discardReason: MemoryRecallDiscardReason,
   ): void {
+    const result = handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+    // A settled result whose every document the fast phase already injected
+    // was not lost, whatever ended the turn — most often a tool-free turn
+    // reaching `no_safe_delivery_point`. Reporting those under the
+    // cancellation reason would inflate the "memory never reached the model"
+    // bucket with turns that did get it, so apply the same rule the
+    // ToolResult consume point uses. A partial overlap still reports the
+    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // genuinely had no delivery point.
+    const everyDocAlreadyDelivered =
+      result.selectedDocs.length > 0 &&
+      result.selectedDocs.every((doc) =>
+        handle.fastDeliveredPaths.has(doc.filePath),
+      );
     this.logMemoryPrefetchDelivery(
       handle,
       'discarded',
-      handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
-      discardReason,
+      result,
+      everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
   }
 
@@ -858,37 +907,146 @@ export class GeminiClient {
   }
 
   /**
-   * Atomically consume the pending prefetch if it has already settled.
-   * Returns the recall result (caller decides where to inject it in
-   * `requestToSend`), or `null` if there's nothing to consume yet.
+   * Atomically consume the pending prefetch, optionally waiting for a bounded
+   * initial-turn budget. Budget expiry leaves the recall running for the next
+   * safe delivery point.
    *
    * Centralises the consume-and-mark dance so the UserQuery and ToolResult
    * inject sites can't drift on the guard logic.
    */
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
+    waitMs = 0,
   ): Promise<RelevantAutoMemoryPromptResult | null> {
     const handle = this.pendingMemoryPrefetch;
-    if (!handle || handle.settledAt === null || handle.consumed) {
+    if (!handle || handle.consumed) {
       return null;
     }
+
+    // `waitMs` is a ceiling, not a fixed cost. The wait ends on whichever
+    // comes first: recall settling, the deterministic result being published,
+    // cancellation, or the budget expiring.
+    //
+    // Ending on the fast result matters more than it looks. That result is
+    // published once recall has scanned the memory tree, which is milliseconds
+    // for an ordinary tree — while the model selector is a network round trip
+    // that this design already assumes will miss the budget. Spending the rest
+    // of the budget after the fast result is in hand therefore buys an
+    // outcome that almost never arrives, and charges every user turn for it.
+    // See `recall-scan-latency.test.ts` for the scan measurements.
+    //
+    // Consequence worth stating plainly, because the branch below reads as
+    // if it still arbitrated: on the initial turn, once the deterministic
+    // scorer matches anything, the fast result wins — the selector's speed is
+    // irrelevant. `onFastResult` is published before recall even issues the
+    // selector request, so `settledAt` is necessarily null when the wait ends
+    // on it. The settled-recall branch is reached at this point only when no
+    // fast result exists at all: no `Config`, or nothing matched
+    // lexically. That is deliberate, not incidental — a model side query does
+    // not complete inside this ceiling, so arbitrating between them would
+    // cost every turn the remainder of the budget to win a race that does not
+    // happen. The selector's judgement reaches the model at the ToolResult
+    // delivery point instead. Pinned by "delivers the fast result even when
+    // the selector settles inside the budget".
+    if (
+      handle.settledAt === null &&
+      handle.fastResultRef.current === null &&
+      waitMs > 0
+    ) {
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          handle.controller.signal.removeEventListener('abort', finish);
+          if (handle.fastResultRef.onArrive === finish) {
+            handle.fastResultRef.onArrive = undefined;
+          }
+          resolve();
+        };
+
+        const timer = setTimeout(finish, waitMs);
+        if (handle.controller.signal.aborted) {
+          finish();
+        } else {
+          handle.controller.signal.addEventListener('abort', finish, {
+            once: true,
+          });
+          handle.fastResultRef.onArrive = finish;
+          void handle.promise.then(finish, finish);
+        }
+      });
+    }
+
+    if (this.pendingMemoryPrefetch !== handle || handle.consumed) {
+      return null;
+    }
+
+    // Budget expired with the selector still in flight. Inject the
+    // deterministic result now rather than gambling on a later tool call:
+    // a turn that makes none has no safe delivery point at all. The handle
+    // stays pending so the model-selected result can still land later.
+    if (handle.settledAt === null) {
+      if (deliveryPoint !== 'initial' || handle.fastDelivered) {
+        return null;
+      }
+      const fast = handle.fastResultRef.current;
+      if (!fast?.prompt) {
+        return null;
+      }
+      handle.fastDelivered = true;
+      for (const doc of fast.selectedDocs) {
+        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        handle.fastDeliveredPaths.add(doc.filePath);
+      }
+      logMemoryRecallDelivery(
+        this.config,
+        new MemoryRecallDeliveryEvent({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: fast.strategy,
+          docs_selected: fast.selectedDocs.length,
+          latency_ms: Date.now() - handle.firedAt,
+        }),
+      );
+      return fast;
+    }
+
     handle.consumed = true;
     this.pendingMemoryPrefetch = undefined;
     const result = await handle.promise; // already settled, returns immediately
-    if (result.prompt) {
-      for (const doc of result.selectedDocs) {
+    // Drop anything the fast phase already put in front of the model. Both
+    // results come from the same scan, so the selector never saw the fast
+    // documents as excluded and can legitimately re-select them.
+    const remainingDocs = result.selectedDocs.filter(
+      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+    );
+    const deduped =
+      remainingDocs.length === result.selectedDocs.length
+        ? result
+        : {
+            ...result,
+            selectedDocs: remainingDocs,
+            prompt:
+              remainingDocs.length > 0
+                ? buildRelevantAutoMemoryPrompt(remainingDocs)
+                : '',
+          };
+
+    if (deduped.prompt) {
+      for (const doc of deduped.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
+      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
         'discarded',
         result,
-        'no_relevant_results',
+        result.selectedDocs.length > 0
+          ? 'already_delivered'
+          : 'no_relevant_results',
       );
     }
-    return result;
+    return deduped;
   }
 
   async resetChat(): Promise<void> {
@@ -2150,6 +2308,57 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const startsInteraction =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Goal;
+    let interactionOwner = startsInteraction
+      ? undefined
+      : getActiveInteractionSpan(prompt_id);
+    if (interactionOwner) {
+      recordInteractionActivity(prompt_id, interactionOwner);
+    }
+    const agentOutput = new AgentOutputMessageCapture(this.config);
+    const endCurrentInteraction = (
+      status: 'ok' | 'error' | 'cancelled',
+      errorMessage?: string,
+      errorType?: string,
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(prompt_id) !== interactionOwner
+      ) {
+        return;
+      }
+      const interactionStartType =
+        this.interactionStartTypeByOwner.get(interactionOwner);
+      const ownsStructuredOutputContract =
+        interactionStartType === SendMessageType.UserQuery ||
+        interactionStartType === SendMessageType.Retry;
+      if (
+        status === 'ok' &&
+        ownsStructuredOutputContract &&
+        this.config.getJsonSchema?.()
+      ) {
+        endInteractionSpan('error', {
+          promptId: prompt_id,
+          errorMessage: 'model did not produce structured output',
+          errorType: 'structured_output_missing',
+        });
+        return;
+      }
+      if (status === 'ok') {
+        agentOutput.writeToSpan(interactionOwner);
+      }
+      endInteractionSpan(status, {
+        promptId: prompt_id,
+        ...(errorMessage ? { errorMessage } : {}),
+        ...(errorType ? { errorType } : {}),
+      });
+    };
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
@@ -2369,9 +2578,37 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery
         ? partToString(request)
         : undefined;
+    if (startsInteraction) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+      startInteractionSpan(this.config, {
+        promptId: prompt_id,
+        model: options?.modelOverride ?? this.config.getModel(),
+        messageType,
+      });
+      interactionOwner = getActiveInteractionSpan(prompt_id);
+      if (
+        interactionOwner &&
+        !this.interactionStartTypeByOwner.has(interactionOwner)
+      ) {
+        this.interactionStartTypeByOwner.set(interactionOwner, messageType);
+      }
+      if (
+        interactionOwner &&
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string'
+      ) {
+        addAgentInputMessageAttributes(
+          this.config,
+          interactionOwner,
+          options.submittedPrompt,
+        );
+      }
+    }
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
+    let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
     try {
       hooksEnabled = !this.config.getDisableAllHooks();
       messageBus = this.config.getMessageBus();
@@ -2422,6 +2659,7 @@ export class GeminiClient {
           hookOutput?.shouldStopExecution()
         ) {
           if (goalPermit) {
+            userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
             if (!runtime || !goalTurnKey) {
               throw new Error('Goal turn admission is unavailable');
@@ -2435,9 +2673,12 @@ export class GeminiClient {
             await runtime.finishTurn(goalPermit);
             goalPermitReleased = true;
             closeGoalStateEvents();
+            endCurrentInteraction('cancelled');
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
+          } else {
+            endCurrentInteraction('cancelled');
           }
           yield {
             type: GeminiEventType.UserPromptSubmitBlocked,
@@ -2473,6 +2714,11 @@ export class GeminiClient {
         }
       }
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : userPromptSubmitFailureMessage,
+        signal.aborted ? undefined : getErrorType(error),
+      );
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -2536,6 +2782,11 @@ export class GeminiClient {
       }
       if (goalRuntime) bindGoalStateEvents(goalRuntime);
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : 'Goal turn admission failed',
+        signal.aborted ? undefined : getErrorType(error),
+      );
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -2589,24 +2840,12 @@ export class GeminiClient {
       );
       this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
     }
-    const isTopLevelInteraction =
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (isTopLevelInteraction) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-      startInteractionSpan(this.config, {
-        promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
-        messageType,
-      });
-      const interactionSpan = getActiveInteractionSpan();
+    if (startsInteraction) {
+      const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
         this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
@@ -2620,7 +2859,6 @@ export class GeminiClient {
         );
       }
     }
-
     // Tracks whether the generator reached its natural end (the bottom-of-try
     // `return turn`). Only on that path do we want to preserve the pending
     // memory prefetch so the next ToolResult turn can consume it. Any other
@@ -2669,6 +2907,7 @@ export class GeminiClient {
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
           }
+          const fastResultRef: MemoryFastResultBox = { current: null };
           const promise = this.config
             .getMemoryManager()
             .recall(
@@ -2679,6 +2918,10 @@ export class GeminiClient {
                 excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
                 recentTools: [...this.recentCompletedToolNames],
                 abortSignal: controller.signal,
+                onFastResult: (result) => {
+                  fastResultRef.current = result;
+                  fastResultRef.onArrive?.();
+                },
               },
             )
             .catch((error: unknown) => {
@@ -2709,6 +2952,9 @@ export class GeminiClient {
             terminalLogged: false,
             firedAt: Date.now(),
             controller,
+            fastResultRef,
+            fastDelivered: false,
+            fastDeliveredPaths: new Set<string>(),
           };
           void promise.then((result) => {
             handle.result = result;
@@ -2820,10 +3066,11 @@ export class GeminiClient {
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield { type: GeminiEventType.MaxSessionTurns };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'max session turns exceeded',
-            });
+          endCurrentInteraction(
+            'error',
+            'max session turns exceeded',
+            'max_session_turns',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -2835,8 +3082,7 @@ export class GeminiClient {
           : Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-        if (isTopLevelInteraction)
-          endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
+        endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -2890,10 +3136,11 @@ export class GeminiClient {
                 'Please start a new session or increase the sessionTokenLimit in your settings.json.',
             },
           };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'session token limit exceeded',
-            });
+          endCurrentInteraction(
+            'error',
+            'session token limit exceeded',
+            'session_token_limit',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -2939,7 +3186,7 @@ export class GeminiClient {
           );
           await arenaAgentClient.reportCancelled();
           this.cancelPendingMemoryPrefetch('abort');
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -3035,14 +3282,12 @@ export class GeminiClient {
           }
         }
 
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // Done AFTER the async reminder setup above so recall settling during
-        // those awaits still gets caught here. (settledAt is set in
-        // promise.finally(); microtask ordering guarantees it's visible
-        // after any await prior to this point — flatMapTextParts above is
-        // the natural drain.) If still not settled, skip — the ToolResult
-        // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch('initial');
+        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
+          'initial',
+          messageType === SendMessageType.UserQuery
+            ? INITIAL_MEMORY_RECALL_WAIT_MS
+            : 0,
+        );
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3176,6 +3421,7 @@ export class GeminiClient {
             )
           : null;
 
+      agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
@@ -3198,6 +3444,15 @@ export class GeminiClient {
             event.type === GeminiEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            agentOutput.restartAttempt(
+              event.type === GeminiEventType.Retry &&
+                event.isContinuation === true,
+            );
+          }
+          if (event.type === GeminiEventType.Content) {
+            agentOutput.appendText(event.value);
+          } else if (event.type === GeminiEventType.Finished) {
+            agentOutput.observeFinishReason(event.value?.reason);
           }
           if (messageDisplay && event.type === GeminiEventType.Content) {
             messageDisplay.addChunk(event.value);
@@ -3233,8 +3488,7 @@ export class GeminiClient {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             this.fireLoopDetectedStopFailure(loopType);
             return turn;
@@ -3266,8 +3520,7 @@ export class GeminiClient {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3331,19 +3584,28 @@ export class GeminiClient {
           if (event.type === GeminiEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
-              const errorMsg =
-                event.value instanceof Error
-                  ? event.value.message
-                  : 'Unknown error';
-              await arenaAgentClient.reportError(errorMsg);
+              const status = event.value.error?.status;
+              const arenaError =
+                status === 401 || status === 403
+                  ? 'Authentication failed'
+                  : status === 429
+                    ? 'Rate limit exceeded'
+                    : status !== undefined && status >= 500
+                      ? 'Provider service unavailable'
+                      : status !== undefined
+                        ? `API request failed (${status})`
+                        : 'Provider request failed';
+              try {
+                await arenaAgentClient.reportError(arenaError);
+              } catch {
+                this.config
+                  .getDebugLogger()
+                  .warn('Failed to report Arena provider error');
+              }
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction) {
-              // Sanitize: do not pass raw API error messages to span status
-              const errMsg =
-                event.value instanceof Error ? '[API error]' : 'unknown error';
-              endInteractionSpan('error', { errorMessage: errMsg });
-            }
+            // Sanitize: do not pass raw API error messages to span status.
+            endCurrentInteraction('error', 'unknown error', 'api_error');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3361,6 +3623,9 @@ export class GeminiClient {
         // a no-op.
         await messageDisplay?.finish();
       }
+      agentOutput.commitResponse(
+        hasToolCalls || turn.pendingToolCalls.length > 0,
+      );
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -3392,9 +3657,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(steerInput, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = steeredTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           normalCompletion = true;
           return steeredTurn;
         }
@@ -3456,7 +3722,7 @@ export class GeminiClient {
           if (activeGoalEvent) {
             yield activeGoalEvent;
           }
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return turn;
         }
 
@@ -3501,7 +3767,7 @@ export class GeminiClient {
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             return turn;
           } else {
             for (const goalEvent of takePendingGoalEvents()) {
@@ -3526,7 +3792,7 @@ export class GeminiClient {
               for (const goalEvent of await finalizeInterruptedGoalTurn()) {
                 yield goalEvent;
               }
-              if (isTopLevelInteraction) endInteractionSpan('cancelled');
+              endCurrentInteraction('cancelled');
               return turn;
             }
             const continueRequest: Part[] = [{ text: continueReason }];
@@ -3555,8 +3821,9 @@ export class GeminiClient {
             } finally {
               settleSteerInput(pendingSteer, pushCountBefore);
             }
-            if (isTopLevelInteraction) {
-              endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+            hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+            if (!hasToolCalls) {
+              endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
             }
             normalCompletion = true;
             return hookTurn;
@@ -3577,7 +3844,7 @@ export class GeminiClient {
             if (activeGoalEvent) {
               yield activeGoalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('cancelled');
+            endCurrentInteraction('cancelled');
             return turn;
           }
 
@@ -3619,7 +3886,7 @@ export class GeminiClient {
               value: warning,
             };
             debugLogger.warn(warning);
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             return turn;
           }
 
@@ -3681,7 +3948,7 @@ export class GeminiClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
           }
@@ -3725,9 +3992,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -3762,6 +4030,7 @@ export class GeminiClient {
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
+        endCurrentInteraction('ok');
         normalCompletion = true;
         return turn;
       }
@@ -3785,6 +4054,7 @@ export class GeminiClient {
             chat.getGenerationConfig(),
             cachedHistory,
             this.config.getModel(),
+            this.config.getSessionId(),
           );
         } catch {
           // Best-effort — don't block the main flow
@@ -3797,7 +4067,7 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
-          if (isTopLevelInteraction) endInteractionSpan('ok');
+          endCurrentInteraction('ok');
           return turn;
         }
 
@@ -3841,9 +4111,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = continueTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -3867,8 +4138,8 @@ export class GeminiClient {
         await arenaAgentClient.reportCancelled();
       }
 
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+      if (!hasToolCalls) {
+        endCurrentInteraction(signal?.aborted ? 'cancelled' : 'ok');
       }
       // Reached the bottom of the try — this turn ended cleanly. If the
       // model did not request tool calls, no future ToolResult will arrive
@@ -3886,6 +4157,21 @@ export class GeminiClient {
     } catch (error) {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
+      }
+      if (
+        error instanceof UnauthorizedError &&
+        messageType !== SendMessageType.Hook &&
+        messageType !== SendMessageType.Steer
+      ) {
+        try {
+          await this.config
+            .getArenaAgentClient()
+            ?.reportError('Authentication failed');
+        } catch {
+          this.config
+            .getDebugLogger()
+            .warn('Failed to report Arena authentication error');
+        }
       }
       throw error;
     } finally {
@@ -3916,10 +4202,12 @@ export class GeminiClient {
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
       }
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
-          errorMessage: 'unexpected exit',
-        });
+      if (!normalCompletion) {
+        endCurrentInteraction(
+          signal?.aborted ? 'cancelled' : 'error',
+          signal?.aborted ? undefined : 'unexpected exit',
+          signal?.aborted ? undefined : 'unexpected_exit',
+        );
       }
     }
   }

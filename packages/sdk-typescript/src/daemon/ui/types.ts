@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionResponse,
 } from '../types.js';
 
@@ -88,6 +89,10 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for events belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -127,6 +132,7 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -480,6 +486,7 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   key: string;
   scope: string;
   value: unknown;
+  mutation?: DaemonSkillToggleMutation;
 }
 
 export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
@@ -828,6 +835,10 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for content belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
@@ -854,6 +865,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   /** Images attached to this user message (base64 data URIs). */
   images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * Text file attachments on this user message (display metadata only —
+   * the content rides the prompt's resource blocks and is never stored
+   * on the block). Local optimistic messages only; daemon replays carry
+   * no attachment metadata.
+   */
+  files?: Array<{ name: string; mimeType: string }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -1020,8 +1038,9 @@ export interface DaemonTranscriptState
   // lazy COW). Match the runtime contract at the type level so
   // consumers get a compile-time error for `state.blocks.sort()` /
   // `.push()` instead of a runtime `TypeError`. Internal reducer
-  // mutation goes through `takeBlocksOwnership` which casts away
-  // readonly after copying — the only place that's allowed.
+  // mutation goes through the ownership helpers which cast away readonly after
+  // copying — the only place that's allowed. The block index follows the same
+  // COW contract.
   blocks: readonly DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;
@@ -1029,7 +1048,7 @@ export interface DaemonTranscriptState
   activeThoughtBlockId?: string;
   activeAssistantBlockByParent: Record<string, string>;
   activeThoughtBlockByParent: Record<string, string>;
-  blockIndexById: Record<string, number>;
+  blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
@@ -1060,6 +1079,7 @@ export interface DaemonTranscriptStore {
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
     meta?: DaemonTextDeltaMeta,
+    files?: Array<{ name: string; mimeType: string }>,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

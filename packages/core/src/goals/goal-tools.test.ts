@@ -21,6 +21,8 @@ import {
 } from './goal-tools.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
+  emptyGoalSnapshot,
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
   type GoalTurnPermit,
@@ -124,6 +126,172 @@ describe('GetGoalTool', () => {
       'No active Goal is available for this turn.',
     );
     expect(getGoalForWorker).not.toHaveBeenCalled();
+  });
+
+  it('summarises the last Goal once it has stopped issuing permits', async () => {
+    const getGoalForWorker = vi.fn();
+    const config = makeConfig({
+      getGoalForWorker,
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 27,
+          activeTimeMs: 1_763_705,
+          createdAt: 1,
+          updatedAt: 2,
+          lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+          evidenceCheckpoint: {
+            checkpointId: 'checkpoint-1',
+            createdAt: 2,
+            claims: [
+              {
+                id: 'checkpoint-1:1',
+                proofKind: 'external_fact' as const,
+                claim: 'note-01.md exists',
+                sourceRefs: ['record-1'],
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 3,
+        status: 'usage_limited',
+        turnCount: 27,
+        activeTimeMs: 1_763_705,
+        lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+      },
+    });
+    expect(result.returnDisplay).toBe(
+      'No Goal turn is permitted · last Goal usage_limited after 27 turns',
+    );
+    expect(getGoalForWorker).not.toHaveBeenCalled();
+  });
+
+  it('summarises a paused Goal outside a permitted turn', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 2,
+          objective: 'Ship Goal v3',
+          status: 'paused' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 1,
+          activeTimeMs: 750,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 2,
+        status: 'paused',
+        turnCount: 1,
+        activeTimeMs: 750,
+      },
+    });
+    expect(result.returnDisplay).toBe(
+      'No Goal turn is permitted · last Goal paused after 1 turn',
+    );
+  });
+
+  it('keeps the objective and the evidence checkpoint behind the permit', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'SECRET_OBJECTIVE',
+          status: 'complete' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 2,
+          activeTimeMs: 10,
+          createdAt: 1,
+          updatedAt: 2,
+          evidenceCheckpoint: {
+            checkpointId: 'checkpoint-1',
+            createdAt: 2,
+            claims: [
+              {
+                id: 'checkpoint-1:1',
+                proofKind: 'delivered_output' as const,
+                claim: 'SECRET_CLAIM',
+                sourceRefs: ['record-1'],
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(String(result.llmContent)).not.toContain('SECRET_OBJECTIVE');
+    expect(String(result.llmContent)).not.toContain('SECRET_CLAIM');
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 1,
+        status: 'complete',
+        turnCount: 2,
+        activeTimeMs: 10,
+      },
+    });
+  });
+
+  it('reports no Goal when the session never had one', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => emptyGoalSnapshot(),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(JSON.parse(String(result.llmContent))).toEqual({ active: false });
+  });
+
+  it('reports no Goal when Goal persistence is unreachable', async () => {
+    const config = {
+      getGoalRuntime: vi.fn(() => {
+        throw new Error('Goal persistence is unavailable');
+      }),
+    };
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(String(result.llmContent))).toEqual({ active: false });
+    expect(result.returnDisplay).toBe(
+      'No active Goal is available for this turn.',
+    );
   });
 
   it('returns only the bounded worker view for the captured permit', async () => {
