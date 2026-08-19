@@ -1415,7 +1415,11 @@ export async function runNonInteractive(
           await routeAbort();
         }
       }
-      if (inlineModelOverride !== undefined && hasImageParts(initialParts)) {
+      if (
+        (inlineModelOverride !== undefined ||
+          inlineModelOverrideResolutionFailed) &&
+        hasImageParts(initialParts)
+      ) {
         initialParts = initialParts.map((part) => clampInlineMediaPart(part));
       }
       if (
@@ -1608,12 +1612,16 @@ export async function runNonInteractive(
       let isFirstTurn = true;
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
+      // Media surviving the bridges above is routed raw to the inline override
+      // target, so the selector needs the trailing-NUL exact-route marker for
+      // that target's own modalities to apply. Text-only overrides stay bare and
+      // keep their pre-existing compression and model-fallback behavior.
       let modelOverride: string | undefined =
         inlineModelOverride === undefined
           ? fullTurnModelOverride
-          : inlineModelOverride.endsWith('\0')
-            ? inlineModelOverride
-            : `${inlineModelOverride}\0`;
+          : hasAudioParts(initialParts) || hasImageParts(initialParts)
+            ? `${inlineModelOverride}\0`
+            : inlineModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
@@ -2397,13 +2405,7 @@ export async function runNonInteractive(
           currentPromptId,
           {
             type: sendType,
-            // NUL marks an exact-route selector so the skill target's
-            // modalities resolve (interactive sends do the same); bare ids
-            // would fall back to the session config's modalities.
-            modelOverride:
-              modelOverride === undefined || modelOverride.endsWith('\0')
-                ? modelOverride
-                : `${modelOverride}\0`,
+            modelOverride,
             ...(isFirstTurn &&
               sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
@@ -2731,11 +2733,7 @@ export async function runNonInteractive(
                   type: itemIsFirstTurn
                     ? item.sendMessageType
                     : SendMessageType.ToolResult,
-                  modelOverride:
-                    itemModelOverride === undefined ||
-                    itemModelOverride.endsWith('\0')
-                      ? itemModelOverride
-                      : `${itemModelOverride}\0`,
+                  modelOverride: itemModelOverride,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
                     todoWorkChainId: item.todoWorkChainId,

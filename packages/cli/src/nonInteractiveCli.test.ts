@@ -1753,6 +1753,55 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('keeps a text-only slash prompt override as a bare selector', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit text to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'summarize the release notes' }],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-text-model',
+    );
+
+    // No media is routed to the override target, so the selector stays bare and
+    // keeps its pre-existing compression and model-fallback behavior instead of
+    // silently becoming a fail-closed exact route.
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('text-model');
+  });
+
   it('clamps audio sent through an audio-capable slash prompt override', async () => {
     vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
     setupMetricsMock();
@@ -2058,6 +2107,82 @@ describe('runNonInteractive', () => {
     expect(JSON.stringify(sentParts)).not.toContain('image/png');
     expect(JSON.stringify(sentParts)).toContain('[audio transcript]');
     expect(JSON.stringify(sentParts)).toContain('[transcribed image]');
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+  });
+
+  it('clamps images after a slash prompt route resolution rejects with no vision bridge', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'AAAA' },
+    };
+    const mixedParts: Part[] = [
+      { text: 'inspect this image and audio' },
+      { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+      imagePart,
+    ];
+    const mockCommand = {
+      name: 'flaky-model',
+      description: 'submit mixed media through a flaky route',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: mixedParts,
+        modelOverride: 'flaky-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'flaky-model', authType: AuthType.QWEN_OAUTH }]);
+    mockConfig = {
+      ...mockConfig,
+      // The session model already accepts images, so no vision bridge runs and
+      // the clamp is the only thing standing between an oversized payload and
+      // the request.
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
+      getBaseLlmClient: vi.fn().mockReturnValue({
+        resolveForModel: vi
+          .fn()
+          .mockRejectedValue(new Error('route unavailable')),
+      }),
+    } as unknown as Config;
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      parts: [mixedParts[0], { text: '[audio transcript]' }, imagePart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/flaky-model',
+        'prompt-mixed-route-rejected-clamped',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+    const sent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[0],
+    );
+    expect(sent).toContain('Media omitted');
+    expect(sent).not.toContain('inlineData');
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBeUndefined();
@@ -4611,7 +4736,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('NUL-suffixes mid-loop skill overrides so exact routes resolve headlessly', async () => {
+  it('keeps a text-only mid-loop skill override as a bare selector', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -4643,15 +4768,15 @@ describe('runNonInteractive', () => {
       'prompt-skill-override',
     );
 
-    // A bare skill override would fall back to the session modalities during
-    // route resolution; the trailing NUL makes sendMessageStream resolve the
-    // exact route, mirroring interactive sends.
+    // Nothing media-shaped is routed to the skill model, so the selector stays
+    // bare and keeps its pre-existing compression and model-fallback behavior
+    // instead of silently becoming a fail-closed exact route.
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'skill loaded' }],
       expect.any(AbortSignal),
       'prompt-skill-override',
-      { type: SendMessageType.ToolResult, modelOverride: 'text-skill-model\0' },
+      { type: SendMessageType.ToolResult, modelOverride: 'text-skill-model' },
     );
   });
 

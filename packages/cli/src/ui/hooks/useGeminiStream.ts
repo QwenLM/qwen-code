@@ -833,6 +833,12 @@ export const useGeminiStream = (
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
   // explicit choice mid-turn, so this takes precedence until the next user turn.
   const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  // The override value that the media bridges decided to route raw media to.
+  // Only that value is sent as a trailing-NUL exact route, so its own
+  // modalities apply; a text-only override stays a bare selector and keeps its
+  // pre-existing compression and model-fallback behavior. Compared by value, so
+  // it stops applying as soon as the override changes.
+  const mediaRoutedOverrideRef = useRef<string | undefined>(undefined);
   const canUseToolResultFullTurnModel = useCallback((model: string) => {
     const current = modelOverrideRef.current;
     return (
@@ -1357,10 +1363,12 @@ export const useGeminiStream = (
       parts: PartListUnion | null;
       shouldProceed: boolean;
       modelOverrideResolutionFailed: boolean;
+      preOverrideParts?: PartListUnion;
     }> => {
       let nextParts = parts;
       let modelOverrideResolutionFailed = false;
       let targetSupportsImage = false;
+      let preOverrideParts: PartListUnion | undefined;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
         let shouldRunBridge = activeOverride === undefined;
@@ -1399,6 +1407,10 @@ export const useGeminiStream = (
               const reason = modelOverrideResolutionFailed
                 ? 'the active model override could not be resolved'
                 : 'the active model override does not support audio';
+              // The audio bytes only fail closed because of this one-shot
+              // override. Retry drops the override, so it has to re-derive from
+              // these parts instead of resending the marker text.
+              preOverrideParts = nextParts;
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
               addItem(
                 {
@@ -1418,6 +1430,9 @@ export const useGeminiStream = (
                 ? clampInlineMediaPart(part)
                 : part,
             );
+            if (hasAudioParts(nextParts)) {
+              mediaRoutedOverrideRef.current = modelOverrideRef.current;
+            }
           }
         }
         if (shouldRunBridge) {
@@ -1454,16 +1469,28 @@ export const useGeminiStream = (
           nextParts = result.parts;
         }
       }
-      if (targetSupportsImage && nextParts !== null) {
+      // An active inline override keeps images raw (the vision bridge is skipped
+      // for it), so the size clamp has to run here regardless of whether the
+      // turn also carried audio.
+      if (
+        nextParts !== null &&
+        (targetSupportsImage || inlineModelOverrideActiveRef.current)
+      ) {
+        const clampedParts = (
+          Array.isArray(nextParts) ? nextParts : [nextParts]
+        ).map((part) =>
+          typeof part === 'string' || !hasImageParts([part])
+            ? part
+            : clampInlineMediaPart(part),
+        );
+        if (hasImageParts(clampedParts)) {
+          mediaRoutedOverrideRef.current = modelOverrideRef.current;
+        }
         return {
-          parts: (Array.isArray(nextParts) ? nextParts : [nextParts]).map(
-            (part) =>
-              typeof part === 'string' || !hasImageParts([part])
-                ? part
-                : clampInlineMediaPart(part),
-          ),
+          parts: clampedParts,
           shouldProceed: true,
           modelOverrideResolutionFailed,
+          preOverrideParts,
         };
       }
       const visionResult = await applyVisionBridgeIfNeeded(
@@ -1472,7 +1499,11 @@ export const useGeminiStream = (
         signal,
         allowFullTurnModel && !modelOverrideResolutionFailed,
       );
-      return { ...visionResult, modelOverrideResolutionFailed };
+      return {
+        ...visionResult,
+        modelOverrideResolutionFailed,
+        preOverrideParts,
+      };
     },
     [addItem, applyVisionBridgeIfNeeded, config, settings],
   );
@@ -1490,6 +1521,7 @@ export const useGeminiStream = (
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
       scheduledToolCallId?: string;
+      preOverrideParts?: PartListUnion;
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1507,6 +1539,7 @@ export const useGeminiStream = (
       }
 
       let localQueryToSendToGemini: PartListUnion | null = null;
+      let preOverrideParts: PartListUnion | undefined;
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
@@ -1613,6 +1646,7 @@ export const useGeminiStream = (
               return {
                 queryToSend: localQueryToSendToGemini,
                 shouldProceed: true,
+                preOverrideParts: bridgeResult.preOverrideParts,
               };
             }
             case 'handled': {
@@ -1702,6 +1736,7 @@ export const useGeminiStream = (
           return { queryToSend: null, shouldProceed: false };
         }
         localQueryToSendToGemini = bridgeResult.parts;
+        preOverrideParts = bridgeResult.preOverrideParts;
       } else {
         // It's a function response (PartListUnion that isn't a string)
         localQueryToSendToGemini = query;
@@ -1713,7 +1748,11 @@ export const useGeminiStream = (
         );
         return { queryToSend: null, shouldProceed: false };
       }
-      return { queryToSend: localQueryToSendToGemini, shouldProceed: true };
+      return {
+        queryToSend: localQueryToSendToGemini,
+        shouldProceed: true,
+        preOverrideParts,
+      };
     },
     [
       config,
@@ -3571,6 +3610,7 @@ export const useGeminiStream = (
             );
           }
           clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
+          mediaRoutedOverrideRef.current = undefined;
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -3637,6 +3677,7 @@ export const useGeminiStream = (
           queryToSend: PartListUnion | null;
           shouldProceed: boolean;
           scheduledToolCallId?: string;
+          preOverrideParts?: PartListUnion;
         };
         try {
           preparedQuery =
@@ -3684,8 +3725,12 @@ export const useGeminiStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         }
-        const { queryToSend, shouldProceed, scheduledToolCallId } =
-          preparedQuery;
+        const {
+          queryToSend,
+          shouldProceed,
+          scheduledToolCallId,
+          preOverrideParts,
+        } = preparedQuery;
 
         if (scheduledToolCallId && foregroundAbortController) {
           keepToolContinuationAbortController = true;
@@ -3813,7 +3858,10 @@ export const useGeminiStream = (
         const finalQueryToSend = queryToSend;
         goalTerminalErrorRef.current = false;
         if (submitType !== SendMessageType.Goal) {
-          lastPromptRef.current = finalQueryToSend;
+          // Retry drops the one-shot inline override, so remember the parts as
+          // they were before that override forced the audio out: retrying the
+          // marker text would strand the recording forever.
+          lastPromptRef.current = preOverrideParts ?? finalQueryToSend;
           lastPromptErroredRef.current = false;
         }
 
@@ -3888,10 +3936,11 @@ export const useGeminiStream = (
             notificationDisplayText: metadata?.notificationDisplayText,
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride:
-              activeModelOverride === undefined ||
-              activeModelOverride.endsWith('\0')
-                ? activeModelOverride
-                : `${activeModelOverride}\0`,
+              activeModelOverride !== undefined &&
+              !activeModelOverride.endsWith('\0') &&
+              mediaRoutedOverrideRef.current === activeModelOverride
+                ? `${activeModelOverride}\0`
+                : activeModelOverride,
             steerInput: metadata?.steerInput,
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse &&

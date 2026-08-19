@@ -979,6 +979,56 @@ describe('useGeminiStream', () => {
     expect(sent).not.toContain('inlineData');
   });
 
+  it('clamps images forwarded through an inline override on an audio-free turn', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+    mockConfig.getDefaultVisionBridgeModel = vi.fn(
+      () =>
+        ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }) as never,
+    );
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'image-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { image: true },
+          },
+        ] as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'inspect' }, imagePart],
+      modelOverride: 'image-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model image-model inspect');
+    });
+
+    // The vision bridge is skipped for an inline override, so this turn's only
+    // size guard is the clamp — which used to run for audio-bearing turns only.
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('Media omitted');
+    expect(sent).not.toContain('inlineData');
+    // Nothing media-shaped survived the clamp, so the selector stays bare.
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'image-model',
+    );
+  });
+
   it('fails closed when an inline model override does not support audio', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -1025,6 +1075,83 @@ describe('useGeminiStream', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('retries the original audio after an inline override fails closed', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: {} },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'text-model',
+    });
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'listen' }, { text: 'retry transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model listen');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'active model override does not support audio',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The audio only failed closed because of the one-shot override, and the
+    // retry drops it: the recording has to be re-derived from the original
+    // bytes rather than resending the unavailable marker forever.
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(mockRunAudioBridge.mock.calls[0]?.[0]?.parts).toEqual([
+      { text: 'listen' },
+      audioPart,
+    ]);
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'listen' },
+      { text: 'retry transcript' },
+    ]);
   });
 
   it('rechecks retained audio after clearing an inline override on retry', async () => {
@@ -4724,7 +4851,10 @@ describe('useGeminiStream', () => {
       'prompt-id-midturn-audio-skill-override',
       expect.objectContaining({
         type: SendMessageType.ToolResult,
-        modelOverride: 'skill-model\0',
+        // The audio was transcribed, so nothing media-shaped is routed to the
+        // skill model: the selector stays bare instead of becoming an exact
+        // route.
+        modelOverride: 'skill-model',
       }),
     );
     expect(mockAddItem).not.toHaveBeenCalledWith(
@@ -10686,13 +10816,14 @@ describe('useGeminiStream', () => {
 
         const { result } = renderTestHook();
 
-        // Turn 1: inline override applied.
+        // Turn 1: inline override applied. The prompt is text-only, so the
+        // selector stays bare rather than becoming an exact route.
         await act(async () => {
           await result.current.submitQuery('/model inline-model do the thing');
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model\0',
+          modelOverride: 'inline-model',
         });
 
         mockSendMessageStream.mockClear();
@@ -10742,7 +10873,7 @@ describe('useGeminiStream', () => {
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model\0',
+          modelOverride: 'inline-model',
         });
 
         mockSendMessageStream.mockClear();
@@ -10761,7 +10892,7 @@ describe('useGeminiStream', () => {
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           type: SendMessageType.Notification,
-          modelOverride: 'inline-model\0',
+          modelOverride: 'inline-model',
         });
 
         mockSendMessageStream.mockClear();

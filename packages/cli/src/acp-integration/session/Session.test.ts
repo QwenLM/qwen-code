@@ -32678,7 +32678,7 @@ describe('Session', () => {
       );
     });
 
-    it('repairs staged tool images when cancellation empties a fallen-back Guard drain', async () => {
+    it('preserves staged tool images when cancellation empties a fallen-back Guard drain', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
       vi.spyOn(audioBridgeService, 'runAudioBridge').mockImplementation(
@@ -32836,8 +32836,13 @@ describe('Session', () => {
             ),
         );
       expect(preserved).toBeDefined();
-      expect(JSON.stringify(preserved)).toContain('[recovered guard image]');
-      expect(JSON.stringify(preserved)).not.toContain('image/png');
+      // The cancellation lands between the drain and the recheck, so the
+      // recheck is skipped and the staged image survives verbatim instead of
+      // being rewritten into a marker that would persist in session history.
+      expect(JSON.stringify(preserved)).toContain('image/png');
+      expect(JSON.stringify(preserved)).not.toContain(
+        '[recovered guard image]',
+      );
       expect(JSON.stringify(preserved)).not.toContain('audio/wav');
       expect(fullTurnSelections).toEqual([true]);
     });

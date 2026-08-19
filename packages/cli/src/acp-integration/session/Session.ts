@@ -6651,6 +6651,7 @@ export class Session implements SessionContext {
       onModelOverrideResolutionFailed,
     });
     const toolRunParts =
+      !abortSignal.aborted &&
       modelOverrideBeforeDrain !== undefined &&
       getModelOverride?.() === undefined
         ? await this.#recheckPartsAfterModelOverrideFallback(
@@ -6765,6 +6766,12 @@ export class Session implements SessionContext {
     parts: Part[],
     abortSignal: AbortSignal,
   ): Promise<Part[]> {
+    // A cancelled turn must keep its media intact: the recheck would rewrite it
+    // into cancellation markers or unavailable notes that then persist in
+    // session history.
+    if (abortSignal.aborted) {
+      return parts;
+    }
     // The selector has already failed and been cleared. Repair both nested
     // tool-result images and top-level media against the primary route, and do
     // not expose an onFullTurnModel callback that could reinstall it.
