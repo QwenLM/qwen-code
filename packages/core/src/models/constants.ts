@@ -35,6 +35,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'customHeaders',
   'extra_body',
   'thinkingMandatory',
+  'adaptiveThinking',
   'modalities',
   'splitToolMedia',
   'toolResultContentFormat',

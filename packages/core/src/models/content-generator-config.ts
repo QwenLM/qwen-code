@@ -89,6 +89,7 @@ export function buildAgentContentGeneratorConfig(
 
   if (modelId && modelId !== parentConfig.model) {
     nextConfig.thinkingMandatory = undefined;
+    nextConfig.adaptiveThinking = undefined;
   }
 
   nextConfig.apiKey = resolveCredentialField(
@@ -174,10 +175,15 @@ function applyResolvedModelConfig(
 
   // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
   // Same-provider fields inherit unless the registry overrides them, except
-  // model capabilities such as thinkingMandatory, which must not leak.
+  // model capabilities such as thinkingMandatory and adaptiveThinking, which
+  // must not leak.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined || field === 'thinkingMandatory') {
+    if (
+      registryValue !== undefined ||
+      field === 'thinkingMandatory' ||
+      field === 'adaptiveThinking'
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }
