@@ -3471,6 +3471,50 @@ describe('Session', () => {
       );
     });
 
+    it('counts a legacy turn whose text only starts with the media-clear prefix', () => {
+      // Only a complete '[Old inline media cleared: ...]' placeholder is
+      // structural; a genuine user prompt that merely starts with the
+      // prefix must keep counting as a legacy turn and trigger the
+      // positional fallback.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '[Old inline media cleared: image/png] what does this mean?',
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'legacy reply' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+      ];
+      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        'prompt-new',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'snap-0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-new',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+        { promptId: 'prompt-new', turnIndex: 1 },
+      ]);
+    });
+
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'unidentified prompt' }] },
