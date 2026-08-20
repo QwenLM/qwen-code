@@ -561,6 +561,10 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
       {
         bridge: makeRuntimeBridge(),
         liveConversationWorkspace,
+        // Isolate the Conversations-runtime ownership record from the
+        // machine-global ~/.qwen path: a concurrent live owner there
+        // (another worker / a developer's qwen serve) would fail this boot.
+        liveDiscoveryStableBaseDir: path.join(tempRoot, 'stable'),
         resolveOnListen: true,
       },
     );
