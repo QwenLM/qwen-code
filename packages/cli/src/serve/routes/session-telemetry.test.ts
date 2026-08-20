@@ -7,7 +7,8 @@
 import path from 'node:path';
 import express, { type Response } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { SessionService } from '@qwen-code/qwen-code-core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -87,6 +88,10 @@ describe('special session resolver telemetry publication', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     archiveMocks.assertSessionLoadable.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('publishes the runtime root for creation before later validation', async () => {
@@ -198,7 +203,9 @@ describe('special session resolver telemetry publication', () => {
   });
 
   it('publishes the live transcript owner in a multi-workspace daemon', async () => {
-    archiveMocks.assertSessionLoadable.mockResolvedValue('active');
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
     const primary = runtime({
       workspaceId: 'primary',
       workspaceCwd: primaryCwd,
@@ -217,12 +224,8 @@ describe('special session resolver telemetry publication', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledTimes(1);
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
-      secondaryCwd,
-      'secondary-session',
-      path.join(secondaryCwd, '.runtime'),
-    );
+    expect(getLocation).toHaveBeenCalledOnce();
+    expect(getLocation).toHaveBeenCalledWith('secondary-session');
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
       expect.anything(),
@@ -231,17 +234,10 @@ describe('special session resolver telemetry publication', () => {
   });
 
   it('publishes the sole active transcript runtime after storage lookup', async () => {
-    archiveMocks.assertSessionLoadable.mockImplementation(
-      async (
-        workspaceCwd: string,
-        _sessionId: string,
-        runtimeBaseDir: string,
-      ) =>
-        runtimeBaseDir === path.join(secondaryCwd, '.runtime') &&
-        workspaceCwd === secondaryCwd
-          ? 'active'
-          : undefined,
-    );
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce('active');
     const primary = runtime({
       workspaceId: 'primary',
       workspaceCwd: primaryCwd,
@@ -260,17 +256,9 @@ describe('special session resolver telemetry publication', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledTimes(2);
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
-      primaryCwd,
-      'stored-secondary',
-      path.join(primaryCwd, '.runtime'),
-    );
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
-      secondaryCwd,
-      'stored-secondary',
-      path.join(secondaryCwd, '.runtime'),
-    );
+    expect(getLocation).toHaveBeenCalledTimes(2);
+    expect(getLocation).toHaveBeenNthCalledWith(1, 'stored-secondary');
+    expect(getLocation).toHaveBeenNthCalledWith(2, 'stored-secondary');
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
       expect.anything(),
@@ -279,7 +267,9 @@ describe('special session resolver telemetry publication', () => {
   });
 
   it('does not publish a workspace for ambiguous transcript storage matches', async () => {
-    archiveMocks.assertSessionLoadable.mockResolvedValue('active');
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
     const primary = runtime({
       workspaceId: 'primary',
       workspaceCwd: primaryCwd,
@@ -299,7 +289,7 @@ describe('special session resolver telemetry publication', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('ambiguous_session_owner');
-    expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledTimes(2);
+    expect(getLocation).toHaveBeenCalledTimes(2);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).not.toHaveBeenCalled();
   });
 

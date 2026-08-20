@@ -14945,6 +14945,147 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it.each([
+      ['default', {}],
+      ['organized', { view: 'organized' as const }],
+      ['metadata-filtered', { sourceType: 'default' }],
+    ])(
+      'merges a canonical live id into its mixed-case persisted row in the %s list',
+      async (_name, options) => {
+        const liveSessionId = '550e8400-e29b-41d4-a716-446655440000';
+        const persistedSessionId = liveSessionId.toUpperCase();
+        await writeStoredSession({
+          sessionId: persistedSessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'persisted mixed-case task',
+          mtime: new Date('2026-05-17T12:11:00.000Z'),
+          sourceType: 'default',
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: liveSessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:30:00.000Z',
+              displayName: 'Live mixed-case task',
+              clientCount: 2,
+              hasActivePrompt: true,
+            },
+          ],
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          options,
+          { runtimeBaseDir: runtimeDir },
+        );
+
+        expect(result.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: persistedSessionId,
+            displayName: 'Live mixed-case task',
+            clientCount: 2,
+            hasActivePrompt: true,
+          }),
+        ]);
+      },
+    );
+
+    it('does not repeat a mixed-case persisted row across default list pages', async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-446655440010';
+      const persistedSessionId = liveSessionId.toUpperCase();
+      const otherSessionId = '550e8400-e29b-41d4-a716-446655440011';
+      await writeStoredSession({
+        sessionId: persistedSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'older mixed-case task',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: otherSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:05:00.000Z',
+        prompt: 'newer task',
+        mtime: new Date('2026-05-17T12:05:00.000Z'),
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            updatedAt: '2026-05-17T12:10:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      const first = await listWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+        { size: 1 },
+        { runtimeBaseDir: runtimeDir },
+      );
+      const second = await listWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+        { size: 1, cursor: first.nextCursor },
+        { runtimeBaseDir: runtimeDir },
+      );
+
+      const ids = [...first.sessions, ...second.sessions].map(
+        (session) => session.sessionId,
+      );
+      expect(ids).toEqual([otherSessionId, persistedSessionId]);
+      expect(new Set(ids).size).toBe(2);
+      expect(second.sessions[0]).toMatchObject({
+        sessionId: persistedSessionId,
+        clientCount: 1,
+      });
+    });
+
+    it('keeps a live-only row when its optional case-alias probe fails', async () => {
+      await writeStoredSessions(2);
+      const liveSessionId = '550e8400-e29b-41d4-a716-446655440099';
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockRejectedValue(
+          Object.assign(new Error('storage unavailable'), {
+            code: 'EIO',
+          }),
+        );
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:10:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      try {
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { size: 1 },
+          { runtimeBaseDir: runtimeDir },
+        );
+
+        expect(result.sessions).toContainEqual(
+          expect.objectContaining({ sessionId: liveSessionId }),
+        );
+      } finally {
+        findSessionId.mockRestore();
+      }
+    });
+
     it('keeps persisted source metadata paired during a live merge', async () => {
       const sessionId = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
       await writeStoredSession({

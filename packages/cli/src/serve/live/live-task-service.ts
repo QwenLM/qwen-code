@@ -1063,13 +1063,15 @@ export class LiveTaskService {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
     const service = createWorkspaceRuntimeSessionService(task.runtime);
+    const persistedSessionId =
+      task.persisted?.conversation.sessionId ?? task.summary.sessionId;
     const metadata =
       task.runtime.provenance === 'live-conversation'
         ? await readLoadableLiveConversationMetadata(
-            task.summary.sessionId,
+            persistedSessionId,
             service,
           )
-        : await service.readCreationMetadata(task.summary.sessionId);
+        : await service.readCreationMetadata(persistedSessionId);
     if (metadata === undefined) {
       throw new SessionNotFoundError(task.summary.sessionId);
     }
@@ -1146,31 +1148,55 @@ export class LiveTaskService {
     if (live.kind === 'unavailable') {
       throw conversationRuntimeUnavailableError();
     }
-    const runtimes =
-      live.kind === 'found'
-        ? [live.runtime]
-        : (
-            await Promise.all(
-              (
-                this.options.workspaceRegistry.listAll?.() ??
-                this.options.workspaceRegistry.list()
-              ).map(async (runtime) => ({
-                runtime,
-                exists:
-                  await createWorkspaceRuntimeSessionService(
-                    runtime,
-                  ).sessionExists(threadId),
-              })),
-            )
-          )
-            .filter((entry) => entry.exists)
-            .map((entry) => entry.runtime);
-    if (runtimes.length === 0) throw new SessionNotFoundError(threadId);
-    if (runtimes.length > 1)
-      throw new Error(`Task id is ambiguous: ${threadId}`);
-    const runtime = runtimes[0]!;
+    const resolvePersistedSessionId = async (
+      runtime: WorkspaceRuntime,
+    ): Promise<string | undefined> => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const candidate = await service.findSessionIdIgnoringCase(threadId);
+      if (
+        candidate !== undefined &&
+        (await service.sessionExists(candidate))
+      ) {
+        return candidate;
+      }
+      return (await service.sessionExists(threadId)) ? threadId : undefined;
+    };
+    let runtime: WorkspaceRuntime;
+    let persistedSessionId: string | undefined;
+    if (live.kind === 'found') {
+      runtime = live.runtime;
+      persistedSessionId = await resolvePersistedSessionId(runtime);
+    } else {
+      const matches = (
+        await Promise.all(
+          (
+            this.options.workspaceRegistry.listAll?.() ??
+            this.options.workspaceRegistry.list()
+          ).map(async (candidateRuntime) => ({
+            runtime: candidateRuntime,
+            persistedSessionId:
+              await resolvePersistedSessionId(candidateRuntime),
+          })),
+        )
+      ).filter(
+        (
+          entry,
+        ): entry is {
+          runtime: WorkspaceRuntime;
+          persistedSessionId: string;
+        } => entry.persistedSessionId !== undefined,
+      );
+      if (matches.length === 0) throw new SessionNotFoundError(threadId);
+      if (matches.length > 1)
+        throw new Error(`Task id is ambiguous: ${threadId}`);
+      runtime = matches[0]!.runtime;
+      persistedSessionId = matches[0]!.persistedSessionId;
+    }
     const service = createWorkspaceRuntimeSessionService(runtime);
-    const persisted = await service.loadSession(threadId);
+    const persisted =
+      persistedSessionId === undefined
+        ? undefined
+        : await service.loadSession(persistedSessionId);
     let summary: BridgeSessionSummary;
     try {
       summary = runtime.bridge.getSessionSummary(liveSessionId);
@@ -1183,6 +1209,7 @@ export class LiveTaskService {
       }
       let cursor: string | undefined;
       let found: BridgeSessionSummary | undefined;
+      const listedSessionId = persistedSessionId ?? threadId;
       do {
         const listed = await listWorkspaceSessionsForResponse(
           runtime.bridge,
@@ -1193,13 +1220,20 @@ export class LiveTaskService {
           },
           { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
         );
-        found = listed.sessions.find((item) => item.sessionId === threadId);
+        found = listed.sessions.find(
+          (item) => item.sessionId === listedSessionId,
+        );
         cursor = listed.nextCursor;
       } while (!found && cursor !== undefined);
       if (!found) throw new SessionNotFoundError(threadId);
       summary = found;
     }
-    return { runtime, persisted, summary, liveSessionId };
+    return {
+      runtime,
+      persisted,
+      summary,
+      liveSessionId,
+    };
   }
 }
 

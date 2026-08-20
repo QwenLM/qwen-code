@@ -17,6 +17,7 @@ import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
@@ -442,6 +443,7 @@ function mergeLiveSessionSummary(
   return {
     ...existing,
     ...live,
+    sessionId: existing.sessionId,
     createdAt: existing.createdAt,
     displayName: live.displayName ?? existing.displayName,
     // Immutable lineage; the persisted transcript is authoritative, and a live
@@ -455,6 +457,61 @@ function mergeLiveSessionSummary(
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,
   };
+}
+
+function indexUniquePersistedSessionIds(
+  sessionIds: Iterable<string>,
+): Map<string, string | undefined> {
+  const byCanonicalId = new Map<string, string | undefined>();
+  for (const sessionId of sessionIds) {
+    const canonicalId = normalizeSessionIdForLookup(sessionId);
+    if (!byCanonicalId.has(canonicalId)) {
+      byCanonicalId.set(canonicalId, sessionId);
+    } else if (byCanonicalId.get(canonicalId) !== sessionId) {
+      byCanonicalId.set(canonicalId, undefined);
+    }
+  }
+  return byCanonicalId;
+}
+
+function persistedSessionIdForLiveEntry(
+  liveSessionId: string,
+  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
+  byCanonicalId: ReadonlyMap<string, string | undefined>,
+): string | undefined {
+  if (bySessionId.has(liveSessionId)) return liveSessionId;
+  return byCanonicalId.get(normalizeSessionIdForLookup(liveSessionId));
+}
+
+async function persistedSessionExistsForLiveEntry(
+  sessionService: SessionService,
+  liveSessionId: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (
+    await sessionService.sessionExists(liveSessionId, {
+      ...(signal ? { signal } : {}),
+    })
+  ) {
+    return true;
+  }
+  signal?.throwIfAborted();
+  let persistedSessionId: string | undefined;
+  try {
+    persistedSessionId =
+      await sessionService.findSessionIdIgnoringCase(liveSessionId);
+  } catch {
+    signal?.throwIfAborted();
+    // An optional alias probe cannot authoritatively suppress the live row.
+    return false;
+  }
+  signal?.throwIfAborted();
+  return (
+    persistedSessionId !== undefined &&
+    (await sessionService.sessionExists(persistedSessionId, {
+      ...(signal ? { signal } : {}),
+    }))
+  );
 }
 
 function clonePersistedSummary(
@@ -779,6 +836,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
       ),
     );
   }
+  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+    bySessionId.keys(),
+  );
   // Activity floors: the key a row falls back to once its live entry is gone.
   const persistedTimeById = new Map(
     persisted.sessions.map((session) => [
@@ -792,16 +852,22 @@ async function listOrganizedWorkspaceSessionsForResponse(
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
-        liveSessionIds.add(live.sessionId);
-        const existing = bySessionId.get(live.sessionId);
-        const organization = snapshot.sessions.get(live.sessionId);
+        const persistedSessionId = persistedSessionIdForLiveEntry(
+          live.sessionId,
+          bySessionId,
+          persistedSessionIdByCanonicalId,
+        );
+        const listedSessionId = persistedSessionId ?? live.sessionId;
+        liveSessionIds.add(listedSessionId);
+        const existing = bySessionId.get(listedSessionId);
+        const organization = snapshot.sessions.get(listedSessionId);
         if (existing) {
           // Merged on every page, not just the first: the page-1 cursor is
           // encoded from merged activity keys, so a later page that keyed the
           // same row by its persisted mtime alone would re-admit a row whose
           // watermark leads storage and return it twice.
           bySessionId.set(
-            live.sessionId,
+            listedSessionId,
             applyOrganization(
               mergeLiveSessionSummary(existing, live),
               organization,
@@ -820,11 +886,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
           // `sessionExists` flipped to true, silently dropping the live
           // session from the response instead of merging it.
           (!persisted.truncated ||
-            !(await (readOptions.signal
-              ? sessionService.sessionExists(live.sessionId, {
-                  signal: readOptions.signal,
-                })
-              : sessionService.sessionExists(live.sessionId))))
+            !(await persistedSessionExistsForLiveEntry(
+              sessionService,
+              live.sessionId,
+              readOptions.signal,
+            )))
         ) {
           bySessionId.set(
             live.sessionId,
@@ -960,6 +1026,9 @@ async function listWorkspaceSessionsByMetadataForResponse(
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
+  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+    bySessionId.keys(),
+  );
   // Activity floors: the key a row falls back to once its live entry is gone.
   const persistedTimeById = new Map(
     persisted.sessions.map((session) => [
@@ -973,11 +1042,17 @@ async function listWorkspaceSessionsByMetadataForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
-        liveSessionIds.add(live.sessionId);
-        const existing = bySessionId.get(live.sessionId);
+        const persistedSessionId = persistedSessionIdForLiveEntry(
+          live.sessionId,
+          bySessionId,
+          persistedSessionIdByCanonicalId,
+        );
+        const listedSessionId = persistedSessionId ?? live.sessionId;
+        liveSessionIds.add(listedSessionId);
+        const existing = bySessionId.get(listedSessionId);
         if (existing) {
           bySessionId.set(
-            live.sessionId,
+            listedSessionId,
             mergeLiveSessionSummary(existing, live),
           );
         } else if (
@@ -986,11 +1061,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
           // already covers every persisted session, so skip the racy
           // re-check when nothing was truncated.
           !persisted.truncated ||
-          !(await (readOptions.signal
-            ? sessionService.sessionExists(live.sessionId, {
-                signal: readOptions.signal,
-              })
-            : sessionService.sessionExists(live.sessionId)))
+          !(await persistedSessionExistsForLiveEntry(
+            sessionService,
+            live.sessionId,
+            readOptions.signal,
+          ))
         ) {
           bySessionId.set(live.sessionId, {
             ...live,
@@ -1185,6 +1260,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+    bySessionId.keys(),
+  );
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
@@ -1195,9 +1273,15 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
   for (const live of liveSessions) {
-    const existing = bySessionId.get(live.sessionId);
+    const persistedSessionId = persistedSessionIdForLiveEntry(
+      live.sessionId,
+      bySessionId,
+      persistedSessionIdByCanonicalId,
+    );
+    const listedSessionId = persistedSessionId ?? live.sessionId;
+    const existing = bySessionId.get(listedSessionId);
     if (existing) {
-      bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
+      bySessionId.set(listedSessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
       // If this is a complete scan (no further pages), a missing
@@ -1208,11 +1292,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
       // silently dropping the live session from the response instead of
       // merging it.
       (persisted.nextCursor == null ||
-        !(await (readOptions.signal
-          ? sessionService.sessionExists(live.sessionId, {
-              signal: readOptions.signal,
-            })
-          : sessionService.sessionExists(live.sessionId))))
+        !(await persistedSessionExistsForLiveEntry(
+          sessionService,
+          live.sessionId,
+          readOptions.signal,
+        )))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,

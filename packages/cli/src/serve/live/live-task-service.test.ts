@@ -53,14 +53,28 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       sessionExists(sessionId: string) {
+        const owner = persistedSessionOwners.get(sessionId);
         return Promise.resolve(
           persistedSessions.has(sessionId) &&
-            persistedSessionOwners.get(sessionId) === this.cwd,
+            (owner === undefined || owner === this.cwd),
         );
       }
 
       async getSessionLocation(sessionId: string) {
         return (await this.sessionExists(sessionId)) ? 'active' : undefined;
+      }
+
+      async findSessionIdIgnoringCase(sessionId: string) {
+        const matches = [...persistedSessions.keys()].filter(
+          (candidate) =>
+            candidate.toLowerCase() === sessionId.toLowerCase() &&
+            (persistedSessionOwners.get(candidate) === undefined ||
+              persistedSessionOwners.get(candidate) === this.cwd),
+        );
+        if (matches.length > 1) {
+          throw new actual.SessionIdCaseConflictError(sessionId);
+        }
+        return matches[0];
       }
 
       readParentSessionId(sessionId: string) {
@@ -991,6 +1005,63 @@ describe('LiveTaskService', () => {
       sessionId,
     );
     expect(subscribeEvents).toHaveBeenCalledWith(sessionId, expect.any(Object));
+  });
+
+  it('reads mixed-case persisted history through the canonical live id', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+    const storageSessionId = sessionId.toUpperCase();
+    const summary: BridgeSessionSummary = {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:03.000Z',
+      displayName: 'Mixed-case task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set(sessionId, summary);
+    harness.resident.add(sessionId);
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'read_thread',
+      arguments: { threadId: sessionId, turnLimit: 1 },
+    });
+
+    expect(result).toMatchObject({
+      thread: { id: sessionId, preview: 'first prompt' },
+      turns: [{ id: 'user-1' }],
+    });
+  });
+
+  it('rejects ambiguous persisted case twins behind a canonical live id', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440003';
+    const storageSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Ambiguous task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(sessionId, '/conversations');
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: sessionId },
+      }),
+    ).rejects.toMatchObject({ name: 'SessionIdCaseConflictError' });
   });
 
   it('reuses a canonical live entry for a mixed-case stored task', async () => {

@@ -2892,12 +2892,12 @@ describe('SessionService', () => {
       // The twin raced away between enumeration and the presence check, so
       // nothing but the request's own unreadable file is left to occupy the id.
       const legacySessionId = sessionIdA.toUpperCase();
-      readdirSyncSpy
-        .mockReturnValueOnce([
+      readdirSpy
+        .mockResolvedValueOnce([
           `${sessionIdA}.jsonl`,
           `${legacySessionId}.jsonl`,
         ] as never)
-        .mockReturnValueOnce([] as never);
+        .mockResolvedValueOnce([] as never);
       vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
         undefined,
       );
