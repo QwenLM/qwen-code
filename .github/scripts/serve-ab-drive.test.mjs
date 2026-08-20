@@ -155,6 +155,35 @@ test('both canaries assert their own precondition', () => {
   for (const c of canaries) assert.equal(typeof c.fixtures, 'function');
 });
 
+test('the unreserved-source witness sends a source the daemon admits today', () => {
+  // The witness only diffs 200 → 400 when the daemon admits its body today:
+  // a body the daemon ALREADY refuses captures the same 400 on both arms,
+  // diffs clean, and silently covers nothing — that is how the `standalone`
+  // reservation went unseen. Mirrors the route's two reserved shapes:
+  // `standalone` (daemon-owned standalone sessions) and `default` +
+  // `realtime_voice:` (daemon-owned Live Voice sessions).
+  const witness = SCENARIOS.find(
+    (s) => s.name === 'session-create-unreserved-source',
+  );
+  assert.ok(witness, 'the admitted-source witness is missing');
+  const body = witness.body();
+  // A named source: an empty body would ride the legacy path instead.
+  assert.equal(typeof body.sourceType, 'string');
+  assert.notEqual(
+    body.sourceType,
+    'standalone',
+    'the daemon reserves `standalone` for its own sessions',
+  );
+  assert.ok(
+    !(
+      body.sourceType === 'default' &&
+      typeof body.sourceId === 'string' &&
+      body.sourceId.startsWith('realtime_voice:')
+    ),
+    'the daemon reserves the `default` + `realtime_voice:` source',
+  );
+});
+
 test('assertCanaryStatus enforces both canary shapes and leaves others alone', () => {
   const exact = { name: 'exact', expectStatus: 200 };
   assert.doesNotThrow(() => assertCanaryStatus(exact, 200, 'body'));

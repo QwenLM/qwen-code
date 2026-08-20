@@ -433,15 +433,16 @@ export const SCENARIOS = [
     project: admissionOnly,
   },
   {
-    // An ordinary, currently-unreserved source type. Admitted today; the point
-    // is that a PR which starts reserving one shows up here as 200 → 400
-    // instead of diffing clean, which is how the harness missed exactly that
-    // change once already.
+    // An ordinary, currently-unreserved source type — a real one, not an
+    // invented string: the daemon's own scheduler creates sessions under it.
+    // Admitted today; the point is that a PR which starts reserving it shows
+    // up here as 200 → 400 instead of diffing clean, which is how the harness
+    // missed exactly that change once already.
     name: 'session-create-unreserved-source',
     method: 'POST',
     path: '/session',
     auth: true,
-    body: () => ({ sourceType: 'standalone' }),
+    body: () => ({ sourceType: 'scheduled_task', sourceId: 'serve-ab' }),
     project: admissionOnly,
   },
 ];
