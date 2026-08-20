@@ -125,7 +125,10 @@ pub async fn browser_panel_open(
     require_runtime_origin(&caller, &application)?;
     let url = require_browser_url(&url)?;
     let rect = require_browser_bounds(&caller, bounds)?;
-    let existing = lock(&store.0).view.clone();
+    let existing = lock(&store.0)
+        .view
+        .clone()
+        .or_else(|| app.get_webview(BROWSER_PANEL_LABEL));
     if let Some(view) = existing {
         view.set_bounds(Rect {
             position: rect.position.into(),
@@ -134,6 +137,7 @@ pub async fn browser_panel_open(
         .map_err(|error| format!("Failed to resize the desktop browser: {error}"))?;
         {
             let mut controller = lock(&store.0);
+            controller.view = Some(view.clone());
             controller.current_url = url.to_string();
             controller.loading = true;
             controller.history.cancel_pending();
@@ -191,11 +195,26 @@ pub async fn browser_panel_open(
         .add_child(builder, rect.position, rect.size)
     {
         Ok(view) => view,
-        Err(error) => {
-            lock(&store.0).reset();
-            emit_state(&app);
-            return Err(format!("Failed to open the desktop browser: {error}"));
-        }
+        Err(error) => match app.get_webview(BROWSER_PANEL_LABEL) {
+            Some(view) => {
+                view.set_bounds(Rect {
+                    position: rect.position.into(),
+                    size: rect.size.into(),
+                })
+                .map_err(|resize_error| {
+                    format!("Failed to resize the desktop browser: {resize_error}")
+                })?;
+                view.navigate(url.clone()).map_err(|navigate_error| {
+                    format!("Failed to navigate the desktop browser: {navigate_error}")
+                })?;
+                view
+            }
+            None => {
+                lock(&store.0).reset();
+                emit_state(&app);
+                return Err(format!("Failed to open the desktop browser: {error}"));
+            }
+        },
     };
     lock(&store.0).view = Some(view);
     emit_state(&app);
@@ -417,14 +436,23 @@ fn normalize_browser_bounds(
     {
         return Err("Invalid desktop browser bounds.".to_string());
     }
-    if bounds.x + bounds.width > window_width + 1.0
-        || bounds.y + bounds.height > window_height + 1.0
+    if window_width < 1.0
+        || window_height < 1.0
+        || bounds.x >= window_width
+        || bounds.y >= window_height
     {
         return Err("Desktop browser bounds exceed the window.".to_string());
     }
+    let window_width = window_width.floor();
+    let window_height = window_height.floor();
+    let x = bounds.x.round().min(window_width - 1.0);
+    let y = bounds.y.round().min(window_height - 1.0);
     Ok(LogicalRect {
-        position: LogicalPosition::new(bounds.x.round(), bounds.y.round()),
-        size: LogicalSize::new(bounds.width.round(), bounds.height.round()),
+        position: LogicalPosition::new(x, y),
+        size: LogicalSize::new(
+            bounds.width.round().max(1.0).min(window_width - x),
+            bounds.height.round().max(1.0).min(window_height - y),
+        ),
     })
 }
 
@@ -499,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_finite_bounds_inside_the_window() {
+    fn normalizes_finite_bounds_to_the_window() {
         let valid = normalize_browser_bounds(
             BrowserPanelBounds {
                 x: 640.4,
@@ -513,6 +541,19 @@ mod tests {
         .expect("valid bounds");
         assert_eq!(valid.position.x, 640.0);
         assert_eq!(valid.size.width, 520.0);
+        let clamped = normalize_browser_bounds(
+            BrowserPanelBounds {
+                x: 900.0,
+                y: 780.0,
+                width: 400.0,
+                height: 100.0,
+            },
+            1200.0,
+            800.0,
+        )
+        .expect("clamped bounds");
+        assert_eq!(clamped.size.width, 300.0);
+        assert_eq!(clamped.size.height, 20.0);
         for bounds in [
             BrowserPanelBounds {
                 x: -1.0,
@@ -527,9 +568,9 @@ mod tests {
                 height: 10.0,
             },
             BrowserPanelBounds {
-                x: 900.0,
+                x: 1200.0,
                 y: 0.0,
-                width: 400.0,
+                width: 10.0,
                 height: 10.0,
             },
             BrowserPanelBounds {

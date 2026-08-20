@@ -86,6 +86,7 @@
         forward: '前进',
         reload: '刷新',
         title: '浏览器',
+        openError: '无法打开应用内浏览器',
       };
     }
     return {
@@ -96,6 +97,7 @@
       forward: 'Forward',
       reload: 'Reload',
       title: 'Browser',
+      openError: 'Unable to open the in-app browser',
     };
   };
 
@@ -200,6 +202,10 @@
     toolbar.append(back, forward, reload, form, external, close);
     const content = document.createElement('div');
     content.dataset.qwenDesktopBrowserContent = '';
+    const error = document.createElement('div');
+    error.dataset.qwenDesktopBrowserError = '';
+    error.hidden = true;
+    content.append(error);
     surface.append(toolbar, content);
     panel.append(resize, surface);
     return {
@@ -208,6 +214,8 @@
       close,
       content,
       external,
+      error,
+      errorLabel: labels.openError,
       forward,
       panel,
       reload,
@@ -249,11 +257,17 @@
     }
     panel.panel.hidden = false;
     panel.address.value = url;
+    panel.error.hidden = true;
     requestAnimationFrame(() => {
       const bounds = elementBounds(panel.content);
       if (!bounds) return;
-      void invoke('browser_panel_open', { url, bounds }).catch(() => {
-        panel.panel.hidden = true;
+      void invoke('browser_panel_open', { url, bounds }).catch((error) => {
+        const message =
+          error && typeof error.message === 'string'
+            ? error.message
+            : String(error);
+        panel.error.textContent = `${panel.errorLabel}: ${message}`;
+        panel.error.hidden = false;
       });
     });
   };
@@ -487,12 +501,22 @@
       border-color: var(--ring, #737373);
     }
     [data-qwen-desktop-browser-content] {
+      align-items: center;
       background: #fff;
+      display: flex;
       flex: 1 1 auto;
+      justify-content: center;
       min-height: 0;
       min-width: 0;
       position: relative;
     }
+    [data-qwen-desktop-browser-error] {
+      color: #b42318;
+      max-width: 32rem;
+      padding: 24px;
+      text-align: center;
+    }
+    [data-qwen-desktop-browser-error][hidden] { display: none; }
     ${
       IS_MACOS
         ? `

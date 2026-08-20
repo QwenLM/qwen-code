@@ -144,6 +144,7 @@ async function testWebShellBrowserPanel() {
   const documentListeners = {};
   const windowListeners = {};
   const commands = [];
+  let browserOpenError;
   const shell = new FakeElement();
   shell.isConnected = true;
   const sidebarShell = new FakeElement('div');
@@ -205,6 +206,9 @@ async function testWebShellBrowserPanel() {
       core: {
         invoke: async (command, args) => {
           commands.push({ command, args });
+          if (command === 'browser_panel_open' && browserOpenError) {
+            throw browserOpenError;
+          }
         },
       },
     },
@@ -325,6 +329,17 @@ async function testWebShellBrowserPanel() {
   assert.equal(ctrlModified.defaultPrevented, true);
   assert.equal(commands[0].command, 'browser_panel_open');
   assert.equal(commands[0].args.url, 'https://example.org/');
+  commands.length = 0;
+  browserOpenError = new Error('a webview with this label already exists');
+  click(new FakeAnchor('https://example.net/'), { ctrlKey: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const browserPanel = shell.children.find(
+    (child) => 'qwenDesktopBrowserPanel' in child.dataset,
+  );
+  const browserError = browserPanel.children[1].children[1].children[0];
+  assert.equal(browserPanel.hidden, false);
+  assert.equal(browserError.hidden, false);
+  assert.match(browserError.textContent, /already exists/);
   assert.ok(windowListeners['qwen-desktop-browser-state']);
 }
 
