@@ -9055,11 +9055,22 @@ export class Session implements SessionContext {
       } else {
         debugLogger.warn(message);
       }
-      return await finalizeRunToolResult({
+      await Promise.all(
+        dedupedFunctionCalls.map((fc) =>
+          recordSkippedToolCall(
+            fc,
+            LOOP_DETECTED_SKIP_MESSAGE,
+            false,
+            ToolErrorType.UNKNOWN,
+          ),
+        ),
+      );
+      const result = await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
         loopDetected: true,
       });
+      return { ...result, parts: [] };
     }
 
     const pushDuplicateBatch = (
