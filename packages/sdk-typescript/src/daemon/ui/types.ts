@@ -20,6 +20,7 @@ export type DaemonUiEventType =
   // Chat-stream events (Stage 1)
   | 'user.text.delta'
   | 'user.image.delta'
+  | 'user.file.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -109,6 +110,7 @@ export interface DaemonInputReference {
   kind?: string;
   label?: string;
   value?: string;
+  metadata?: unknown;
   serialized?: string;
   removable?: boolean;
 }
@@ -132,6 +134,14 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export interface DaemonUiUserFileEvent extends DaemonUiEventBase {
+  type: 'user.file.delta';
+  name: string;
+  mimeType: string;
+  attachmentId: string;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -689,6 +699,7 @@ export type DaemonUiEvent =
   // Chat-stream events
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
+  | DaemonUiUserFileEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -923,13 +934,14 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   /** Images attached to this user message (base64 data URIs). */
   images?: Array<{ data: string; mimeType: string }>;
-  /**
-   * Text file attachments on this user message (display metadata only —
-   * the content rides the prompt's resource blocks and is never stored
-   * on the block). Local optimistic messages only; daemon replays carry
-   * no attachment metadata.
-   */
-  files?: Array<{ name: string; mimeType: string }>;
+  /** File attachments on this user message. */
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -1179,7 +1191,13 @@ export interface DaemonTranscriptStore {
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
     meta?: DaemonTextDeltaMeta,
-    files?: Array<{ name: string; mimeType: string }>,
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**
