@@ -18,6 +18,7 @@ import {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
   disableTasksForSessions,
   enableTasksForSessions,
@@ -64,8 +65,13 @@ export class SessionArchiveCoordinator {
     | { promise: Promise<void>; resolve: () => void }
     | undefined;
 
+  // Lock keys are canonicalized like every other session-id lookup: batch
+  // delete/archive/unarchive lock raw caller spellings while restore locks
+  // the request spelling, and on a case-insensitive filesystem both reach
+  // the same transcript file — uncanonicalized keys would let a differently
+  // cased caller id slip past a held guard and unlink it mid-restore.
   assertNotTransitioning(sessionId: string): void {
-    if (this.exclusive.has(sessionId)) {
+    if (this.exclusive.has(normalizeSessionIdForLookup(sessionId))) {
       throw new SessionArchivingError(sessionId);
     }
   }
@@ -77,7 +83,9 @@ export class SessionArchiveCoordinator {
     if (this.maintenanceSealed) {
       throw new DaemonDrainingError();
     }
-    const uniqueSessionIds = [...new Set(sessionIds)];
+    const uniqueSessionIds = [
+      ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+    ];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
       if ((this.shared.get(sessionId) ?? 0) > 0) {
@@ -124,7 +132,9 @@ export class SessionArchiveCoordinator {
     if (this.maintenanceSealed) {
       throw new DaemonDrainingError();
     }
-    const uniqueSessionIds = [...new Set(sessionIds)];
+    const uniqueSessionIds = [
+      ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+    ];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
     }
@@ -391,7 +401,9 @@ export async function deleteDaemonSessions(params: {
     coordinatorLockHeld = false,
     onError,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -631,7 +643,9 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -791,7 +805,9 @@ export async function unarchiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);

@@ -58,6 +58,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async getSessionLocation(sessionId: string) {
+        return (await this.sessionExists(sessionId)) ? 'active' : undefined;
+      }
+
       readParentSessionId(sessionId: string) {
         return Promise.resolve(parentSessions.get(sessionId));
       }
@@ -70,6 +74,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               : {}),
           },
         );
+      }
+
+      async readCreationMetadataIfReadable(
+        sessionId: string,
+        _state: 'active' | 'archived',
+      ) {
+        if (!(await this.sessionExists(sessionId))) return undefined;
+        return this.readCreationMetadata(sessionId);
       }
 
       removeSession(sessionId: string) {

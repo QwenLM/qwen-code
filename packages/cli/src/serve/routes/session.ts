@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -39,6 +40,7 @@ import {
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -1146,7 +1148,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) throw new SessionNotFoundError(sessionId);
     }
@@ -1631,9 +1633,8 @@ export function registerSessionRoutes(
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, (candidateId) =>
-          service.readCreationMetadata(candidateId),
-        )) !== undefined
+        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
+        undefined
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -1870,7 +1871,7 @@ export function registerSessionRoutes(
       if (!exists) continue;
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
@@ -1966,7 +1967,7 @@ export function registerSessionRoutes(
         if (!exists) continue;
         const metadata = await readLoadableLiveConversationMetadata(
           sessionId,
-          (candidateId) => service.readCreationMetadata(candidateId),
+          service,
         );
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
@@ -2021,7 +2022,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) {
         throw new SessionNotFoundError(sessionId);
@@ -2303,6 +2304,21 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    if (
+      isReservedStandaloneSessionSource({
+        sourceType:
+          typeof body['sourceType'] === 'string'
+            ? body['sourceType']
+            : undefined,
+      })
+    ) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned standalone sessions.',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
     const source = parseSessionSource(body['sourceType'], body['sourceId']);
     if ('error' in source) {
       res.status(400).json({
@@ -3073,13 +3089,54 @@ export function registerSessionRoutes(
           throw error;
         }
       }
+      let restoredStorageSessionId = sessionId;
       try {
+        // The coordinator canonicalizes lock keys (every case variant of a
+        // caller id contends on one key), so the request spelling alone
+        // covers the raw-spelled batch delete/archive/unarchive locks.
+        const guardSessionService =
+          createWorkspaceRuntimeSessionService(runtime);
+        try {
+          await guardSessionService.findSessionIdIgnoringCase(sessionId);
+        } catch (error) {
+          if (
+            error instanceof SessionIdCaseConflictError &&
+            (await guardSessionService.getSessionLocation(
+              error.candidateSessionId ?? sessionId,
+            )) === 'conflict'
+          ) {
+            throw new SessionConflictError(sessionId);
+          }
+          throw error;
+        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
+            let persistedSessionId: string | undefined;
+            try {
+              persistedSessionId =
+                await sessionService.findSessionIdIgnoringCase(sessionId);
+            } catch (error) {
+              if (
+                error instanceof SessionIdCaseConflictError &&
+                (await sessionService.getSessionLocation(
+                  error.candidateSessionId ?? sessionId,
+                )) === 'conflict'
+              ) {
+                throw new SessionConflictError(sessionId);
+              }
+              throw error;
+            }
+            if (persistedSessionId) {
+              restoredStorageSessionId = persistedSessionId;
+            } else if (isInternalWorkspaceRuntime(runtime)) {
+              throw new SessionNotFoundError(sessionId);
+            }
             const location = await assertSessionLoadable(
               workspaceCwd,
-              sessionId,
+              restoredStorageSessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -3088,17 +3145,26 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
               runtime.provenance === 'live-conversation'
                 ? await readLoadableLiveConversationMetadata(
-                    sessionId,
-                    (candidateId) =>
-                      sessionService.readCreationMetadata(candidateId),
+                    restoredStorageSessionId,
+                    sessionService,
                   )
-                : await sessionService.readCreationMetadata(sessionId);
-            if (metadata === undefined) {
+                : await sessionService.readCreationMetadata(
+                    restoredStorageSessionId,
+                  );
+            // The reserved standalone source is hidden only on the internal
+            // Conversations runtime. Ordinary workspace restores keep
+            // loading legacy transcripts that happen to carry the reserved
+            // source string — create-side admission already blocks new ones,
+            // so every such transcript on an ordinary store predates the
+            // gate and must not become unreachable.
+            if (
+              metadata === undefined ||
+              (isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata))
+            ) {
               throw new SessionNotFoundError(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3119,6 +3185,10 @@ export function registerSessionRoutes(
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
               }
+              // Keyed on the canonical id, not the persisted spelling: the
+              // bridge registers the live entry under the canonical id, and
+              // every later materialize/discard call derives the directory
+              // from that same id.
               liveConversationCwd = await materialize(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3259,7 +3329,7 @@ export function registerSessionRoutes(
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
-            ).getWorktreeSessionPath(sessionId),
+            ).getWorktreeSessionPath(restoredStorageSessionId),
           ).catch(() => null);
           if (sidecar) {
             // Defense-in-depth: resolve symlinks on both the target and

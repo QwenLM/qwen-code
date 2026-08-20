@@ -1062,7 +1062,7 @@ export class LiveTaskService {
       task.runtime.provenance === 'live-conversation'
         ? await readLoadableLiveConversationMetadata(
             task.summary.sessionId,
-            (sessionId) => service.readCreationMetadata(sessionId),
+            service,
           )
         : await service.readCreationMetadata(task.summary.sessionId);
     if (metadata === undefined) {

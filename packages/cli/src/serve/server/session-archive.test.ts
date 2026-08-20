@@ -145,6 +145,30 @@ describe('SessionArchiveCoordinator', () => {
     });
   });
 
+  it('collapses case-variant spellings of a caller session id to one lock key', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440024';
+    const upper = sessionId.toUpperCase();
+
+    // Batch delete/archive/unarchive lock raw caller spellings while
+    // restore locks the request spelling; on a case-insensitive filesystem
+    // both reach the same transcript, so the two spellings must contend.
+    await coordinator.runSharedMany([sessionId], async () => {
+      await expect(
+        coordinator.runExclusiveMany([upper], async () => 'exclusive'),
+      ).rejects.toThrow(SessionArchivingError);
+    });
+
+    await coordinator.runExclusiveMany([sessionId], async () => {
+      await expect(
+        coordinator.runSharedMany([upper], async () => 'shared'),
+      ).rejects.toThrow(SessionArchivingError);
+      expect(() => coordinator.assertNotTransitioning(upper)).toThrow(
+        SessionArchivingError,
+      );
+    });
+  });
+
   it('allows concurrent shared access and reference-counts release', async () => {
     const coordinator = new SessionArchiveCoordinator();
     const sessionId = '550e8400-e29b-41d4-a716-446655440021';
@@ -275,6 +299,33 @@ describe('archiveDaemonSessions', () => {
     const result = await archiveDaemonSessions({
       sessionIds: [sessionId, sessionId],
       service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      archived: [sessionId],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
+
+  it('collapses case-variant spellings in one batch to a single archive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
       bridge: { closeSession },
       coordinator: new SessionArchiveCoordinator(),
     });
@@ -728,6 +779,30 @@ describe('unarchiveDaemonSessions', () => {
     ).toBe(false);
   });
 
+  it('collapses case-variant spellings in one batch to a single unarchive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      unarchived: [sessionId],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(false);
+  });
+
   it('does not unarchive while another writer holds the lease', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440015';
     writeSessionFile(workspaceDir, sessionId, 'archived');
@@ -976,6 +1051,29 @@ describe('deleteDaemonSessions', () => {
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
+  });
+
+  it('collapses case-variant spellings in one batch to a single delete', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440170';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
   });
 
   it('does not delete while another writer holds the lease', async () => {
