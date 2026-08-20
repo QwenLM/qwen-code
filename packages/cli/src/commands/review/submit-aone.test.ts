@@ -26,6 +26,7 @@ import { join } from 'node:path';
 const {
   ghMock,
   ghWithInputMock,
+  setGhHostMock,
   getPlatformReaderMock,
   authMock,
   submitAoneMock,
@@ -35,6 +36,7 @@ const {
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghWithInputMock: vi.fn(),
+  setGhHostMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
   authMock: vi.fn(),
   submitAoneMock: vi.fn(),
@@ -49,7 +51,7 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ...actual,
     gh: ghMock,
     ghWithInput: ghWithInputMock,
-    setGhHost: vi.fn(),
+    setGhHost: setGhHostMock,
     currentUser: vi.fn(() => 'someone-else'),
   };
 });
@@ -151,8 +153,12 @@ function base(over: Record<string, unknown> = {}) {
 }
 
 const AONE_RESULT = {
+  // postedInline and inlineCommentIds DIVERGE on purpose: an
+  // accepted-but-unreadable comment counts as posted but carries no id.
+  // submit's success JSON must read `postedInline`, not the id list —
+  // pinning the divergence pins the source.
   inlineCommentIds: [11],
-  postedInline: 1,
+  postedInline: 2,
   summaryCommentId: 12,
   summaryPosted: true,
   approved: false,
@@ -191,11 +197,14 @@ describe('submit posts an authorised Aone target through a1', () => {
     process.exitCode = undefined;
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
-    // Default: authorised, no recorded host (the `--user-authorized` fast
-    // path / bare pr-number target shape), cwd probe reads Aone.
+    // Default: authorised via the fast path with a recording that names
+    // the canonical Aone git host — the hostless fast path refuses (that
+    // refusal has its own tests below), so the posting tests carry a
+    // recorded host.
     authMock.mockReturnValue({
       ok: true,
       why: 'the user asked for this review to be published',
+      recordedHost: 'gitlab.alibaba-inc.com',
     });
     getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
     submitAoneMock.mockReturnValue({ ...AONE_RESULT });
@@ -237,12 +246,18 @@ describe('submit posts an authorised Aone target through a1', () => {
     const out = postedJson();
     expect(out.posted).toBe(true);
     expect(out.event).toBe('REQUEST_CHANGES');
-    expect(out.inlineComments).toBe(1);
+    // The success JSON reads `postedInline` (2), NOT the id list (1) —
+    // the fixture diverges the two on purpose.
+    expect(out.inlineComments).toBe(2);
     expect(out.summaryPosted).toBe(true);
     expect(out.url).toBe(AONE_RESULT.webUrl);
-    // The D6 semantic difference is named in the terminal.
+    // The D6 semantic difference is named in the terminal — conditional
+    // on what actually posted: this payload carries one inline Critical.
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('no native request-changes state'),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('1 inline Critical(s) block the merge'),
     );
   });
 
@@ -278,11 +293,19 @@ describe('submit posts an authorised Aone target through a1', () => {
   it('the AMBIENT GH_HOST never selects Aone for a write — even pointing at the canonical Aone git host', () => {
     // GH_HOST is a GitHub-ROUTING variable; read detection never consults
     // it, and a write that did could read one platform and write another.
+    // Slow-path shape (a same-session recording with `--comment`, no
+    // host): the cwd probe — not GH_HOST — decides, and it reads github.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
     getPlatformReaderMock.mockReturnValue({ kind: 'github' });
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+    ghWithInputMock.mockReturnValue('');
     process.env['GH_HOST'] = 'gitlab.alibaba-inc.com';
     expect(() =>
-      runSubmit(base(), 'unknown', { defaultComment: false }),
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
@@ -291,20 +314,27 @@ describe('submit posts an authorised Aone target through a1', () => {
   it('a wildcard *.alibaba-inc.com GH_HOST (an org GHE, not Aone) never routes to a1', () => {
     // The family suffix also names GitHub Enterprise instances; an
     // irreversible write must not take the a1 path on a family
-    // resemblance.
+    // resemblance. Same slow-path shape as above.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
     getPlatformReaderMock.mockReturnValue({ kind: 'github' });
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+    ghWithInputMock.mockReturnValue('');
     process.env['GH_HOST'] = 'ghe.alibaba-inc.com';
     expect(() =>
-      runSubmit(base(), 'unknown', { defaultComment: false }),
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
   });
 
-  it('an explicit wildcard-family --host (a GHE host) routes to gh, not a1', () => {
-    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+  it('an explicit wildcard-family --host (a GHE host) routes to gh, not a1, and binds gh at that host', () => {
+    // The explicit flag outranks the recorded Aone host — and the gh
+    // write must then ROUTE at the flag's host, not the ambient env.
+    ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base({ host: 'ghe.alibaba-inc.com' }), 'unknown', {
         defaultComment: false,
@@ -312,6 +342,27 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
+  });
+
+  it('a RECORDED family-but-non-canonical host binds the gh write at the recorded host', () => {
+    // A recorded `--host ghe.alibaba-inc.com` is family-but-NOT-canonical,
+    // so it routes at gh — and with no explicit flag the gh write must
+    // bind at the RECORDED host, not wherever the ambient env points
+    // (github.com's same-named repo otherwise).
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'ghe.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
   });
 
   it('an explicit --host OUTRANKS a recorded Aone host, in BOTH directions', () => {
@@ -324,7 +375,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       recordedHost: 'code.alibaba-inc.com',
     });
     getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+    ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base({ host: 'github.com' }), 'unknown', {
         defaultComment: false,
@@ -332,6 +383,26 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('an explicit Aone --host OUTRANKS a recorded non-Aone host too', () => {
+    // The other cell of "in BOTH directions": a recorded github.com
+    // binding must not veto an explicit canonical-Aone flag (a
+    // recorded-veto regression of the explicit arm would route the
+    // operator's re-run at gh against the documented precedence).
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'github.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    expect(() =>
+      runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
   it('a RECORDED Aone host routes to a1 even when the effective host is non-Aone', () => {
@@ -363,13 +434,57 @@ describe('submit posts an authorised Aone target through a1', () => {
       recordedHost: 'github.com',
     });
     getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+    ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(postedJson().posted).toBe(true);
+  });
+
+  it('the FAST path with no recording at all refuses — the cwd probe must not guess the platform', () => {
+    // No recording (recordedHost undefined, no recordedUnbound) is a
+    // documented degraded state: writeSkillArgs never throws, recordings
+    // are cwd-relative. With no `--host` the cwd probe alone would pick
+    // the platform of an irreversible write — fail closed instead.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'target-platform-unbound',
+    });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('no recorded review names this target'),
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('the SLOW path may still let the cwd probe decide (same-session recording)', () => {
+    // The slow path reads the CURRENT session's own recording, so it is
+    // same-session by construction — the cwd names the clone the review
+    // ran in, sound evidence rather than a guess. A bare-number recording
+    // with `--comment` and no host posts via the cwd-detected platform.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
   it('a recorded-but-hostless target still refuses — a write must not guess the platform', () => {
@@ -415,7 +530,7 @@ describe('submit posts an authorised Aone target through a1', () => {
 
     submitAoneMock.mockClear();
     ghWithInputMock.mockClear();
-    ghWithInputMock.mockReturnValue('{"id": 77}');
+    ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base({ host: 'github.com' }), 'unknown', {
         defaultComment: false,
@@ -522,6 +637,11 @@ describe('submit posts an authorised Aone target through a1', () => {
     const out = postedJson();
     expect(out.posted).toBe(true);
     expect(out.approved).toBe(true);
+    // A fully-successful native approval must NOT print the
+    // approve-failure WARNING (that would tell the operator to re-run an
+    // approval that already succeeded).
+    const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).not.toContain('a1 repo mr approve');
   });
 
   it('an approve failure keeps the post but names the missing command', () => {
@@ -546,8 +666,66 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(process.exitCode).toBeUndefined();
     expect(postedJson().posted).toBe(true);
     expect(postedJson().approved).toBe(false);
+    // Pin the FULL hand-run remedy — the pr/repo interpolations included.
+    // A transposed or --repo-less command fails by hand and the MR stays
+    // silently unapproved.
     expect(stderrMock).toHaveBeenCalledWith(
-      expect.stringContaining('a1 repo mr approve'),
+      expect.stringContaining(
+        'a1 repo mr approve 1 --repo maxcompute/odps_src',
+      ),
+    );
+  });
+
+  it('an attribution-OFF Aone post strips the severity prefix and appends the invisible marker', () => {
+    // The Aone request consumes finalComments — the attribution-off
+    // rewrite. Without this case, passing raw payload.comments stays
+    // green and an attribution-off operator posts visible prefixes and
+    // loses the marker presubmit/pr-context key on.
+    expect(() =>
+      runSubmit(base(), 'unknown', {
+        defaultComment: false,
+        attribution: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toHaveLength(1);
+    expect(req.comments[0].body).not.toContain('**[Critical]**');
+    expect(req.comments[0].body).toContain('<!-- qwen-review critical -->');
+  });
+
+  it('the Aone success JSON carries NO url key when a1 answered without detailUrl', () => {
+    // The url-ABSENCE arm is what SKILL.md Step 7's fallback keys on —
+    // emitting `"url": ""` would not satisfy "has no url".
+    submitAoneMock.mockReturnValue({ ...AONE_RESULT, webUrl: '' });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(postedJson().posted).toBe(true);
+    expect('url' in postedJson()).toBe(false);
+  });
+
+  it('a REQUEST_CHANGES with zero inline Criticals says nothing mechanically blocks', () => {
+    // All Criticals can be body-level (build/test gates, unmappable
+    // whole-PR blockers): the RC posts with no Critical discussion
+    // threads, so the Note must not claim the merge is blocked.
+    const suggestionOnly = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** Prefer a named constant here.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(suggestionOnly) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('NO inline Critical discussions'),
     );
   });
 });

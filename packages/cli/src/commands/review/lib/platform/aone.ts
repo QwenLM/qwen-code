@@ -716,18 +716,34 @@ function createMrComment(
   return createdCommentId(out);
 }
 
-/** The cause of an a1 failure for a terminal report. The FIRST line of an
- *  execFileSync error is the "Command failed: a1 …" preamble — it embeds
- *  the full argv, and a comment create's argv carries the whole comment
- *  BODY — so the cause is the first line AFTER the preamble (a1's own
- *  output), capped: a kilobyte stack trace has no place in the one line
- *  the user reads. */
+/** The cause of an a1 failure for a terminal report — the one line the
+ *  user reads, capped so a kilobyte stack trace never lands there. */
 function a1Cause(err: unknown): string {
-  const lines = (err as Error).message
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const cause = lines.slice(1).find(Boolean) ?? lines[0] ?? String(err);
+  const e = err as Error & { stderr?: Buffer | string };
+  const firstLine = (text: string): string | undefined =>
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .find(Boolean);
+  // The message an execFileSync failure raises is NOT trustworthy here:
+  // its first line is the "Command failed: a1 …" preamble, and Node embeds
+  // the FULL argv in that preamble — for a comment create, the ENTIRE
+  // multi-line comment body. Parsing the message therefore surfaces the
+  // operator's own review text, never a1's error (auth expired,
+  // `HTTP 422: line out of range`), hiding which remedy applies. a1's real
+  // error rides the captured `stderr` property; fall back to the message
+  // only for shapes with no stderr.
+  const stderr = e.stderr === undefined ? undefined : String(e.stderr);
+  const cause =
+    (stderr !== undefined ? firstLine(stderr) : undefined) ??
+    (() => {
+      const lines = (e.message ?? String(err))
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      return lines.slice(1).find(Boolean) ?? lines[0] ?? String(err);
+    })();
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
@@ -811,13 +827,16 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
         }),
       );
     }
-    // An empty body posts nothing: `-m ''` is refused by a1, and an
-    // empty summary comment would be noise. (compose-review's body is
-    // non-empty on every event this can ride; the guard keeps a
-    // future empty shape from failing the whole batch.) The blocking
-    // header a Request changes prepends rides `summaryMessage`, computed
-    // once above where the size gate reads the same bytes.
-    if (req.body.trim() !== '') {
+    // An empty summary posts nothing: `-m ''` is refused by a1, and an
+    // empty summary comment would be noise. Guard on the MESSAGE actually
+    // posted (`summaryMessage`), not the raw body — on REQUEST_CHANGES the
+    // blocking header is prepended, so a header-only summary still posts
+    // even when the composed body is empty (which compose-review produces
+    // today: C≥1 with inline-only Criticals → RC with body ''). The same
+    // `summaryMessage` is what the size gate above measures — one view of
+    // the decision, not two. (For COMMENT/APPROVE, summaryMessage ===
+    // req.body, so an empty body still skips.)
+    if (summaryMessage.trim() !== '') {
       summaryCommentId = createMrComment(
         req.prNumber,
         req.ownerRepo,

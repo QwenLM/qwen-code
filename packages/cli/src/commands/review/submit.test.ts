@@ -145,6 +145,16 @@ function args(over: Record<string, unknown> = {}) {
     pr: 6771,
     repo: 'QwenLM/qwen-code',
     review: file(`review-${seq++}.json`, REVIEW),
+    // Real runs always carry a recording (writeSkillArgs at /review start),
+    // and it is the platform evidence the write gate binds. Give the
+    // default one a github.com host WITHOUT --comment: the fast path then
+    // has host evidence (posts proceed), while slow-path refusal tests
+    // still refuse (no --comment). Tests that override `skillArgs` or
+    // `userAuthorized` steer their own shape.
+    skillArgs: file(
+      `skill-args-${seq++}.txt`,
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    ),
     userAuthorized: false,
     dryRun: false,
     ...over,
@@ -169,10 +179,11 @@ beforeEach(() => {
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
-  // The Aone detection reads the AMBIENT GH_HOST (its env arm), and the
-  // org's standard intranet export pattern is an Aone-family host — without
-  // isolating it, every recorded-host-less posting test below routes to the
-  // a1 seam instead of gh on exactly the population these tests target.
+  // Belt and braces: the write routing never consults the ambient GH_HOST
+  // (submit's platform gate documents this, and the registry reader above
+  // is pinned to github) — but `resolveGhHost` still falls back to it for
+  // the gate's host BINDING, so keep the org's standard Aone-family
+  // intranet export out of these tests anyway.
   savedGhHost = process.env['GH_HOST'];
   delete process.env['GH_HOST'];
 });
@@ -349,6 +360,24 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         { callerRepo: 'o/r', callerHost: 'ghe.corp.example' },
       ),
     ).toEqual({ floor: 'critical', source: 'explicit' });
+    // …and it recovers an Aone record across the web/git host ALIAS: the
+    // CR-URL record carries the web host (code.) while the submission
+    // carries the git host (gitlab.). Raw equality silently discarded the
+    // operator's floor exactly on this shape (the --comment gate above
+    // binds through the same hostsEquivalent).
+    expect(
+      recoverFloor(
+        'https://code.alibaba-inc.com/o/r/codereview/123 --severity-floor critical',
+        { callerRepo: 'o/r', callerHost: 'gitlab.alibaba-inc.com' },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // A genuinely different host still recovers nothing.
+    expect(
+      recoverFloor(
+        'https://code.alibaba-inc.com/o/r/codereview/123 --severity-floor critical',
+        { callerRepo: 'o/r', callerHost: 'github.com' },
+      ),
+    ).toBeUndefined();
     // …and the CALLER's identity outranks the plan's on every axis — repo:
     // a mis-transcribed planPath naming another repo must not stand the
     // CLI-typed repo's bar down…
@@ -583,6 +612,31 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         userAuthorized: true,
       }).recordedHost,
     ).toBe('code.alibaba-inc.com');
+    // The NON-Aone recorded host pins too — a gate regression keeping only
+    // Aone-family hosts would drop this binding and leave the cwd probe to
+    // select the platform (a github-recorded review, published from an
+    // Aone-origin clone, posts at Aone's same-named repo).
+    expect(
+      authFor('123 --host github.com --comment', { userAuthorized: true })
+        .recordedHost,
+    ).toBe('github.com');
+    // The repo axis binds case-INSENSITIVELY — GitHub resolves owner/repo
+    // case-insensitively server-side, so any casing variant is a valid
+    // target; a case-sensitive comparison silently dropped the recording
+    // out of platform selection (the slow path and the floor recovery both
+    // lowercase both sides).
+    expect(
+      authFor('https://code.alibaba-inc.com/O/R/codereview/123 --comment', {
+        userAuthorized: true,
+        repo: 'o/r',
+      }).recordedHost,
+    ).toBe('code.alibaba-inc.com');
+    expect(
+      authFor('https://code.alibaba-inc.com/o/r/codereview/123 --comment', {
+        userAuthorized: true,
+        repo: 'O/R',
+      }).recordedHost,
+    ).toBe('code.alibaba-inc.com');
     const bare = authFor('123 --comment', { userAuthorized: true });
     expect(bare.recordedHost).toBeUndefined();
     expect(bare.recordedUnbound).toBe(true);
@@ -679,9 +733,11 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
   });
 
   it('does not bind a sibling recording of a DIFFERENT PR', () => {
-    // A stale recording of another PR must not supply a host — the refusal
-    // would fire on the wrong target, and a stale non-Aone host would
-    // suppress the environment arms.
+    // A stale recording of another PR must not supply a host. Under the
+    // fail-closed gate, a write whose number no recording names is refused
+    // as unbound — which is itself the proof the stale host was NOT used:
+    // if it had been, the recorded Aone host would bind and the review
+    // would post at Aone instead of refusing.
     expect(() =>
       runSubmit(
         args({ userAuthorized: true, pr: 999, repo: 'maxcompute/odps_src' }),
@@ -689,15 +745,19 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
         { defaultComment: false },
       ),
     ).not.toThrow();
-    expect(process.exitCode).toBeUndefined();
-    // ghWithInput is aliased onto ghMock in this file: the post reached the
-    // wire (the write proceeded instead of refusing on a stale host).
-    expect(ghMock).toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+    expect(
+      JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+    ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('binds the repo too — a different-repo same-number recording supplies nothing', () => {
     // The recording names PR 42 of ANOTHER repo; the write targets
-    // maxcompute/odps_src — the host must not cross the repo boundary.
+    // maxcompute/odps_src — the host must not cross the repo boundary. The
+    // unbound refusal is the proof: had the other repo's host bound, this
+    // would post at Aone instead of refusing.
     writeFileSync(
       siblingFile,
       'https://code.alibaba-inc.com/other/repo/codereview/42 --comment\n',
@@ -710,8 +770,12 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
         { defaultComment: false },
       ),
     ).not.toThrow();
-    expect(process.exitCode).toBeUndefined();
-    expect(ghMock).toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+    expect(
+      JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+    ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('FAILS CLOSED on a bare-number recording with no host evidence', () => {
@@ -726,6 +790,36 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     expect(() =>
       runSubmit(
         args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const out = JSON.parse(
+      writeStdoutSpy.mock.calls.map((c) => String(c[0])).join(''),
+    ) as { posted?: boolean; reason?: string };
+    expect(out).toEqual({ posted: false, reason: 'target-platform-unbound' });
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED when NO recording exists at all (fast path, no host evidence)', () => {
+    // recordedUnbound is only set when a recording EXISTS but carries no
+    // host. When there is NO recording (writeSkillArgs never throws,
+    // recordings are cwd-relative — a publish invoked from another
+    // directory finds nothing), the lookup returns unbound: false. Before
+    // this fix the refusal keyed on recordedUnbound alone, so the no-
+    // recording case fell through to the cwd probe picking the platform of
+    // an irreversible write. It must fail closed the same way.
+    // (skillArgs points at a missing file — overriding args()'s default
+    // recording — and no sibling session names #6771.)
+    rmSync(siblingFile, { force: true });
+    expect(() =>
+      runSubmit(
+        args({
+          userAuthorized: true,
+          skillArgs: join(dir, 'no-recording-anywhere.txt'),
+        }),
         'unknown',
         { defaultComment: false },
       ),
@@ -867,12 +961,73 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('the cross-session scan is last-writer-wins by MTIME, not name order', () => {
+    // Session ids are arbitrary strings, so name order is a coin flip. The
+    // record itself is last-writer-wins; the scan must read it the same
+    // way, or an OLDER session's same-number recording supplies a stale
+    // host that masks the newest recording's hostlessness. Aone's small
+    // global MR ids collide with GitHub PR numbers easily, so the stale
+    // host routes an irreversible write at the wrong platform.
+    const oldDir = join('.qwen', 'tmp', 's-mtime-old');
+    const newDir = join('.qwen', 'tmp', 's-mtime-new');
+    const oldFile = join(oldDir, 'qwen-skill-args-review.txt');
+    const newFile = join(newDir, 'qwen-skill-args-review.txt');
+    mkdirSync(oldDir, { recursive: true });
+    mkdirSync(newDir, { recursive: true });
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      // OLDER session carried a host; NEWER session recorded a bare number.
+      writeFileSync(oldFile, '7 --host gitlab.alibaba-inc.com --comment\n');
+      writeFileSync(newFile, '7 --comment\n');
+      utimesSync(oldDir, now - 3600, now - 3600);
+      utimesSync(newDir, now, now);
+      // The newest same-PR recording (hostless) decides → unbound refusal,
+      // NOT a post at the stale session's Aone host.
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 7, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBe(3);
+      expect(
+        JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+      ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+      expect(aoneSubmitMock).not.toHaveBeenCalled();
+      expect(ghMock).not.toHaveBeenCalled();
+
+      // Reverse the mtimes: the host-carrying recording is now the newest,
+      // so it binds and the write posts at its Aone host.
+      process.exitCode = undefined;
+      aoneSubmitMock.mockClear();
+      writeStdoutSpy.mockClear();
+      utimesSync(oldDir, now, now);
+      utimesSync(newDir, now - 3600, now - 3600);
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 7, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBeUndefined();
+      expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(oldDir, { recursive: true, force: true });
+      rmSync(newDir, { recursive: true, force: true });
+    }
+  });
+
   it('never reads recordings planted OUTSIDE session dirs (worktree vector)', () => {
     // `.qwen/tmp/` also holds review worktrees checked out from the PR's
     // own tree — a malicious PR can plant a root-level args file that a
     // review materializes at a scanned path. Only `s-*` session
     // directories are scanned, so the planted host never reaches the
-    // binding.
+    // binding. With the legit session recording removed, NO recording
+    // names #42 — the write gate fails closed (the planted host must not
+    // be the evidence that saves it): if the planted file were scanned,
+    // its Aone host would bind and the review would post at Aone.
     const plantedDir = join('.qwen', 'tmp', 'review-pr-42');
     mkdirSync(plantedDir, { recursive: true });
     writeFileSync(
@@ -894,10 +1049,14 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
           { defaultComment: false },
         ),
       ).not.toThrow();
-      // The planted Aone host did NOT bind: the write proceeds (cwd pinned
-      // non-Aone by the registry mock).
-      expect(process.exitCode).toBeUndefined();
-      expect(ghMock).toHaveBeenCalled();
+      // Refused as unbound — and, the proof the planted host never
+      // reached the binding: no Aone post happened.
+      expect(process.exitCode).toBe(3);
+      expect(
+        JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+      ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+      expect(aoneSubmitMock).not.toHaveBeenCalled();
+      expect(ghMock).not.toHaveBeenCalled();
     } finally {
       rmSync(plantedDir, { recursive: true, force: true });
     }
@@ -1199,15 +1358,26 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     return plan;
   }
 
-  /** Run with the transcript env the stripped-`env` compose path reads. */
+  /** Run with the transcript env the stripped-`env` compose path reads.
+   *  Also seeds the session-scoped recording the write gate binds when a
+   *  session id is present (the caller-supplied skillArgs is ignored by
+   *  design then) — a github.com pr-url record, the platform evidence. */
   function withVerifyEnv(fn: () => void): void {
     const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
     const prevSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'SUBV';
+    const sessionRecDir = join('.qwen', 'tmp', 's-SUBV');
+    mkdirSync(sessionRecDir, { recursive: true });
+    const sessionRec = join(sessionRecDir, 'qwen-skill-args-review.txt');
+    writeFileSync(
+      sessionRec,
+      'https://github.com/QwenLM/qwen-code/pull/6771\n',
+    );
     try {
       fn();
     } finally {
+      rmSync(sessionRecDir, { recursive: true, force: true });
       if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
       else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
       if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
@@ -2806,12 +2976,21 @@ describe('the ledger marker on the body that reaches GitHub', () => {
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = SESSION;
     process.env['QWEN_CODE_MODEL'] = 'the-session-model';
+    // Seed the session-scoped recording the write gate binds when a
+    // session id is present — the platform evidence.
+    const sessionRecDir = join('.qwen', 'tmp', `s-${SESSION}`);
+    mkdirSync(sessionRecDir, { recursive: true });
+    writeFileSync(
+      join(sessionRecDir, 'qwen-skill-args-review.txt'),
+      'https://github.com/QwenLM/qwen-code/pull/6771\n',
+    );
     try {
       runSubmit(authorized({ review }));
       const ledger = parseLedger(posted().body);
       expect(ledger?.sha).toBe('deadbeef00112233');
       expect(ledger?.model).toBe('the-session-model');
     } finally {
+      rmSync(sessionRecDir, { recursive: true, force: true });
       for (const [key, prev] of [
         ['QWEN_CODE_PROJECT_DIR', prevDir],
         ['QWEN_CODE_SESSION_ID', prevSession],

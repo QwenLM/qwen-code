@@ -833,7 +833,25 @@ describe('submitAoneReview (the a1 write path)', () => {
       '--message',
       '**[Critical]** one',
     ]);
-    expect(calls[1]).toContain('--file');
+    // The MIDDLE create pinned exactly too — a loop regression pairing
+    // comments[i] with the wrong body, or re-posting the first body, must
+    // not pass while only the two ends are watched.
+    expect(calls[1]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--file',
+      'b.ts',
+      '--line',
+      '9',
+      '--message',
+      '**[Suggestion]** two',
+    ]);
     expect(calls[2]).toEqual([
       'repo',
       'mr',
@@ -846,6 +864,17 @@ describe('submitAoneReview (the a1 write path)', () => {
       '--message',
       'summary body',
     ]);
+    // The `repo mr view` read is the SOLE input of the head-drift gate —
+    // pin its argv exactly, or a transposed prNumber/ownerRepo anchors the
+    // gate on the wrong MR and every test above stays green.
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'view',
+      '7',
+      '--repo',
+      'g/p',
+    );
     // COMMENT posts no approval.
     expect(a1OnceMock).not.toHaveBeenCalled();
     expect(result.postedInline).toBe(2);
@@ -869,6 +898,13 @@ describe('submitAoneReview (the a1 write path)', () => {
       '7',
       '--repo',
       'g/p',
+    );
+    // Ordering is the POINT: the approve must interleave AFTER every
+    // comment create. An approve-before-writes mutation (MR approved but
+    // carrying no review content if the summary create then fails) must
+    // not pass — invocationCallOrder is comparable across the two mocks.
+    expect(a1OnceMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+      Math.max(...a1JsonOnceMock.mock.invocationCallOrder),
     );
     expect(result.approved).toBe(true);
     expect(result.approveError).toBeUndefined();
@@ -991,6 +1027,10 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.inlineCommentIds).toEqual([201, 202]);
     expect(result.postedInline).toBe(2);
     expect(result.summaryCommentId).toBeUndefined();
+    // The summary's accepted-but-unreadable shape is still POSTED — the
+    // first-class "accepted, id unknown" state. summaryPosted must not be
+    // conditioned on the id reading back.
+    expect(result.summaryPosted).toBe(true);
   });
 
   it('counts an accepted-but-unreadable answer as POSTED — no undercount, no throw', () => {
@@ -1007,5 +1047,135 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.inlineCommentIds).toEqual([202]);
     expect(result.summaryCommentId).toBe(203);
     expect(result.summaryPosted).toBe(true);
+  });
+
+  it('a SUMMARY-create failure reports the inlines landed, not the summary', () => {
+    // The last write dying must not read back as "and the summary landed"
+    // (a summaryPosted-before-call mutation would) — the operator would be
+    // told a verdict summary is on the MR when it is not, or re-post it.
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockReturnValueOnce({ id: 102 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: summary died');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.postedInline).toBe(2);
+    expect(partial.summaryPosted).toBe(false);
+    expect(partial.message).toContain('2 of 2');
+    expect(partial.message).not.toContain('and the summary');
+    expect(partial.ambiguous).toBe(true);
+  });
+
+  it('counts an accepted-but-unreadable inline, THEN a failing write — count stays exact', () => {
+    // The ambiguous count includes undefined ids: an earlier inline
+    // accepted with an unparseable answer, then a later create dying,
+    // must report BOTH in postedInline even though the id list holds only
+    // the readable one (an ids.length mutation undercounts exactly here).
+    a1JsonOnceMock
+      .mockReturnValueOnce(undefined) // inline #1: accepted, unreadable
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: second died');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.postedInline).toBe(1);
+    expect(partial.inlineCommentIds).toEqual([]);
+    expect(partial.message).toContain('1 of 2');
+    expect(partial.ambiguous).toBe(true);
+  });
+
+  it('the size gate pins the boundary operator — 131072 refused, 131071 posts', () => {
+    // Far-above-limit fixtures let a `>=`→`>` mutation survive: a summary
+    // of EXACTLY 131072 bytes would pass the gate and die E2BIG at exec
+    // time after every inline already landed.
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ body: 'x'.repeat(131072), comments: [] }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+
+    a1JsonOnceMock.mockClear();
+    const result = submitAoneReview(req({ body: 'x'.repeat(131071) }));
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('the size gate measures the RC HEADER-PREFIXED summary, not the raw body', () => {
+    // A REQUEST_CHANGES body just under the limit whose header-prefixed
+    // summaryMessage crosses it must refuse whole — measuring req.body
+    // instead would let the summary (deliberately LAST) die E2BIG after
+    // every inline already landed.
+    const header = '**Request changes**\n\n';
+    const body = 'x'.repeat(131072 - header.length + 1);
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ event: 'REQUEST_CHANGES', body, comments: [] }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty-body REQUEST_CHANGES still posts the blocking header', () => {
+    // compose-review produces RC with an EMPTY body today (C≥1, all
+    // Criticals inline). The header is the verdict's sole carrier on
+    // Aone — the skip guard keys on the posted summaryMessage, so a
+    // header-only summary posts instead of being dropped.
+    const result = submitAoneReview(
+      req({ event: 'REQUEST_CHANGES', body: '' }),
+    );
+    expect(result.summaryPosted).toBe(true);
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    expect(calls).toHaveLength(3); // 2 inlines + header-only summary
+    expect(calls[2][calls[2].length - 1]).toBe('**Request changes**\n\n');
+  });
+
+  it('reports a1 stderr as the cause, not a line of the comment body', () => {
+    // Node embeds the FULL argv — multi-line comment body included — in
+    // the "Command failed:" preamble, so parsing the message surfaces the
+    // operator's own review text. The real error rides the captured
+    // stderr property; the report must carry IT.
+    a1JsonOnceMock.mockImplementationOnce(() => {
+      const err = Object.assign(
+        new Error(
+          'Command failed: a1 repo mr comment create --message line one\nline two of the body',
+        ),
+        { stderr: 'HTTP 422: real a1 error\n' },
+      );
+      throw err;
+    });
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'a.ts', line: 3, body: 'b' }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.message).toContain('HTTP 422: real a1 error');
+    expect(partial.message).not.toContain('line two of the body');
   });
 });

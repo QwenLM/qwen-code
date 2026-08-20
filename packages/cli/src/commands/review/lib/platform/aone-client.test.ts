@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 
 // Mock execFileSync before aone-client.ts is loaded — same shape as
 // gh.test.ts: vi.mock is hoisted above all imports.
@@ -53,8 +54,22 @@ describe('aone-client write discipline', () => {
       '7',
     );
     expect(out).toEqual({ id: 42 });
+    // Pin the FULL argv — the caller args AND the appended --format tail.
+    // A botched rest-parameter spread would exec `a1` with no
+    // --mr/--message and die only at the irreversible write itself; no
+    // other test observes this passthrough (aone.test.ts mocks the module
+    // wholesale).
     const args = mockExecFileSync.mock.calls[0][1] as string[];
-    expect(args.slice(-2)).toEqual(['--format', 'json']);
+    expect(args).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--format',
+      'json',
+    ]);
   });
 
   it('a1JsonOnce returns undefined (not a throw) when an ACCEPTED write answers unparseably', () => {
@@ -93,5 +108,48 @@ describe('aone-client write discipline', () => {
     });
     expect(() => a1('repo', 'mr', 'view', '7')).toThrow();
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a1 (the read path) transient-error retry — the POSITIVE side', () => {
+  // Without a succeed-after-retry test, deleting the retry entirely
+  // (execA1(args, false), or dropping the `retry &&` conjunct) leaves the
+  // suite green — silently stripping the read path's 502/reset absorption.
+  // Mirrors the four-test transient block in gh.test.ts, Atomics.wait
+  // spied so the delay is skipped.
+  let atomsWaitSpy: MockInstance<typeof Atomics.wait>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    atomsWaitSpy = vi.spyOn(Atomics, 'wait').mockReturnValue('ok');
+  });
+
+  afterEach(() => {
+    atomsWaitSpy.mockRestore();
+  });
+
+  it('retries a transient HTTP 502 and succeeds on the second attempt', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw transientError();
+      })
+      .mockReturnValueOnce('{"ok":true}\n');
+
+    const result = a1('repo', 'mr', 'view', '7');
+    expect(result).toBe('{"ok":true}');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('retrying in 3000ms'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('exhausts MAX_RETRIES on a persistent transient error, then throws', () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw transientError();
+    });
+    expect(() => a1('repo', 'mr', 'view', '7')).toThrow();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 });

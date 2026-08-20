@@ -481,7 +481,6 @@ export function runSubmit(
   } = {},
 ): void {
   const { attribution = true, defaultComment = false } = opts;
-  setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
@@ -558,24 +557,35 @@ export function runSubmit(
   //    GitHub-ROUTING variable; a read would never detect Aone from it
   //    (detectPlatformKind does not read it), and a write that did could
   //    READ from one platform and WRITE to another.
-  //  - RECORDED but hostless (a bare-MR-number recording with no
-  //    `--host` flag — the canonical Aone invocation shape carries no
-  //    URL): the recording proves a review exists but not WHERE it
-  //    lives. Fail CLOSED and name the remedy (`--host`) — which this
-  //    gate honours: an explicit flag on the re-run is platform proof,
-  //    so it lifts the refusal instead of meeting it again.
+  //  - The FAST path with no host evidence at all — a recording that
+  //    names no host (a bare-MR-number recording without `--host`), or NO
+  //    recording found (writeSkillArgs never throws, recordings are
+  //    cwd-relative — a publish invoked from another directory finds
+  //    nothing) — fails CLOSED and names the remedy (`--host`), which
+  //    this gate honours: an explicit flag on the re-run is platform
+  //    proof, so it lifts the refusal instead of meeting it again. The
+  //    cwd probe may still decide a SLOW-path publish — that path reads
+  //    the current session's own recording, so it is same-session by
+  //    construction and the cwd names the clone the review ran in.
   const recordedHost = auth.recordedHost;
   const explicitHost = args.host?.trim() || undefined;
-  if (auth.recordedUnbound === true && explicitHost === undefined) {
+  const fastPathHostless =
+    auth.recordedUnbound === true ||
+    (args.userAuthorized && recordedHost === undefined);
+  if (fastPathHostless && explicitHost === undefined) {
     // Same exit-3 shape as an unauthorised refusal — Step 7 treats it as
     // a complete, correct outcome; a throw would surface as a failed
     // command an agent might retry or route around.
     writeStderrLine(
-      `REFUSED to post to ${args.repo}#${args.pr}: the recorded review ` +
-        `names no platform (a bare PR number with no \`--host\`), and a ` +
-        `public write must not guess between GitHub and Aone Code. ` +
-        `Re-run with \`--host <host>\` naming the host the target lives ` +
-        `on. The findings are in the terminal output and the saved report.`,
+      `REFUSED to post to ${args.repo}#${args.pr}: nothing this gate ` +
+        `can read names the platform the target lives on — ` +
+        (auth.recordedUnbound === true
+          ? `the recorded review is a bare PR number with no \`--host\``
+          : `no recorded review names this target at all`) +
+        ` — and a public write must not guess between GitHub and Aone ` +
+        `Code. Re-run with \`--host <host>\` naming the host the target ` +
+        `lives on. The findings are in the terminal output and the saved ` +
+        `report.`,
     );
     writeStdoutLine(
       JSON.stringify(
@@ -592,6 +602,13 @@ export function runSubmit(
     (explicitHost === undefined &&
       recordedHost === undefined &&
       getPlatformReader().kind === 'aone');
+  // The gh write binds its routing host to the SAME evidence that selected
+  // it: an explicit flag, else the recorded binding. Without the rebind a
+  // recorded non-Aone host (e.g. a GHE instance) posted wherever the
+  // ambient env pointed — github.com's same-named repo — instead of where
+  // the review actually ran. setGhHost validates its input; a1 writes
+  // never touch the gh host state.
+  if (!aoneWrite) setGhHost(explicitHost ?? recordedHost);
 
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
@@ -833,8 +850,9 @@ export function runSubmit(
           `Code: ${(err as Error).message}` +
           (landed
             ? ` Part of the review may already be on the MR — do NOT ` +
-              `re-run submit (it would post twice); inspect the MR, ` +
-              `then post any remainder manually.`
+              `re-run submit (it would post twice); inspect the MR. ` +
+              `Posting any remainder is the USER's call to make by hand ` +
+              `— it is never an agent action.`
             : ''),
       );
       writeStdoutLine(
@@ -850,14 +868,25 @@ export function runSubmit(
         (result.webUrl ? ` ${result.webUrl}` : ''),
     );
     if (event === 'REQUEST_CHANGES') {
-      // D6: no native reject exists on Aone — the blocking header and the
-      // unresolved inline Criticals carry the semantics a GitHub
-      // REQUEST_CHANGES event carries natively. Say so in the terminal.
+      // D6: no native reject exists on Aone — the blocking header and any
+      // unresolved inline Critical discussions carry the semantics a GitHub
+      // REQUEST_CHANGES event carries natively. But a REQUEST_CHANGES can
+      // post with ZERO inline Criticals (they were all body-level), and
+      // then nothing mechanically blocks the merge — say which shape this
+      // was, counted off the same comments the consistency gate marked.
+      const criticalsPosted = (payload.comments ?? []).filter(
+        (c) => severityOf(c) === 'critical',
+      ).length;
       writeStderrLine(
-        `Note: Aone Code has no native request-changes state — the ` +
-          `summary comment carries the blocking header, and the inline ` +
-          `Criticals block the merge while their discussions stay ` +
-          `unresolved.`,
+        criticalsPosted > 0
+          ? `Note: Aone Code has no native request-changes state — the ` +
+              `summary comment carries the blocking header, and the ` +
+              `${criticalsPosted} inline Critical(s) block the merge ` +
+              `while their discussions stay unresolved.`
+          : `Note: Aone Code has no native request-changes state — the ` +
+              `summary comment carries the blocking header, but this ` +
+              `review posted NO inline Critical discussions, so nothing ` +
+              `mechanically blocks the merge; the header is advisory.`,
       );
     }
     if (event === 'APPROVE' && !result.approved) {

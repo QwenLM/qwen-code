@@ -309,6 +309,29 @@ Enterprise paragraph.
     as possibly-landed (`ambiguous`), so submit's do-not-re-run advisory
     fires even when the count is zero — an accepted-then-died write must
     never read back as a clean total failure.
+  - **Hardened further (2026-08-20, verify-lane review of #9491):** the
+    sandboxed-verification review surfaced the next layer. (6) The
+    fail-closed refusal now also fires when NO recording exists at all —
+    a `--user-authorized` publish invoked from another directory finds
+    nothing, and the cwd probe alone must not pick the platform of an
+    irreversible write. (7) The gh write rebinds its routing host to the
+    same evidence that selected it (`explicitHost ?? recordedHost`), so a
+    recorded non-canonical host (a GHE instance) no longer posts wherever
+    the ambient env pointed. (8) The REQUEST_CHANGES terminal note is
+    conditioned on the inline Criticals actually posted — a body-only
+    Critical posts no discussion threads, so nothing mechanically blocks
+    the merge and the note says so. (9) `a1Cause` reads the captured
+    stderr, not the execFileSync message — the message embeds the FULL
+    argv (the multi-line comment body), so parsing it surfaced the
+    operator's review text instead of a1's error. (10) The summary
+    skip-guard keys on the posted `summaryMessage`, not the raw body — an
+    empty-body REQUEST_CHANGES still posts its blocking header, the
+    verdict's sole carrier. Host comparison is normalised once
+    (`normalizeHostSpelling`: case/port/trailing-dot) and shared by
+    `hostsEquivalent` and `isAoneCanonicalHost`; the fast-path repo axis
+    binds case-insensitively; the cross-session scan is last-writer-wins
+    by mtime, and the newest same-PR recording decides (host or unbound)
+    instead of harvesting an older session's stale host.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

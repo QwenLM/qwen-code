@@ -154,7 +154,15 @@ function lookupRecordedHost(
       const parsed = parseReviewArgs(raw, { comment: req.defaultComment });
       const t = parsed.target;
       if (t.type === 'pr-url') {
-        return t.number === req.pr && `${t.owner}/${t.repo}` === req.repo
+        // Repo axis case-INSENSITIVE — the slow-path gate and the floor
+        // recovery both lowercase both sides, and GitHub resolves
+        // owner/repo case-insensitively server-side. A case-drifted
+        // `--repo` used to make this binding vanish silently, dropping the
+        // recording out of platform selection between two writable
+        // platforms.
+        return t.number === req.pr &&
+          `${t.owner}/${t.repo}`.toLowerCase() ===
+            (req.repo ?? '').toLowerCase()
           ? t.host
           : null;
       }
@@ -180,25 +188,47 @@ function lookupRecordedHost(
       : defaultSkillArgsPath(),
   ];
   try {
-    const entries = readdirSync(SKILL_ARGS_DIR, {
-      withFileTypes: true,
-    }).sort((a, b) => a.name.localeCompare(b.name));
+    // Sibling sessions in MTIME order, newest first — session ids are
+    // arbitrary strings, so name order is a coin flip; the record itself is
+    // last-writer-wins and the cross-session scan must read it the same
+    // way, or an OLDER session's same-number recording (Aone's small global
+    // MR ids collide with GitHub PR numbers easily) supplies a stale host
+    // that masks the newest recording's hostlessness.
+    const entries = readdirSync(SKILL_ARGS_DIR, { withFileTypes: true })
+      .filter(
+        // Session directories ONLY — `.qwen/tmp/` also holds review
+        // worktrees materialized from the reviewed PR's own tree; their
+        // content is attacker-controlled and must never supply a host.
+        (entry) =>
+          entry.isDirectory() &&
+          !entry.isSymbolicLink() &&
+          /^s-/.test(entry.name),
+      )
+      .flatMap((entry) => {
+        try {
+          return [
+            {
+              path: join(
+                SKILL_ARGS_DIR,
+                entry.name,
+                'qwen-skill-args-review.txt',
+              ),
+              mtime: statSync(join(SKILL_ARGS_DIR, entry.name)).mtimeMs,
+            },
+          ];
+        } catch {
+          return [];
+        }
+      })
+      .sort((a, b) => b.mtime - a.mtime);
     for (const entry of entries) {
-      // Session directories ONLY — `.qwen/tmp/` also holds review
-      // worktrees materialized from the reviewed PR's own tree; their
-      // content is attacker-controlled and must never supply a host.
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      if (!/^s-/.test(entry.name)) continue;
-      candidates.push(
-        join(SKILL_ARGS_DIR, entry.name, 'qwen-skill-args-review.txt'),
-      );
+      candidates.push(entry.path);
     }
     candidates.push(join(SKILL_ARGS_DIR, 'qwen-skill-args-review.txt'));
   } catch {
     // No recorded-args directory at all — the session-scoped candidate
     // above is the only one.
   }
-  let sawSamePrRecording = false;
   for (const path of candidates) {
     if (!isReadableRecording(path)) continue;
     let raw: string;
@@ -209,10 +239,13 @@ function lookupRecordedHost(
     }
     const bound = bindHost(raw);
     if (bound === null) continue;
-    sawSamePrRecording = true;
-    if (bound !== undefined) return { host: bound, unbound: false };
+    // The FIRST (newest) same-PR recording decides: it yields its host, or
+    // — when it carries none — the unbound verdict. Scanning PAST a
+    // hostless newest recording to harvest an older session's host is the
+    // stale-evidence hole the mtime ordering exists to close.
+    return { host: bound, unbound: bound === undefined };
   }
-  return { host: undefined, unbound: sawSamePrRecording };
+  return { host: undefined, unbound: false };
 }
 
 /**
@@ -497,7 +530,12 @@ export function recordedSeverityFloor(opts: {
       ) {
         return undefined;
       }
-      if (t.host.toLowerCase() !== host) return undefined;
+      // hostsEquivalent, not raw equality — the same shape the `--comment`
+      // gate above binds: an Aone CR-URL record carries the web host while
+      // the submission carries the git host (one platform, two names). Raw
+      // equality silently discarded the operator's floor exactly on the
+      // Aone shape this repo supports.
+      if (!hostsEquivalent(t.host.toLowerCase(), host)) return undefined;
     } else {
       return undefined;
     }
