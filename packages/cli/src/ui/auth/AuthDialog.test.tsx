@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   AuthDialog,
   getExistingProviderSetup,
+  getProtocolSetups,
   getMaxItemsToShow,
 } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
@@ -583,6 +584,72 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         modelIdsByBaseUrl: new Map(),
       });
     }
+  });
+
+  it('computes per-protocol saved views so a protocol switch preserves the selected bucket', () => {
+    const proxyUrl = 'https://proxy.example/v1';
+    const {
+      modelIdsByBaseUrlByProtocol,
+      preserveModelsByProtocol,
+      baseUrlByProtocol,
+    } = getProtocolSetups(customProvider, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'a-oai',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+        },
+        {
+          id: 'b-oai',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+        },
+      ],
+      [AuthType.USE_ANTHROPIC]: [
+        {
+          id: 'c-ant',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+        },
+        {
+          id: 'd-ant',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+        },
+      ],
+    });
+
+    // Each protocol bucket gets its own endpoint→ids view, so the models
+    // field can be re-seeded with the selected protocol's own models.
+    expect(modelIdsByBaseUrlByProtocol.get(AuthType.USE_OPENAI)).toEqual(
+      new Map([[proxyUrl, ['a-oai', 'b-oai']]]),
+    );
+    expect(modelIdsByBaseUrlByProtocol.get(AuthType.USE_ANTHROPIC)).toEqual(
+      new Map([[proxyUrl, ['c-ant', 'd-ant']]]),
+    );
+
+    // Each protocol's preserveModels carries that bucket's own custom models
+    // (R34-2): switching to Anthropic and submitting must preserve c-ant/
+    // d-ant, not the first bucket's a-oai/b-oai.
+    expect(preserveModelsByProtocol.get(AuthType.USE_OPENAI)).toEqual([
+      { id: 'a-oai', baseUrl: proxyUrl, envKey: 'QWEN_CUSTOM_API_KEY_OPENAI' },
+      { id: 'b-oai', baseUrl: proxyUrl, envKey: 'QWEN_CUSTOM_API_KEY_OPENAI' },
+    ]);
+    expect(preserveModelsByProtocol.get(AuthType.USE_ANTHROPIC)).toEqual([
+      {
+        id: 'c-ant',
+        baseUrl: proxyUrl,
+        envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+      },
+      {
+        id: 'd-ant',
+        baseUrl: proxyUrl,
+        envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+      },
+    ]);
+
+    expect(baseUrlByProtocol.get(AuthType.USE_OPENAI)).toBe(proxyUrl);
+    expect(baseUrlByProtocol.get(AuthType.USE_ANTHROPIC)).toBe(proxyUrl);
   });
 
   it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {

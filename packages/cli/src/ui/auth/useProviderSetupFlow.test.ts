@@ -13,6 +13,7 @@ import {
   generateCustomEnvKey,
   type ModelProvidersConfig,
   type ProviderConfig,
+  type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import { describe, expect, it, vi } from 'vitest';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
@@ -952,6 +953,61 @@ describe('useProviderSetupFlow', () => {
       result.current.selectProtocol(AuthType.USE_OPENAI);
     });
     expect(result.current.state.modelIds).toBe('llama-70b, claude-sonnet-9');
+  });
+
+  it('re-seeds endpoint, key, and models from the selected protocol bucket on protocol switch', () => {
+    // R34-2/R35-12: the same baseUrl can be connected under several protocol
+    // buckets. Switching the protocol step must restore the selected
+    // protocol's own saved endpoint/key/models — not leave the field blank
+    // and not pre-fill another protocol's ids — so submitting preserves the
+    // selected bucket's models.
+    const proxyUrl = 'https://proxy.example/v1';
+    const anthropicEnvKey = generateCustomEnvKey(
+      AuthType.USE_ANTHROPIC,
+      proxyUrl,
+    );
+    const anthropicModels = [
+      { id: 'c-ant', baseUrl: proxyUrl, envKey: anthropicEnvKey },
+      { id: 'd-ant', baseUrl: proxyUrl, envKey: anthropicEnvKey },
+    ];
+    const modelIdsByBaseUrlByProtocol = new Map<
+      AuthType,
+      ReadonlyMap<string, readonly string[]>
+    >([[AuthType.USE_ANTHROPIC, new Map([[proxyUrl, ['c-ant', 'd-ant']]])]]);
+    const preserveModelsByProtocol = new Map<
+      AuthType,
+      readonly ProviderModelConfig[]
+    >([[AuthType.USE_ANTHROPIC, anthropicModels]]);
+    const baseUrlByProtocol = new Map<AuthType, string>([
+      [AuthType.USE_ANTHROPIC, proxyUrl],
+    ]);
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        customProvider,
+        AuthType.USE_OPENAI,
+        { [anthropicEnvKey]: 'sk-ant-stored' },
+        [],
+        undefined,
+        [],
+        new Map(),
+        [],
+        modelIdsByBaseUrlByProtocol,
+        preserveModelsByProtocol,
+        baseUrlByProtocol,
+      );
+    });
+
+    // Switching to Anthropic restores that bucket's saved endpoint, key, and
+    // models instead of leaving them blank.
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    expect(result.current.state.baseUrl).toBe(proxyUrl);
+    expect(result.current.state.apiKey).toBe('sk-ant-stored');
+    expect(result.current.state.modelIds).toBe('c-ant, d-ant');
   });
 
   it('restores the credential for a submitted custom endpoint', () => {

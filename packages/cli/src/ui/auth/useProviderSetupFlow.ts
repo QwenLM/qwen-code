@@ -158,6 +158,20 @@ export function useProviderSetupFlow(
       }
     >(),
   );
+  // Saved-state views per protocol (from the settings buckets), used by
+  // selectProtocol to re-seed the endpoint maps, the models field, and
+  // preserveModels when the user switches protocol — so each protocol
+  // bucket's own saved models are displayed and preserved instead of the
+  // first non-empty bucket's (R34-2/R35-12).
+  const savedModelStateByProtocolRef = useRef(
+    new Map<
+      AuthType,
+      {
+        baseUrl: string;
+        preserveModels: readonly ProviderModelConfig[];
+      }
+    >(),
+  );
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -181,10 +195,20 @@ export function useProviderSetupFlow(
       initialTrimmedDefaultModelIds?: string[],
       existingModelIdsByBaseUrl?: ReadonlyMap<string, readonly string[]>,
       preserveModels?: ProviderModelConfig[],
+      modelIdsByBaseUrlByProtocol?: ReadonlyMap<
+        AuthType,
+        ReadonlyMap<string, readonly string[]>
+      >,
+      preserveModelsByProtocol?: ReadonlyMap<
+        AuthType,
+        readonly ProviderModelConfig[]
+      >,
+      baseUrlByProtocol?: ReadonlyMap<AuthType, string>,
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
       endpointModelStateByProtocolRef.current.clear();
+      savedModelStateByProtocolRef.current.clear();
       setProvider(config);
       const steps = getVisibleSteps(config);
       setVisibleSteps(steps);
@@ -214,7 +238,9 @@ export function useProviderSetupFlow(
       setApiKey(prefillKey);
       setExistingProviderEnv(existingEnv ?? {});
       committedBaseUrlRef.current = resolved;
-      preserveModelsRef.current = preserveModels ?? [];
+      preserveModelsRef.current = [
+        ...(preserveModelsByProtocol?.get(proto) ?? preserveModels ?? []),
+      ];
 
       setApiKeyError(null);
       // Built-in defaults go to the recommended list (checked), user-added
@@ -244,6 +270,38 @@ export function useProviderSetupFlow(
       trimmedDefaultModelIdsRef.current.set(normalizedResolved, [
         ...trimmedDefaultIds,
       ]);
+      // Seed the per-protocol stashes from the settings buckets so switching
+      // protocol restores that protocol's own saved endpoint model maps,
+      // models field, and preserveModels (R34-2/R35-12) instead of the first
+      // non-empty bucket's.
+      for (const [protoKey, idsByBaseUrl] of modelIdsByBaseUrlByProtocol ??
+        []) {
+        const customByBaseUrl = new Map<string, string[]>();
+        const trimmedByBaseUrl = new Map<string, string[]>();
+        for (const [endpoint, savedIds] of idsByBaseUrl) {
+          const normalizedEndpoint = normalizeBaseUrlForMatching(endpoint);
+          const endpointDefaultSet = new Set(
+            getDefaultModelIds(config, normalizedEndpoint),
+          );
+          const savedIdSet = new Set(savedIds);
+          customByBaseUrl.set(
+            normalizedEndpoint,
+            savedIds.filter((id) => !endpointDefaultSet.has(id)),
+          );
+          trimmedByBaseUrl.set(
+            normalizedEndpoint,
+            [...endpointDefaultSet].filter((id) => !savedIdSet.has(id)),
+          );
+        }
+        endpointModelStateByProtocolRef.current.set(protoKey, {
+          customModelIds: customByBaseUrl,
+          trimmedDefaultModelIds: trimmedByBaseUrl,
+        });
+        savedModelStateByProtocolRef.current.set(protoKey, {
+          baseUrl: baseUrlByProtocol?.get(protoKey) ?? '',
+          preserveModels: preserveModelsByProtocol?.get(protoKey) ?? [],
+        });
+      }
       const initialModelIds = [
         ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
         ...customIds,
@@ -276,6 +334,7 @@ export function useProviderSetupFlow(
     customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
     endpointModelStateByProtocolRef.current.clear();
+    savedModelStateByProtocolRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -329,6 +388,13 @@ export function useProviderSetupFlow(
         trimmedDefaultModelIdsRef.current = new Map(
           stashedEndpointState?.trimmedDefaultModelIds,
         );
+        // Switch preservation to the selected protocol's own bucket: its
+        // saved models must survive the submit, not the first bucket's
+        // (R34-2/R35-12).
+        preserveModelsRef.current = [
+          ...(savedModelStateByProtocolRef.current.get(selectedProtocol)
+            ?.preserveModels ?? []),
+        ];
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
           setBaseUrl(draft.baseUrl);
@@ -339,20 +405,65 @@ export function useProviderSetupFlow(
           setModelIds(draft.modelIds);
           committedBaseUrlRef.current = draft.committedBaseUrl;
         } else {
-          // Clear baseUrl so the user types fresh; show the protocol's
-          // default endpoint as a placeholder (used if they submit blank).
-          setBaseUrl('');
-          setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
-          setApiKey('');
-          setModelIds('');
-          committedBaseUrlRef.current = '';
+          const savedState =
+            savedModelStateByProtocolRef.current.get(selectedProtocol);
+          if (provider && savedState && savedState.baseUrl) {
+            // Restore this protocol's saved endpoint, key, and models so the
+            // field shows the bucket's own models instead of being blank.
+            const savedBaseUrl = savedState.baseUrl;
+            setBaseUrl(savedBaseUrl);
+            setBaseUrlPlaceholder('');
+            const envKeyName = providerEnvKey(
+              provider,
+              selectedProtocol,
+              savedBaseUrl,
+            );
+            setApiKey(existingProviderEnv[envKeyName] ?? '');
+            const normalizedSavedBaseUrl =
+              normalizeBaseUrlForMatching(savedBaseUrl);
+            const savedCustomIds =
+              customModelIdsByBaseUrlRef.current.get(normalizedSavedBaseUrl) ??
+              [];
+            const trimmedSet = new Set(
+              trimmedDefaultModelIdsRef.current.get(normalizedSavedBaseUrl) ??
+                [],
+            );
+            setModelIds(
+              [
+                ...getDefaultModelIds(provider, savedBaseUrl).filter(
+                  (id) => !trimmedSet.has(id),
+                ),
+                ...savedCustomIds,
+              ].join(', '),
+            );
+            committedBaseUrlRef.current = savedBaseUrl;
+          } else {
+            // No saved state for this protocol: clear baseUrl so the user
+            // types fresh; show the protocol's default endpoint as a
+            // placeholder (used if they submit blank).
+            setBaseUrl('');
+            setBaseUrlPlaceholder(
+              getDefaultBaseUrlForProtocol(selectedProtocol),
+            );
+            setApiKey('');
+            setModelIds('');
+            committedBaseUrlRef.current = '';
+          }
         }
         setApiKeyError(null);
         setModelIdsError(null);
       }
       goNext();
     },
-    [apiKey, baseUrl, goNext, modelIds, protocol],
+    [
+      apiKey,
+      baseUrl,
+      existingProviderEnv,
+      goNext,
+      modelIds,
+      protocol,
+      provider,
+    ],
   );
 
   const switchEndpointModelState = useCallback(

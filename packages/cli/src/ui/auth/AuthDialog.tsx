@@ -26,6 +26,7 @@ import {
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
+  type AuthType,
   type ProviderConfig,
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
@@ -231,6 +232,95 @@ export function getExistingProviderSetup(
   };
 }
 
+/**
+ * Per-protocol saved-state views. The same baseUrl can be connected under
+ * several protocol buckets (LiteLLM-style proxies are the stated Custom
+ * Provider use case). Seeding only the first bucket means switching protocol
+ * then submitting deletes the selected bucket's saved models (their ids never
+ * reach preserveModels) and pre-fills the wrong protocol's ids (R34-2/
+ * R35-12). Compute each supported protocol's saved state so the flow can
+ * swap on protocol change.
+ */
+export function getProtocolSetups(
+  providerConfig: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+): {
+  modelIdsByBaseUrlByProtocol: ReadonlyMap<
+    AuthType,
+    ReadonlyMap<string, readonly string[]>
+  >;
+  preserveModelsByProtocol: ReadonlyMap<
+    AuthType,
+    readonly ProviderModelConfig[]
+  >;
+  baseUrlByProtocol: ReadonlyMap<AuthType, string>;
+} {
+  const supportedProtocols = providerConfig.protocolOptions?.length
+    ? providerConfig.protocolOptions
+    : [providerConfig.protocol];
+  const modelIdsByBaseUrlByProtocol = new Map<
+    AuthType,
+    Map<string, string[]>
+  >();
+  const preserveModelsByProtocol = new Map<AuthType, ProviderModelConfig[]>();
+  const baseUrlByProtocol = new Map<AuthType, string>();
+  for (const proto of supportedProtocols) {
+    const savedForProto = findExistingProviderModels(
+      providerConfig,
+      modelProviders,
+      proto,
+    );
+    if (!savedForProto || savedForProto.models.length === 0) continue;
+    const protoFirstBaseUrl = savedForProto.models[0]?.baseUrl;
+    const protoBaseUrl =
+      typeof providerConfig.baseUrl === 'string' ||
+      protoFirstBaseUrl === undefined
+        ? resolveBaseUrl(providerConfig, protoFirstBaseUrl)
+        : protoFirstBaseUrl;
+    if (protoBaseUrl) {
+      baseUrlByProtocol.set(proto, protoBaseUrl);
+    }
+    const protoModelIdsByBaseUrl = new Map<string, string[]>();
+    for (const model of savedForProto.models) {
+      const modelBaseUrl = model.baseUrl ?? protoBaseUrl;
+      if (modelBaseUrl === undefined) continue;
+      const resolvedModelBaseUrl = normalizeBaseUrlForMatching(
+        resolveBaseUrl(providerConfig, modelBaseUrl),
+      );
+      const ids = protoModelIdsByBaseUrl.get(resolvedModelBaseUrl) ?? [];
+      if (!ids.includes(model.id)) ids.push(model.id);
+      protoModelIdsByBaseUrl.set(resolvedModelBaseUrl, ids);
+    }
+    modelIdsByBaseUrlByProtocol.set(proto, protoModelIdsByBaseUrl);
+    const protoRestoredEndpoint = normalizeBaseUrlForMatching(protoBaseUrl);
+    const protoPreserveModels = savedForProto.models.flatMap((model) => {
+      if (protoBaseUrl === undefined) return [];
+      const preserved =
+        model.baseUrl === undefined
+          ? { ...model, baseUrl: protoBaseUrl }
+          : model;
+      const modelEndpoint = preserved.baseUrl ?? protoBaseUrl;
+      const belongsToAnotherEndpoint =
+        normalizeBaseUrlForMatching(modelEndpoint) !== protoRestoredEndpoint;
+      const endpointDefaults = new Set(
+        getDefaultModelIds(providerConfig, modelEndpoint),
+      );
+      const shouldPreserve =
+        (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
+        !endpointDefaults.has(preserved.id);
+      return shouldPreserve ? [preserved] : [];
+    });
+    if (protoPreserveModels.length > 0) {
+      preserveModelsByProtocol.set(proto, protoPreserveModels);
+    }
+  }
+  return {
+    modelIdsByBaseUrlByProtocol,
+    preserveModelsByProtocol,
+    baseUrlByProtocol,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
@@ -298,9 +388,16 @@ export function AuthDialog({
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
+    const mergedModelProviders = settings.merged.modelProviders as
+      | Record<string, unknown>
+      | undefined;
     const existingSetup = getExistingProviderSetup(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      mergedModelProviders,
+    );
+    const protocolSetups = getProtocolSetups(
+      providerConfig,
+      mergedModelProviders,
     );
     setupFlow.start(
       providerConfig,
@@ -311,6 +408,9 @@ export function AuthDialog({
       existingSetup.trimmedDefaultModelIds,
       existingSetup.modelIdsByBaseUrl,
       existingSetup.preserveModels,
+      protocolSetups.modelIdsByBaseUrlByProtocol,
+      protocolSetups.preserveModelsByProtocol,
+      protocolSetups.baseUrlByProtocol,
     );
     pushView('provider-setup');
   };
@@ -376,9 +476,16 @@ export function AuthDialog({
         pushView('thirdparty-select');
         break;
       case 'CUSTOM_PROVIDER': {
+        const customModelProviders = settings.merged.modelProviders as
+          | Record<string, unknown>
+          | undefined;
         const existingSetup = getExistingProviderSetup(
           customProvider,
-          settings.merged.modelProviders as Record<string, unknown> | undefined,
+          customModelProviders,
+        );
+        const customProtocolSetups = getProtocolSetups(
+          customProvider,
+          customModelProviders,
         );
         setupFlow.start(
           customProvider,
@@ -389,6 +496,9 @@ export function AuthDialog({
           existingSetup.trimmedDefaultModelIds,
           existingSetup.modelIdsByBaseUrl,
           existingSetup.preserveModels,
+          customProtocolSetups.modelIdsByBaseUrlByProtocol,
+          customProtocolSetups.preserveModelsByProtocol,
+          customProtocolSetups.baseUrlByProtocol,
         );
         pushView('provider-setup');
         break;
