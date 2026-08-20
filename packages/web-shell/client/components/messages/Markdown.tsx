@@ -320,7 +320,8 @@ function MermaidBlock({ code }: { code: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       },
-      () => {},
+      (error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
     );
   };
 
@@ -501,7 +502,8 @@ function CodeBlock({
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       },
-      () => {},
+      (error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
     );
   };
 

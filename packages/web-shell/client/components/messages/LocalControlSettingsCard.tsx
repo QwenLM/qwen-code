@@ -248,7 +248,9 @@ export function LocalControlSettingsCard() {
               variant="outline"
               size="sm"
               onClick={() =>
-                void writeClipboardText(status.url!).catch(() => {})
+                void writeClipboardText(status.url!).catch((error: unknown) =>
+                  console.warn('[web-shell] clipboard write failed:', error),
+                )
               }
             >
               <CopyIcon aria-hidden="true" />

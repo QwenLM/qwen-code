@@ -66,7 +66,9 @@ function CommitRow({
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
-      .catch(() => {});
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   useEffect(() => {

@@ -13,19 +13,22 @@
  * been decided, `writeText` only settles when the user answers the permission
  * prompt. If they block it after several seconds, the transient user
  * activation that `execCommand('copy')` needs may already have expired, so
- * the fallback can still fail. The `denied` short-circuit below covers the
- * common repeat-visit case; the first-copy prompt case is accepted.
+ * the fallback can still fail. The common repeat-visit case (permission
+ * already `denied`) is covered because `writeText` rejects promptly and the
+ * fallback runs while the gesture is still active.
+ *
+ * `writeText` is invoked synchronously in the caller's tick (no permission
+ * pre-query) so gesture-bound tests and click handlers observe the call
+ * immediately; the rejection is the fallback trigger.
  */
 export async function writeClipboardText(text: string): Promise<void> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    if ((await queryClipboardWritePermission()) !== 'denied') {
-      try {
-        await navigator.clipboard.writeText(text);
-        return;
-      } catch {
-        // Permission may be denied or the write may transiently fail; try
-        // the legacy user-gesture path before giving up.
-      }
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Permission may be denied or the write may transiently fail; try
+      // the legacy user-gesture path before giving up.
     }
   }
 
@@ -36,19 +39,6 @@ export async function writeClipboardText(text: string): Promise<void> {
   throw new Error(
     'Clipboard is not available. Open the page in a secure context (HTTPS or http://localhost) or copy the text manually.',
   );
-}
-
-async function queryClipboardWritePermission(): Promise<
-  PermissionState | undefined
-> {
-  try {
-    const status = await navigator.permissions.query({
-      name: 'clipboard-write' as PermissionName,
-    });
-    return status.state;
-  } catch {
-    return undefined;
-  }
 }
 
 function copyViaExecCommand(text: string): boolean {

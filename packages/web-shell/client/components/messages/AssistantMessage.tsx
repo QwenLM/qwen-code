@@ -63,7 +63,9 @@ export const AssistantMessage = memo(function AssistantMessage({
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => {});
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   }, [content]);
   return (
     <div className={styles.message}>

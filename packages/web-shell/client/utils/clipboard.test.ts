@@ -65,6 +65,17 @@ describe('writeClipboardText (issue #9485)', () => {
     expect(execCommand).not.toHaveBeenCalled();
   });
 
+  it('invokes writeText synchronously in the caller tick', () => {
+    const writeText = captureClipboard();
+
+    // Deliberately not awaited: click handlers and the table copy tests
+    // assert on the spy in the same tick as the click, so writeText must be
+    // called before any async deferral (no permission pre-query).
+    void writeClipboardText('sync dispatch');
+
+    expect(writeText).toHaveBeenCalledWith('sync dispatch');
+  });
+
   it('falls back to execCommand when the Clipboard API is missing', async () => {
     delete (navigator as { clipboard?: unknown }).clipboard;
     const execCommand = captureExecCommand();

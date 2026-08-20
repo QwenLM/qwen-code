@@ -21,6 +21,7 @@ describe('copyFromLastAssistantMessage without the async Clipboard API (issue #9
   let restoreClipboard: () => void;
   let execCommandMock: ReturnType<typeof vi.fn>;
   let originalExecCommand: Document['execCommand'] | undefined;
+  let copiedValue: string | null = null;
 
   beforeEach(() => {
     const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
@@ -34,13 +35,21 @@ describe('copyFromLastAssistantMessage without the async Clipboard API (issue #9
       }
     };
     originalExecCommand = document.execCommand;
-    execCommandMock = vi.fn().mockReturnValue(true);
+    execCommandMock = vi.fn().mockImplementation((command: string) => {
+      // Capture the fallback textarea's value so the test pins text
+      // fidelity, not just that execCommand ran.
+      if (command === 'copy') {
+        copiedValue = document.querySelector('textarea')?.value ?? null;
+      }
+      return true;
+    });
     document.execCommand = execCommandMock;
   });
 
   afterEach(() => {
     restoreClipboard();
     document.execCommand = originalExecCommand!;
+    copiedValue = null;
   });
 
   it('falls back to a legacy execCommand copy for /copy', async () => {
@@ -50,6 +59,7 @@ describe('copyFromLastAssistantMessage without the async Clipboard API (issue #9
     );
 
     expect(execCommandMock).toHaveBeenCalledWith('copy');
+    expect(copiedValue).toBe('hello fallback');
     expect(result).toEqual({
       status: 'info',
       message: 'Last output copied to the clipboard',

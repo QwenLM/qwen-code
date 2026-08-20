@@ -34,7 +34,9 @@ export function MessageTimestamp({
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => {});
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   }, [copyText]);
   if (timestamp === undefined && !copyText && !toolGroupSpacing) {
     return <>{children}</>;
