@@ -677,12 +677,25 @@ export function formatChannelWorkerDaemonUrl(
 ): string {
   const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
-  if (
-    normalized === '' ||
-    normalized === '0.0.0.0' ||
-    normalized === '::' ||
-    normalized === '[::]'
-  ) {
+  // R7-7: a wildcard bind's loopback has to match the FAMILY that was bound.
+  // An IPv6 wildcard socket answers 127.0.0.1 only when the kernel gives it a
+  // dual-stack mapping; on an IPv6-only host, or one with
+  // `net.ipv6.bindv6only=1` (historically Debian's default, still set on
+  // hardened hosts), it does not. Measured on this Node against a v6-only
+  // `[::]` socket: `dial 127.0.0.1` -> ECONNREFUSED while `dial ::1` -> ok;
+  // against a dual-stack `[::]` socket both succeed. So `::1` is the one
+  // address an IPv6 wildcard bind answers everywhere.
+  //
+  // `''` belongs with the IPv6 wildcards, not with `0.0.0.0`: `listen(port,
+  // '')` — exactly how this daemon binds — reports `{address: '::', family:
+  // 'IPv6'}`, so an empty --hostname IS an IPv6 wildcard bind.
+  //
+  // The v4 wildcard keeps v4 loopback: measured against `0.0.0.0`,
+  // `dial ::1` is ECONNREFUSED.
+  if (normalized === '' || normalized === '::' || normalized === '[::]') {
+    return `${scheme}://[::1]:${port}`;
+  }
+  if (normalized === '0.0.0.0') {
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;

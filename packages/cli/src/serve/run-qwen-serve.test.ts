@@ -12,6 +12,7 @@ import { X509Certificate } from 'node:crypto';
 import { extractCertificateBlocks } from './pem-certificate-blocks.js';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
@@ -1118,15 +1119,91 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
   });
 });
 
+// R7-7: dial the loopback of the family the daemon actually bound. Refuses to
+// resolve, so an offline/AF_INET6-less runner reports the reason instead of a
+// bare timeout.
+const dialLoopback = (
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; code?: string }> =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host, port, autoSelectFamily: false }, () => {
+      socket.destroy();
+      resolve({ ok: true });
+    });
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      socket.destroy();
+      resolve({ ok: false, code: err.code });
+    });
+    socket.setTimeout(2000, () => {
+      socket.destroy();
+      resolve({ ok: false, code: 'ETIMEDOUT' });
+    });
+  });
+
+const listenOn = (options: net.ListenOptions): Promise<net.Server> =>
+  new Promise((resolve, reject) => {
+    const server = net.createServer((connection) => connection.end());
+    server.once('error', reject);
+    server.listen(options, () => resolve(server));
+  });
+
 describe('formatChannelWorkerDaemonUrl', () => {
-  it.each(['', '0.0.0.0', '::', '[::]'])(
-    'uses loopback when the daemon binds wildcard host %j',
+  it('uses IPv4 loopback for the IPv4 wildcard bind', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  // R7-7: `[::]` -> 127.0.0.1 is only reachable through a dual-stack mapping
+  // the kernel is free not to give (IPv6-only hosts, net.ipv6.bindv6only=1).
+  // `''` is grouped here, not with 0.0.0.0, because `listen(port, '')` — how
+  // the daemon binds — reports `{address: '::', family: 'IPv6'}`.
+  it.each(['', '::', '[::]'])(
+    'uses IPv6 loopback when the daemon binds IPv6 wildcard host %j',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
-        'http://127.0.0.1:4170',
+        'http://[::1]:4170',
       );
     },
   );
+
+  // The oracle for the two cases above: a real socket per family, dialled at
+  // the address the worker is actually handed. A v6-only server models the
+  // bindv6only host; the dual-stack control proves the fix costs nothing
+  // there. Mutating either mapping back to the other family reddens this.
+  it('hands workers a loopback address the bound socket really answers', async () => {
+    for (const [bind, listenOptions] of [
+      ['::', { host: '::', port: 0, ipv6Only: true }],
+      ['::', { host: '::', port: 0 }],
+      ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+    ] as const) {
+      let server: net.Server;
+      try {
+        server = await listenOn(listenOptions);
+      } catch {
+        // No AF_INET6 (or no AF_INET) on this runner: nothing to measure.
+        continue;
+      }
+      try {
+        const port = (server.address() as AddressInfo).port;
+        const certified = new URL(formatChannelWorkerDaemonUrl(bind, port));
+        // URL keeps IPv6 literals bracketed; net.connect wants them bare.
+        const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
+        expect({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: await dialLoopback(dialHost, port),
+        }).toEqual({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: { ok: true },
+        });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  });
 
   it('formats concrete IPv6 hosts for URLs', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
