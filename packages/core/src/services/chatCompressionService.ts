@@ -24,6 +24,7 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -555,41 +556,6 @@ export class ChatCompressionService {
       };
     }
 
-    // Fire PreCompact hook before compression begins. Pass any user-supplied
-    // `/compress` instructions so hook scripts can read / log / amend them
-    // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
-    // additionalContext across all hooks with '\n' separators.
-    let hookExtraInstructions = '';
-    const hookSystem = config.getHookSystem();
-    if (hookSystem) {
-      const preCompactTrigger =
-        compactTrigger === 'manual'
-          ? PreCompactTrigger.Manual
-          : PreCompactTrigger.Auto;
-      try {
-        const result = await hookSystem.firePreCompactEvent(
-          preCompactTrigger,
-          opts.customInstructions ?? '',
-          signal,
-        );
-        // `getAdditionalContext()` sanitises (`<`/`>` → `&lt;`/`&gt;`) so a
-        // hook can't inject XML structure into the summary prompt. Mirrors
-        // every other call-site in this repo (toolHookTriggers, agent.ts,
-        // client.ts) — keep it consistent.
-        const merged = result?.getAdditionalContext();
-        if (merged && merged.trim().length > 0) {
-          // Cap like the user-text path: an unbounded hook payload would
-          // otherwise bypass MAX_COMPRESS_INSTRUCTIONS_CHARS and inflate the
-          // side-query prompt past a recoverable size.
-          hookExtraInstructions = merged
-            .trim()
-            .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
-        }
-      } catch (err) {
-        config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
-      }
-    }
-
     // A tool result is still pending when automatic compaction runs before
     // sendMessageStream commits the current user turn to chat history. Include
     // it in the side-query so Anthropic-compatible providers see it immediately
@@ -634,6 +600,146 @@ export class ChatCompressionService {
       );
       return coldInput;
     };
+    let cachedColdHistoryEstimate: number | undefined;
+    const getColdHistoryEstimate = () =>
+      (cachedColdHistoryEstimate ??= estimateContentTokens(
+        getColdInput().slimmedHistory,
+        slimmingConfig.imageTokenEstimate,
+      ));
+    const compressionDirectiveTokenCount = Math.ceil(
+      COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN,
+    );
+    const projectRoot =
+      config.getProjectRoot?.() ?? config.getTargetDir?.() ?? process.cwd();
+    const targetDir = config.getTargetDir?.() ?? projectRoot;
+    const reduceColdInputForAdmission = () => {
+      const slim = getColdInput();
+      const reduced = microcompactHistory(
+        slim.slimmedHistory,
+        null,
+        { toolResultsNumToKeep: 1 },
+        {
+          force: true,
+          preserveReadFileResult: (filePath) =>
+            isManagedMemoryPath(filePath, projectRoot, targetDir),
+        },
+      );
+      if (reduced.history === slim.slimmedHistory) {
+        return false;
+      }
+      coldInput = { ...slim, slimmedHistory: reduced.history };
+      cachedColdHistoryEstimate = undefined;
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] microcompacted ${reduced.meta?.toolsCleared ?? 0} ` +
+            `old tool result(s) before cold request admission`,
+        );
+      return true;
+    };
+    const estimateColdRequestInput = (systemPrompt: string) =>
+      getColdHistoryEstimate() +
+      Math.ceil(systemPrompt.length / CHARS_PER_TOKEN) +
+      compressionDirectiveTokenCount;
+    const coldRequestCannotFit = (
+      inputTokens: number,
+      receivingWindow: number,
+    ) =>
+      inputTokens +
+        COMPACTION_BUDGET_SAFETY_MARGIN +
+        MIN_COMPACTION_OUTPUT_TOKENS >
+      receivingWindow;
+    const buildInputTooLargeWarning = (
+      inputTokens: number,
+      receivingWindow: number,
+    ) =>
+      `Compression input too large: estimated input ` +
+      `${inputTokens.toLocaleString()} tokens cannot leave ` +
+      `${MIN_COMPACTION_OUTPUT_TOKENS.toLocaleString()} usable output tokens ` +
+      `within the ${receivingWindow.toLocaleString()}-token context window.`;
+    let effectiveCompactionModel =
+      config.getCompactionModel?.() ?? config.getModel();
+    let compactionWarning: string | undefined;
+    const providerSupportsCacheSharing =
+      supportsCompressionCacheSharing(config);
+    const hasProviderTokenCount =
+      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
+      chat.isLastPromptTokenCountEstimated?.() !== true;
+    const canAttemptSharedRequestBeforeHook =
+      effectiveCompactionModel === config.getModel() &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount;
+
+    // Do not fire side-effecting hooks for an input that cannot fit even with
+    // zero hook output. Hook output can only add prompt text, never make this
+    // minimum payload smaller. Skip this cold-path work while a cache-sharing
+    // request is still possible; that path deliberately preserves the full
+    // history and may succeed without any slimming.
+    if (!canAttemptSharedRequestBeforeHook) {
+      const preHookSystemInstruction = buildCompressionSystemPrompt(
+        opts.customInstructions,
+        '',
+      );
+      let preHookInputTokens = estimateColdRequestInput(
+        preHookSystemInstruction,
+      );
+      if (coldRequestCannotFit(preHookInputTokens, contextLimit)) {
+        reduceColdInputForAdmission();
+        preHookInputTokens = estimateColdRequestInput(preHookSystemInstruction);
+        if (coldRequestCannotFit(preHookInputTokens, contextLimit)) {
+          const warning = buildInputTooLargeWarning(
+            preHookInputTokens,
+            contextLimit,
+          );
+          config.getDebugLogger().warn(`[chat-compression] ${warning}`);
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus:
+                CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+              warning,
+            },
+          };
+        }
+      }
+    }
+
+    // Fire PreCompact hook before compression begins. Pass any user-supplied
+    // `/compress` instructions so hook scripts can read / log / amend them
+    // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
+    // additionalContext across all hooks with '\n' separators.
+    let hookExtraInstructions = '';
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const preCompactTrigger =
+        compactTrigger === 'manual'
+          ? PreCompactTrigger.Manual
+          : PreCompactTrigger.Auto;
+      try {
+        const result = await hookSystem.firePreCompactEvent(
+          preCompactTrigger,
+          opts.customInstructions ?? '',
+          signal,
+        );
+        // `getAdditionalContext()` sanitises (`<`/`>` → `&lt;`/`&gt;`) so a
+        // hook can't inject XML structure into the summary prompt. Mirrors
+        // every other call-site in this repo (toolHookTriggers, agent.ts,
+        // client.ts) — keep it consistent.
+        const merged = result?.getAdditionalContext();
+        if (merged && merged.trim().length > 0) {
+          // Cap like the user-text path: an unbounded hook payload would
+          // otherwise bypass MAX_COMPRESS_INSTRUCTIONS_CHARS and inflate the
+          // side-query prompt past a recoverable size.
+          hookExtraInstructions = merged
+            .trim()
+            .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
+        }
+      } catch (err) {
+        config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
+      }
+    }
 
     // Hoist the system prompt so the guard can include it in the estimate.
     const systemInstruction = buildCompressionSystemPrompt(
@@ -645,21 +751,15 @@ export class ChatCompressionService {
     // slimmed payload, fall back to the main model for this compression only.
     // Coalesce to the main model so an undefined getCompactionModel() (e.g.
     // validation failure) never leaks to the fast model via resolveDefaultModel.
-    let effectiveCompactionModel =
-      config.getCompactionModel?.() ?? config.getModel();
-    let compactionWarning: string | undefined;
     // Shared estimate of the slimmed side-query payload (history + system
-    // instruction), memoized and lazy: the cache-sharing path must not pay
-    // for slimming. The compaction-model guard adds the output reserve as
-    // its third term; the budget clamp adds the directive — keeping the
-    // leading terms in one place so the two checks cannot drift.
-    let cachedColdInputEstimate: number | undefined;
+    // instruction), memoized and lazy: the cache-sharing path must not pay for
+    // slimming. The compaction-model guard adds the output reserve, while the
+    // pre-hook and final admission checks add the directive, safety margin,
+    // and minimum output reserve. Keeping the shared terms here prevents the
+    // three checks from drifting.
     const getColdInputEstimate = () =>
-      (cachedColdInputEstimate ??=
-        estimateContentTokens(
-          getColdInput().slimmedHistory,
-          slimmingConfig.imageTokenEstimate,
-        ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
+      getColdHistoryEstimate() +
+      Math.ceil(systemInstruction.length / CHARS_PER_TOKEN);
     // Window the output budget clamps against: the window of the model that
     // actually receives the side-query. Defaults to the main model's window;
     // switched below to a distinct compaction model's window when the guard
@@ -678,18 +778,25 @@ export class ChatCompressionService {
         const window = entry?.contextWindowSize;
         // Include the system prompt and the output reserve: providers check
         // prompt + max_tokens <= window, so all three terms count.
-        const slimmedTokenEstimate =
+        let slimmedTokenEstimate =
           getColdInputEstimate() + COMPACT_MAX_OUTPUT_TOKENS;
         if (window && window > 0 && slimmedTokenEstimate > window) {
-          compactionWarning =
-            `Compaction model "${resolved.modelId}" context window ` +
-            `(${window.toLocaleString()} tokens) is too small for the current ` +
-            `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
-            `using the main model for this compression.`;
-          config
-            .getDebugLogger()
-            .warn(`[chat-compression] ${compactionWarning}`);
-          effectiveCompactionModel = config.getModel();
+          reduceColdInputForAdmission();
+          slimmedTokenEstimate =
+            getColdInputEstimate() + COMPACT_MAX_OUTPUT_TOKENS;
+          if (slimmedTokenEstimate > window) {
+            compactionWarning =
+              `Compaction model "${resolved.modelId}" context window ` +
+              `(${window.toLocaleString()} tokens) is too small for the current ` +
+              `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
+              `using the main model for this compression.`;
+            config
+              .getDebugLogger()
+              .warn(`[chat-compression] ${compactionWarning}`);
+            effectiveCompactionModel = config.getModel();
+          } else {
+            budgetWindow = window;
+          }
         } else if (window && window > 0) {
           budgetWindow = window;
         }
@@ -718,46 +825,19 @@ export class ChatCompressionService {
               `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
       }
-      const directiveTokenCount = Math.ceil(
-        COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN,
-      );
-      let coldRequestInputTokens = getColdInputEstimate() + directiveTokenCount;
-      if (
-        coldRequestInputTokens +
-          COMPACTION_BUDGET_SAFETY_MARGIN +
-          MIN_COMPACTION_OUTPUT_TOKENS >
-        budgetWindow
-      ) {
-        const reduced = microcompactHistory(
-          slim.slimmedHistory,
-          null,
-          config.getClearContextOnIdle?.() ?? {},
-          { force: true },
-        );
-        if (reduced.history !== slim.slimmedHistory) {
-          coldInput = { ...slim, slimmedHistory: reduced.history };
-          cachedColdInputEstimate = undefined;
-          slim = coldInput;
-          coldRequestInputTokens = getColdInputEstimate() + directiveTokenCount;
-          config
-            .getDebugLogger()
-            .debug(
-              `[chat-compression] microcompacted ${reduced.meta?.toolsCleared ?? 0} ` +
-                `old tool result(s) before cold request admission`,
-            );
-        }
+      let coldRequestInputTokens =
+        getColdInputEstimate() + compressionDirectiveTokenCount;
+      if (coldRequestCannotFit(coldRequestInputTokens, budgetWindow)) {
+        reduceColdInputForAdmission();
+        slim = getColdInput();
+        coldRequestInputTokens =
+          getColdInputEstimate() + compressionDirectiveTokenCount;
       }
-      if (
-        coldRequestInputTokens +
-          COMPACTION_BUDGET_SAFETY_MARGIN +
-          MIN_COMPACTION_OUTPUT_TOKENS >
-        budgetWindow
-      ) {
-        compactionWarning =
-          `Compression input too large: estimated input ` +
-          `${coldRequestInputTokens.toLocaleString()} tokens cannot leave ` +
-          `${MIN_COMPACTION_OUTPUT_TOKENS.toLocaleString()} usable output tokens ` +
-          `within the ${budgetWindow.toLocaleString()}-token context window.`;
+      if (coldRequestCannotFit(coldRequestInputTokens, budgetWindow)) {
+        compactionWarning = buildInputTooLargeWarning(
+          coldRequestInputTokens,
+          budgetWindow,
+        );
         config.getDebugLogger().warn(`[chat-compression] ${compactionWarning}`);
         return undefined;
       }
@@ -823,50 +903,56 @@ export class ChatCompressionService {
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
-    const sharedRequestText =
-      `${systemInstruction}\n\n` +
-      'Do not call tools; tool execution is disabled for this request. ' +
-      COMPRESSION_REQUEST_DIRECTIVE;
+    let sharedRequestText = '';
     const sharedPromptTokenCount =
       opts.precomputedEffectiveTokens ??
       originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);
-    const sharedDirectiveTokenCount = Math.ceil(
-      sharedRequestText.length / CHARS_PER_TOKEN,
-    );
-    const sharedGenerationConfig = {
-      ...(chat.getGenerationConfig?.() ?? {}),
-      ...opts.requestGenerationConfig,
-    };
-    const sharedRouteOverheadTokenEstimate = Math.ceil(
-      JSON.stringify({
-        systemInstruction: sharedGenerationConfig.systemInstruction,
-        tools: sharedGenerationConfig.tools,
-      }).length / CHARS_PER_TOKEN,
-    );
-    const sharedCurrentRouteTokenEstimate =
-      estimateContentTokens(
-        sideQueryHistory,
-        slimmingConfig.imageTokenEstimate,
-      ) +
-      sharedDirectiveTokenCount +
-      sharedRouteOverheadTokenEstimate;
-    const sharedAdmissionTokenCount = Math.max(
-      sharedPromptTokenCount + sharedDirectiveTokenCount,
-      sharedCurrentRouteTokenEstimate,
-    );
     const usesMainModel = effectiveCompactionModel === config.getModel();
-    const providerSupportsCacheSharing =
-      supportsCompressionCacheSharing(config);
     // The anchor must be provider-reported, not merely non-zero: an
     // estimate-derived count misses the ~15-20K system/tools overhead the
     // shared request actually carries, so `sharedRequestFits` could approve
     // a request that overflows the window. Estimate-only sessions stay on
     // the cold path until provider usage arrives.
-    const hasProviderTokenCount =
-      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
-      chat.isLastPromptTokenCountEstimated?.() !== true;
-    const sharedRequestFits =
-      sharedAdmissionTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextLimit;
+    let sharedGenerationConfig: GenerateContentConfig = {};
+    let sharedCurrentRouteTokenEstimate = 0;
+    let sharedAdmissionTokenCount = 0;
+    let sharedRequestFits = false;
+    if (
+      usesMainModel &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount
+    ) {
+      sharedRequestText =
+        `${systemInstruction}\n\n` +
+        'Do not call tools; tool execution is disabled for this request. ' +
+        COMPRESSION_REQUEST_DIRECTIVE;
+      const sharedDirectiveTokenCount = Math.ceil(
+        sharedRequestText.length / CHARS_PER_TOKEN,
+      );
+      sharedGenerationConfig = {
+        ...(chat.getGenerationConfig?.() ?? {}),
+        ...opts.requestGenerationConfig,
+      };
+      const sharedRouteOverheadTokenEstimate = Math.ceil(
+        JSON.stringify({
+          systemInstruction: sharedGenerationConfig.systemInstruction,
+          tools: sharedGenerationConfig.tools,
+        }).length / CHARS_PER_TOKEN,
+      );
+      sharedCurrentRouteTokenEstimate =
+        estimateContentTokens(
+          sideQueryHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) +
+        sharedDirectiveTokenCount +
+        sharedRouteOverheadTokenEstimate;
+      sharedAdmissionTokenCount = Math.max(
+        sharedPromptTokenCount + sharedDirectiveTokenCount,
+        sharedCurrentRouteTokenEstimate,
+      );
+      sharedRequestFits =
+        sharedAdmissionTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextLimit;
+    }
     const canShareCache =
       usesMainModel &&
       providerSupportsCacheSharing &&
