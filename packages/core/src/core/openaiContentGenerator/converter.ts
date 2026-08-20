@@ -1667,9 +1667,13 @@ export function convertOpenAIChunkToGemini(
       // "[API Error: Model response leaked thinking tags.]" mid-session.
       // Hold the block while it is incomplete, demote balanced block(s) to
       // the thought channel, and keep rejecting blocks that never close.
+      // The inline path must also run on the initial content delta: when the
+      // first chunk already carries a complete opening tag (or a whole
+      // balanced block), no pending candidate exists yet, and falling
+      // through to the leaked-tag check would reject a valid shape that
+      // depends only on stream chunking.
       const inlineOpeningTagCandidate =
         hasStructuredReasoning &&
-        pendingTagCandidate &&
         !closingTagName &&
         confirmedOpeningTagCandidate;
 

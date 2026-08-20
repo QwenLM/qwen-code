@@ -641,6 +641,61 @@ describe('OpenAIContentConverter', () => {
       expect(stream.pendingThinkingTagCandidate).toBeUndefined();
     });
 
+    it('demotes a balanced inline thinking block that arrives in a single content chunk (issue #9348)', () => {
+      // Chunking-dependent shape: the first content delta already carries the
+      // complete balanced block, so no pending tag candidate exists yet when
+      // the inline parser first sees the opening tag.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const block = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>user asked X</thinking>',
+        }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk('answer', { content: 'Answer here.' }, 'stop'),
+        stream,
+      );
+
+      expect(block.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'user asked X' },
+      ]);
+      expect(answer.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer here.' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('holds an unclosed inline thinking block that starts in the first content chunk (issue #9348)', () => {
+      // Same initial-delta path, but the block does not balance mid-stream:
+      // it must be held for a closing tag, then rejected at stream end.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>user asked X' }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>user asked X',
+      });
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
     it('still rejects an unclosed inline thinking block after reasoning (issue #9348 regression guard)', () => {
       // The fix must not weaken real leak detection: an opening tag that is
       // never balanced by a closing tag remains a PROTOCOL_TAG_LEAK.
