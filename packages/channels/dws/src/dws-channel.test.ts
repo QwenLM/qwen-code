@@ -349,6 +349,23 @@ class PolicyDwsChannel extends DwsChannel {
     return this.cursor.pendingDocumentNotifications ?? [];
   }
 
+  documentSetSize(): number {
+    return (this as unknown as { documentSet: Set<string> }).documentSet.size;
+  }
+
+  rememberDocumentReferences(count: number): void {
+    const rememberDocumentId = (
+      this as unknown as { rememberDocumentId(documentId: string): void }
+    ).rememberDocumentId.bind(this);
+    for (let index = 0; index < count; index += 1) {
+      rememberDocumentId(`doc-${index}`);
+    }
+  }
+
+  documentIds(): string[] {
+    return [...(this as unknown as { documentSet: Set<string> }).documentSet];
+  }
+
   seedPendingDocumentNotifications(count: number): void {
     this.cursor.pendingDocumentNotifications = Array.from(
       { length: count },
@@ -523,7 +540,7 @@ describe('DwsChannel', () => {
     client.identity = { profile: 'corp-only' };
 
     await expect(readyChannel(client, makeConfig())).rejects.toThrow(
-      'DWS direct messages require the authenticated identity to expose an openDingTalkId.',
+      'DWS IM sources require the authenticated identity to expose an openDingTalkId.',
     );
     expect(client.streams).toEqual([]);
   });
@@ -679,7 +696,7 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('starts ambient groups without querying account identity metadata', async () => {
+  it('requires authoritative self sender metadata for ambient groups', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
 
@@ -691,11 +708,10 @@ describe('DwsChannel', () => {
           groups: { 'cid-ambient': { requireMention: false } },
         }),
       ),
-    ).resolves.toBeDefined();
-    expect(client.streams.map((item) => item.source)).toEqual([
-      { kind: 'at' },
-      { kind: 'group', conversationId: 'cid-ambient' },
-    ]);
+    ).rejects.toThrow(
+      'DWS IM sources require the authenticated identity to expose an openDingTalkId.',
+    );
+    expect(client.streams).toEqual([]);
   });
 
   it('cancels a connection that finishes authenticating after disconnect', async () => {
@@ -2073,9 +2089,9 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('keeps polling when a document pairing notification cannot be sent', async () => {
+  it('keeps polling when a direct pairing notification cannot be sent', async () => {
     const client = new FakeDwsClient();
-    client.replyToComment.mockRejectedValueOnce(
+    client.sendImMessage.mockRejectedValueOnce(
       new DwsCommandError('comment rejected', 'not_sent'),
     );
     const { channel, bridge } = await readyPolicyChannel(
@@ -2093,11 +2109,24 @@ describe('DwsChannel', () => {
     await expect(channel.poll()).resolves.toBeUndefined();
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.replyToComment).toHaveBeenCalledWith(
-      'doc-pairing',
-      'comment-pairing',
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
       expect.stringContaining('pairing code'),
+      expect.any(String),
     );
+  });
+
+  it('bounds live document routing references', async () => {
+    const client = new FakeDwsClient();
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    channel.rememberDocumentReferences(5_001);
+
+    expect(channel.documentSetSize()).toBe(5_000);
+    expect(channel.documentIds()[0]).toBe('doc-1');
+    expect(channel.documentIds().at(-1)).toBe('doc-5000');
   });
 
   // The pending queue's only drain is an ALLOWED sender later processing the
@@ -2166,6 +2195,13 @@ describe('DwsChannel', () => {
     await expect(channel.poll()).resolves.toBeUndefined();
 
     expect(client.readDocument).not.toHaveBeenCalled();
+    expect(client.replyToComment).not.toHaveBeenCalled();
+    expect(channel.documentSetSize()).toBe(0);
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-stranger' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 
@@ -2183,7 +2219,7 @@ describe('DwsChannel', () => {
     ];
 
     await channel.poll();
-    const pairingText = client.replyToComment.mock.calls[0]?.[2];
+    const pairingText = client.sendImMessage.mock.calls[0]?.[1];
     const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
     expect(code).toBeDefined();
     expect(bridge.prompt).not.toHaveBeenCalled();
@@ -2236,7 +2272,7 @@ describe('DwsChannel', () => {
       ),
     ];
     await first.poll();
-    const pairingText = firstClient.replyToComment.mock.calls[0]?.[2];
+    const pairingText = firstClient.sendImMessage.mock.calls[0]?.[1];
     const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
     expect(code).toBeDefined();
     expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
@@ -2287,7 +2323,7 @@ describe('DwsChannel', () => {
       ];
 
       await channel.poll();
-      const pairingText = client.replyToComment.mock.calls[0]?.[2];
+      const pairingText = client.sendImMessage.mock.calls[0]?.[1];
       const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
       expect(code).toBeDefined();
       expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
@@ -2745,9 +2781,12 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('does not suppress matching peer text without an authoritative self sender', async () => {
+  it('does not suppress peer text matching bot output', async () => {
     const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
+    client.identity = {
+      profile: 'corp-only',
+      selfSenderIds: ['open-self'],
+    };
     const channel = await readyChannel(
       client,
       makeConfig({
@@ -2776,7 +2815,10 @@ describe('DwsChannel', () => {
 
   it('does not track group replies when their conversation requires mentions', async () => {
     const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
+    client.identity = {
+      profile: 'corp-only',
+      selfSenderIds: ['open-self'],
+    };
     const channel = await readyChannel(
       client,
       makeConfig({
@@ -3342,6 +3384,58 @@ describe('DwsChannel', () => {
     expect(channel.inbound).toEqual([
       expect.objectContaining({ chatId: 'doc-outage', senderId: 'open-bob' }),
     ]);
+  });
+
+  it('keeps another sender pending when an allowed turn exhausts its budget', async () => {
+    const client = new FakeDwsClient();
+    const config = makeConfig({
+      senderPolicy: 'pairing',
+      allowedUsers: ['open-bob'],
+    });
+    const name = 'sender-scoped-document-failure-dws';
+    const { channel, bridge } = await readyPolicyChannel(client, config, name);
+    vi.mocked(bridge.prompt).mockRejectedValue(new Error('agent unavailable'));
+    const now = Date.now();
+    const commentKey = 'd'.repeat(45);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'alice-pending',
+        documentMentionCard('doc-shared', commentKey),
+        { eventTime: now - 1 },
+      ),
+      message(
+        'user_im_message_receive_o2o_all',
+        'bob-failing',
+        documentMentionCard('doc-shared', commentKey),
+        { eventTime: now, senderId: 'open-bob', senderName: 'Bob' },
+      ),
+    ];
+
+    for (let round = 0; round < 6; round += 1) {
+      await channel.poll();
+    }
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(5);
+    expect(channel.pendingDocumentNotifications()).toEqual([
+      expect.objectContaining({
+        documentId: 'doc-shared',
+        commentKey,
+        senderId: 'open-alice',
+      }),
+    ]);
+
+    const pairingText = client.sendImMessage.mock.calls[0]?.[1];
+    const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
+    expect(code).toBeDefined();
+    expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+    vi.mocked(bridge.prompt).mockResolvedValue('recovered');
+    client.directMessages = [];
+
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(6);
+    expect(channel.pendingDocumentNotifications()).toEqual([]);
   });
 
   // R4-1: `pollTodos` remembers a fingerprint only on success, so a todo whose

@@ -637,30 +637,28 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     this.documentSet.clear();
     for (const documentId of this.cursor.documentIds ?? []) {
-      this.documentSet.add(documentId);
-    }
-    for (const pending of this.cursor.pendingDocumentNotifications ?? []) {
-      this.documentSet.add(pending.documentId);
+      this.rememberDocumentId(documentId);
     }
     for (const key of this.cursor.processedMessages) {
       const documentId = key.match(/^document-notification\0([^\0]+)\0/u)?.[1];
       if (documentId && /^[\p{L}\p{N}_~-]+$/u.test(documentId)) {
-        this.documentSet.add(documentId);
+        this.rememberDocumentId(documentId);
       }
     }
     this.cursor.documentIds = [...this.documentSet].slice(-MAX_PROCESSED_ITEMS);
     const selfSenderIds = [...new Set(identity.selfSenderIds ?? [])].slice(
       -MAX_SELF_SENDER_IDS,
     );
+    const previousSelfSenderIds = this.cursor.selfSenderIds;
     if (
       selfSenderIds.length === 0 &&
-      this.imStates.some(({ source }) => source.kind === 'direct')
+      previousSelfSenderIds.length === 0 &&
+      this.imStates.length > 0
     ) {
       throw new Error(
-        'DWS direct messages require the authenticated identity to expose an openDingTalkId.',
+        'DWS IM sources require the authenticated identity to expose an openDingTalkId.',
       );
     }
-    const previousSelfSenderIds = this.cursor.selfSenderIds;
     if (previousSelfSenderIds.length === 0 && selfSenderIds.length > 0) {
       this.cursor.imTargets = this.cursor.imTargets.filter(
         ({ target }) => target.kind !== 'direct',
@@ -691,6 +689,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (generation === this.lifecycleGeneration) this.disconnect();
       throw error;
     }
+  }
+
+  private rememberDocumentId(documentId: string): void {
+    this.documentSet.delete(documentId);
+    this.documentSet.add(documentId);
+    if (this.documentSet.size <= MAX_PROCESSED_ITEMS) return;
+    const oldest = this.documentSet.values().next().value;
+    if (oldest !== undefined) this.documentSet.delete(oldest);
   }
 
   disconnect(): void {
@@ -1542,7 +1548,24 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     const task = (async () => {
-      this.documentSet.add(notification.documentId);
+      // A direct message can forge a document URL, so authorize the sender
+      // before promoting its parsed IDs to authenticated document targets.
+      const gateResult = this.gate.check(message.senderId, message.senderName);
+      if (!gateResult.allowed) {
+        this.rememberImTarget(message.conversationId, {
+          kind: 'direct',
+          openDingTalkId: message.senderId,
+        });
+        if (gateResult.pairing) {
+          await this.onPairingRequired(
+            message.conversationId,
+            gateResult.pairing,
+          ).catch(() => undefined);
+        }
+        this.rememberPendingDocumentNotification(message, notification);
+        return;
+      }
+      this.rememberDocumentId(notification.documentId);
       this.cursor.documentIds = [...this.documentSet].slice(
         -MAX_PROCESSED_ITEMS,
       );
@@ -1551,22 +1574,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         message.messageId,
         message.conversationId,
       );
-      // R7-1: `(documentId, commentKey)` is reconstructed from rendered
-      // message text, so a plain DM forges a mention card that is
-      // indistinguishable from a platform notification. Reading the document
-      // here — before `handleInbound` resolves the sender gate — let any DM
-      // stranger force an authenticated read of any document this profile can
-      // reach, under the documented default `senderPolicy: 'pairing'` where
-      // the sender is never served at all. Resolve the gate first and read
-      // only for a sender this channel will actually answer; the envelope
-      // already carries a "Markdown unavailable" fallback, and the gate branch
-      // in `preflightInbound` still parks the mention exactly as before.
-      const context = this.gate.isAllowed(message.senderId)
-        ? await this.readDocumentContext(
-            notification.documentId,
-            this.pollAbortController.signal,
-          )
-        : '';
+      const context = await this.readDocumentContext(
+        notification.documentId,
+        this.pollAbortController.signal,
+      );
       const envelope: Envelope = {
         channelName: this.name,
         senderId: message.senderId,
@@ -1591,25 +1602,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         ].join('\n'),
       };
       await this.handleInbound(envelope);
-      const outcome = this.syntheticInboundOutcomes.get(envelope);
       this.syntheticInboundOutcomes.delete(envelope);
-      // A DENIED sender must not consume the slot either. `notificationKey` is
-      // (document, comment) with no sender in it, so marking it processed here
-      // dropped every LATER mention of the same comment — including one from an
-      // allowed reviewer — silently and forever, across restarts. Park it like
-      // 'pairing' instead: replay already skips a pending entry whose sender
-      // fails `gate.isAllowed`, and an allowed sender reaching the same comment
-      // clears the entry on the way through.
-      if (
-        outcome === 'pairing' ||
-        outcome === 'denied' ||
-        (!outcome && !this.gate.isAllowed(message.senderId))
-      ) {
-        this.rememberPendingDocumentNotification(message, notification);
-      } else {
-        this.markProcessedMessage(notificationKey);
-        this.removePendingDocumentNotification(notificationKey);
-      }
+      this.markProcessedMessage(notificationKey);
+      this.removePendingDocumentNotification(notificationKey);
     })();
     this.processingMessages.set(notificationKey, task);
     try {
@@ -1624,15 +1619,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // forever, starving every newer notification behind it.
         if (
           this.recordInboundFailure(notificationKey, error, () => {
-            // R6-3: mark the failing MESSAGE, not the comment. Exhausting the
-            // budget takes five polls — ~25s of transient model or bridge
-            // trouble — and `notificationKey` carries no sender, so marking it
-            // dropped every future mention of that comment from anyone,
-            // silently and across restarts, exactly as the denied-sender
-            // comment above says the park mechanism exists to avoid. Marking
-            // `key` is what stops the window re-running this message, so the
-            // R4-1 starvation this budget closes stays closed.
-            this.removePendingDocumentNotification(notificationKey);
+            // Stop retrying this message without deleting another sender's
+            // pending request for the same document comment.
+            this.removePendingDocumentNotification(
+              notificationKey,
+              message.senderId,
+            );
             this.markProcessedMessage(key);
           })
         ) {
@@ -1732,10 +1724,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.cursor.pendingDocumentNotifications = pending;
   }
 
-  private removePendingDocumentNotification(notificationKey: string): void {
+  private removePendingDocumentNotification(
+    notificationKey: string,
+    senderId?: string,
+  ): void {
     this.cursor.pendingDocumentNotifications = (
       this.cursor.pendingDocumentNotifications ?? []
-    ).filter((pending) => documentNotificationKey(pending) !== notificationKey);
+    ).filter(
+      (pending) =>
+        documentNotificationKey(pending) !== notificationKey ||
+        (senderId !== undefined && pending.senderId !== senderId),
+    );
   }
 
   private deferPendingDocumentNotification(notificationKey: string): number {

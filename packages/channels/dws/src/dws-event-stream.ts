@@ -174,6 +174,7 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
     readyTimer.unref?.();
 
     stdout.on('line', (line) => {
+      lastError = undefined;
       child.stdout.pause();
       lineQueue = lineQueue
         .then(() => onLine(line))

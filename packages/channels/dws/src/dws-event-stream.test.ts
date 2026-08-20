@@ -58,6 +58,29 @@ describe('DWS event process', () => {
     });
   });
 
+  it('clears stale process errors after a healthy event', async () => {
+    const onLine = vi.fn();
+    const onError = vi.fn();
+    const fixture = fileURLToPath(
+      new URL('./fixtures/dws-event-recovered-source.mjs', import.meta.url),
+    );
+    const subscription = await startDwsEventProcess(
+      process.execPath,
+      [fixture],
+      onLine,
+      onError,
+    );
+
+    await subscription.closed;
+
+    expect(onLine).toHaveBeenCalledWith('{"type":"recovered"}');
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      message: 'DWS event consumer stopped (0).',
+      retryable: undefined,
+    });
+  });
+
   it('serializes a burst of inbound event lines', async () => {
     let active = 0;
     let maxActive = 0;
