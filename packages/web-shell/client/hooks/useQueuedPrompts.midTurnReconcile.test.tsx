@@ -20,8 +20,8 @@ const sdkMock = vi.hoisted(() => {
   const pendingEventListeners = new Set<() => void>();
   const mock = {
     actions: {
-      uploadMedia: vi.fn(),
-      removeMedia: vi.fn(),
+      uploadAttachment: vi.fn(),
+      removeAttachment: vi.fn(),
       enqueueMidTurnMessage: vi.fn(),
       getMidTurnMessages: vi.fn(),
       submitPrompt: vi.fn(),
@@ -185,15 +185,15 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       (_message: string, opts?: { messageId?: string }) =>
         Promise.resolve({ accepted: true, messageId: opts?.messageId }),
     );
-    sdkMock.actions.uploadMedia.mockImplementation(
+    sdkMock.actions.uploadAttachment.mockImplementation(
       async (image: { mimeType?: string }) => ({
         type: 'image',
-        mediaId: 'media-1',
+        attachmentId: 'media-1',
         mimeType: image.mimeType ?? 'image/png',
         size: 3,
       }),
     );
-    sdkMock.actions.removeMedia.mockResolvedValue(true);
+    sdkMock.actions.removeAttachment.mockResolvedValue(true);
     sdkMock.actions.getMidTurnMessages.mockResolvedValue({
       messages: [],
       settledMessageIds: [],
@@ -1697,7 +1697,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       }
 
       expect(harness.editor.setText).not.toHaveBeenCalled();
-      expect(sdkMock.actions.removeMedia).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
       expect(harness.reportError).toHaveBeenCalledTimes(1);
       expect(onComplete).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([]);
@@ -1983,7 +1983,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -2003,7 +2003,6 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         return Promise.resolve({ accepted: false });
       },
     );
-    sdkMock.actions.removeMedia.mockReturnValueOnce(new Promise(() => {}));
     const harness = createHarness();
     try {
       await harness.render({ streamingState: 'responding' });
@@ -2016,7 +2015,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
-      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-1', {
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith('media-1', {
         sessionId: 'session-a',
       });
       expect(harness.result().queuedPrompts).toEqual([]);
@@ -2031,12 +2030,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     let finishUpload:
       | ((reference: {
           type: 'image';
-          mediaId: string;
+          attachmentId: string;
           mimeType: string;
           size: number;
         }) => void)
       | undefined;
-    sdkMock.actions.uploadMedia.mockReturnValueOnce(
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(
       new Promise((resolve) => {
         finishUpload = resolve;
       }),
@@ -2055,7 +2054,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         finishUpload?.({
           type: 'image',
-          mediaId: 'media-a',
+          attachmentId: 'media-a',
           mimeType: 'image/png',
           size: 3,
         });
@@ -2063,7 +2062,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
 
       expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
-      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-a', {
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith('media-a', {
         sessionId: 'session-a',
       });
     } finally {
@@ -2090,7 +2089,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -2104,7 +2103,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
   });
 
   it('restores media immediately when upload fails before admission', async () => {
-    sdkMock.actions.uploadMedia.mockRejectedValueOnce(
+    sdkMock.actions.uploadAttachment.mockRejectedValueOnce(
       new Error('upload failed'),
     );
     const harness = createHarness();
@@ -2130,15 +2129,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
   });
 
   it('removes successful uploads when another image fails', async () => {
-    sdkMock.actions.uploadMedia
+    sdkMock.actions.uploadAttachment
       .mockResolvedValueOnce({
         type: 'image',
-        mediaId: 'uploaded-before-failure',
+        attachmentId: 'uploaded-before-failure',
         mimeType: 'image/png',
         size: 3,
       })
       .mockRejectedValueOnce(new Error('second upload failed'));
-    sdkMock.actions.removeMedia.mockReturnValueOnce(new Promise(() => {}));
     const harness = createHarness();
     try {
       await harness.render({ streamingState: 'responding' });
@@ -2150,7 +2148,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
-      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith(
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
         'uploaded-before-failure',
         { sessionId: 'session-a' },
       );
@@ -2403,7 +2401,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
   });
 
   it('degrades a refresh-rebuilt row when media hydration failed', async () => {
-    // The SDK substitutes a placeholder text block for a media reference it
+    // The SDK substitutes a placeholder text block for a attachment reference it
     // could not hydrate. The rebuilt row must surface the loss (summary-only)
     // instead of silently rendering as a complete, editable row.
     sdkMock.actions.getMidTurnMessages.mockResolvedValue({
@@ -2414,7 +2412,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'text',
-              text: '[Attached media is no longer available]',
+              text: '[Attachment is no longer available]',
             },
           ],
         },
@@ -2504,6 +2502,45 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('keeps file summaries from pending-prompt content after a refresh', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-file-refresh',
+          text: 'refreshed file prompt',
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      for (let i = 0; i < 2; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        text: 'refreshed file prompt',
+        serverPromptId: 'p-file-refresh',
+        files: [{ name: 'notes.txt', media_type: 'text/plain', size: 5 }],
+        payloadCompleteness: 'summary-only',
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('keeps images on the next turn when the daemon lacks the media capability', async () => {
     const harness = createHarness();
     try {
@@ -2568,7 +2605,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'text',
-              text: '[Attached media is no longer available]',
+              text: '[Attachment is no longer available]',
             },
           ],
         },
@@ -2649,7 +2686,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -2701,7 +2738,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -2731,7 +2768,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
               { type: 'image', data: 'aW1n', mimeType: 'image/png' },
               {
                 type: 'image',
-                mediaId: 'media-2',
+                attachmentId: 'media-2',
                 mimeType: 'image/png',
                 size: 3,
               },
@@ -2915,12 +2952,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     let finishUpload:
       | ((reference: {
           type: 'image';
-          mediaId: string;
+          attachmentId: string;
           mimeType: string;
           size: number;
         }) => void)
       | undefined;
-    sdkMock.actions.uploadMedia.mockReturnValueOnce(
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(
       new Promise((resolve) => {
         finishUpload = resolve;
       }),
@@ -2939,7 +2976,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         finishUpload?.({
           type: 'image',
-          mediaId: 'media-a',
+          attachmentId: 'media-a',
           mimeType: 'image/png',
           size: 3,
         });
@@ -2985,7 +3022,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           content: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -3072,7 +3109,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
             { type: 'image', data: 'aW1n', mimeType: 'image/png' },
             {
               type: 'image',
-              mediaId: 'media-2',
+              attachmentId: 'media-2',
               mimeType: 'image/png',
               size: 3,
             },
@@ -3094,8 +3131,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(row).toMatchObject({
         serverPromptId: 'p-partial',
         payloadCompleteness: 'summary-only',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
       });
-      expect(row?.images).toBeUndefined();
     } finally {
       await harness.dispose();
     }

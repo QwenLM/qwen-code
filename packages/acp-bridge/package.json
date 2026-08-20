@@ -55,9 +55,9 @@
       "types": "./dist/sessionArtifacts.d.ts",
       "import": "./dist/sessionArtifacts.js"
     },
-    "./sessionMedia": {
-      "types": "./dist/sessionMedia.d.ts",
-      "import": "./dist/sessionMedia.js"
+    "./sessionAttachments": {
+      "types": "./dist/sessionAttachments.d.ts",
+      "import": "./dist/sessionAttachments.js"
     },
     "./daemonEventTypes": {
       "types": "./dist/daemonEventTypes.d.ts",

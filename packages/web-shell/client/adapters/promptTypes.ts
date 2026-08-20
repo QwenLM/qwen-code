@@ -6,6 +6,7 @@ export interface PromptImage {
 export interface PromptFile {
   name: string;
   media_type: string;
-  text: string;
+  data?: Blob;
+  text?: string;
   size?: number;
 }
