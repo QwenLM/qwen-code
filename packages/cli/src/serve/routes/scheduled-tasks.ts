@@ -55,6 +55,7 @@ import {
   parseChannelDelivery,
   type PublicChannelDelivery,
 } from '../../runtime/channel-delivery.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import type {
   WorkspaceRegistry,
@@ -189,7 +190,9 @@ async function teardownBoundSession(
   if (target.cleanupSession) {
     await target.cleanupSession(sessionId).catch(() => {});
   } else if (target.bridge) {
-    await target.bridge.closeSession(sessionId).catch(() => {});
+    await target.bridge
+      .closeSession(normalizeSessionIdForLookup(sessionId))
+      .catch(() => {});
     const removed = await new SessionService(target.workspaceCwd, {
       runtimeBaseDir: target.runtimeBaseDir,
     })
@@ -599,11 +602,14 @@ function registerScheduledTaskCrudRoutes(
           // list. Best-effort — a nameless session still fires correctly.
           try {
             await runWithScheduledTaskTarget(target, async () =>
-              bridge.updateSessionMetadata(boundSessionId!, {
-                displayName: scheduledTaskSessionName(
-                  nameResult.value ?? prompt,
-                ),
-              }),
+              bridge.updateSessionMetadata(
+                normalizeSessionIdForLookup(boundSessionId!),
+                {
+                  displayName: scheduledTaskSessionName(
+                    nameResult.value ?? prompt,
+                  ),
+                },
+              ),
             );
           } catch {
             // metadata update is non-critical
@@ -991,11 +997,14 @@ function registerScheduledTaskCrudRoutes(
         (patch.prompt !== undefined && updated.name === undefined);
       if (bridge && updated.sessionId && effectiveLabelChanged) {
         try {
-          bridge.updateSessionMetadata(updated.sessionId, {
-            displayName: scheduledTaskSessionName(
-              updated.name ?? updated.prompt,
-            ),
-          });
+          bridge.updateSessionMetadata(
+            normalizeSessionIdForLookup(updated.sessionId),
+            {
+              displayName: scheduledTaskSessionName(
+                updated.name ?? updated.prompt,
+              ),
+            },
+          );
         } catch {
           // non-critical — the schedule change already persisted
         }
@@ -1096,7 +1105,7 @@ function registerScheduledTaskCrudRoutes(
       if (boundSessionId && bridge) {
         try {
           await runWithScheduledTaskTarget(target, () =>
-            bridge.closeSession(boundSessionId!),
+            bridge.closeSession(normalizeSessionIdForLookup(boundSessionId!)),
           );
         } catch (error) {
           if (sendActivityGateError(res, error)) return;

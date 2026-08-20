@@ -1258,7 +1258,7 @@ describe('LiveTaskService', () => {
     expect(sessionIdLookups).toEqual([]);
   });
 
-  it('uses a unique cold owner despite an unrelated workspace scan failure', async () => {
+  it('rejects a cold owner that cannot be proven across workspaces', async () => {
     const harness = makeHarness();
     const sessionId = '550e8400-e29b-41d4-a716-446655440004';
     const summary: BridgeSessionSummary = {
@@ -1271,12 +1271,11 @@ describe('LiveTaskService', () => {
     };
     persistedSessions.set(sessionId, persisted(sessionId));
     persistedSessionOwners.set(sessionId, '/project');
-    sessionIdLookupErrors.set(
-      `/conversations:${sessionId}`,
-      Object.assign(new Error('EIO: unrelated catalog unavailable'), {
-        code: 'EIO',
-      }),
+    const error = Object.assign(
+      new Error('EIO: unrelated catalog unavailable'),
+      { code: 'EIO' },
     );
+    sessionIdLookupErrors.set(`/conversations:${sessionId}`, error);
     listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
 
     await expect(
@@ -1285,9 +1284,7 @@ describe('LiveTaskService', () => {
         name: 'read_thread',
         arguments: { threadId: sessionId },
       }),
-    ).resolves.toMatchObject({
-      thread: { id: sessionId, preview: 'first prompt' },
-    });
+    ).rejects.toBe(error);
   });
 
   it('preserves a cold scan failure when no workspace owns the task', async () => {

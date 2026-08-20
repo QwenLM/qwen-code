@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
+
 export interface ChannelDeliveryAuthorizationTarget {
   channelName: string;
   type: 'user' | 'chat';
@@ -39,7 +41,11 @@ function authorizationKey(
   sessionId: string,
   id: string,
 ): string {
-  return JSON.stringify([workspaceCwd, sessionId, id]);
+  return JSON.stringify([
+    workspaceCwd,
+    normalizeSessionIdForLookup(sessionId),
+    id,
+  ]);
 }
 
 function targetsEqual(

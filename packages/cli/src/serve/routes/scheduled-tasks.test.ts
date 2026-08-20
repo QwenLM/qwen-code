@@ -1368,6 +1368,36 @@ describe('scheduled-tasks routes', () => {
     await fsp.writeFile(file, JSON.stringify([task]), 'utf8');
   };
 
+  it('uses the canonical live id for a legacy mixed-case task', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    await seedTask({
+      id: 'mixed-case-task',
+      name: 'Old',
+      cron: '0 9 * * *',
+      prompt: 'prompt',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: sessionId.toUpperCase(),
+    });
+
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/mixed-case-task')
+      .send({ name: 'New' });
+    expect(patch.status).toBe(200);
+    expect(h.bridge.named).toContainEqual({
+      sessionId,
+      displayName: '⏰ New',
+    });
+
+    const removed = await request(h.app).delete(
+      '/scheduled-tasks/mixed-case-task',
+    );
+    expect(removed.status).toBe(200);
+    expect(h.bridge.closed).toContain(sessionId);
+  });
+
   const staleMutationTask = () => ({
     id: 'stale-task',
     cron: '0 9 * * *',

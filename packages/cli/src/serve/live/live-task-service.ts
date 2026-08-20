@@ -1276,6 +1276,8 @@ export class LiveTaskService {
           candidate.error instanceof SessionIdCaseConflictError,
       );
       if (conflict && 'error' in conflict) throw conflict.error;
+      const failed = candidates.find((candidate) => 'error' in candidate);
+      if (failed && 'error' in failed) throw failed.error;
       const matches = candidates.filter(
         (
           entry,
@@ -1285,8 +1287,6 @@ export class LiveTaskService {
         } => entry.persistedSessionId !== undefined,
       );
       if (matches.length === 0) {
-        const failed = candidates.find((candidate) => 'error' in candidate);
-        if (failed && 'error' in failed) throw failed.error;
         throw new SessionNotFoundError(threadId);
       }
       if (matches.length > 1)

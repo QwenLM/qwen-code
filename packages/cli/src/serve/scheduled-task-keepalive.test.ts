@@ -118,11 +118,13 @@ describe('scheduled-task keepalive', () => {
     const recordHeartbeat = vi.fn(() => {
       throw new Error('not resident');
     });
+    const updateSessionMetadata = vi.fn();
     const ka = startScheduledTaskKeepalive({
       bridge: {
         ...bridge,
         recordHeartbeat,
         resumeSession,
+        updateSessionMetadata,
       },
       boundWorkspace: workspace,
       intervalMs: 60_000,
@@ -133,6 +135,10 @@ describe('scheduled-task keepalive', () => {
     expect(recordHeartbeat).toHaveBeenCalledWith(sessionId);
     expect(resumeSession).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId }),
+    );
+    expect(updateSessionMetadata).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ displayName: expect.any(String) }),
     );
   });
 

@@ -239,8 +239,9 @@ async function bindAndNameSessions(
 
   for (const task of needsName) {
     const sessionId = task.sessionId!;
+    const liveSessionId = normalizeSessionIdForLookup(sessionId);
     try {
-      bridge.updateSessionMetadata(sessionId, {
+      bridge.updateSessionMetadata(liveSessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
       });
       renamed.add(sessionId);
