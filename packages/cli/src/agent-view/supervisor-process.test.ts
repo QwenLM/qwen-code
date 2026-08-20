@@ -678,6 +678,62 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('preserves ready state when it races the adoption commit', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    let handler!: ReturnType<typeof createAgentViewSupervisorHandler>;
+    let readyInjected = false;
+    const writeWorker = supervisorStore.writeAgentViewWorker;
+    const writeSpy = vi
+      .spyOn(supervisorStore, 'writeAgentViewWorker')
+      .mockImplementation(async (...args) => {
+        await writeWorker(...args);
+        const [writtenSessionId, worker] = args;
+        if (
+          !readyInjected &&
+          writtenSessionId === sessionId &&
+          worker.hostPid !== undefined
+        ) {
+          readyInjected = true;
+          await handler.workerEvent?.({
+            type: 'ready',
+            sessionId,
+            token: await readWorkerTokenForTest(sessionId, globalDir),
+            cwd: globalDir,
+          });
+        }
+      });
+    try {
+      handler = createAgentViewSupervisorHandler({
+        globalDir,
+        platform: 'linux',
+        waitForWorkerReady: true,
+        launchPtyHost: async () => fakePtyHost(),
+      });
+
+      await expect(
+        handler.adopt?.({
+          sessionId,
+          projectCwd: globalDir,
+          activeCwd: globalDir,
+          terminal: { columns: 80, rows: 24 },
+        }),
+      ).resolves.toEqual({ sessionId, adopted: true });
+      await expect(
+        readAgentViewSessionState(sessionId, { globalDir }),
+      ).resolves.toMatchObject({
+        ownership: 'managed',
+        sessionState: 'idle',
+        processState: 'alive',
+      });
+    } finally {
+      writeSpy.mockRestore();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
   it('treats adoption of an already managed session as idempotent', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -1234,13 +1290,34 @@ describe('Agent View supervisor process helpers', () => {
       sessionId: result.sessionId,
       token,
       sessionState: 'needs_input',
-      waitingFor: 'response',
+      inputKind: 'soft',
       lastResult: 'Anything else?',
       promptId: secondPromptId,
     });
     await expect(
       readAgentViewActivity(result.sessionId, { globalDir }),
     ).resolves.not.toMatchObject({ queuedPromptCount: 1 });
+    await writeAgentViewActivity(
+      result.sessionId,
+      {
+        schemaVersion: 1,
+        inputKind: 'soft',
+        queuedPromptCount: 1,
+        queuedPromptPreview: 'legacy prompt',
+        queuedPromptId: undefined,
+        queuedPromptText: undefined,
+        queuedPromptDeliveredAt: undefined,
+        lastQueuedPromptAt: '2026-07-17T00:00:00.000Z',
+        lastActivityAt: '2026-07-17T00:00:01.000Z',
+        capabilities: ['reply', 'hibernate'],
+      },
+      { globalDir },
+    );
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.not.toMatchObject({
+      activity: { queuedPromptCount: 1 },
+    });
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'no' }),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
@@ -4622,6 +4699,9 @@ describe('Agent View supervisor process helpers', () => {
       platform: 'linux',
       hibernationPolicy: { autoExit: false },
     });
+    await expect(
+      restartedHandler.logs?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ live: true });
     const patchSpy = vi
       .spyOn(supervisorStore, 'patchAgentViewSessionStateIf')
       .mockRejectedValueOnce(new Error('transient write failure'));

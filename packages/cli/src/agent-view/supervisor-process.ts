@@ -221,6 +221,7 @@ class AgentViewSupervisorProcessHandler
   >();
   private readonly promptQueues = new Map<string, Promise<void>>();
   private readonly attachSetupQueues = new Map<string, Promise<void>>();
+  private readonly activeHibernations = new Set<string>();
   private readonly workers: WorkerRegistry;
   private workerControlSequence = 0;
   private shuttingDown = false;
@@ -254,6 +255,7 @@ class AgentViewSupervisorProcessHandler
       (sessionId) => this.hasPendingWorkerStopControl(sessionId),
       (sessionId) => this.hasLiveAttach(sessionId),
       (sessionId) => this.queueWorkerStop(sessionId),
+      (sessionId) => this.activeHibernations.has(sessionId),
     );
   }
 
@@ -669,22 +671,19 @@ class AgentViewSupervisorProcessHandler
         );
         await ensureSessionStillLaunchable(adoption.sessionId, store, host);
         this.workers.set(adoption.sessionId, host);
-        const latestState =
-          (await readAgentViewSessionState(adoption.sessionId, store)) ??
-          adoptingState;
-        await patchAgentViewSessionState(
+        await patchAgentViewSessionStateIf(
           adoption.sessionId,
-          {
+          (existing) => ({
             ownership: 'managed',
             sessionState:
-              latestState.processState === 'alive'
-                ? latestState.sessionState
+              existing.processState === 'alive'
+                ? existing.sessionState
                 : 'starting',
             processState:
-              latestState.processState === 'alive' ? 'alive' : 'starting',
+              existing.processState === 'alive' ? 'alive' : 'starting',
             attachState: 'detached',
             updatedAt: new Date().toISOString(),
-          },
+          }),
           store,
         );
         await ready;
@@ -1444,52 +1443,71 @@ class AgentViewSupervisorProcessHandler
             ) {
               return false;
             }
-            if (!(await markSessionHibernating(snapshot.state, this.store))) {
-              return false;
-            }
-            const latestState = await readAgentViewSessionState(
-              snapshot.sessionId,
-              this.store,
-            );
-            const latestActivity = await readAgentViewActivity(
-              snapshot.sessionId,
-              this.store,
-            );
-            // A pin committed after the pre-hibernating roster check above
-            // must not be ignored either; an unreadable roster fails closed.
-            let pinnedLate = true;
+            this.activeHibernations.add(snapshot.sessionId);
             try {
-              pinnedLate = (
-                await readAgentViewRosterStrict(this.store)
-              ).sessions.some(
-                (entry) =>
-                  entry.pinned &&
-                  sanitizeSessionId(entry.sessionId) === snapshot.sessionId,
+              if (!(await markSessionHibernating(snapshot.state, this.store))) {
+                return false;
+              }
+              const latestState = await readAgentViewSessionState(
+                snapshot.sessionId,
+                this.store,
               );
-            } catch {
-              // pinnedLate stays true.
-            }
-            if (
-              !latestState ||
-              pinnedLate ||
-              latestState.sessionState === 'stopped' ||
-              latestState.sessionState === 'working' ||
-              latestState.processState !== 'hibernating' ||
-              this.hasLiveAttach(snapshot.sessionId) ||
-              this.hasPendingWorkerInputControl(snapshot.sessionId) ||
-              this.hasPendingWorkerStopControl(snapshot.sessionId) ||
-              hasPendingPrompt(latestActivity) ||
-              // Re-run the idle-window freshness check against the re-read
-              // record: activity a worker reported since the pre-lock
-              // snapshot makes hibernating now cost the user a respawn.
-              (latestActivity?.lastActivityAt !== undefined &&
-                nowMs - Date.parse(latestActivity.lastActivityAt) <
-                  policy.idleMs)
-            ) {
-              if (latestState?.processState === 'hibernating') {
-                // Flip back inside the queued mutation: a concurrent stop
-                // verdict enqueued between the re-read above and this
-                // rollback must not be re-asserted away by a stale snapshot.
+              const latestActivity = await readAgentViewActivity(
+                snapshot.sessionId,
+                this.store,
+              );
+              // A pin committed after the pre-hibernating roster check above
+              // must not be ignored either; an unreadable roster fails closed.
+              let pinnedLate = true;
+              try {
+                pinnedLate = (
+                  await readAgentViewRosterStrict(this.store)
+                ).sessions.some(
+                  (entry) =>
+                    entry.pinned &&
+                    sanitizeSessionId(entry.sessionId) === snapshot.sessionId,
+                );
+              } catch {
+                // pinnedLate stays true.
+              }
+              if (
+                !latestState ||
+                pinnedLate ||
+                latestState.sessionState === 'stopped' ||
+                latestState.sessionState === 'working' ||
+                latestState.processState !== 'hibernating' ||
+                this.hasLiveAttach(snapshot.sessionId) ||
+                this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+                this.hasPendingWorkerStopControl(snapshot.sessionId) ||
+                hasPendingPrompt(latestActivity) ||
+                // Re-run the idle-window freshness check against the re-read
+                // record: activity a worker reported since the pre-lock
+                // snapshot makes hibernating now cost the user a respawn.
+                (latestActivity?.lastActivityAt !== undefined &&
+                  nowMs - Date.parse(latestActivity.lastActivityAt) <
+                    policy.idleMs)
+              ) {
+                if (latestState?.processState === 'hibernating') {
+                  // Flip back inside the queued mutation: a concurrent stop
+                  // verdict enqueued between the re-read above and this
+                  // rollback must not be re-asserted away by a stale snapshot.
+                  await patchAgentViewSessionStateIf(
+                    snapshot.sessionId,
+                    (existing) =>
+                      existing.processState === 'hibernating'
+                        ? {
+                            processState: 'alive',
+                            updatedAt: new Date().toISOString(),
+                          }
+                        : undefined,
+                    this.store,
+                  );
+                }
+                return false;
+              }
+              try {
+                await this.workers.shutdownHost(snapshot.sessionId, host);
+              } catch {
                 await patchAgentViewSessionStateIf(
                   snapshot.sessionId,
                   (existing) =>
@@ -1501,26 +1519,12 @@ class AgentViewSupervisorProcessHandler
                       : undefined,
                   this.store,
                 );
+                return false;
               }
-              return false;
+              return markSessionHibernated(snapshot.state, this.store);
+            } finally {
+              this.activeHibernations.delete(snapshot.sessionId);
             }
-            try {
-              await this.workers.shutdownHost(snapshot.sessionId, host);
-            } catch {
-              await patchAgentViewSessionStateIf(
-                snapshot.sessionId,
-                (existing) =>
-                  existing.processState === 'hibernating'
-                    ? {
-                        processState: 'alive',
-                        updatedAt: new Date().toISOString(),
-                      }
-                    : undefined,
-                this.store,
-              );
-              return false;
-            }
-            return markSessionHibernated(snapshot.state, this.store);
           }),
       );
       if (didHibernate) {
@@ -1942,10 +1946,6 @@ class WorkerRegistry {
     string,
     { host: AgentViewPtyHostHandle; timeout: NodeJS.Timeout }
   >();
-  private readonly hibernationRecoveryHosts = new Map<
-    string,
-    AgentViewPtyHostHandle
-  >();
 
   constructor(
     private readonly options: AgentViewSupervisorProcessOptions,
@@ -1955,6 +1955,7 @@ class WorkerRegistry {
     private readonly hasPendingStopControl: (sessionId: string) => boolean,
     private readonly hasLiveAttach: (sessionId: string) => boolean,
     private readonly queueStop: (sessionId: string) => void,
+    private readonly isHibernationInProgress: (sessionId: string) => boolean,
   ) {}
 
   private get store(): AgentViewStoreOptions {
@@ -2071,7 +2072,6 @@ class WorkerRegistry {
     }
     if (this.ptyHosts.get(sessionId) === host) {
       this.clearStopFallback(sessionId, host);
-      this.hibernationRecoveryHosts.delete(sessionId);
       this.ptyHosts.delete(sessionId);
       await clearAgentViewWorkerPids(sessionId, this.store);
       if (preserveInput) {
@@ -2760,7 +2760,6 @@ class WorkerRegistry {
             // controls and the persisted queue marker so a later respawn can
             // still deliver accepted user input.
             this.clearStopFallback(sessionId, host);
-            this.hibernationRecoveryHosts.delete(sessionId);
             this.ptyHosts.delete(sessionId);
             this.preserveQueuedInputControls(sessionId);
             this.onChanged();
@@ -2816,9 +2815,6 @@ class WorkerRegistry {
     reconnect: () => Promise<boolean> = () =>
       this.reconnectSessionHost(state.sessionId),
   ): Promise<AgentViewSessionStateFile> {
-    if (state.processState !== 'hibernating') {
-      this.hibernationRecoveryHosts.delete(state.sessionId);
-    }
     if (state.sessionState === 'stopped' && state.processState === 'alive') {
       const connected =
         this.ptyHosts.has(state.sessionId) || (await reconnect());
@@ -2893,15 +2889,12 @@ class WorkerRegistry {
       );
     }
     if (state.processState === 'hibernating') {
-      let host = this.ptyHosts.get(state.sessionId);
-      if (host && this.hibernationRecoveryHosts.get(state.sessionId) !== host) {
+      if (this.isHibernationInProgress(state.sessionId)) {
         return state;
       }
+      let host = this.ptyHosts.get(state.sessionId);
       if (!host && (await reconnect())) {
         host = this.ptyHosts.get(state.sessionId);
-        if (host) {
-          this.hibernationRecoveryHosts.set(state.sessionId, host);
-        }
       }
       if (host) {
         const patch = {
@@ -2920,9 +2913,6 @@ class WorkerRegistry {
           },
           this.store,
         );
-        if (applied) {
-          this.hibernationRecoveryHosts.delete(state.sessionId);
-        }
         return applied
           ? { ...state, ...patch }
           : ((await readAgentViewSessionState(state.sessionId, this.store)) ??
@@ -3820,7 +3810,7 @@ function shouldClearPendingPrompt(
     (event.sessionState === 'idle' ||
       event.sessionState === 'completed' ||
       (event.sessionState === 'needs_input' &&
-        event.waitingFor === 'response' &&
+        (event.waitingFor === 'response' || event.inputKind === 'soft') &&
         previousState.sessionState !== 'needs_input'))
   );
 }
@@ -3986,7 +3976,7 @@ function shouldClearStalePendingPrompt(
 ): activity is AgentViewActivityFile {
   if (
     state.sessionState !== 'needs_input' ||
-    activity?.waitingFor !== 'response' ||
+    (activity?.waitingFor !== 'response' && activity?.inputKind !== 'soft') ||
     !hasPendingPrompt(activity) ||
     !activity.lastQueuedPromptAt
   ) {

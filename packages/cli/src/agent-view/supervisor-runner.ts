@@ -43,6 +43,7 @@ const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
 const LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS = 30_000;
+const AGENT_VIEW_SHUTDOWN_TIMEOUT_MS = 60_000;
 
 export interface AgentViewSupervisorClientHandle {
   socketPath: string;
@@ -326,7 +327,10 @@ function createSupervisorHandle(
         socketPath,
         'shutdown',
         keepWorkers === undefined ? undefined : { keepWorkers },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: AGENT_VIEW_SHUTDOWN_TIMEOUT_MS,
+        },
       ),
   };
 }

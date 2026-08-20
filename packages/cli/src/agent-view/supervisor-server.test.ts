@@ -100,6 +100,7 @@ describe('Agent View supervisor server', () => {
       await waitFor(() => handler.dispatch.mock.calls.length === 1);
       const shutdown = callAgentViewSupervisor(socketPath, 'shutdown');
       await Promise.resolve();
+      const repeatedShutdown = callAgentViewSupervisor(socketPath, 'shutdown');
 
       await expect(
         callAgentViewSupervisor(socketPath, 'send', {
@@ -118,6 +119,8 @@ describe('Agent View supervisor server', () => {
       releaseDispatch();
       await expect(dispatch).resolves.toEqual({ sessionId: 'session-1' });
       await expect(shutdown).resolves.toEqual({ shuttingDown: true });
+      await expect(repeatedShutdown).resolves.toEqual({ shuttingDown: true });
+      expect(handler.shutdown).toHaveBeenCalledOnce();
     } finally {
       await server.close();
     }
