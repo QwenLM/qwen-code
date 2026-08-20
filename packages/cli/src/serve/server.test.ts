@@ -13074,6 +13074,56 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
+      'reads the persisted title with the case-corrected storage id on %s (#8977)',
+      async (action) => {
+        // The custom_title record lives next to the transcript, so the
+        // title read must use the corrected spelling resolved by
+        // findSessionIdIgnoringCase or it misses the file on
+        // case-sensitive filesystems.
+        const sessionId = '550e8400-e29b-41d4-a716-446655440160';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const titleSpy = vi
+          .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+          .mockReturnValue({ title: 'Manual title', source: 'manual' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          expect(titleSpy).toHaveBeenCalledWith(storageSessionId);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toEqual([
+            expect.objectContaining({
+              sessionId,
+              displayName: 'Manual title',
+              titleSource: 'manual',
+            }),
+          ]);
+        } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+          titleSpy.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
       'takes the %s shared restore guard on the request session id',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440144';

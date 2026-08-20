@@ -1914,7 +1914,12 @@ export class AcpDispatcher {
                 ) {
                   throw new SessionNotFoundError(sessionId);
                 }
-                const titleInfo = sessionService.getSessionTitleInfo(sessionId);
+                // The persisted title record lives next to the transcript,
+                // so the read must use the case-corrected storage id like the
+                // adjacent persisted reads above; the raw request spelling can
+                // miss the file on case-sensitive filesystems.
+                const titleInfo =
+                  sessionService.getSessionTitleInfo(storageSessionId);
                 const persistedTitle = restoreSessionTitleFields(
                   titleInfo.title,
                   titleInfo.source,

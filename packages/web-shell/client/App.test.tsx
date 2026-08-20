@@ -11053,6 +11053,84 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('keeps the carry when a fold landing load fails with no creation in flight', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // No creation in flight, and the fold's landing load fails (e.g. a pane
+    // the single connection cannot own): the user stays on the empty chat
+    // the carry exists for, so the first prompt there must still receive
+    // the carried name.
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('pane load failed'),
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
   it('drops the carry when a split landing load succeeds with no creation in flight', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;

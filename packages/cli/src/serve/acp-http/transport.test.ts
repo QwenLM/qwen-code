@@ -4874,6 +4874,69 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
+    '%s reads the persisted title with the case-corrected storage id',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        // The transcript (and the custom_title record next to it) is stored
+        // under the uppercase spelling while the caller requests the
+        // normalized lowercase id; the title read must use the corrected
+        // spelling or it misses the file on case-sensitive filesystems.
+        const sessionId = '550e8400-e29b-41d4-a716-446655440138';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId);
+        const readTitle = vi
+          .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+          .mockReturnValue({ title: 'Manual session', source: 'manual' });
+
+        let restoreRequest: unknown;
+        bridge.loadSession = async (req) => {
+          restoreRequest = req;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          restoreRequest = req;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 237,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({ id: 237 });
+          reader.close();
+
+          expect(readTitle).toHaveBeenCalledWith(storageSessionId);
+          expect(restoreRequest).toMatchObject({
+            sessionId,
+            displayName: 'Manual session',
+            titleSource: 'manual',
+          });
+        } finally {
+          readTitle.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
     '%s restores reserved-source transcripts on the generic surface',
     async (method) => {
       await withRuntimeDir(async () => {
