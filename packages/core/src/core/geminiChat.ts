@@ -104,7 +104,11 @@ import {
   makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
+import {
+  type ChatCompressionInfo,
+  CompressionStatus,
+  isCompressionFailureStatus,
+} from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getStartupContextLength,
@@ -324,16 +328,6 @@ export function redactStructuredOutputArgsForRecording(
       args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
     },
   };
-}
-
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
-  );
 }
 
 function shouldStopAfterHardRescue(
