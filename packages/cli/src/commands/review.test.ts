@@ -57,6 +57,7 @@ describe('reviewCommand', () => {
       'agent-prompt',
       'build-test',
       'base-tree',
+      'scratch-tree',
       'test-delta',
       'drive',
       'mock-provider',

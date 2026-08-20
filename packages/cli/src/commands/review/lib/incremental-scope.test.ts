@@ -75,3 +75,50 @@ describe('computeIncrementalScope — interaction ordering', () => {
     expect(ruling.scope.deltaFiles).toEqual([changed]);
   });
 });
+
+describe('computeIncrementalScope — a revert against a still-live contract', () => {
+  it('scopes the callee a restored importer strands, instead of stopping', () => {
+    // The shape the second widening pass exists for, and the one it could not
+    // see. Round 1 changes `i.ts` (`foo(x)` → `foo(x, y)`) together with its
+    // caller `r.ts` and clears both at the anchor; the fix round reverts ONLY
+    // `r.ts`. So the delta is `{r.ts}` and it is restored — `deltaLive` is
+    // empty — while `i.ts` carries the PR's only section, changed before the
+    // anchor and unchanged since.
+    //
+    // Two layers stopped the round dead. Keyed on `deltaLive`, the pass
+    // resolved `r.ts`'s import against an EMPTY membership and found no edge;
+    // and even with the edge, `scoped` took only the importer side, so the
+    // section that actually moves was never kept and `kept.length === 0`
+    // ruled `nothing-new` anyway. `upToDate` does not advance the anchor, so
+    // every re-run rules the same: `r.ts@base × i.ts@head` — the base-era
+    // call against the new contract — reviewed by no round, and absent from
+    // every later delta by construction.
+    const i = 'src/i.ts';
+    const r = 'src/r.ts';
+    // `r.ts` is byte-identical to the merge base, so the PR's own diff
+    // carries no section for it. `i.ts` is the whole of the PR's diff.
+    const ruling = computeIncrementalScope({
+      anchor: 'a'.repeat(40),
+      fullDiff: Buffer.from(section(i), 'utf8'),
+      deltaFiles: [r],
+      restored: (path) => path === r,
+      readWorktree: (rel) => (rel === r ? `import './i.js';\n` : null),
+    });
+
+    expect(ruling.kind).toBe('scoped');
+    if (ruling.kind !== 'scoped') return;
+    // The seam is briefed…
+    expect(ruling.scope.interaction).toEqual([
+      { path: r, importsChanged: [i] },
+    ]);
+    // …and the moving side is actually published, which is the half the
+    // importer-only `scoped` set dropped.
+    expect(ruling.diff.toString('utf8')).toContain(`b/${i}`);
+    // The restored file owes no review of its own.
+    expect(ruling.scope.deltaFiles).toEqual([]);
+    expect(ruling.scope.restoredFileCount).toBe(1);
+    // `i.ts` was scoped IN as the seam's target, so it is not a file the
+    // widening considered and passed over.
+    expect(ruling.scope.contextFileCount).toBe(0);
+  });
+});

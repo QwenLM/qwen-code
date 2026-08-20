@@ -39,6 +39,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -559,11 +560,28 @@ function tryRemove(action: () => void): void {
 }
 
 function cleanStale(prNumber: string): void {
-  releaseWorktree(worktreePath(prNumber));
+  // The result is READ, because `releaseWorktree` can now refuse: an ancestor
+  // symlink above the temp dir means the removal would land in whatever
+  // checkout it names, so it declines and says so. Dropping that on the floor
+  // left the sweep looking successful and the next `worktree add` wedged at a
+  // path nobody was told about — the same "something that should be gone is
+  // still there, and nothing said so" the cleanup path reports everywhere else.
+  const { existed, freed, reason } = releaseWorktree(worktreePath(prNumber));
+  if (existed && !freed) {
+    writeStderrLine(
+      `Could not free the stale worktree at ${worktreePath(prNumber)}: ${reason}`,
+    );
+  }
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+      execFileSync('git', ['branch', '-D', ref], {
+        stdio: 'pipe',
+        // Same reason as every other git spawn in this pipeline: a delete must
+        // land in the repository the caller named, not the one the shell's
+        // `GIT_DIR` points at.
+        env: sanitizedGitEnv(),
+      }),
     );
   }
 }
@@ -977,7 +995,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
@@ -993,7 +1017,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       git('worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,

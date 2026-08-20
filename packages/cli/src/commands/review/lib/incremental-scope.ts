@@ -143,11 +143,21 @@ export function computeIncrementalScope(input: ScopeInput): ScopeRuling {
   // A restored file is inside `delta`, so the pass above skips it as a
   // candidate by construction (`dependentsOfChanged` never scans a file that
   // is itself changed). It still needs one: its own imports of files that are
-  // STILL changing are live seams no other reader covers. Keyed on
-  // `deltaLive`, because a restored file importing another restored file has
-  // no moving side to check.
+  // STILL changing are live seams no other reader covers.
+  //
+  // The membership is every file the PR still changes, not just the ones the
+  // delta moved. Keyed on `deltaLive` alone it missed the whole reason the
+  // pass exists: the callee a revert strands is usually changed BEFORE the
+  // anchor and unchanged since, so it is not in `deltaFiles` at all. Round 1
+  // changes `i.ts` and its caller `r.ts` together and clears both; the fix
+  // round reverts only `r.ts`. The delta is `{r.ts}`, restored, so `deltaLive`
+  // is EMPTY — the pass resolved `r.ts`'s import against nothing, found no
+  // edge, and the round stopped `nothing-new` with `r.ts@base × i.ts@head`,
+  // the base-era call against the still-live contract, reviewed by no round
+  // and gone from every later delta. Restored×restored pairs stay excluded
+  // for free: a restored file carries no section, so it is never a candidate.
   for (const [path, edges] of dependentsOfChanged(
-    deltaLive,
+    new Set([...deltaLive, ...candidates]),
     [...restoredDelta],
     readWorktree,
     packages,
@@ -155,7 +165,18 @@ export function computeIncrementalScope(input: ScopeInput): ScopeRuling {
     if (!interaction.has(path)) interaction.set(path, edges);
   }
 
-  const scoped = new Set([...deltaLive, ...interaction.keys()]);
+  // The edges' TARGETS are scoped too, not just their importer side. The
+  // moving half of a seam is the half that carries hunks: a restored importer
+  // has no section of its own, so scoping only `interaction.keys()` kept
+  // nothing, `kept` came back empty and the round still ruled `nothing-new` —
+  // the same stop, one layer down, surviving the membership fix above. Adding
+  // targets is inert everywhere else: pass 1's are `delta` members, already
+  // here when live and sectionless when restored.
+  const scoped = new Set([
+    ...deltaLive,
+    ...interaction.keys(),
+    ...[...interaction.values()].flat(),
+  ]);
   const kept = sections.filter((f) => scoped.has(f.path));
   const keptPaths = new Set(kept.map((f) => f.path));
 
@@ -221,7 +242,10 @@ export function computeIncrementalScope(input: ScopeInput): ScopeRuling {
           path,
           importsChanged,
         })),
-      contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
+      // Considered and NOT scoped in — which is no longer the same as "not
+      // an interaction key", now that a seam can scope a candidate as an
+      // edge target rather than as an importer.
+      contextFileCount: candidates.filter((p) => !keptPaths.has(p)).length,
       restoredFileCount: restoredDelta.size,
     },
   };
