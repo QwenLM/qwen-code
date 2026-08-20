@@ -406,6 +406,15 @@ function VirtualizedList<T>(
   const prevTotalHeight = useRef(totalHeight);
   const prevScrollTop = useRef(actualScrollTop);
   const prevContainerHeight = useRef(scrollableContainerHeight);
+  // Set by the re-anchor branch when it clamps a scrolled-away viewport to
+  // the new bottom, holding the anchor the clamp installed. While the
+  // current anchor still sits where the clamp parked it, that position is
+  // content-driven, so the re-stick gate must not read it as the user
+  // having scrolled to the bottom. Any scroll moves the anchor, and the
+  // mismatch clears the mark.
+  const reAnchorClampMark = useRef<{ index: number; offset: number } | null>(
+    null,
+  );
 
   useLayoutEffect(() => {
     const contentPreviouslyFit =
@@ -420,8 +429,18 @@ function VirtualizedList<T>(
     // too, and flipping sticking there would let `bottomAlignGap`
     // bottom-align content the host anchored to the top (#9300). Re-stick
     // only from a real bottom position: previously overflowing with the
-    // viewport at the bottom pixels.
+    // viewport at the bottom pixels. A position installed by the re-anchor
+    // clamp is not a user-driven bottom either (#9305): suppress the flip
+    // while the anchor still matches the clamp mark.
+    const clampParked =
+      reAnchorClampMark.current !== null &&
+      scrollAnchor.index === reAnchorClampMark.current.index &&
+      scrollAnchor.offset === reAnchorClampMark.current.offset;
+    if (reAnchorClampMark.current !== null && !clampParked) {
+      reAnchorClampMark.current = null;
+    }
     if (
+      !clampParked &&
       !contentPreviouslyFit &&
       wasScrolledToBottomPixels &&
       actualScrollTop >= prevScrollTop.current
@@ -460,8 +479,18 @@ function VirtualizedList<T>(
         actualScrollTop > totalHeight - scrollableContainerHeight) &&
       data.length > 0
     ) {
+      if (data.length <= 1 && isStickingToBottom) {
+        // Collapse to the host's non-end-anchored state (MainContent mounts
+        // banner-only data with initialScrollIndex 0, e.g. after /clear):
+        // the followed conversation is gone, so drop the carried sticking
+        // instead of bottom-aligning the remnant under a blank viewport.
+        setIsStickingToBottom(false);
+      }
       const newScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
       const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
+      if (!isStickingToBottom) {
+        reAnchorClampMark.current = newAnchor;
+      }
       if (
         scrollAnchor.index !== newAnchor.index ||
         scrollAnchor.offset !== newAnchor.offset
@@ -754,11 +783,18 @@ function VirtualizedList<T>(
     ref,
     () => ({
       scrollBy: (delta: number) => {
+        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Nothing to scroll: the attempt is positionally a no-op and must
+          // not flip sticking either way. Engaging it would bottom-align a
+          // top-anchored list whose content fits; releasing it would drop a
+          // stuck conversation's auto-follow.
+          return;
+        }
         if (delta < 0) {
           setIsStickingToBottom(false);
         }
         const currentScrollTop = getScrollTop();
-        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
         const actualCurrent = Math.min(currentScrollTop, maxScroll);
         const newScrollTop = Math.max(0, actualCurrent + delta);
         // Reaching the bottom must use the same live-recomputing end anchor as
@@ -782,6 +818,11 @@ function VirtualizedList<T>(
       },
       scrollTo: (offset: number) => {
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Same no-op rule as scrollBy: a scroll attempt on fitting content
+          // must not flip sticking either way.
+          return;
+        }
         if (offset >= maxScroll || offset === SCROLL_TO_ITEM_END) {
           setIsStickingToBottom(true);
           setPendingScrollTop(Number.MAX_SAFE_INTEGER);

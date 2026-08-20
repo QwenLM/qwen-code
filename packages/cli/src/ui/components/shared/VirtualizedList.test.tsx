@@ -275,6 +275,118 @@ describe('<VirtualizedList />', () => {
       'item-1',
       'item-2',
     ]);
+
+    // A scroll attempt while everything fits is positionally a no-op and
+    // must not flip sticking either way: engaging it would bottom-align
+    // the fitting content (destroying the top-aligned state pinned above),
+    // releasing it would drop auto-follow (#9305 review R5-2).
+    for (const scroll of [
+      () => listRef!.scrollBy(1),
+      () => listRef!.scrollBy(-1),
+      () => listRef!.scrollTo(0),
+    ]) {
+      act(scroll);
+      rerender(<Wrapper />);
+      await act(async () => {});
+      expect((lastFrame() ?? '').split('\n')).toEqual([
+        'item-0',
+        'item-1',
+        'item-2',
+      ]);
+    }
+  });
+
+  it('top-aligns the banner-only state when a stuck list collapses without remount', async () => {
+    // /clear does not remount the list (no key on ScrollableList in
+    // MainContent), so sticking from the bottom-stuck rest state is still
+    // set when the data collapses to the banner alone. The host mounts that
+    // state top-anchored (initialScrollIndex 0), so the in-place collapse
+    // must render the same top-aligned frame instead of bottom-aligning the
+    // banner under a blank viewport (#9305 review R5-1).
+    let items = makeItems(20);
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+  });
+
+  it('does not re-stick a scrolled-away list that shrinks to fit in two steps', async () => {
+    // The first shrink re-anchors a scrolled-away viewport, parking it
+    // exactly at the new bottom; the re-stick gate must not read that
+    // content-driven clamp as the user being at the bottom and flip
+    // sticking back on when the next shrink fits (#9305 review R5-3).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(12);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+    ]);
   });
 
   it('reports zero-height shrink so collapsed items leave no blank gap', async () => {
