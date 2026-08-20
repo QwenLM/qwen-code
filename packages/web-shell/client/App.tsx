@@ -6153,8 +6153,6 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     writeBlocked: sessionWriteBlocked,
@@ -7269,7 +7267,7 @@ export function App({
           ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
-        sessionCatalogController.turnCompleted(workspaceCwd);
+        sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
         if (!connectionRef.current.displayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
@@ -12396,7 +12394,17 @@ export function App({
                           />
                         </div>
                       )}
-                      <div className={styles.composer}>
+                      {/* A pending approval overlay owns the footer: drop the
+                          composer out of layout (kept mounted so the draft
+                          survives) instead of leaving a live input below the
+                          dialog. */}
+                      <div
+                        className={
+                          approvalOverlayActive && mainView === 'chat'
+                            ? `${styles.composer} ${styles.composerHidden}`
+                            : styles.composer
+                        }
+                      >
                         {streamingState !== 'idle' ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
@@ -12499,8 +12507,6 @@ export function App({
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
                           onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
