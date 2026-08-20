@@ -373,6 +373,24 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
   });
 
+  it('keeps the recovery clone byte-identical to the original workflow', () => {
+    // The recovery clone is a byte-identical copy of qwen-autofix.yml under
+    // a new path (its header names its deletion condition), except two
+    // comment blocks: its own RECOVERY CLONE header and the original's
+    // entity-specific no-op re-parse touch. It stages and executes the SAME
+    // shared gate script, so a consumer update to one file (the gate's
+    // handoff outcomes) must land in BOTH — drift once made the live clone
+    // fail rounds the gate deliberately ended green.
+    const recoveryPath = '.github/workflows/qwen-autofix-recovery.yml';
+    if (!existsSync(recoveryPath)) return; // its deletion condition was met
+    const recovery = readFileSync(recoveryPath, 'utf8');
+    const stripCloneHeader = (t) =>
+      t.replace(/^# RECOVERY CLONE[\s\S]*?^#\n/m, '');
+    const stripNoOpTouch = (t) =>
+      t.replace(/^# 2026-08-19: no-op comment[\s\S]*?~12 hours\.\n/m, '');
+    expect(stripCloneHeader(recovery)).toBe(stripNoOpTouch(workflow));
+  });
+
   it('keeps the prepare-branch-and-feedback run block bash-parseable', () => {
     // The deferred-feedback echo sits inside a double-quoted string, where the
     // '"'"' idiom is a literal apostrophe followed by a string CLOSER rather
