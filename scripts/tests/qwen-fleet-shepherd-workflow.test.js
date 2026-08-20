@@ -29,6 +29,11 @@ const workflow = readFileSync(
 // hide behind the shim.
 const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
 
+// The `wedged` predicate is defined once in the workflow and reused by the
+// in-flight count, the census, and the conflict lever's busy-set; tests replay
+// it VERBATIM so a drift in any of them fails here.
+const zombieDef = workflow.match(/ZOMBIE_JQ='([\s\S]*?)'\n/)?.[1];
+
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
     // The run step reads no repo files (the flake registry is gone with the
@@ -438,7 +443,7 @@ exit 1`;
     // must collect the PR into the busy-set, and no live runs at all must
     // leave BUSY_OK true with an empty set.
     const busyWalk = workflow.match(
-      /(SHEP_BUSY=' '\n[\s\S]*?done < <\(jq -r '\.\[\] \| select\(\.status != "completed"\) \| \.databaseId' \/tmp\/scan-runs\.json 2> \/dev\/null\))/,
+      /(SHEP_BUSY=' '\n[\s\S]*?done < <\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'\.\[\] \| select\(\.status != "completed"\) \| select\(wedged\(\$now; \$zmin\) \| not\) \| \.databaseId' \/tmp\/scan-runs\.json 2> \/dev\/null\))/,
     )?.[1];
     expect(busyWalk).toBeTruthy();
     const runBusyWalk = ({ runs, ghScript }) => {
@@ -461,6 +466,11 @@ exit 1`;
               SCAN_RUNS_OK: 'true',
               ACTIONS_TOKEN: 'x',
               REPO: 'QwenLM/qwen-code',
+              NOW_EPOCH: String(
+                Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000),
+              ),
+              ZOMBIE_QUEUED_MINUTES: '30',
+              ZOMBIE_JQ: zombieDef,
             },
             encoding: 'utf8',
           },
@@ -488,6 +498,35 @@ exit 1`;
         ghScript: 'exit 1',
       }),
     ).toBe('true| ');
+    // A run wedged in `queued` is never inspected: it holds no jobs, so
+    // reading it wastes an API call and — worse, before this — a failing read
+    // on a permanently-queued run deferred every conflict dispatch forever.
+    // `exit 1` proves gh is not called at all: BUSY_OK survives as true.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 102,
+            status: 'queued',
+            createdAt: '2026-08-19T05:01:14Z',
+          },
+        ],
+        ghScript: 'exit 1',
+      }),
+    ).toBe('true| ');
+    // ...while a freshly queued run IS still inspected.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 103,
+            status: 'queued',
+            createdAt: '2026-08-19T23:56:00Z',
+          },
+        ],
+        ghScript: 'exit 1',
+      }),
+    ).toBe('false| ');
   });
 
   it('behaviorally proves in-flight counting ignores foreign dispatches', () => {
@@ -499,15 +538,30 @@ exit 1`;
     // starve the watchdog.
     const jqProgram = workflow
       .match(
-        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" '([\s\S]*?)' \/tmp\/scan-runs\.json/,
+        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
       )?.[1]
       ?.replace(/\n {12}/g, '\n');
     expect(jqProgram).toBeTruthy();
-    const count = (runs, lvrun) =>
-      execFileSync('jq', ['-r', '--arg', 'lvrun', lvrun, jqProgram], {
-        encoding: 'utf8',
-        input: JSON.stringify(runs),
-      }).trim();
+    expect(zombieDef).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-07-18T08:00:05Z') / 1000);
+    const count = (runs, lvrun, { now = NOW, zmin = '30' } = {}) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'lvrun',
+          lvrun,
+          '--arg',
+          'now',
+          String(now),
+          '--arg',
+          'zmin',
+          zmin,
+          zombieDef + jqProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
     const OURS = '900001';
     const run = (event, databaseId, createdAt, status = 'in_progress') => ({
       event,
@@ -553,6 +607,132 @@ exit 1`;
     expect(
       count([run('workflow_dispatch', 900001, '2026-07-18T07:59:58Z')], ''),
     ).toBe('0');
+  });
+
+  it('behaviorally proves a run wedged in queued is not in flight', () => {
+    // 2026-08-19: qwen-autofix.yml crossed GitHub's 500 KB workflow-file
+    // limit, and GitHub answered by CREATING runs it never started — queued
+    // forever, zero jobs, uncancellable through the API. The watchdog counted
+    // one of them as its own in-flight liveness dispatch and stopped
+    // dispatching for 18 hours ("last scan signal 1107m ago, in-flight: 1")
+    // while the loop was dark. A queued run older than ZOMBIE_QUEUED_MINUTES
+    // is wedged, not live, and must drop out of the count.
+    const inflightProgram = workflow
+      .match(
+        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    const censusProgram = workflow
+      .match(
+        /SCAN_ZOMBIES="\$\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    expect(inflightProgram).toBeTruthy();
+    expect(censusProgram).toBeTruthy();
+
+    const NOW = Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000);
+    const jq = (program, runs, extra) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          ...extra,
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'zmin',
+          '30',
+          zombieDef + program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
+    const inflight = (runs) =>
+      jq(inflightProgram, runs, ['--arg', 'lvrun', '900001']);
+    const census = (runs) => jq(censusProgram, runs, []);
+    const run = (event, databaseId, createdAt, status) => ({
+      event,
+      databaseId,
+      createdAt,
+      status,
+    });
+
+    // A dispatch queued for four minutes is a runner queue, not a wedge.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:56:00Z', 'queued'),
+      ]),
+    ).toBe('1');
+    // The observed failure: our own liveness dispatch, queued for 19 hours.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued'),
+      ]),
+    ).toBe('0');
+    // Schedule runs wedge the same way and must not starve the watchdog either.
+    expect(
+      inflight([run('schedule', 900007, '2026-08-19T05:01:14Z', 'queued')]),
+    ).toBe('0');
+    // Boundary: exactly ZOMBIE_QUEUED_MINUTES old is wedged, a second younger
+    // is not — the cutoff is inclusive and has no dead zone.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:30:00Z', 'queued'),
+      ]),
+    ).toBe('0');
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:30:01Z', 'queued'),
+      ]),
+    ).toBe('1');
+    // Only QUEUED runs wedge. A review-address run legitimately runs for
+    // hours, and must keep deferring the watchdog for every one of them.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T02:00:00Z', 'in_progress'),
+      ]),
+    ).toBe('1');
+    // Unknown age is not evidence of a wedge: an absent createdAt keeps the
+    // run in flight rather than licensing a duplicate dispatch.
+    expect(
+      inflight([
+        { event: 'workflow_dispatch', databaseId: 900001, status: 'queued' },
+      ]),
+    ).toBe('1');
+
+    // The census counts every wedged run whatever its event or attribution —
+    // it exists to make the wedge VISIBLE, which is what the incident lacked.
+    expect(
+      census([
+        run('workflow_dispatch', 1, '2026-08-19T01:04:50Z', 'queued'),
+        run('workflow_dispatch', 2, '2026-08-19T13:44:13Z', 'queued'),
+        run('pull_request_review', 3, '2026-08-19T05:14:09Z', 'queued'),
+        run('schedule', 4, '2026-08-19T23:55:00Z', 'queued'),
+        run('schedule', 5, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('3');
+  });
+
+  it('reports and routes around wedged runs everywhere they matter', () => {
+    // Tunable without a deploy, and generous enough never to fire on an
+    // ordinary runner queue.
+    expect(workflow).toContain(
+      'ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || \'30\' }}"',
+    );
+    // The conflict lever's busy-set reads the same predicate: a wedged run
+    // holds no review-address job, so waiting on it would defer conflict
+    // dispatches forever too.
+    expect(workflow).toContain(
+      'select(.status != "completed") | select(wedged($now; $zmin) | not) | .databaseId',
+    );
+    // Visible in the tick log and on the dashboard, not just in the count.
+    expect(workflow).toContain('wedged-queued: ${SCAN_ZOMBIES}');
+    expect(workflow).toContain(
+      "autofix run(s) stuck 'queued' for over ${ZOMBIE_QUEUED_MINUTES}m",
+    );
+    expect(workflow).toContain(
+      '${SCAN_ZOMBIES} autofix run(s) wedged in \\`queued\\`',
+    );
   });
 
   it('maintains one dashboard issue edited in place', () => {
