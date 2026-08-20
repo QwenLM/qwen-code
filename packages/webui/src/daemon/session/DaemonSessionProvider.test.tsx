@@ -543,6 +543,114 @@ describe('DaemonSessionProvider', () => {
     expect(connection).not.toHaveProperty('sessionId');
   });
 
+  it('keeps model preview separate until live reasoning context is authoritative', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    const session = createMockSession({
+      sessionId: 'lazy-session',
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'lazy-session',
+        workspaceCwd: '/mock-workspace',
+        state: { configOptions: reasoningConfigOptions('medium') },
+      })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    expect(connection?.sessionId).toBe('lazy-session');
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('does not restore model preview when live context lacks reasoning capability', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'lazy-session',
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'lazy-session',
+          workspaceCwd: '/mock-workspace',
+          state: { configOptions: [] },
+        })),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
+  });
+
   it('populates git branch from the active session workspace', async () => {
     sdkMocks.sessions.push(createMockSession());
     let connection: DaemonConnectionState | undefined;
@@ -13213,6 +13321,51 @@ function createTextReplaySnapshot(text: string): MockSession['replaySnapshot'] {
       },
     ],
     liveJournal: [],
+  };
+}
+
+function reasoningConfigOptions(currentValue: string): unknown[] {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+      },
+    },
+  ];
+}
+
+function workspaceProvidersWithReasoningPreview() {
+  return {
+    v: 1,
+    workspaceCwd: '/mock-workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: reasoningConfigOptions('xhigh'),
+          },
+        ],
+      },
+    ],
   };
 }
 

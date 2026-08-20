@@ -256,6 +256,8 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
+  buildModelReasoningConfigOption,
+  buildModelReasoningConfigPreview,
   getModelConfiguration,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
@@ -268,6 +270,7 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -7268,6 +7271,10 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
+        const configOptions =
+          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+            ? undefined
+            : buildModelReasoningConfigPreview(model.id);
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -7285,6 +7292,7 @@ class QwenAgent implements Agent {
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
+          ...(configOptions ? { configOptions } : {}),
         };
         provider.models.push(providerModel);
         if (isCurrent) provider.current = true;
@@ -13211,70 +13219,32 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
-    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
-      ? {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue:
-            config.getContentGeneratorConfig().reasoning === false
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? ACP_REASONING_EFFORT_DEFAULT
-                : (modelReasoning.efforts.find(
-                    (effort) => effort === currentModelEffort,
-                  ) ?? modelReasoning.defaultEffort),
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_NONE,
-              name: 'Thinking off',
-              description: 'Disable thinking for this session',
-            },
-            ...(modelReasoning.toggleOnly
-              ? [
-                  {
-                    value: ACP_REASONING_EFFORT_DEFAULT,
-                    name: 'Thinking on',
-                    description: 'Use the model or provider thinking default',
-                  },
-                ]
-              : modelReasoning.efforts.map((effort) => ({
-                  value: effort,
-                  name: ACP_REASONING_EFFORT_NAMES[effort],
-                  description: 'Apply this effort to the next request',
-                }))),
-          ],
-          _meta: {
-            'qwenCode/reasoning': {
-              ...(modelReasoning.toggleOnly
-                ? { toggleOnly: true }
-                : { defaultEffort: modelReasoning.defaultEffort }),
-            },
-          },
-        }
-      : {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: 'How hard reasoning-capable models should think',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_DEFAULT,
-              name: 'Default',
-              description: 'Use the model or provider default',
-            },
-            ...REASONING_EFFORT_TIERS.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description:
-                'Providers map or clamp the requested tier for the active model',
-            })),
-          ],
-        };
+    const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
+      ? buildModelReasoningConfigOption(rawCurrentModelId, {
+          enabled: config.getContentGeneratorConfig().reasoning !== false,
+          effort: currentModelEffort,
+        })
+      : undefined) ?? {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
+      options: [
+        {
+          value: ACP_REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: ACP_REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
 
     return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }

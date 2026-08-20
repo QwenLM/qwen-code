@@ -1904,6 +1904,7 @@ export interface DaemonWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface DaemonWorkspaceProviderStatus extends DaemonStatusCell {
