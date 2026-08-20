@@ -10287,6 +10287,7 @@ exit 1
       'Do not push, comment, create pull requests',
       'Operate only in the workflow',
       'Run required verification commands before committing',
+      'Verify with a mutation probe before',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
