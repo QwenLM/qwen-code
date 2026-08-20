@@ -16,8 +16,10 @@ import {
 } from '@qwen-code/channel-base';
 import { DwsChannel } from './dws-channel.js';
 import {
+  DwsClient,
   DwsCommandError,
   type DwsClientLike,
+  type DwsCommandRunner,
   type DwsIdentity,
   type DwsImMessage,
   type DwsImSource,
@@ -26,6 +28,7 @@ import {
 } from './dws-client.js';
 import {
   DwsEventProcessError,
+  type DwsEventProcessStarter,
   type DwsEventSubscription,
 } from './dws-event-stream.js';
 
@@ -712,6 +715,52 @@ describe('DwsChannel', () => {
       'DWS IM sources require the authenticated identity to expose an openDingTalkId.',
     );
     expect(client.streams).toEqual([]);
+  });
+
+  it('rejects ambient groups when the real client cannot resolve self identity', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ version: '1.0.57' }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          profiles: [{ profile: 'corp:bot', isCurrent: true }],
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          authenticated: true,
+          user_id: 'AI574',
+          user_name: 'QwenBot',
+        }),
+        stderr: '',
+      })
+      .mockRejectedValueOnce(new Error('contact unavailable'));
+    const eventStarter = vi.fn<DwsEventProcessStarter>();
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+      eventStarter,
+    );
+    const channel = new TestableDwsChannel(
+      'real-client-missing-self-dws',
+      makeConfig({
+        dmPolicy: 'disabled',
+        groups: { 'cid-ambient': { requireMention: false } },
+      }),
+      makeBridge(),
+      undefined,
+      client,
+    );
+    channels.push(channel);
+
+    await expect(channel.connect()).rejects.toThrow(
+      'DWS IM sources require the authenticated identity to expose an openDingTalkId.',
+    );
+    expect(eventStarter).not.toHaveBeenCalled();
   });
 
   it('cancels a connection that finishes authenticating after disconnect', async () => {

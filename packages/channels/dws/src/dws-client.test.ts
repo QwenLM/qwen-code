@@ -147,7 +147,7 @@ describe('DwsClient', () => {
     ]);
   });
 
-  it('keeps group-only identity usable when contact lookup fails', async () => {
+  it('returns no self sender identity when contact lookup fails', async () => {
     const runner = vi
       .fn<DwsCommandRunner>()
       .mockResolvedValueOnce({
