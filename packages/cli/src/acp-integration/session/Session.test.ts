@@ -2808,6 +2808,7 @@ describe('Session', () => {
     it('captures Todo IDs only for an enabled, active revision', async () => {
       const setRevision = vi.fn();
       const clearRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
       mockConfig.setSessionWorkflowPlanRevision = setRevision;
       mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
@@ -2845,6 +2846,7 @@ describe('Session', () => {
 
     it('requires both the Workflow marker and complete Todo identity', async () => {
       const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
       mockConfig.setSessionWorkflowPlanRevision = setRevision;
       mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
@@ -2882,6 +2884,85 @@ describe('Session', () => {
       });
 
       expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an in-progress plan', ['in_progress']],
+      ['a partially completed plan', ['completed', 'pending']],
+    ] as const)('does not bind %s for approval', async (_label, statuses) => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: statuses.map((status, index) => ({
+          content: `Step ${index + 1}`,
+          priority: 'medium',
+          status,
+          _meta: { qwenTodo: { id: `step-${index + 1}` } },
+        })),
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it('keeps the approved Todo IDs frozen during execution updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await runExitPlanModeApprovalPrompt();
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Unapproved follow-up',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'follow-up' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect'],
+      });
     });
 
     it('clears the revision context on session disposal', () => {
@@ -20786,6 +20867,7 @@ describe('Session', () => {
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
+        enableSessionWorkflowRevisionContext();
         let mode = ApprovalMode.PLAN;
         const hookSpy = vi
           .spyOn(core, 'firePermissionRequestHook')
@@ -20857,9 +20939,11 @@ describe('Session', () => {
               content: 'Ship',
               priority: 'medium',
               status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'todo-call-1' },
           },

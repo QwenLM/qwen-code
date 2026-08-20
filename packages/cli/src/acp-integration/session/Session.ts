@@ -6209,15 +6209,21 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       update: projectedUpdate,
     };
+    const canUpdateTodoPlanRevision =
+      update.sessionUpdate === 'plan' &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN;
 
-    if (update.sessionUpdate === 'plan') {
+    if (canUpdateTodoPlanRevision) {
       // Clear before delivery: a plan update the client never receives
       // must not stay bound to the next exit_plan_mode approval. The
       // capture below re-stamps only after delivery succeeds.
       this.clearActiveTodoPlanRevision();
     }
     await this.client.sessionUpdate(params);
-    if (update.sessionUpdate === 'plan') {
+    if (
+      canUpdateTodoPlanRevision &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN
+    ) {
       this.#captureTodoPlanRevision(update);
     }
   }
@@ -6241,7 +6247,7 @@ export class Session implements SessionContext {
       typeof sourceCallId === 'string' &&
       sourceCallId.trim() !== '' &&
       update.entries.length > 0 &&
-      update.entries.some((entry) => entry.status !== 'completed');
+      update.entries.every((entry) => entry.status === 'pending');
     const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
     if (!workflowEnabled || !workflowPlan || !hasValidIdentity) return;
 
