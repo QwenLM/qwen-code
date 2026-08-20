@@ -138,6 +138,61 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps an untrusted workspace bridge error to 403', () => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('Workspace is not trusted'), {
+      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(403);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted',
+      code: 'untrusted_workspace',
+    });
+  });
+
+  it.each([
+    ['goal_conflict', 409],
+    ['goal_invalid_transition', 409],
+    ['goal_persist_failed', 500],
+  ] as const)('maps %s to %i', (kind, expectedStatus) => {
+    // A persistence failure is not retryable; surfacing it as a 409 sends the
+    // client back to re-sync `current` and retry a write that cannot succeed,
+    // and the inverse turns an ordinary conflict into a 500.
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('goal control failed'), {
+      data: { errorKind: kind },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(expectedStatus);
+    expect(json).toHaveBeenCalledWith({
+      error: 'goal control failed',
+      code: kind,
+    });
+  });
+
+  it('forwards the current Goal snapshot on a conflict', () => {
+    // The client re-syncs from `current` before retrying; dropping it leaves it
+    // retrying against the revision the daemon just rejected.
+    const { response, json } = responseMock();
+    const current = { v: 2, activity: 'idle', goal: null };
+    const error = Object.assign(new Error('goal revision changed'), {
+      data: { errorKind: 'goal_conflict', current },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(json).toHaveBeenCalledWith({
+      error: 'goal revision changed',
+      code: 'goal_conflict',
+      current,
+    });
+  });
+
   it.each([
     ['invalid_session_attachment_reference', 400],
     ['session_attachment_gone', 410],
