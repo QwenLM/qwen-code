@@ -40,6 +40,7 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  await testWebShellBrowserPanel();
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
@@ -55,6 +56,164 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+async function testWebShellBrowserPanel() {
+  class FakeElement {
+    constructor(tagName = 'div') {
+      this.tagName = tagName.toUpperCase();
+      this.dataset = {};
+      this.hidden = false;
+      this.isConnected = false;
+      this.listeners = {};
+      this.style = {
+        setProperty: (name, value) => {
+          this.style[name] = value;
+        },
+      };
+    }
+
+    addEventListener(event, listener) {
+      this.listeners[event] = listener;
+    }
+
+    append(...children) {
+      for (const child of children) {
+        child.parentElement = this;
+        child.isConnected = this.isConnected;
+        if (this.tagName === 'FORM') child.form = this;
+      }
+      this.children ??= [];
+      this.children.push(...children);
+    }
+
+    setAttribute(name, value) {
+      this.attributes ??= {};
+      this.attributes[name] = value;
+    }
+
+    getBoundingClientRect() {
+      return { x: 640, y: 42, width: 520, height: 718 };
+    }
+  }
+
+  class FakeAnchor extends FakeElement {
+    constructor(href) {
+      super('a');
+      this.href = href;
+    }
+  }
+
+  const documentListeners = {};
+  const windowListeners = {};
+  const commands = [];
+  const shell = new FakeElement();
+  shell.isConnected = true;
+  const sidebar = new FakeElement('aside');
+  sidebar.parentElement = shell;
+  sidebar.isConnected = true;
+  const documentElement = new FakeElement('html');
+  documentElement.isConnected = true;
+  documentElement.lang = 'en';
+  const document = {
+    body: new FakeElement('body'),
+    documentElement,
+    addEventListener(event, listener) {
+      documentListeners[event] = listener;
+    },
+    createElement(tagName) {
+      return new FakeElement(tagName);
+    },
+    querySelector(selector) {
+      assert.equal(selector, '[data-web-shell-root] [data-sidebar-shell]');
+      return sidebar;
+    },
+  };
+  const navigator = { platform: 'MacIntel' };
+  const window = {
+    __TAURI__: {
+      core: {
+        invoke: async (command, args) => {
+          commands.push({ command, args });
+        },
+      },
+    },
+    addEventListener(event, listener) {
+      windowListeners[event] = listener;
+    },
+    innerWidth: 1200,
+    location: new URL('http://127.0.0.1:4170/session/1'),
+    removeEventListener() {},
+  };
+  vm.runInNewContext(
+    fs.readFileSync(
+      path.join(packageDir, 'src-tauri', 'web-shell-desktop.js'),
+      'utf8',
+    ),
+    {
+      document,
+      Element: FakeElement,
+      HTMLAnchorElement: FakeAnchor,
+      navigator,
+      requestAnimationFrame: (callback) => callback(),
+      URL,
+      window,
+    },
+    { timeout: 5000 },
+  );
+
+  const click = (anchor, overrides = {}) => {
+    const event = {
+      button: 0,
+      composedPath: () => [anchor],
+      ctrlKey: false,
+      metaKey: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      stopImmediatePropagation() {
+        this.propagationStopped = true;
+      },
+      ...overrides,
+    };
+    documentListeners.click(event);
+    return event;
+  };
+
+  click(new FakeAnchor('https://example.com/'));
+  click(new FakeAnchor('https://example.com/'), { ctrlKey: true });
+  click(new FakeAnchor('http://127.0.0.1:4170/settings'), { metaKey: true });
+  assert.equal(
+    commands.length,
+    0,
+    'ordinary and non-matching clicks stay native',
+  );
+
+  const modified = click(new FakeAnchor('https://example.com/path'), {
+    metaKey: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(modified.defaultPrevented, true);
+  assert.equal(modified.propagationStopped, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(commands)), [
+    {
+      command: 'browser_panel_open',
+      args: {
+        url: 'https://example.com/path',
+        bounds: { x: 640, y: 42, width: 520, height: 718 },
+      },
+    },
+  ]);
+  commands.length = 0;
+  navigator.platform = 'Win32';
+  const ctrlModified = click(new FakeAnchor('https://example.org/'), {
+    ctrlKey: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctrlModified.defaultPrevented, true);
+  assert.equal(commands[0].command, 'browser_panel_open');
+  assert.equal(commands[0].args.url, 'https://example.org/');
+  assert.ok(windowListeners['qwen-desktop-browser-state']);
 }
 
 async function testBootstrapWorkspaceVisibility() {

@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser_panel;
 mod computer_use;
 mod desktop_state;
 mod runtime;
 
+use browser_panel::BrowserPanelStore;
 use command_group::GroupChild;
 use computer_use::{
     create_surfaces, session_id_from_url, ComputerUseController, RuntimeConnection,
@@ -108,6 +110,14 @@ fn main() {
             computer_use_stop,
             computer_use_set_picture_in_picture_visible,
             computer_use_set_always_hide_picture_in_picture,
+            browser_panel::browser_panel_open,
+            browser_panel::browser_panel_navigate,
+            browser_panel::browser_panel_set_bounds,
+            browser_panel::browser_panel_go_back,
+            browser_panel::browser_panel_go_forward,
+            browser_panel::browser_panel_reload,
+            browser_panel::browser_panel_open_external,
+            browser_panel::browser_panel_close,
         ])
         .setup(setup_app);
 
@@ -244,6 +254,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
         .initialization_script(include_str!("../web-shell-computer-use.js"))
+        .initialization_script(include_str!("../web-shell-desktop.js"))
+        .initialization_script(include_str!("../web-shell-computer-use.js"))
         .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
@@ -267,6 +279,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build()?;
     restore_window(&window, window_state.as_ref());
+
+    handle.manage(BrowserPanelStore::default());
 
     handle.manage(ApplicationState {
         computer_use,
@@ -553,6 +567,7 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 }
 
 fn stop_runtime(app: &AppHandle) {
+    let _ = browser_panel::close(app);
     let state = app.state::<ApplicationState>();
     state.computer_use.clear(app);
     state.start_generation.fetch_add(1, Ordering::SeqCst);
@@ -794,6 +809,26 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
         Ok(())
     } else {
         Err("This command is only available from the desktop shell.".to_string())
+    }
+}
+
+fn require_runtime_origin(
+    webview: &WebviewWindow,
+    state: &ApplicationState,
+) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("Untrusted desktop sender.".to_string());
+    }
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    if lock(&state.origin)
+        .as_ref()
+        .is_some_and(|origin| is_same_origin(&url, origin))
+    {
+        Ok(())
+    } else {
+        Err("This command is only available to the active Web Shell.".to_string())
     }
 }
 
