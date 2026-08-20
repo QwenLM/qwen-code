@@ -76,36 +76,6 @@ function addSourceBlockCounts(
   offsets.mathBlockCount += counts.mathBlockCount;
 }
 
-/**
- * Stable identity of a tool_group for duplicate collapsing (#9420): the
- * sorted callIds of its tool calls, JSON-encoded so multi-call signatures
- * stay unambiguous even if a callId itself contains a comma. The same
- * in-flight batch can render twice — from committed history and from the
- * live pending list — and the two copies share this signature.
- *
- * Cached by item reference — history items are stable references, replaced
- * (never mutated) when they change — because the consuming memo recomputes
- * on every streaming tick and a long session can hold hundreds of committed
- * tool_groups.
- */
-const toolGroupSignatures = new WeakMap<
-  HistoryItemWithoutId | VpBannerItem,
-  string | null
->();
-function toolGroupSignature(
-  item: HistoryItemWithoutId | VpBannerItem,
-): string | null {
-  let signature = toolGroupSignatures.get(item);
-  if (signature === undefined) {
-    signature =
-      item.type === 'tool_group'
-        ? JSON.stringify(item.tools.map((tool) => tool.callId).sort())
-        : null;
-    toolGroupSignatures.set(item, signature);
-  }
-  return signature;
-}
-
 // Issue #3899: Ink's <Static> renders all items synchronously on (re)mount.
 // For long histories that's O(N) blocking work — bad on Ctrl+O which clears
 // the terminal and forces a full remount. To keep input responsive, we
@@ -329,41 +299,41 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     // renders from both committed history and the live pending list between
     // the onComplete commit and the scheduler clearing its display state.
     // Continuation thought/content items can land between the copies, so
-    // match by signature across the whole list — never by adjacency — and
-    // only when a live pending counterpart exists (it keeps updating, so it
-    // wins). Committed rows without a live counterpart are never collapsed,
-    // so distinct batches whose signatures collide (e.g. synthetic
-    // speculation callIds) both survive.
-    //
-    // livePendingSigs comes straight from pendingHistoryItems so a tick
-    // without any pending tool_group skips the history-wide pass below.
-    const livePendingSigs = new Set<string>();
+    // match across the whole list — never by adjacency — on the scheduler-
+    // minted batchId stamped on both copies of one batch, and only when a
+    // live pending counterpart exists (it keeps updating, so it wins).
+    // callIds are NOT an identity (ids are re-minted after core-history
+    // compaction and providers can reuse wire ids), so unrelated batches
+    // whose callIds collide keep rendering. Groups without a batchId
+    // (restored sessions, adapters) are never collapsed.
+    const livePendingBatchIds = new Set<string>();
     for (const item of pendingHistoryItems) {
-      const sig = toolGroupSignature(item);
-      if (sig !== null) livePendingSigs.add(sig);
-    }
-    if (livePendingSigs.size === 0) return combined;
-    const dropped = new Set<VpItem>();
-    // The stale committed copy of the live batch is the LATEST committed row
-    // matching its signature — onComplete just appended it at the tail of
-    // history. Earlier committed rows sharing the signature are distinct
-    // executions whose callIds merely collide (ids re-minted after core
-    // history compaction, provider wire-id reuse) and must keep rendering.
-    const latestCommittedBySig = new Map<string, VpItem>();
-    // Same batch twice within the pending list: keep the latest copy only.
-    const keptPendingBySig = new Map<string, VpItem>();
-    for (const item of combined) {
-      const sig = toolGroupSignature(item);
-      if (sig === null || !livePendingSigs.has(sig)) continue;
-      if (item.id > 0) {
-        latestCommittedBySig.set(sig, item);
-      } else {
-        const kept = keptPendingBySig.get(sig);
-        if (kept) dropped.add(kept);
-        keptPendingBySig.set(sig, item);
+      if (item.type === 'tool_group' && item.batchId !== undefined) {
+        livePendingBatchIds.add(item.batchId);
       }
     }
-    for (const item of latestCommittedBySig.values()) dropped.add(item);
+    if (livePendingBatchIds.size === 0) return combined;
+    const dropped = new Set<VpItem>();
+    const committedByBatchId = new Map<string, VpItem>();
+    // Same batch twice within the pending list: keep the latest copy only.
+    const keptPendingByBatchId = new Map<string, VpItem>();
+    for (const item of combined) {
+      if (
+        item.type !== 'tool_group' ||
+        item.batchId === undefined ||
+        !livePendingBatchIds.has(item.batchId)
+      ) {
+        continue;
+      }
+      if (item.id > 0) {
+        committedByBatchId.set(item.batchId, item);
+      } else {
+        const kept = keptPendingByBatchId.get(item.batchId);
+        if (kept) dropped.add(kept);
+        keptPendingByBatchId.set(item.batchId, item);
+      }
+    }
+    for (const item of committedByBatchId.values()) dropped.add(item);
     if (dropped.size === 0) return combined;
     return combined.filter((item) => !dropped.has(item));
   }, [visibleHistory, pendingHistoryItems]);

@@ -884,7 +884,12 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
-    // Shared fixtures for the #9420 collapse tests.
+    // Shared fixtures for the #9420 collapse tests. A tool batch renders
+    // twice transiently — the committed history copy plus the live pending
+    // copy — and both copies carry the same scheduler-minted `batchId`.
+    // The collapse matches on that identity, never on callIds: callIds are
+    // not globally unique (deterministic ids re-minted after core-history
+    // compaction, provider wire-id reuse).
     const toolGroupFixture = (...callIds: string[]) => ({
       type: 'tool_group' as const,
       tools: callIds.map((callId) => ({
@@ -895,6 +900,10 @@ describe('<MainContent />', () => {
         resultDisplay: undefined,
         confirmationDetails: undefined,
       })),
+    });
+    const batched = (batchId: string, ...callIds: string[]) => ({
+      ...toolGroupFixture(...callIds),
+      batchId,
     });
     const lastVpDataIds = () =>
       scrollableListPropsSpy.mock.calls
@@ -907,8 +916,8 @@ describe('<MainContent />', () => {
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          history: [{ id: 1, ...toolGroupFixture('dup-call') }],
-          pendingHistoryItems: [toolGroupFixture('dup-call')],
+          history: [{ id: 1, ...batched('batch-1', 'call-A', 'call-B') }],
+          pendingHistoryItems: [batched('batch-1', 'call-A', 'call-B')],
         }),
       );
 
@@ -925,14 +934,14 @@ describe('<MainContent />', () => {
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          history: [{ id: 1, ...toolGroupFixture('dup-call') }],
+          history: [{ id: 1, ...batched('batch-1', 'dup-call') }],
           // The real lifecycle: onComplete commits the batch to history, then
           // the continuation stream appends thought/content pending items
           // before the scheduler clears the stale live copy — so the two
           // copies are not adjacent in the combined list.
           pendingHistoryItems: [
             { type: 'gemini_thought' as const, text: 'thinking' },
-            toolGroupFixture('dup-call'),
+            batched('batch-1', 'dup-call'),
           ],
         }),
       );
@@ -947,8 +956,8 @@ describe('<MainContent />', () => {
         createUIState({
           useTerminalBuffer: true,
           pendingHistoryItems: [
-            toolGroupFixture('dup-call'),
-            toolGroupFixture('dup-call'),
+            batched('batch-1', 'dup-call'),
+            batched('batch-1', 'dup-call'),
           ],
         }),
       );
@@ -964,9 +973,9 @@ describe('<MainContent />', () => {
         createUIState({
           useTerminalBuffer: true,
           pendingHistoryItems: [
-            toolGroupFixture('dup-call'),
+            batched('batch-1', 'dup-call'),
             { type: 'gemini_thought' as const, text: 'between' },
-            toolGroupFixture('dup-call'),
+            batched('batch-1', 'dup-call'),
           ],
         }),
       );
@@ -976,32 +985,33 @@ describe('<MainContent />', () => {
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2, -3]);
     });
 
-    it('keeps adjacent tool_groups with different signatures (#9420)', () => {
+    it('keeps tool_groups of unrelated batches side by side (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
           history: [
-            { id: 1, ...toolGroupFixture('call-A') },
-            { id: 2, ...toolGroupFixture('call-B') },
+            { id: 1, ...batched('batch-1', 'call-A') },
+            { id: 2, ...batched('batch-2', 'call-B') },
           ],
-          pendingHistoryItems: [toolGroupFixture('call-C')],
+          pendingHistoryItems: [batched('batch-3', 'call-C')],
         }),
       );
 
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
     });
 
-    it('keeps committed tool_groups sharing a signature when no pending copy is live (#9420)', () => {
+    it('keeps committed tool_groups sharing callIds when no pending copy is live (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          // Two committed batches with identical signatures (e.g. accepted-
+          // Two committed batches with identical callIds (e.g. accepted-
           // speculation runs whose synthetic callIds collide) and no live
           // pending copy: nothing is duplicated, both rows must survive.
+          // Restored-session groups carry no batchId and take this shape.
           history: [
             { id: 1, ...toolGroupFixture('dup-call') },
             { id: 2, type: 'gemini_thought' as const, text: 'between' },
@@ -1013,62 +1023,85 @@ describe('<MainContent />', () => {
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, 3]);
     });
 
+    it('keeps an unrelated committed batch that collides with a live batch before it commits (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Pre-commit shape: the live batch ('batch-new') has not been
+          // committed yet, so it has no stale copy in history. The
+          // committed row belongs to an unrelated earlier batch whose
+          // callIds merely collide (ids re-minted after core-history
+          // compaction, provider wire-id reuse) and must keep rendering
+          // for the whole execution window of the new batch.
+          history: [{ id: 1, ...batched('batch-old', 'dup-call') }],
+          pendingHistoryItems: [batched('batch-new', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, -1]);
+    });
+
     it('keeps earlier committed batches whose callIds collide with the live pending batch (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          // callIds are not globally unique: after full core-history
-          // compaction the display history stays intact while deterministic
-          // ids (call_qwen_1, ...) are re-minted, and OpenAI-compatible
-          // providers can reuse wire ids across turns. The unrelated earlier
-          // batch (id 1) sharing the live batch's callIds must keep
-          // rendering; only the just-committed stale copy (id 3, the latest
-          // match) is collapsed against the pending copy.
+          // The unrelated earlier batch ('batch-old') sharing the live
+          // batch's callIds must keep rendering; only the stale committed
+          // copy of the live batch itself (id 3, 'batch-live') collapses
+          // against the pending copy.
           history: [
-            { id: 1, ...toolGroupFixture('dup-call') },
+            { id: 1, ...batched('batch-old', 'dup-call') },
             { id: 2, type: 'gemini_thought' as const, text: 'between' },
-            { id: 3, ...toolGroupFixture('dup-call') },
+            { id: 3, ...batched('batch-live', 'dup-call') },
           ],
-          pendingHistoryItems: [toolGroupFixture('dup-call')],
+          pendingHistoryItems: [batched('batch-live', 'dup-call')],
         }),
       );
 
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
     });
 
-    it('collapses multi-tool groups regardless of callId order (#9420)', () => {
+    it('collapses two distinct duplicated tool_groups pending at once (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          // Same batch streamed with its tool calls in different orders:
-          // the signature must be order-insensitive (pins the .sort()).
-          history: [{ id: 1, ...toolGroupFixture('call-A', 'call-B') }],
-          pendingHistoryItems: [toolGroupFixture('call-B', 'call-A')],
+          history: [
+            { id: 1, ...batched('batch-A', 'call-A') },
+            { id: 2, ...batched('batch-B', 'call-B') },
+          ],
+          pendingHistoryItems: [
+            batched('batch-A', 'call-A'),
+            batched('batch-B', 'call-B'),
+          ],
         }),
       );
 
-      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1]);
+      // Each live batch collapses exactly its own committed copy — the
+      // bookkeeping must key per batch, not collapse into one shared slot.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
     });
 
-    it('keeps distinct batches whose callIds only collide through a comma join (#9420)', () => {
+    it('collapses a stale committed copy that is not the last history item (#9420)', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
         createUIState({
           useTerminalBuffer: true,
-          // One batch with a single callId 'a,b' and another with two
-          // callIds 'a' and 'b' are different executions; an ambiguous
-          // join(',') signature would collapse the committed one.
-          history: [{ id: 1, ...toolGroupFixture('a,b') }],
-          pendingHistoryItems: [toolGroupFixture('a', 'b')],
+          history: [
+            { id: 1, ...batched('batch-1', 'dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'after' },
+          ],
+          pendingHistoryItems: [batched('batch-1', 'dup-call')],
         }),
       );
 
-      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, -1]);
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 2, -1]);
     });
 
     it('requests a full-height measurement only for pending plain-text confirmations', () => {

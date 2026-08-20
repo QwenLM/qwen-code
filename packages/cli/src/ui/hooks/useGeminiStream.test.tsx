@@ -1659,6 +1659,106 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('stamps the committed tool_group with the batch id minted at schedule time (#9420)', async () => {
+    const makeCompletedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-id',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    // Completing 'setup-tool' submits its result; the continuation stream
+    // schedules 'next-tool', minting the batch identity for its callIds.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: { callId: 'next-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([makeCompletedTool('setup-tool')]);
+    });
+    await waitFor(() => {
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    });
+
+    const findCommittedGroup = (callId: string) =>
+      mockAddItem.mock.calls
+        .map((call) => call[0])
+        .find(
+          (item) =>
+            item?.type === 'tool_group' &&
+            item.tools.some(
+              (tool: { callId: string }) => tool.callId === callId,
+            ),
+        );
+
+    // 'setup-tool' completed without ever being scheduled through the
+    // stream path, so its committed copy carries no batch identity
+    // (restored-session shape — never collapsed).
+    expect(findCommittedGroup('setup-tool')?.batchId).toBeUndefined();
+
+    mockAddItem.mockClear();
+    await act(async () => {
+      await capturedOnComplete?.([makeCompletedTool('next-tool')]);
+    });
+
+    // The scheduled batch's committed copy carries the minted batchId so
+    // MainContent can collapse it against the live pending copy.
+    expect(findCommittedGroup('next-tool')?.batchId).toEqual(
+      expect.any(String),
+    );
+  });
+
   it('forwards one exact Goal context across a ToolResult batch', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-tools',

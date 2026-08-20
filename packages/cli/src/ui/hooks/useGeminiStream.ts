@@ -882,6 +882,29 @@ export const useGeminiStream = (
   } = useSessionStats();
   const storage = config.storage;
 
+  // Batch identity for tool_group duplicate collapsing (#9420): minted when
+  // a batch is scheduled, stamped on both the live pending display group and
+  // the history item committed by onComplete below, so MainContent can
+  // collapse the transient double render of one batch by identity — callIds
+  // are not an identity (ids are re-minted after core-history compaction and
+  // providers can reuse wire ids across turns).
+  const toolBatchIdByCallIdRef = useRef(new Map<string, string>());
+  const toolBatchCounterRef = useRef(0);
+  const registerToolBatch = useCallback(
+    (requests: ToolCallRequestInfo | ToolCallRequestInfo[]) => {
+      const batchId = `tool-batch-${++toolBatchCounterRef.current}`;
+      for (const request of Array.isArray(requests) ? requests : [requests]) {
+        toolBatchIdByCallIdRef.current.set(request.callId, batchId);
+      }
+    },
+    [],
+  );
+  const getToolBatchId = useCallback(
+    (callId: string): string | undefined =>
+      toolBatchIdByCallIdRef.current.get(callId),
+    [],
+  );
+
   const [toolCalls, scheduleToolCalls, markToolsAsSubmitted] =
     useReactToolScheduler(
       async (completedToolCallsFromScheduler) => {
@@ -897,6 +920,9 @@ export const useGeminiStream = (
               completedToolCallsFromScheduler as TrackedToolCall[],
               projectRoot,
             );
+            toolGroupDisplay.batchId = getToolBatchId(
+              completedToolCallsFromScheduler[0].request.callId,
+            );
             addItem(toolGroupDisplay, Date.now());
 
             // Handle tool response submission immediately when tools complete
@@ -905,6 +931,11 @@ export const useGeminiStream = (
             );
           } finally {
             releaseToolCompletionActivity?.();
+            // Entries are only needed until the batch commits; the scheduler
+            // clears its display copy right after this callback returns.
+            for (const tc of completedToolCallsFromScheduler) {
+              toolBatchIdByCallIdRef.current.delete(tc.request.callId);
+            }
           }
         }
       },
@@ -914,13 +945,15 @@ export const useGeminiStream = (
       canUseToolResultFullTurnModel,
     );
 
-  const pendingToolCallGroupDisplay = useMemo(
-    () =>
-      toolCalls.length
-        ? mapTrackedToolCallsToDisplay(toolCalls, config.getProjectRoot())
-        : undefined,
-    [toolCalls, config],
-  );
+  const pendingToolCallGroupDisplay = useMemo(() => {
+    if (!toolCalls.length) return undefined;
+    const group = mapTrackedToolCallsToDisplay(
+      toolCalls,
+      config.getProjectRoot(),
+    );
+    group.batchId = getToolBatchId(toolCalls[0].request.callId);
+    return group;
+  }, [toolCalls, config, getToolBatchId]);
 
   const activeToolPtyId = useMemo(() => {
     const executingShellTool = toolCalls?.find(
@@ -1417,6 +1450,7 @@ export const useGeminiStream = (
                 isClientInitiated: true,
                 prompt_id,
               };
+              registerToolBatch(toolCallRequest);
               scheduleToolCalls([toolCallRequest], abortSignal);
               return {
                 queryToSend: null,
@@ -1579,6 +1613,7 @@ export const useGeminiStream = (
       handleSlashCommand,
       logger,
       shellModeActive,
+      registerToolBatch,
       scheduleToolCalls,
       applyVisionBridgeIfNeeded,
     ],
@@ -2956,6 +2991,7 @@ export const useGeminiStream = (
             }
           }
           scheduledToolContinuation = true;
+          registerToolBatch(executableToolCallRequests);
           scheduleToolCalls(
             executableToolCallRequests,
             signal,
@@ -2973,6 +3009,7 @@ export const useGeminiStream = (
       handleThoughtEvent,
       handleUserCancelledEvent,
       handleErrorEvent,
+      registerToolBatch,
       scheduleToolCalls,
       geminiClient,
       handleChatCompressionEvent,
