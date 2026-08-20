@@ -262,6 +262,20 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['third_party/docs/protocols/frames.md', false],
     ['test/fixtures/docs/reference/sample.md', false],
     ['node_modules/pkg/docs/api/x.md', false],
+    // The members, boundary anchors and /i flag the rows above leave unpinned:
+    // each survives a one-edit mutation of the closed set without a row.
+    ['vendors/lib/docs/api/x.md', false],
+    ['third-party/lib/docs/protocols/frames.md', false],
+    ['src/__fixtures__/docs/api/x.md', false],
+    ['Vendor/some-lib/docs/api/reference.md', false],
+    ['Third_Party/lib/docs/api/x.md', false],
+    // The separator-less spelling is a conventional vendor directory name in
+    // its own right, so the separator is optional.
+    ['thirdparty/some-lib/docs/api/reference.md', false],
+    // A segment that merely contains or adjoins a member is not the member:
+    // dropping either boundary anchor flips nothing without these rows.
+    ['docs/api/myvendor/x.md', true],
+    ['docs/api/vendor-notes.md', true],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });

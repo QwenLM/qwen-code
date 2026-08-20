@@ -229,7 +229,7 @@ const NON_CONTRACT_FILE =
  * the meta filenames above are one.
  */
 const NOT_OURS =
-  /(?:^|\/)(?:vendor|vendors|third[-_]party|node_modules|fixtures|__fixtures__)\//i;
+  /(?:^|\/)(?:vendor|vendors|third[-_]?party|node_modules|fixtures|__fixtures__)\//i;
 
 const CONTRACT_DOCS: PathRule = {
   title: 'Consumer-facing contract documentation',
