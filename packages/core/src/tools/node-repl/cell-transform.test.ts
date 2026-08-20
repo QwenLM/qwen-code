@@ -165,7 +165,7 @@ describe('prepareNodeReplCell', () => {
         cellId: 'cell-4',
       },
     );
-    expect(prepared.source).toContain('const 变量 = "你好";');
+    expect(prepared.source).toContain('const 变量 = "你好",');
     expect(prepared.source).toContain('throw new Error("停止");');
     const firstCommit = prepared.source.indexOf('["变量"] = 变量;');
     const thrown = prepared.source.indexOf('throw new Error');

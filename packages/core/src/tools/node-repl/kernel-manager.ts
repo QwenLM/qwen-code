@@ -21,6 +21,7 @@ import {
   type ExecResultMessage,
   type KernelToHostMessage,
   type NodeReplBindingKind,
+  type NodeReplModuleRoot,
 } from './protocol.js';
 import type { NodeReplSecurityPolicy } from './security-policy.js';
 
@@ -41,13 +42,6 @@ const MAX_CAPABILITY_ID_CHARS = 128;
 const MAX_CAPABILITY_OPERATION_CHARS = 256;
 const MAX_CAPABILITY_REQUESTS_PER_EXEC = 4096;
 const CONSOLE_LEVELS = new Set(['log', 'info', 'warn', 'error', 'debug']);
-const KERNEL_ENV_KEYS = [
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TZ',
-  ...(IS_WINDOWS ? ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT'] : []),
-];
 
 export interface NodeReplTextEvent {
   type: 'text';
@@ -198,19 +192,14 @@ function hasControlCharacters(value: string): boolean {
 }
 
 function createKernelEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of KERNEL_ENV_KEYS) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
-  return normalizePathEnvForWindows(env);
+  return normalizePathEnvForWindows({ ...process.env });
 }
 
 export class NodeReplKernelManager {
   private kernel: KernelHandle | null = null;
   private generation = 0;
   private readonly bindingKinds = new Map<string, NodeReplBindingKind>();
-  private readonly moduleRoots: string[];
+  private readonly moduleRoots: NodeReplModuleRoot[];
   private readonly readableRoots: string[];
   private readonly capabilities: Readonly<
     Record<string, NodeReplCapabilityHandler>
@@ -251,7 +240,7 @@ export class NodeReplKernelManager {
   }
 
   getModuleRoots(): string[] {
-    return [...this.moduleRoots];
+    return this.moduleRoots.map((root) => root.canonicalPath);
   }
 
   getBindingNames(): string[] {
@@ -286,6 +275,7 @@ export class NodeReplKernelManager {
   ): Promise<{ path: string; added: boolean }> {
     this.assertNotDisposed();
     const canonical = this.options.policy.validateModuleRoot(rawPath);
+    const root = { path: path.resolve(rawPath), canonicalPath: canonical };
     if (
       approvedCanonicalPath !== undefined &&
       canonical !== approvedCanonicalPath
@@ -296,19 +286,23 @@ export class NodeReplKernelManager {
     }
     const run = this.operationChain.then(async () => {
       this.assertNotDisposed();
-      const current = this.options.policy.validateModuleRoot(canonical);
+      const current = this.options.policy.validateModuleRoot(rawPath);
       if (current !== canonical) {
         throw new Error(
           'module root canonical target changed before registration',
         );
       }
-      if (this.moduleRoots.includes(canonical)) {
+      if (
+        this.moduleRoots.some(
+          (registered) => registered.canonicalPath === canonical,
+        )
+      ) {
         return { path: canonical, added: false };
       }
-      if (this.kernel) await this.sendAddRoot(canonical);
-      this.moduleRoots.push(canonical);
+      if (this.kernel) await this.sendAddRoot(root);
+      this.moduleRoots.push(root);
       debugLogger.debug(
-        `[node-repl] untrusted module root added (count=${this.moduleRoots.length})`,
+        `[node-repl] module root added (count=${this.moduleRoots.length})`,
       );
       return { path: canonical, added: true };
     });
@@ -1047,7 +1041,7 @@ export class NodeReplKernelManager {
     );
   }
 
-  private async sendAddRoot(root: string): Promise<void> {
+  private async sendAddRoot(root: NodeReplModuleRoot): Promise<void> {
     const handle = this.kernel;
     if (!handle) return;
     const requestId = randomUUID();
@@ -1057,7 +1051,7 @@ export class NodeReplKernelManager {
     let timer: NodeJS.Timeout | undefined;
     try {
       handle.toKernel.write(
-        encodeFrame({ type: 'addModuleRoot', requestId, path: root }),
+        encodeFrame({ type: 'addModuleRoot', requestId, root }),
       );
       await Promise.race([
         result,

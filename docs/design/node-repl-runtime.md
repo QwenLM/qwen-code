@@ -3,8 +3,7 @@
 Issue: QwenLM/qwen-code#9333. This is phase 1 of the persistent-kernel
 Computer Use roadmap. #9334 modifies cua-driver and wraps it as an independent
 JavaScript SDK. #9335 adds the Skill that guides Qwen Code to load and call that
-SDK through Node REPL as an ordinary untrusted package. This phase does not
-register the SDK or its operations into the Qwen host.
+SDK through Node REPL. This phase contains only the general Node REPL.
 
 ## Scope
 
@@ -12,16 +11,17 @@ Qwen exposes three deferred built-in tools:
 
 - `node_repl`: execute JavaScript in one task-owned Node kernel;
 - `node_repl_reset`: replace that kernel process;
-- `node_repl_add_node_module_dir`: add an untrusted `node_modules` lookup
-  root after the normal permission and workspace-trust checks.
+- `node_repl_add_node_module_dir`: add a `node_modules` lookup root after the
+  normal permission and workspace-trust checks.
 
 They are registered through the regular tool registry. Deliberately minimal
 `--bare` mode keeps its existing fixed tool set and does not register this
 deferred family.
 
-There is no MCP prerequisite, external install, `functions.exec`, nested tool
-calling, `qwenSession` global, Computer Use API, cua-driver, browser API, or
-unrestricted shell in this change.
+There is no MCP prerequisite, external install, `functions.exec`, nested Qwen
+tool calling, `qwenSession` global, Computer Use API, cua-driver, or browser API
+in this change. Like the reference runtime, imported Node builtins and packages
+retain their normal Node capabilities.
 
 The behavioral reference is the Codex `node_repl` contract observed while
 planning #9333. The implementation is clean-room: no Codex runtime source,
@@ -50,9 +50,8 @@ disposal is idempotent.
 
 The child runs with `--experimental-vm-modules`. stdout and stderr are data
 streams only. Protocol frames use dedicated pipes, so user output cannot
-forge a control frame. Its environment is built from a small locale/timezone
-and Windows-runtime allowlist; credentials, dynamic-library injection
-variables, `NODE_OPTIONS`, and `NODE_PATH` are not inherited.
+forge a control frame. It inherits the parent Node process environment,
+matching normal Node package behavior in the reference runtime.
 
 ## Tool contract and permission defaults
 
@@ -66,21 +65,19 @@ All schemas set `additionalProperties: false`.
 
 The existing PermissionManager remains authoritative. Execution and add-root
 are denied while the workspace is untrusted; reset remains available for
-cleanup. The add-root tool validates that the path is an existing real
-directory named `node_modules`, then stores the canonical path in the manager.
-The permission prompt is bound to that canonical target. If the path changes
-targets before execution, registration fails; if a registered directory is
-later replaced by a symlink to another target, the root stops resolving.
-Adding it never changes the trusted-package policy. A successful call returns
-`true` when the canonical root was newly added and `false` when it was already
-registered. Unlike the Codex reference's pre-registration behavior, Qwen
-requires the directory to exist at approval time so permission is bound to a
-real canonical target; this is an intentional safety restriction.
+cleanup. The add-root tool accepts an absolute path named `node_modules` even
+before package installation creates it. Existing directories are stored by
+canonical path. If an approved existing path changes targets before execution,
+registration fails; if a registered directory is later replaced by a symlink
+to another target, the root stops resolving. Adding it never changes the
+trusted-package policy. A successful call returns `true` when the root was
+newly added and `false` when it was already registered.
 
 The `node_repl` description tells the model about the 30-second default,
 top-level await, persistent bindings, redeclaration strategies, dynamic
-imports, reset, partial commit, and the public `nodeRepl` APIs. It does not
-claim Browser, Chrome, Computer Use, or nested-tool capabilities.
+imports, Node-compatible package loading, reset, partial commit, and the public
+`nodeRepl` APIs. It does not claim Browser, Chrome, Computer Use, or nested-tool
+capabilities.
 
 ## Cell semantics
 
@@ -216,24 +213,28 @@ later call.
 
 ## Module loading
 
-The first release supports ESM only.
-
 - Top-level static `import ... from ...` and `export ... from ...` are rejected;
   callers use `await import(...)` instead.
 - Relative `.js` and `.mjs` imports resolve from the current module, remain
-  inside canonical readable roots, and execute in the untrusted context.
-- Bare packages resolve by scanning registered module roots in registration
-  order. `exports` uses `import` then `default`; `module`/`main` are fallback
-  entry fields.
-- CJS, JSON-as-code, Node builtins, `require`, worker threads, and
-  `child_process` are unavailable to untrusted modules.
-- Untrusted local-module caches are cell-scoped. Explicit REPL bindings are
-  the persistence mechanism.
-- A trusted entry may import only additional relative files whose canonical
-  paths and SHA-256 digests are pinned in its host policy. Other bare packages,
-  subpaths, CJS, and Node builtins are rejected. Host functionality crosses the
-  structured capability broker instead of injecting parent-realm builtin
-  exports.
+  exact-file-only, and execute in the Cell VM context. Imported local files may
+  use static imports for other local files, packages, and Node builtins.
+- Bare packages resolve from registered `node_modules` roots in registration
+  order and then from the task working directory. Resolution uses Node's
+  `import` conditions and native module loader, so ESM, CommonJS, and N-API
+  packages work without a Qwen-specific package format.
+- Node builtins are generally available. Direct imports of `process` and
+  `node:process` are blocked in model code, and the Cell does not receive
+  process, environment, `require`, or module globals. Standard runtime globals
+  such as `Buffer`, URL, text encoders, fetch, Web Crypto, timers, and abort
+  controllers are available. Code may explicitly import `node:module` and
+  construct `require` from `import.meta.url`, matching the reference behavior
+  needed by packages that load native addons.
+- Local-module caches are Cell-scoped, so local `.js`/`.mjs` files reload for
+  each execution. Native package entrypoints use Node's process-level singleton
+  cache and are discarded by process reset.
+- A trusted entry may import additional hash-pinned relative files. Its bare
+  dependencies and Node builtins use the same Node-compatible loader; direct
+  `process` imports receive the restricted facade.
 - Trusted package modules may remain cached for one process generation and
   are destroyed by process-level reset.
 
@@ -245,10 +246,9 @@ after validation.
 ## Trusted context and host bridge
 
 The trusted-package registry is empty in production for #9333. Tests register
-one temporary package and one fake capability. This generic bridge is not an
-SDK registry: neither #9334 nor #9335 is assumed to register the independent
-SDK or its operations into the Qwen host. Any future activation of this bridge
-requires a separate explicit design decision.
+one temporary package and one fake capability. #9334 and #9335 do not use this
+bridge: the independent SDK follows the ordinary Node package import path.
+Activating a production privileged package remains a separate design decision.
 
 Trust requires all of the following:
 
@@ -261,18 +261,17 @@ Trust requires all of the following:
 - the entry SHA-256 matches the host-provided digest.
 
 Every additional trusted file is pinned by canonical path and SHA-256. A
-host-configured trusted package name is its only public entry; trusted packages
-cannot import other bare packages in the phase-1 bridge. A model cannot bypass
-that decision with a `file:` URL or relative path into a trusted package
-directory. Registering an ordinary module root also cannot shadow or widen a
-same-named trusted entry.
+host-configured trusted package name is its only privileged entry. A model
+cannot bypass that decision with a `file:` URL or relative path into a trusted
+package directory. Registering an ordinary module root also cannot shadow or
+widen a same-named trusted entry.
 
 Model-provided roots are never trust inputs. A matching package loads in the
 separate trusted context. An import crossing between contexts is represented
 by a `SyntheticModule` in the importing context after the target module has
-evaluated. A host-configured trusted root is consulted only for its matching
-package; it does not become an untrusted lookup root and cannot make sibling
-packages importable.
+evaluated. Trust affects access to the privileged bridge, not whether an
+ordinary sibling package can be resolved through the normal cwd/module-root
+search path.
 
 The trusted context receives its own frozen `nodeRepl`. Its public runtime
 methods match the normal object, and it additionally has an internal
@@ -363,7 +362,7 @@ Existing provider-wide image validation remains downstream.
   lazily start a new generation and old bindings are reported lost.
 - Reset is process replacement, not context replacement. It kills the old
   tree immediately and leaves no child running until the next execution.
-- Canonical untrusted module roots live in the manager and are passed to the
+- Canonical ordinary module roots live in the manager and are passed to the
   next generation.
 - Task shutdown kills descendants, rejects in-flight calls, closes pipes, and
   removes the session temp directory.
@@ -387,9 +386,8 @@ with older CLI packages that predate `node_repl`.
 ## Deliberate non-goals
 
 - production Computer Use capabilities;
-- CJS execution in either VM;
 - hard-sandbox claims for Node `vm`;
 - memory pressure policy;
 - automatic output persistence outside normal ToolResult handling;
 - MCP transport;
-- byte-for-byte Codex compatibility.
+- copying or redistributing Codex implementation artifacts.

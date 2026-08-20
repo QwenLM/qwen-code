@@ -349,6 +349,25 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
+    'partially commits completed declarators before a later initializer fails',
+    async () => {
+      const failed = await run(
+        'const completedDeclarator = 41, failedDeclarator = (() => { throw new Error("initializer boom"); })();',
+      );
+      expect(failed.status).toBe('error');
+      expect(failed.error?.message).toContain('initializer boom');
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write(`${completedDeclarator}|${typeof failedDeclarator}`);',
+          ),
+        ),
+      ).toEqual(['41|undefined']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     'does not mutate bindings after parse or link failure',
     async () => {
       await run('const anchor = { value: 9 };');
@@ -468,7 +487,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'does not expose Node authority or dynamic code generation',
+    'does not expose process globals or dynamic code generation directly',
     async () => {
       const result = await run(
         [
@@ -482,34 +501,39 @@ describe('NodeReplKernelManager', () => {
           'try { await nodeRepl.emitImage("https://example.invalid/image.png"); } catch (error) {',
           '  try { error.constructor.constructor("return process")(); } catch (inner) { imageErrorProbe = inner.name; }',
           '}',
-          'let importErrorProbe;',
-          'try { await import("node:fs"); } catch (error) {',
-          '  try { error.constructor.constructor("return process")(); } catch (inner) { importErrorProbe = inner.name; }',
-          '}',
-          'nodeRepl.write([typeof globalThis.qwenSession, typeof process, typeof require, typeof module, typeof Buffer, typeof nodeRepl.callHost, functionProbe, constructorProbe, wasmProbe, imageErrorProbe, importErrorProbe].join(","));',
+          'nodeRepl.write([typeof globalThis.qwenSession, typeof process, typeof require, typeof module, typeof Buffer, typeof nodeRepl.callHost, functionProbe, constructorProbe, wasmProbe, imageErrorProbe].join(","));',
         ].join('\n'),
       );
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual([
-        'undefined,undefined,undefined,undefined,undefined,undefined,EvalError,EvalError,CompileError,EvalError,EvalError',
+        'undefined,undefined,undefined,undefined,function,undefined,EvalError,EvalError,CompileError,EvalError',
       ]);
     },
     TEST_TIMEOUT,
   );
 
   it(
-    'does not inherit Node preload options from the parent environment',
+    'gives ordinary packages the parent Node process environment',
     async () => {
-      const original = process.env['NODE_OPTIONS'];
-      process.env['NODE_OPTIONS'] =
-        '--require=/definitely/missing/qwen-node-repl-preload.cjs';
+      const key = 'QWEN_NODE_REPL_TEST_PARENT_ENV';
+      const original = process.env[key];
+      process.env[key] = 'visible';
       try {
-        const result = await run('nodeRepl.write(21 * 2);');
+        const root = path.join(workDir, 'node_modules');
+        createEsmPackage(
+          root,
+          'environment-fixture',
+          `export const value = process.env.${key};`,
+        );
+        await manager.addModuleRoot(root);
+        const result = await run(
+          'const environment = await import("environment-fixture"); nodeRepl.write(environment.value);',
+        );
         expect(result.status).toBe('ok');
-        expect(texts(result)).toEqual(['42']);
+        expect(texts(result)).toEqual(['visible']);
       } finally {
-        if (original === undefined) delete process.env['NODE_OPTIONS'];
-        else process.env['NODE_OPTIONS'] = original;
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
       }
     },
     TEST_TIMEOUT,
@@ -542,18 +566,30 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'blocks Node builtins from static and dynamic import',
+    'loads Node builtins while blocking direct process imports',
     async () => {
-      expect((await run('await import("node:child_process");')).status).toBe(
-        'error',
+      fs.writeFileSync(
+        path.join(workDir, 'builtin-helper.mjs'),
+        'import path from "node:path"; export const value = path.join("a", "b");',
       );
-      expect((await run('import fs from "fs"; fs;')).status).toBe('error');
+      expect(
+        texts(
+          await run(
+            'const helper = await import("./builtin-helper.mjs"); const fs = await import("node:fs"); nodeRepl.write(`${helper.value}|${typeof fs.readFile}`);',
+          ),
+        ),
+      ).toEqual([`a${path.sep}b|function`]);
+      for (const specifier of ['process', 'node:process']) {
+        const denied = await run(`await import(${JSON.stringify(specifier)});`);
+        expect(denied.status).toBe('error');
+        expect(denied.error?.message).toMatch(/not allowed in node_repl/);
+      }
     },
     TEST_TIMEOUT,
   );
 
   it(
-    'imports local ESM only inside readable roots',
+    'imports exact local ESM paths outside the workspace root',
     async () => {
       fs.writeFileSync(
         path.join(workDir, 'helper.mjs'),
@@ -570,16 +606,17 @@ describe('NodeReplKernelManager', () => {
       const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'node-repl-out-'));
       try {
         fs.writeFileSync(path.join(outside, 'x.mjs'), 'export const v = 1;');
-        for (const candidate of [
-          path.join(outside, 'x.mjs'),
-          path.join(outside, 'missing.mjs'),
-        ]) {
-          const denied = await run(
-            `await import(${JSON.stringify(candidate)});`,
-          );
-          expect(denied.status).toBe('error');
-          expect(denied.error?.message).toMatch(/allowed roots/);
-        }
+        const imported = await run(
+          `const outside = await import(${JSON.stringify(path.join(outside, 'x.mjs'))}); nodeRepl.write(outside.v);`,
+        );
+        expect(imported.status).toBe('ok');
+        expect(texts(imported)).toEqual(['1']);
+
+        const missing = await run(
+          `await import(${JSON.stringify(path.join(outside, 'missing.mjs'))});`,
+        );
+        expect(missing.status).toBe('error');
+        expect(missing.error?.message).toMatch(/module file not found/);
       } finally {
         fs.rmSync(outside, { recursive: true, force: true });
       }
@@ -588,7 +625,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'loads ESM packages from an approved node_modules root and rejects CJS',
+    'loads ESM and CommonJS packages with Node singleton semantics',
     async () => {
       const root = path.join(workDir, 'node_modules');
       createEsmPackage(
@@ -621,16 +658,72 @@ describe('NodeReplKernelManager', () => {
             'const demoAgain = await import("demo-esm"); nodeRepl.write(`${demo.bump()}|${demoAgain.bump()}`);',
           ),
         ),
-      ).toEqual(['1|1']);
-      const cjs = await run('await import("demo-cjs");');
-      expect(cjs.status).toBe('error');
-      expect(cjs.error?.message).toMatch(/CommonJS/);
+      ).toEqual(['1|2']);
+      expect(
+        texts(
+          await run(
+            'const cjs = await import("demo-cjs"); const { createRequire } = await import("node:module"); const require = createRequire(import.meta.url); nodeRepl.write(`${cjs.default}|${require("demo-cjs")}`);',
+          ),
+        ),
+      ).toEqual(['3|3']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'resolves packages installed after their module root is registered',
+    async () => {
+      const root = path.join(workDir, 'future', 'node_modules');
+      const registration = await manager.addModuleRoot(root);
+      createEsmPackage(root, 'future-fixture', 'export const value = 42;');
+      expect(registration).toEqual({
+        path: fs.realpathSync(root),
+        added: true,
+      });
+      expect(
+        texts(
+          await run(
+            'const fixture = await import("future-fixture"); nodeRepl.write(fixture.value);',
+          ),
+        ),
+      ).toEqual(['42']);
     },
     TEST_TIMEOUT,
   );
 
   it.skipIf(process.platform === 'win32')(
-    'revokes an untrusted module root if its canonical target changes',
+    'resolves packages through a node_modules symlink with a differently named target',
+    async () => {
+      const target = path.join(workDir, 'packages');
+      createEsmPackage(
+        target,
+        'symlink-root-fixture',
+        'export const value = 42;',
+      );
+      const aliasParent = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'node-repl-module-root-alias-'),
+      );
+      const alias = path.join(aliasParent, 'node_modules');
+      fs.symlinkSync(target, alias, 'dir');
+      try {
+        await expect(manager.addModuleRoot(alias)).resolves.toEqual({
+          path: fs.realpathSync(target),
+          added: true,
+        });
+        const result = await run(
+          'const fixture = await import("symlink-root-fixture"); nodeRepl.write(fixture.value);',
+        );
+        expect(result.status).toBe('ok');
+        expect(texts(result)).toEqual(['42']);
+      } finally {
+        fs.rmSync(aliasParent, { recursive: true, force: true });
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'revokes a module root if its canonical target changes',
     async () => {
       const root = path.join(workDir, 'node_modules');
       createEsmPackage(root, 'original-fixture', 'export const value = 1;');
@@ -693,7 +786,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'does not read a package manifest through a symlink outside approved roots',
+    'allows package metadata symlinks when the resolved entry stays in the module root',
     async () => {
       const root = path.join(workDir, 'node_modules');
       const packageDir = path.join(root, 'manifest-escape-fixture');
@@ -714,9 +807,11 @@ describe('NodeReplKernelManager', () => {
         fs.symlinkSync(outsideManifest, path.join(packageDir, 'package.json'));
         await manager.addModuleRoot(root);
 
-        const denied = await run('await import("manifest-escape-fixture");');
-        expect(denied.status).toBe('error');
-        expect(denied.error?.message).toMatch(/cannot resolve package/);
+        const result = await run(
+          'const fixture = await import("manifest-escape-fixture"); nodeRepl.write(fixture.escaped);',
+        );
+        expect(result.status).toBe('ok');
+        expect(texts(result)).toEqual(['true']);
       } finally {
         fs.rmSync(outside, { recursive: true, force: true });
       }
@@ -1035,19 +1130,19 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps model-added packages untrusted',
+    "loads added packages through Node's native package loader",
     async () => {
       const root = path.join(workDir, 'node_modules');
       createEsmPackage(
         root,
         'plain-fixture',
-        'export const authority = [typeof nodeRepl.callHost, typeof process].join("/");',
+        'export const authority = [typeof globalThis.nodeRepl, typeof process].join("/");',
       );
       await manager.addModuleRoot(root);
       const result = await run(
         'const fixture = await import("plain-fixture"); nodeRepl.write(fixture.authority);',
       );
-      expect(texts(result)).toEqual(['undefined/undefined']);
+      expect(texts(result)).toEqual(['undefined/object']);
     },
     TEST_TIMEOUT,
   );
@@ -1092,9 +1187,13 @@ describe('NodeReplKernelManager', () => {
         },
       });
       expect(manager.getModuleRoots()).toEqual([]);
-      expect((await run('await import("unapproved-sibling");')).status).toBe(
-        'error',
-      );
+      expect(
+        texts(
+          await run(
+            'const sibling = await import("unapproved-sibling"); nodeRepl.write(sibling.value);',
+          ),
+        ),
+      ).toEqual(['1']);
 
       const result = await run(
         [
@@ -1163,10 +1262,18 @@ describe('NodeReplKernelManager', () => {
         path.join(os.tmpdir(), 'node-repl-trusted-package-'),
       );
       const root = path.join(trustedParent, 'node_modules');
+      createEsmPackage(
+        root,
+        'external-trusted-dependency',
+        'export const value = 7;',
+      );
       const entry = createEsmPackage(
         root,
         'external-trusted-fixture',
-        'export const privileged = typeof nodeRepl.callHost === "function";',
+        [
+          'export const privileged = typeof nodeRepl.callHost === "function";',
+          'export const dependency = async () => (await import("external-trusted-dependency")).value;',
+        ].join('\n'),
       );
       const digest = createHash('sha256')
         .update(fs.readFileSync(entry))
@@ -1185,10 +1292,10 @@ describe('NodeReplKernelManager', () => {
 
       try {
         const result = await run(
-          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(fixture.privileged);',
+          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(`${fixture.privileged}|${await fixture.dependency()}`);',
         );
         expect(result.status).toBe('ok');
-        expect(texts(result)).toEqual(['true']);
+        expect(texts(result)).toEqual(['true|7']);
       } finally {
         manager.dispose();
         fs.rmSync(trustedParent, { recursive: true, force: true });
@@ -1457,7 +1564,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'loads only hash-pinned trusted files and rejects bare dependencies',
+    'loads hash-pinned trusted files with package dependencies and builtins',
     async () => {
       const root = path.join(workDir, 'node_modules');
       createEsmPackage(root, 'unlisted-dependency', 'export const value = 1;');
@@ -1467,8 +1574,8 @@ describe('NodeReplKernelManager', () => {
         [
           'import { helper } from "./helper.js";',
           'export const value = helper;',
-          'export const loadUnlisted = () => import("unlisted-dependency");',
-          'export const loadBuiltin = () => import("node:path");',
+          'export const loadUnlisted = async () => (await import("unlisted-dependency")).value;',
+          'export const loadBuiltin = async () => (await import("node:path")).basename("/a/b");',
         ].join('\n'),
       );
       const helperPath = path.join(path.dirname(entry), 'helper.js');
@@ -1503,18 +1610,15 @@ describe('NodeReplKernelManager', () => {
         /require an approved package import/,
       );
 
-      const denied = await run(
+      const dependencies = await run(
         [
-          'const deniedMessages = [];',
-          'for (const load of [fixture.loadUnlisted, fixture.loadBuiltin]) {',
-          '  try { await load(); } catch (error) { deniedMessages.push(error.message); }',
-          '}',
-          'nodeRepl.write(deniedMessages.join("|"));',
+          'const unlisted = await fixture.loadUnlisted();',
+          'const builtin = await fixture.loadBuiltin();',
+          'nodeRepl.write(`${unlisted}|${builtin}`);',
         ].join('\n'),
       );
-      expect(texts(denied)[0]).toMatch(
-        /cannot import bare dependency.*Node builtin.*is not available/,
-      );
+      expect(dependencies.status).toBe('ok');
+      expect(texts(dependencies)).toEqual(['1|b']);
 
       await manager.reset();
       fs.writeFileSync(helperPath, 'export const helper = 3;');

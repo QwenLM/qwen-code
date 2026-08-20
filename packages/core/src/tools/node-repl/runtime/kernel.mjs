@@ -10,10 +10,16 @@ import process from 'node:process';
 import v8 from 'node:v8';
 import { Buffer } from 'node:buffer';
 import { StringDecoder } from 'node:string_decoder';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, webcrypto } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import path from 'node:path';
-import { URL, fileURLToPath } from 'node:url';
-import { inspect, types as utilTypes } from 'node:util';
+import { URL, URLSearchParams, fileURLToPath } from 'node:url';
+import {
+  inspect,
+  TextDecoder,
+  TextEncoder,
+  types as utilTypes,
+} from 'node:util';
 import {
   setTimeout as hostSetTimeout,
   setInterval as hostSetInterval,
@@ -643,6 +649,27 @@ function createContext(name, privileged) {
     name,
     codeGeneration: { strings: false, wasm: false },
   });
+  context.globalThis = context;
+  context.global = context;
+  context.Buffer = Buffer;
+  context.URL = URL;
+  context.URLSearchParams = URLSearchParams;
+  context.TextEncoder = TextEncoder;
+  context.TextDecoder = TextDecoder;
+  context.AbortController = globalThis.AbortController;
+  context.AbortSignal = globalThis.AbortSignal;
+  context.structuredClone = globalThis.structuredClone;
+  context.fetch = globalThis.fetch;
+  context.Headers = globalThis.Headers;
+  context.Request = globalThis.Request;
+  context.Response = globalThis.Response;
+  context.performance = performance;
+  context.crypto = webcrypto;
+  context.queueMicrotask = globalThis.queueMicrotask;
+  context.setImmediate = globalThis.setImmediate;
+  context.clearImmediate = globalThis.clearImmediate;
+  context.atob = (data) => Buffer.from(data, 'base64').toString('binary');
+  context.btoa = (data) => Buffer.from(data, 'binary').toString('base64');
   const bridge = Object.freeze({
     emitText,
     formatValue,
@@ -814,7 +841,10 @@ async function handleExec(message) {
     await asyncContext.run({ execId: message.execId }, async () => {
       const cell = loader.createCell(
         message.source,
-        `qwen-node-repl:cell:${generation}:${message.execId}`,
+        path.join(
+          config.cwd,
+          `.qwen_node_repl_cell_${generation}_${message.execId}.mjs`,
+        ),
         bindings,
       );
       cellModule = cell.module;
@@ -861,9 +891,17 @@ async function handleExec(message) {
 
 function handleAddModuleRoot(message) {
   if (!config) throw new Error('kernel is not initialized');
-  const candidate = String(message.path);
-  if (!config.moduleRoots.includes(candidate))
-    config.moduleRoots.push(candidate);
+  const root = {
+    path: String(message.root.path),
+    canonicalPath: String(message.root.canonicalPath),
+  };
+  if (
+    !config.moduleRoots.some(
+      (candidate) => candidate.canonicalPath === root.canonicalPath,
+    )
+  ) {
+    config.moduleRoots.push(root);
+  }
   send({
     type: 'addModuleRootResult',
     requestId: message.requestId,

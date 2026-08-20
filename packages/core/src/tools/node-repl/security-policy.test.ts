@@ -100,14 +100,22 @@ describe('NodeReplSecurityPolicy', () => {
   describe('validateModuleRoot', () => {
     const policy = NodeReplSecurityPolicy.default();
 
-    it('accepts only an existing canonical node_modules directory', () => {
+    it('canonicalizes an existing node_modules directory', () => {
       const root = makeModuleRoot();
       expect(policy.validateModuleRoot(root)).toBe(fs.realpathSync(root));
     });
 
-    it('canonicalizes a symlink before validating its directory name', () => {
-      const root = makeModuleRoot();
-      const alias = path.join(makeTmpDir(), 'approved-modules');
+    it('accepts a node_modules path before it is created', () => {
+      const root = path.join(makeTmpDir(), 'future', 'node_modules');
+      const approved = policy.validateModuleRoot(root);
+      fs.mkdirSync(root, { recursive: true });
+      expect(approved).toBe(fs.realpathSync(root));
+    });
+
+    it('canonicalizes an existing node_modules symlink', () => {
+      const root = path.join(makeTmpDir(), 'packages');
+      fs.mkdirSync(root);
+      const alias = path.join(makeTmpDir(), 'node_modules');
       fs.symlinkSync(
         root,
         alias,
@@ -116,14 +124,14 @@ describe('NodeReplSecurityPolicy', () => {
       expect(policy.validateModuleRoot(alias)).toBe(fs.realpathSync(root));
     });
 
-    it('rejects empty, relative, missing, file, and non-node_modules paths', () => {
+    it('rejects empty, relative, file, and non-node_modules paths', () => {
       expect(() => policy.validateModuleRoot('')).toThrow(/non-empty/);
       expect(() => policy.validateModuleRoot('node_modules')).toThrow(
         /absolute/,
       );
       expect(() =>
         policy.validateModuleRoot(path.join(makeTmpDir(), 'missing')),
-      ).toThrow(/does not exist/);
+      ).toThrow(/node_modules/);
       const plainDirectory = makeTmpDir();
       expect(() => policy.validateModuleRoot(plainDirectory)).toThrow(
         /node_modules/,

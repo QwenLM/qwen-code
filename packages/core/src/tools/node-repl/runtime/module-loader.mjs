@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { createHash } from 'node:crypto';
-import { builtinModules } from 'node:module';
+import { builtinModules, createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MAX_MODULE_SOURCE_BYTES = 32 * 1024 * 1024;
@@ -18,6 +18,8 @@ const BUILTINS = new Set([
   ...builtinModules,
   ...builtinModules.map((name) => `node:${name}`),
 ]);
+const DENIED_BUILTINS = new Set(['process', 'node:process']);
+const IMPORT_CONDITIONS = new Set(['node', 'import']);
 
 export function createModuleLoader(options) {
   const {
@@ -31,6 +33,9 @@ export function createModuleLoader(options) {
   } = options;
 
   const trustedCache = new Map();
+  const nativeModuleCaches = new WeakMap();
+  const nativeNamespaceCache = new Map();
+  const requireByBase = new Map();
   const trustedByName = new Map(
     trustedPackages.map((entry) => [entry.packageName, entry]),
   );
@@ -83,9 +88,115 @@ export function createModuleLoader(options) {
       : normalizedLeft === normalizedRight;
   }
 
+  function toNodeBuiltinSpecifier(specifier) {
+    return specifier.startsWith('node:') ? specifier : `node:${specifier}`;
+  }
+
+  function isDeniedBuiltin(specifier) {
+    const normalized = specifier.startsWith('node:')
+      ? specifier.slice(5)
+      : specifier;
+    return DENIED_BUILTINS.has(specifier) || DENIED_BUILTINS.has(normalized);
+  }
+
+  function moduleSearchRoots() {
+    const roots = [];
+    for (const candidate of moduleRoots) {
+      try {
+        const real = canonicalDirectory(candidate.path);
+        if (
+          sameCanonicalPath(candidate.canonicalPath, real) &&
+          !roots.some((root) => sameCanonicalPath(root.canonicalPath, real))
+        ) {
+          roots.push({ path: candidate.path, canonicalPath: real });
+        }
+      } catch {
+        // Missing search roots do not participate in resolution.
+      }
+    }
+    const cwdRoot = path.join(cellBaseDir, 'node_modules');
+    try {
+      const real = canonicalDirectory(cwdRoot);
+      if (
+        sameCanonicalPath(cwdRoot, real) &&
+        !roots.some((root) => sameCanonicalPath(root.canonicalPath, real))
+      ) {
+        roots.push({ path: cwdRoot, canonicalPath: real });
+      }
+    } catch {
+      // The working directory does not need to contain node_modules.
+    }
+    return roots;
+  }
+
+  function getRequireForBase(base) {
+    let require = requireByBase.get(base);
+    if (!require) {
+      require = createRequire(path.join(base, '__qwen_node_repl__.cjs'));
+      requireByBase.set(base, require);
+    }
+    return require;
+  }
+
+  function resolveNativePackage(specifier, referencingRecord) {
+    const roots = moduleSearchRoots();
+    const trustedRoot = referencingRecord.packagePolicy?.root;
+    if (referencingRecord.trusted && trustedRoot) {
+      try {
+        const real = canonicalDirectory(trustedRoot);
+        if (
+          sameCanonicalPath(trustedRoot, real) &&
+          !roots.some((root) => sameCanonicalPath(root.canonicalPath, real))
+        ) {
+          roots.push({ path: trustedRoot, canonicalPath: real });
+        }
+      } catch {
+        // A revoked trusted root cannot supply new dependencies.
+      }
+    }
+    const bases =
+      referencingRecord.filePath && referencingRecord.isPackage
+        ? [path.dirname(referencingRecord.filePath)]
+        : roots.map((root) => path.dirname(root.path));
+
+    let firstError = null;
+    for (const base of [...new Set(bases)]) {
+      try {
+        const resolved = getRequireForBase(base).resolve(specifier, {
+          conditions: IMPORT_CONDITIONS,
+        });
+        const canonical = fs.realpathSync(resolved);
+        if (!roots.some((root) => isUnder(canonical, root.canonicalPath))) {
+          continue;
+        }
+        return {
+          kind: 'native',
+          filePath: canonical,
+          specifier,
+        };
+      } catch (error) {
+        if (
+          error?.code === 'MODULE_NOT_FOUND' ||
+          error?.code === 'ERR_MODULE_NOT_FOUND'
+        ) {
+          continue;
+        }
+        firstError ??= error;
+      }
+    }
+    if (firstError) throw firstError;
+    throw new Error(
+      `cannot resolve package '${specifier}' from ${roots.length} module roots`,
+    );
+  }
+
   function allowedRoots(extraRoots = []) {
     const roots = [];
-    for (const candidate of [...readableRoots, ...moduleRoots, ...extraRoots]) {
+    for (const candidate of [
+      ...readableRoots,
+      ...moduleRoots.map((root) => root.canonicalPath),
+      ...extraRoots,
+    ]) {
       try {
         const real = canonicalDirectory(candidate);
         if (sameCanonicalPath(candidate, real)) roots.push(real);
@@ -116,24 +227,22 @@ export function createModuleLoader(options) {
     return real;
   }
 
-  function assertCandidateReadable(candidate, extraRoots = []) {
-    const resolved = path.resolve(candidate);
-    let canonicalCandidate = resolved;
+  function resolveLocalSource(candidate, localDefaultEsm) {
+    let filePath;
     try {
-      canonicalCandidate = path.join(
-        fs.realpathSync(path.dirname(resolved)),
-        path.basename(resolved),
-      );
+      filePath = fs.realpathSync(candidate);
     } catch {
-      // The boundary check below remains fail-closed.
+      throw new Error(`module file not found: ${candidate}`);
     }
-    if (
-      !allowedRoots(extraRoots).some((root) =>
-        isUnder(canonicalCandidate, root),
-      )
-    ) {
-      throw new Error(`import is outside the allowed roots: ${candidate}`);
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) throw new Error(`module is not a file: ${candidate}`);
+    if (stat.size > MAX_MODULE_SOURCE_BYTES) {
+      throw new Error(
+        `module exceeds the ${MAX_MODULE_SOURCE_BYTES}-byte source limit: ${candidate}`,
+      );
     }
+    assertEsm(filePath, localDefaultEsm);
+    return filePath;
   }
 
   function readJson(filePath, extraRoots = []) {
@@ -199,10 +308,12 @@ export function createModuleLoader(options) {
         return;
       }
       throw new Error(
-        `CommonJS is not supported by node_repl; ${filePath} is not in a type=module package`,
+        `local CommonJS file imports are not supported; ${filePath} is not in a type=module package`,
       );
     }
-    throw new Error(`node_repl imports only .js and .mjs ESM: ${filePath}`);
+    throw new Error(
+      `node_repl local file imports only support .js and .mjs ESM: ${filePath}`,
+    );
   }
 
   function parseBareSpecifier(specifier) {
@@ -310,12 +421,15 @@ export function createModuleLoader(options) {
     return trustedPackages.find((entry) => isUnder(filePath, entry.packageDir));
   }
 
-  function resolveBare(specifier) {
+  function resolveBare(specifier, referencingRecord) {
     const { packageName, subpath } = parseBareSpecifier(specifier);
     const configuredTrust = trustedByName.get(packageName);
+    if (!configuredTrust) {
+      return resolveNativePackage(specifier, referencingRecord);
+    }
     const configuredRoots = configuredTrust
       ? [configuredTrust.root]
-      : moduleRoots;
+      : moduleRoots.map((root) => root.canonicalPath);
     for (const configuredRoot of configuredRoots) {
       let root;
       try {
@@ -379,8 +493,10 @@ export function createModuleLoader(options) {
           );
         }
         return {
+          kind: 'source',
           filePath: entry,
           trusted: false,
+          isPackage: true,
           localDefaultEsm: false,
         };
       }
@@ -396,8 +512,10 @@ export function createModuleLoader(options) {
       }
       const verified = verifiedTrustedSource(configuredTrust, entry);
       return {
+        kind: 'source',
         filePath: entry,
         trusted: true,
+        isPackage: true,
         localDefaultEsm: false,
         packageName,
         packageDir: configuredTrust.packageDir,
@@ -418,9 +536,18 @@ export function createModuleLoader(options) {
       throw new Error('@prev is available only to the generated REPL cell');
     }
     if (BUILTINS.has(specifier)) {
-      throw new Error(
-        `Node builtin '${specifier}' is not available in node_repl modules`,
-      );
+      if (isDeniedBuiltin(specifier)) {
+        if (referencingRecord.trusted) {
+          return { kind: 'safe-process', specifier: 'node:process' };
+        }
+        throw new Error(
+          `Importing module "${specifier}" is not allowed in node_repl`,
+        );
+      }
+      return {
+        kind: 'builtin',
+        specifier: toNodeBuiltinSpecifier(specifier),
+      };
     }
     if (specifier.startsWith('file:')) specifier = fileURLToPath(specifier);
     if (
@@ -436,9 +563,7 @@ export function createModuleLoader(options) {
             `trusted import is outside its package: ${specifier}`,
           );
         }
-        const filePath = assertReadable(resolveFileCandidate(candidate), [
-          packagePolicy.packageDir,
-        ]);
+        const filePath = assertReadable(candidate, [packagePolicy.packageDir]);
         if (!isUnder(filePath, packagePolicy.packageDir)) {
           throw new Error(
             `trusted import is outside its package: ${specifier}`,
@@ -447,8 +572,10 @@ export function createModuleLoader(options) {
         assertEsm(filePath, false, [packagePolicy.packageDir]);
         const verified = verifiedTrustedSource(packagePolicy, filePath);
         return {
+          kind: 'source',
           filePath,
           trusted: true,
+          isPackage: referencingRecord.isPackage,
           localDefaultEsm: false,
           packageName: packagePolicy.packageName,
           packageDir: packagePolicy.packageDir,
@@ -458,30 +585,46 @@ export function createModuleLoader(options) {
           trustedSource: verified.source,
         };
       }
-      assertCandidateReadable(candidate);
-      const filePath = assertReadable(resolveFileCandidate(candidate));
+      const filePath = resolveLocalSource(
+        candidate,
+        referencingRecord.localDefaultEsm,
+      );
       if (trustedOwner(filePath)) {
         throw new Error(
           'trusted package files require an approved package import',
         );
       }
-      assertEsm(filePath, referencingRecord.localDefaultEsm);
       return {
+        kind: 'source',
         filePath,
         trusted: false,
+        isPackage: false,
         localDefaultEsm: referencingRecord.localDefaultEsm,
       };
     }
-    if (referencingRecord.trusted) {
-      throw new Error(
-        `trusted package '${referencingRecord.packagePolicy.packageName}' cannot import bare dependency '${specifier}'`,
-      );
-    }
-    return resolveBare(specifier);
+    return resolveBare(specifier, referencingRecord);
   }
 
   function contextFor(resolved) {
     return resolved.trusted ? trustedContext : untrustedContext;
+  }
+
+  function importTarget(resolved) {
+    if (resolved.kind === 'builtin' || resolved.kind === 'safe-process') {
+      return resolved.specifier;
+    }
+    if (resolved.kind === 'native') return resolved.specifier;
+    return pathToFileURL(resolved.filePath).href;
+  }
+
+  function initializeImportMeta(meta, record, isMain) {
+    const filename = record.filePath;
+    meta.url = pathToFileURL(filename).href;
+    meta.filename = filename;
+    meta.dirname = path.dirname(filename);
+    meta.main = isMain;
+    meta.resolve = (specifier) =>
+      importTarget(resolveSpecifier(specifier, record));
   }
 
   function cacheFor(resolved, scope) {
@@ -490,6 +633,9 @@ export function createModuleLoader(options) {
   }
 
   function constructRecord(resolved, scope) {
+    if (resolved.kind !== 'source') {
+      throw new Error(`cannot construct source module for ${resolved.kind}`);
+    }
     const cache = cacheFor(resolved, scope);
     const key = `${resolved.trusted ? 'T' : 'U'}:${resolved.filePath}`;
     const cached = cache.get(key);
@@ -505,6 +651,7 @@ export function createModuleLoader(options) {
       filePath: resolved.filePath,
       baseDir: path.dirname(resolved.filePath),
       trusted: resolved.trusted,
+      isPackage: resolved.isPackage ?? false,
       packagePolicy: resolved.packagePolicy ?? null,
       packageVersion: resolved.packageVersion ?? null,
       localDefaultEsm: resolved.localDefaultEsm,
@@ -515,7 +662,7 @@ export function createModuleLoader(options) {
       context,
       identifier,
       initializeImportMeta(meta) {
-        meta.url = identifier;
+        initializeImportMeta(meta, record, false);
       },
       importModuleDynamically: (specifier) =>
         importDynamicSafely(specifier, record),
@@ -533,7 +680,7 @@ export function createModuleLoader(options) {
   }
 
   function syntheticFromNamespace(namespace, context, identifier) {
-    const keys = Object.keys(namespace);
+    const keys = Object.getOwnPropertyNames(namespace);
     return new vm.SyntheticModule(
       keys,
       function initialize() {
@@ -543,9 +690,87 @@ export function createModuleLoader(options) {
     );
   }
 
+  function nativeCacheFor(context) {
+    let cache = nativeModuleCaches.get(context);
+    if (!cache) {
+      cache = new Map();
+      nativeModuleCaches.set(context, cache);
+    }
+    return cache;
+  }
+
+  async function loadNativeNamespace(resolved) {
+    const key =
+      resolved.kind === 'builtin'
+        ? `builtin:${resolved.specifier}`
+        : `package:${resolved.filePath}`;
+    let promise = nativeNamespaceCache.get(key);
+    if (!promise) {
+      promise =
+        resolved.kind === 'builtin'
+          ? import(resolved.specifier)
+          : import(pathToFileURL(resolved.filePath).href);
+      nativeNamespaceCache.set(key, promise);
+    }
+    return promise;
+  }
+
+  function safeProcessNamespace() {
+    const processFacade = vm.runInContext('process', trustedContext);
+    const namespace = { default: processFacade };
+    for (const name of Object.getOwnPropertyNames(processFacade)) {
+      namespace[name] = processFacade[name];
+    }
+    return namespace;
+  }
+
+  async function loadSyntheticModule(resolved, context) {
+    const key =
+      resolved.kind === 'safe-process'
+        ? 'builtin:node:process:safe'
+        : resolved.kind === 'builtin'
+          ? `builtin:${resolved.specifier}`
+          : `package:${resolved.filePath}`;
+    const cache = nativeCacheFor(context);
+    let promise = cache.get(key);
+    if (!promise) {
+      promise = (async () => {
+        const namespace =
+          resolved.kind === 'safe-process'
+            ? safeProcessNamespace()
+            : await loadNativeNamespace(resolved);
+        return syntheticFromNamespace(
+          namespace,
+          context,
+          `qwen-node-repl:${key}`,
+        );
+      })();
+      cache.set(key, promise);
+    }
+    return promise;
+  }
+
+  async function evaluateSynthetic(module) {
+    if (module.status === 'unlinked') {
+      await module.link(() => {
+        throw new Error('synthetic module has no imports');
+      });
+    }
+    if (module.status === 'linked') await module.evaluate();
+    if (module.status === 'errored') throw module.error;
+    return module;
+  }
+
   async function linker(specifier, referencingRecord, previousModule) {
     if (specifier === '@prev' && previousModule) return previousModule;
     const resolved = resolveSpecifier(specifier, referencingRecord);
+    if (
+      resolved.kind === 'builtin' ||
+      resolved.kind === 'native' ||
+      resolved.kind === 'safe-process'
+    ) {
+      return loadSyntheticModule(resolved, referencingRecord.context);
+    }
     const record = constructRecord(resolved, referencingRecord.scope);
     if (record.context === referencingRecord.context) return record.module;
 
@@ -579,6 +804,14 @@ export function createModuleLoader(options) {
 
   async function importDynamic(specifier, referencingRecord) {
     const resolved = resolveSpecifier(specifier, referencingRecord);
+    if (resolved.kind === 'builtin' || resolved.kind === 'native') {
+      return loadNativeNamespace(resolved);
+    }
+    if (resolved.kind === 'safe-process') {
+      return evaluateSynthetic(
+        await loadSyntheticModule(resolved, referencingRecord.context),
+      );
+    }
     const record = constructRecord(resolved, referencingRecord.scope);
     await evaluateRecord(record);
     if (record.context === referencingRecord.context) return record.module;
@@ -614,9 +847,10 @@ export function createModuleLoader(options) {
     const record = {
       module: null,
       context: untrustedContext,
-      filePath: null,
+      filePath: identifier,
       baseDir: cellBaseDir,
       trusted: false,
+      isPackage: false,
       packagePolicy: null,
       packageVersion: null,
       localDefaultEsm: true,
@@ -627,7 +861,7 @@ export function createModuleLoader(options) {
       context: untrustedContext,
       identifier,
       initializeImportMeta(meta) {
-        meta.url = identifier;
+        initializeImportMeta(meta, record, true);
       },
       importModuleDynamically: (specifier) =>
         importDynamicSafely(specifier, record),

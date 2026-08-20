@@ -161,14 +161,23 @@ describe('NodeReplResetTool', () => {
 });
 
 describe('NodeReplAddNodeModuleDirTool', () => {
-  it('requires an existing absolute node_modules path', () => {
+  it('requires an absolute path named node_modules', () => {
     const tool = new NodeReplAddNodeModuleDirTool(session);
     expect(() => tool.build({ path: '' })).toThrow();
     expect(() => tool.build({ path: 'relative/node_modules' })).toThrow();
     expect(() => tool.build({ path: workDir })).toThrow(/node_modules/);
-    expect(() =>
-      tool.build({ path: path.join(workDir, 'missing', 'node_modules') }),
-    ).toThrow(/does not exist/);
+    const futureRoot = path.join(workDir, 'missing', 'node_modules');
+    const canonicalFutureRoot = path.join(
+      fs.realpathSync(workDir),
+      'missing',
+      'node_modules',
+    );
+    expect(tool.build({ path: futureRoot }).getDescription()).toContain(
+      canonicalFutureRoot,
+    );
+    expect(tool.toAutoClassifierInput({ path: futureRoot })).toEqual({
+      path: canonicalFutureRoot,
+    });
   });
 
   it('asks permission, registers canonically, and does not start a child', async () => {
@@ -195,6 +204,31 @@ describe('NodeReplAddNodeModuleDirTool', () => {
       .execute(new AbortController().signal);
     expect(repeated.llmContent).toBe('false');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'registers a node_modules symlink by its stable canonical target',
+    async () => {
+      const target = path.join(workDir, 'packages');
+      fs.mkdirSync(target);
+      const aliasParent = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'node-repl-tool-root-alias-'),
+      );
+      const alias = path.join(aliasParent, 'node_modules');
+      fs.symlinkSync(target, alias, 'dir');
+      try {
+        const tool = new NodeReplAddNodeModuleDirTool(session);
+        const invocation = tool.build({ path: alias });
+        expect(invocation.getDescription()).toContain(fs.realpathSync(target));
+        const result = await invocation.execute(new AbortController().signal);
+        expect(result.error).toBeUndefined();
+        expect(session.getManager().getModuleRoots()).toEqual([
+          fs.realpathSync(target),
+        ]);
+      } finally {
+        fs.rmSync(aliasParent, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'rejects a module root whose canonical target changes after approval',

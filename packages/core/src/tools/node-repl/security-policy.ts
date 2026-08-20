@@ -16,6 +16,22 @@ const PACKAGE_NAME_PATTERN =
   /^(?:@[A-Za-z0-9][A-Za-z0-9._~-]*\/)?[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
+function canonicalizeFuturePath(filePath: string): string {
+  let existingPrefix = filePath;
+  const missingSegments: string[] = [];
+  while (true) {
+    try {
+      return path.join(fs.realpathSync(existingPrefix), ...missingSegments);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(existingPrefix);
+      if (parent === existingPrefix) throw error;
+      missingSegments.unshift(path.basename(existingPrefix));
+      existingPrefix = parent;
+    }
+  }
+}
+
 /**
  * Host-side security policy for the node_repl runtime.
  *
@@ -23,10 +39,10 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
  * canonical package target, package name, entry path, and every loaded-file
  * sha256 match a host-configured entry.
  * Model code and model-supplied paths (node_repl_add_node_module_dir) can
- * never create or widen trust — they only add *untrusted* resolution roots.
+ * never create or widen privilege — they only add ordinary resolution roots.
  *
  * Phase 1 ships with an empty trusted set. Activating this generic mechanism
- * later requires an explicit host policy; it is not an SDK registration path.
+ * later requires an explicit host policy. SDKs use normal package loading.
  */
 export class NodeReplSecurityPolicy {
   private readonly trusted: TrustedPackageEntry[];
@@ -56,8 +72,8 @@ export class NodeReplSecurityPolicy {
 
   /**
    * Validate a module root path supplied via node_repl_add_node_module_dir.
-   * Returns the resolved real path, or throws with a user-facing message.
-   * Granting a root only widens *untrusted* resolution — never trust.
+   * Existing roots are canonicalized; a not-yet-created node_modules path is
+   * retained so package installation can happen after registration.
    */
   validateModuleRoot(rawPath: string): string {
     if (typeof rawPath !== 'string' || rawPath.trim().length === 0) {
@@ -66,11 +82,20 @@ export class NodeReplSecurityPolicy {
     if (!path.isAbsolute(rawPath)) {
       throw new Error(`path must be absolute, got: ${rawPath}`);
     }
+    const normalized = path.resolve(rawPath);
+    if (path.basename(normalized).toLowerCase() !== 'node_modules') {
+      throw new Error(
+        `path must identify a node_modules directory: ${rawPath}`,
+      );
+    }
     let real: string;
     try {
-      real = fs.realpathSync(rawPath);
-    } catch {
-      throw new Error(`directory does not exist: ${rawPath}`);
+      real = fs.realpathSync(normalized);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return canonicalizeFuturePath(normalized);
+      }
+      throw new Error(`cannot resolve directory: ${rawPath}`);
     }
     let stat: fs.Stats;
     try {
@@ -80,11 +105,6 @@ export class NodeReplSecurityPolicy {
     }
     if (!stat.isDirectory()) {
       throw new Error(`path is not a directory: ${rawPath}`);
-    }
-    if (path.basename(real).toLowerCase() !== 'node_modules') {
-      throw new Error(
-        `path must identify a node_modules directory: ${rawPath}`,
-      );
     }
     return real;
   }

@@ -300,6 +300,47 @@ function snapshotAssignments(
   return assignments.length > 0 ? `\n${assignments.join('\n')}` : '';
 }
 
+function snapshotDeclarator(
+  helperName: string,
+  snapshotName: string,
+  bindings: Iterable<NodeReplBindingDescriptor>,
+  maxChars: number,
+): string {
+  const assignments = [...bindings].map(
+    ({ name }) => `${snapshotName}[${JSON.stringify(name)}] = ${name}`,
+  );
+  const expression =
+    assignments.length > 0
+      ? `${assignments.join(', ')}, undefined`
+      : 'undefined';
+  const text = `, ${helperName} = (${expression})`;
+  if (text.length > maxChars) {
+    throw new Error('Transformed JavaScript cell exceeds the sanity limit');
+  }
+  return text;
+}
+
+function topLevelVariableDeclaration(
+  item: Parser.SyntaxNode,
+): Parser.SyntaxNode | null {
+  if (
+    item.type === 'lexical_declaration' ||
+    item.type === 'variable_declaration'
+  ) {
+    return item;
+  }
+  if (item.type === 'for_statement') {
+    const initializer = item.childForFieldName('initializer');
+    return initializer?.type === 'variable_declaration' ? initializer : null;
+  }
+  return null;
+}
+
+function declarationKind(declaration: Parser.SyntaxNode): NodeReplBindingKind {
+  if (declaration.type === 'variable_declaration') return 'var';
+  return declaration.text.trimStart().startsWith('const') ? 'const' : 'let';
+}
+
 function applyEdits(source: string, edits: readonly Edit[]): string {
   const ordered = [...edits].sort((a, b) => {
     if (a.start !== b.start) return a.start - b.start;
@@ -439,8 +480,39 @@ export async function prepareNodeReplCell(
     const edits: Edit[] = [];
     const activeBindings = new Map(previousBindingsByName);
     let generatedCommitChars = 0;
+    let commitCounter = 0;
 
     for (const item of sourceItems) {
+      const declaration = topLevelVariableDeclaration(item);
+      if (declaration) {
+        const completedBindings = new Map(activeBindings);
+        const kind = declarationKind(declaration);
+        for (const declarator of declaration.namedChildren) {
+          if (declarator.type !== 'variable_declarator') continue;
+          const name = declarator.childForFieldName('name');
+          if (name) addPatternBindings(name, kind, completedBindings);
+          const marker = snapshotDeclarator(
+            `${prefix}commit_${commitCounter++}`,
+            snapshotName,
+            [...completedBindings]
+              .map(([bindingName, bindingKind]) => ({
+                name: bindingName,
+                kind: bindingKind,
+              }))
+              .sort((left, right) => left.name.localeCompare(right.name)),
+            MAX_TRANSFORMED_SOURCE_CHARS -
+              code.length -
+              prelude.length -
+              generatedCommitChars,
+          );
+          generatedCommitChars += marker.length;
+          edits.push({
+            start: declarator.endIndex,
+            end: declarator.endIndex,
+            text: marker,
+          });
+        }
+      }
       const declaredHere = new Map<string, NodeReplBindingKind>();
       collectDeclarationNames(item, declaredHere);
       collectTopLevelLoopVarBindings(item, declaredHere);

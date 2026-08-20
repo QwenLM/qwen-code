@@ -15,6 +15,11 @@ export interface NodeReplBindingDescriptor {
   kind: NodeReplBindingKind;
 }
 
+export interface NodeReplModuleRoot {
+  path: string;
+  canonicalPath: string;
+}
+
 export interface TrustedPackageFile {
   path: string;
   sha256: string;
@@ -44,7 +49,7 @@ export interface InitMessage {
   cwd: string;
   homeDir: string;
   tmpDir: string;
-  moduleRoots: string[];
+  moduleRoots: NodeReplModuleRoot[];
   trustedPackages: TrustedPackageEntry[];
   readableRoots: string[];
 }
@@ -65,7 +70,7 @@ export interface ExecMessage {
 export interface AddModuleRootMessage {
   type: 'addModuleRoot';
   requestId: string;
-  path: string;
+  root: NodeReplModuleRoot;
 }
 
 export interface CapabilityResultMessage {

@@ -169,10 +169,16 @@ export class NodeReplTool extends BaseDeclarativeTool<
         'node_repl_reset. User-exported declarations stay local to their cell. ' +
         'A timeout or cancellation replaces the kernel and loses its bindings. ' +
         'Top-level static imports are unsupported; use await import() for ' +
-        'local .js/.mjs modules and packages from ' +
-        'node_repl_add_node_module_dir roots. The untrusted runtime exposes ' +
-        'no process or environment variables, require, Node builtins, worker ' +
-        'threads, shell, or nested Qwen tool access.',
+        'local .js/.mjs modules and packages. Bare packages resolve from ' +
+        'node_repl_add_node_module_dir roots and then the task working ' +
+        'directory. Local modules reload on each execution, while package ' +
+        'entrypoints use Node singleton caching. Imported local files may ' +
+        'statically import other local files, packages, and Node builtins, ' +
+        'and can use nodeRepl, console, and import.meta helpers. Package ' +
+        'dependencies use Node package-relative lookup. Node builtins are ' +
+        'generally available, but importing process is blocked. The cell has ' +
+        'no process or environment globals, require, or nested Qwen tool ' +
+        'access.',
       Kind.Execute,
       {
         type: 'object',
@@ -365,7 +371,7 @@ class NodeReplAddNodeModuleDirInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Allow node_repl imports from ${this.params.path}`;
+    return `Allow node_repl imports from ${this.approvedCanonicalPath ?? this.params.path}`;
   }
 
   override getDefaultPermission(): Promise<PermissionDecision> {
@@ -415,11 +421,11 @@ export class NodeReplAddNodeModuleDirTool extends BaseDeclarativeTool<
       NodeReplAddNodeModuleDirTool.Name,
       ToolDisplayNames.NODE_REPL_ADD_NODE_MODULE_DIR,
       'Registers an absolute path to a node_modules directory so packages ' +
-        'inside it can be imported (untrusted) with dynamic import() in ' +
+        'inside it can be imported with dynamic import() in ' +
         'node_repl. Registration persists across node_repl_reset for the ' +
         'rest of the task. Returns true when newly added and false when the ' +
-        'same canonical root was already registered. It never grants elevated ' +
-        '(trusted) execution.',
+        'same root was already registered. It does not grant access to the ' +
+        'privileged nodeRepl bridge.',
       Kind.Execute,
       {
         type: 'object',
@@ -470,7 +476,7 @@ export class NodeReplAddNodeModuleDirTool extends BaseDeclarativeTool<
       : null;
     return new NodeReplAddNodeModuleDirInvocation(
       this.session,
-      { path: canonicalPath ?? trimmed },
+      { path: trimmed },
       canonicalPath,
     );
   }

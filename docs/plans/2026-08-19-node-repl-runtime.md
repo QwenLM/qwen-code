@@ -8,8 +8,7 @@ Deliver one focused phase-1 change: three deferred built-in tools, one
 task-owned Node child, fresh SourceTextModule cells with `@prev` persistence,
 process-level reset, output conversion, heap status, and an empty-by-default
 trusted-context bridge. Do not include #9334 cua-driver/SDK work or #9335
-Skill work that calls the independent SDK through Node REPL. Do not register
-that SDK or its operations into the Qwen host.
+Skill work that calls the independent SDK through Node REPL.
 
 ## Sequence
 
@@ -51,11 +50,12 @@ that SDK or its operations into the Qwen host.
    - Add synchronous `getHeapStatus()` without policy side effects.
 
 5. **Implement the trusted bridge**
-   - Keep model roots untrusted.
+   - Keep model-added roots outside the privileged-package policy.
    - Classify host entries by package name, pinned canonical root, entry path,
      and SHA-256; reject roots whose realpath target changes after approval.
    - Pin workspace-symlink package targets and every allowed package file;
-     reject trusted-package bare dependencies and Node builtins.
+     load bare dependencies and Node builtins through the same Node-compatible
+     loader used by the current Codex runtime.
    - Create separate normal and privileged `nodeRepl` realm objects.
    - Add token + generation + execution + operation validation around
      structured capability requests.
@@ -77,6 +77,9 @@ that SDK or its operations into the Qwen host.
    - Run the 100-cell and 10-kernel E2E driver against built output.
    - Run build, bundle, typecheck, focused lint/format, a minimal real CLI
      registration path, and the performance probes.
+   - Build the independent #9334 TypeScript package out of tree and prove that
+     this REPL can import its ESM entry, CommonJS dependencies, and N-API
+     runtime without adding cua-driver code to #9333.
    - Record provider/infrastructure blockers separately from source failures.
 
 8. **Review**
