@@ -473,6 +473,41 @@ describe('WorkflowRunRegistry', () => {
     });
   });
 
+  it('preserves the hook reason on info confirmations through restriction', () => {
+    // The ask bounce synthesizes an info view for every tool without a
+    // structured one (any MCP tool, web_fetch, or a structured tool whose
+    // re-entrant preview throws); the hookAskReason passthrough must
+    // survive restrictWorkflowConfirmationDetails for the INFO branch too,
+    // not only edit/exec (#9441 R8-1).
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_info_hook_reason'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_info_hook_reason', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        name: 'HookedTool',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Hook confirmation',
+          prompt: 'hook says confirm',
+          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
+        },
+      }),
+    );
+
+    expect(r.get('wf_info_hook_reason')!.pendingApprovals[0]).toMatchObject({
+      confirmationDetails: {
+        type: 'info',
+        title: 'Hook confirmation',
+        prompt: 'hook says confirm',
+        hideAlwaysAllow: true,
+        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
+      },
+    });
+  });
+
   it('preserves plain-text rendering for copied info confirmations', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_plain_info'));

@@ -10967,6 +10967,93 @@ describe('CoreToolScheduler Plan shell routing', () => {
     }
   });
 
+  it('does not gate the ask bounce on the round-1 IDE diff RPC', async () => {
+    // R8-2: resolveDiffFromCli awaits closeDiff, whose only bound is the
+    // 10-minute IDE RPC timeout and which takes no signal — awaiting it on
+    // the bounce's critical path stalls the hook escalation, the batch, and
+    // Ctrl+C behind an unresponsive IDE. The invalidation is best-effort
+    // and must not block the transition to awaiting_approval; the epoch
+    // bump keeps any stale round-1 answer dropped either way.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+    mockIdeClient.resolveDiffFromCli.mockReset();
+    let resolveRoundOneDiff!: (
+      resolution: Awaited<ReturnType<IdeClient['openDiff']>>,
+    ) => void;
+    mockIdeClient.openDiff.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRoundOneDiff = resolve;
+      }),
+    );
+    // Hang the bounce's invalidation RPC forever: on the pre-fix code the
+    // awaited call never reaches awaiting_approval and this test times out.
+    mockIdeClient.resolveDiffFromCli.mockReturnValue(new Promise(() => {}));
+
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [editToolForAskBounce({ name: 'hungIdeBounceEdit', execute })],
+      mode: () => ApprovalMode.DEFAULT,
+      ideMode: true,
+      messageBus: planShellAskMessageBus(),
+      disableHooks: false,
+    });
+
+    try {
+      await scheduler.schedule(
+        [
+          {
+            callId: 'hung-ide-bounce',
+            name: 'hungIdeBounceEdit',
+            args: { param: 'hook-reviewed' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-hung-ide-bounce',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() =>
+        expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1),
+      );
+      const first = (await waitForStatus(
+        onToolCallsUpdate,
+        'awaiting_approval',
+      )) as WaitingToolCall;
+      await first.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      // The bounced round lands even though the invalidation RPC is still
+      // pending.
+      await vi.waitFor(() =>
+        expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+      );
+      expect(mockIdeClient.resolveDiffFromCli).toHaveBeenCalledWith(
+        'test.txt',
+        'rejected',
+      );
+
+      // The stale round-1 diff still cannot answer the bounced round while
+      // the RPC hangs.
+      resolveRoundOneDiff({ status: 'accepted', content: 'stale-edit' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const bounced = bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+      expect(bounced.status).toBe('awaiting_approval');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(IdeClient.getInstance).mockReset();
+      mockIdeClient.openDiff.mockReset();
+      mockIdeClient.resolveDiffFromCli.mockReset();
+    }
+  });
+
   it('rejects ModifyWithEditor while a PreToolUse ask bounce is pending', async () => {
     // R6-1: content edited through the editor during the bounce would reach
     // a hook-skipping re-execution, so the bounced call rejects the modify

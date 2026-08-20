@@ -4671,8 +4671,11 @@ export class CoreToolScheduler {
     // dropBounceModifyPayload / the claim guard this view sets up. Bump
     // the epoch FIRST so the continuation drops the answer even when the
     // resolver settles in the same tick, then resolve + close the panel
-    // the same way the CLI's handleConfirm does. Only edit views open an
-    // IDE diff.
+    // the same way the CLI's handleConfirm does — fire-and-forget:
+    // closeDiff is bounded only by the 10-minute IDE RPC timeout and
+    // takes no signal, so awaiting it here would stall the bounce (and
+    // Ctrl+C) behind an unresponsive IDE. The epoch bump already drops
+    // any stale answer, and only edit views open an IDE diff (#9441 R8-2).
     this.confirmationEpochs.set(
       callId,
       (this.confirmationEpochs.get(callId) ?? 0) + 1,
@@ -4681,7 +4684,13 @@ export class CoreToolScheduler {
       try {
         const ideClient = await IdeClient.getInstance();
         if (ideClient.isDiffingEnabled()) {
-          await ideClient.resolveDiffFromCli(toolDetails.filePath, 'rejected');
+          void ideClient
+            .resolveDiffFromCli(toolDetails.filePath, 'rejected')
+            .catch((error) => {
+              debugLogger.warn(
+                `Failed to invalidate the round-1 IDE diff during PreToolUse ask bounce for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
         }
       } catch (error) {
         debugLogger.warn(
@@ -4690,6 +4699,9 @@ export class CoreToolScheduler {
       }
     }
 
+    if (signal.aborted) {
+      return false;
+    }
     this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
 
     // The IDE diff is deliberately NOT opened on a bounce: it would answer
