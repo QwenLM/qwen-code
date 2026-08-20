@@ -238,9 +238,11 @@ jobs:
           # this lever exists to surface. Fall back to the default, mirroring
           # AUTO_RELEASE_DAYS. The digit-only regex still admits values large
           # enough to wedge every queued run at once — re-creating the
-          # starvation — so bound by string LENGTH too.
-          if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]]; then
-            echo "::warning::ZOMBIE_QUEUED_MINUTES '${ZOMBIE_QUEUED_MINUTES}' is not an integer or is too large; using 30"
+          # starvation — so bound by string LENGTH too, and reject zero: it
+          # wedges every queued run at birth, the exact opposite of the
+          # generous-by-design invariant the env block declares.
+          if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]] || [[ "${ZOMBIE_QUEUED_MINUTES}" =~ ^0+$ ]]; then
+            echo "::warning::ZOMBIE_QUEUED_MINUTES '${ZOMBIE_QUEUED_MINUTES}' is not a positive integer or is too large; using 30"
             ZOMBIE_QUEUED_MINUTES=30
           fi
           # One definition of "wedged", shared by every reader of the run
@@ -286,7 +288,10 @@ jobs:
           # the interval, it does not block hard: once that run starts,
           # completes, or leaves the snapshot window, the gate reopens on its
           # own, so the residual stays the documented single absorbed
-          # duplicate scan instead of one corpse per hour.
+          # duplicate scan instead of one corpse per hour. When attribution
+          # falls back to run=none the guard cannot see the dispatch — no id
+          # was recorded — and the watermark-cycle corpse planting resumes;
+          # the wedge banner remains the exposure signal for that path.
           PREV_LIVENESS_WEDGED="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
             [ .[] | select($lvrun != "" and ((.databaseId | tostring) == $lvrun) and wedged($now; $zmin)) ] | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
@@ -1194,6 +1199,9 @@ jobs:
             # green from PR-event runs.
             if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
               echo "> ⚠️ **${SCAN_ZOMBIES} autofix run(s) wedged in \`queued\`** (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — GitHub never started them, so they are excluded from the in-flight count. A workflow file over GitHub's 500 KB limit does exactly this."
+              if [[ "${PREV_LIVENESS_WEDGED}" -gt 0 ]]; then
+                echo "> 🚧 The shepherd's liveness re-dispatch stays paused while the recorded liveness run is among them — a fresh dispatch would only wedge again. Deleting the wedged run(s) (\`gh run delete <id>\`) reopens it immediately; it also reopens once they leave the 50-run snapshot window."
+              fi
               echo
             fi
             echo '## Bot fleet'

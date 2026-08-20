@@ -314,8 +314,9 @@ describe('fleet shepherd workflow', () => {
       'run-list read failed; liveness lever and conflict dispatches skipped',
     );
     // The FULL gate, including the wedge self-limit: a still-wedged recorded
-    // liveness run keeps it closed, so a persistent wedge plants one corpse
-    // per snapshot window at worst, not one per watermark cycle.
+    // liveness run keeps it closed, so an ATTRIBUTED persistent wedge plants
+    // one corpse per snapshot window at worst, not one per watermark cycle (a
+    // run=none attribution fallback records no id the guard could see).
     expect(workflow).toContain(
       '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" && "${PREV_LIVENESS_WEDGED}" == "0"',
     );
@@ -858,11 +859,35 @@ exit 1`;
     // back to the default with a warning instead of failing every $zmin
     // consumer open (mirrors AUTO_RELEASE_DAYS), and the guard runs BEFORE
     // the first consumer (the census), not after.
-    expect(workflow).toMatch(
-      /if \[\[ ! "\$\{ZOMBIE_QUEUED_MINUTES\}" =~ \^\[0-9\]\+\$ \]\] \|\| \[\[ \$\{#ZOMBIE_QUEUED_MINUTES\} -gt 3 \]\]; then/,
+    const guardCondition = workflow.match(
+      /^ {10}(if \[\[ ! "\$\{ZOMBIE_QUEUED_MINUTES\}".*); then$/m,
+    )?.[1];
+    expect(guardCondition).toBeTruthy();
+    expect(guardCondition).toBe(
+      'if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]] || [[ "${ZOMBIE_QUEUED_MINUTES}" =~ ^0+$ ]]',
     );
+    // Replayed VERBATIM: zero is the degenerate lower bound — it wedges
+    // every queued run at birth — so it falls back like a non-numeric or
+    // oversized value instead of reaching the jq consumers.
+    const guardVerdict = (value) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          `ZOMBIE_QUEUED_MINUTES='${value}'; ${guardCondition}; then echo fallback; else echo keep; fi`,
+        ],
+        { encoding: 'utf8' },
+      ).stdout.trim();
+    expect(guardVerdict('0')).toBe('fallback');
+    expect(guardVerdict('00')).toBe('fallback');
+    expect(guardVerdict('000')).toBe('fallback');
+    expect(guardVerdict('abc')).toBe('fallback');
+    expect(guardVerdict('1000')).toBe('fallback');
+    expect(guardVerdict('1')).toBe('keep');
+    expect(guardVerdict('30')).toBe('keep');
+    expect(guardVerdict('999')).toBe('keep');
     expect(workflow).toMatch(
-      /is not an integer or is too large; using 30"\n\s+ZOMBIE_QUEUED_MINUTES=30\n[\s\S]*?SCAN_ZOMBIES="/,
+      /is not a positive integer or is too large; using 30"\n\s+ZOMBIE_QUEUED_MINUTES=30\n[\s\S]*?SCAN_ZOMBIES="/,
     );
     // The conflict lever's busy-set deliberately does NOT share the wedged
     // exclusion: age alone proves jobless only for the wedge class that
@@ -879,6 +904,14 @@ exit 1`;
     expect(workflow).toContain(
       '${SCAN_ZOMBIES} autofix run(s) wedged in \\`queued\\`',
     );
+    // While the recorded liveness run stays wedged, the banner also names
+    // the paused re-dispatch gate AND its escape hatch: recovery from a
+    // persistent wedge leaves the gate closed until that run leaves the
+    // snapshot window, and nothing else tells oncall why scans stay dark.
+    expect(workflow).toContain(
+      'liveness re-dispatch stays paused while the recorded liveness run is among them',
+    );
+    expect(workflow).toContain('gh run delete <id>');
   });
 
   it('maintains one dashboard issue edited in place', () => {
