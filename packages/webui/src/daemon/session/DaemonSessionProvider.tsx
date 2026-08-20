@@ -35,6 +35,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
   type DaemonUnrecognizedDiagnostic,
+  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -66,6 +67,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -1818,6 +1820,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
+            goalState:
+              current.sessionId === activeSession.sessionId
+                ? current.goalState
+                : undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -1848,24 +1854,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.context !== undefined);
           const configGeneration =
             sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const goalStateAtLoadStart =
+            connectionRef.current.sessionId === activeSession.sessionId
+              ? connectionRef.current.goalState
+              : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [providerResult, commandResult, contextResult, gitResult] =
-            await Promise.allSettled([
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.supportedCommands(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.context(),
-              gitPromise,
-            ]);
+          const [
+            providerResult,
+            commandResult,
+            contextResult,
+            gitResult,
+            goalResult,
+          ] = await Promise.allSettled([
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : client.workspaceProviders(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.supportedCommands(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.context(),
+            gitPromise,
+            activeSession.goal(),
+          ]);
           if (
             disposed ||
             abort.signal.aborted ||
@@ -1889,6 +1905,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
               : undefined;
+          const goalState =
+            goalResult.status === 'fulfilled'
+              ? goalResult.value.snapshot
+              : undefined;
+          // A failed goal fetch on a session with no known state still needs a
+          // snapshot so consumers stop treating the state as hydrating; it must
+          // never reconcile against a state a frame installed meanwhile.
+          const goalStateFallback =
+            goalResult.status === 'fulfilled' ||
+            goalStateAtLoadStart !== undefined
+              ? undefined
+              : ({
+                  v: 2,
+                  goal: null,
+                  activity: 'idle',
+                } satisfies GoalSnapshotV2);
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models
@@ -1978,6 +2010,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: configSnapshotCurrent
                 ? (context ?? current.context)
                 : current.context,
+              // Reconcile rather than reference-compare: the load response and
+              // any frame that arrived during the load window share a revision
+              // domain, and routing through `selectGoalState` is what registers
+              // the cleared-goal tombstone that keeps a later stale frame from
+              // resurrecting a cleared goal. The read is stamped with the goal
+              // observed when it was issued (`goalStateAtLoadStart`) — a create
+              // that lands inside the load window must not be wiped, and
+              // tombstoned, by a bare-null answer that predates it.
+              goalState: goalState
+                ? selectGoalStateFromRead(
+                    current.goalState,
+                    goalState,
+                    goalStateAtLoadStart?.goal?.goalId,
+                  )
+                : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -2463,6 +2510,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              goalState: undefined,
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
@@ -2608,6 +2656,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
                   errorStatus,
@@ -2633,6 +2682,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 errorStatus,
@@ -2961,6 +3011,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
                       }
