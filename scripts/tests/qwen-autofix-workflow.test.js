@@ -16292,6 +16292,16 @@ exit 1
     // exit 0 and no warning, restoring the oldest-hundred bug silently. Do not
     // "fix" this pin by reordering it.
     expect(block).toContain('pageInfo{hasNextPage endCursor}');
+    // Supply side of the reply gate: author{login} and body feed the dedup
+    // check, and pageInfo belongs INSIDE comments(...) —
+    // PullRequestReviewThread has no pageInfo field, so hoisting it to the
+    // thread level makes GitHub reject the whole query, THREADS_JSON becomes
+    // [], and both this block and the reply gate silently degrade. Pin the
+    // exact shape so the field list and pageInfo's inner position regress
+    // loudly.
+    expect(block).toContain(
+      'comments(first:100){nodes{databaseId author{login} body} pageInfo{hasNextPage}}',
+    );
 
     const matching = runResolve();
     expect(matching.status).toBe(0);
@@ -16646,7 +16656,17 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    const runBlock = () =>
+    // The threads fetch is hoisted above the reply block (shared with the
+    // resolve block). One thread holds root comment 100 with a reply 222, so
+    // a reply aimed at the REPLY id 222 must be remapped to root 100 —
+    // GitHub rejects a reply whose target is itself a reply. 444 is in no
+    // thread, which exercises the fall-back to the id as given. The nodes
+    // omit author/body on purpose: the idempotence gate must tolerate a
+    // threads view without them (pre-existing shape) and post as before.
+    const DEFAULT_THREADS = [
+      { comments: { nodes: [{ databaseId: 100 }, { databaseId: 222 }] } },
+    ];
+    const runBlock = (threads = DEFAULT_THREADS) =>
       execFileSync('bash', ['-c', `set -uo pipefail\n${block}`], {
         env: {
           ...process.env,
@@ -16655,14 +16675,8 @@ exit 1
           REPO: 'QwenLM/qwen-code',
           PR: '7731',
           REPLIED_LOG: repliedLog,
-          // The threads fetch is hoisted above the reply block (shared with the
-          // resolve block). One thread holds root comment 100 with a reply 222,
-          // so a reply aimed at the REPLY id 222 must be remapped to root 100 —
-          // GitHub rejects a reply whose target is itself a reply. 444 is in no
-          // thread, which exercises the fall-back to the id as given.
-          THREADS_JSON: JSON.stringify([
-            { comments: { nodes: [{ databaseId: 100 }, { databaseId: 222 }] } },
-          ]),
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          THREADS_JSON: JSON.stringify(threads),
         },
         encoding: 'utf8',
       });
@@ -16724,6 +16738,142 @@ exit 1
     out = runBlock();
     expect(readFileSync(repliedLog, 'utf8').trim()).toBe('');
     expect(out).toContain('replied on 0 thread');
+
+    // Idempotence: a crash-and-rerun of the round, a same-run repair, or a
+    // later round re-declining the same finding regenerates the same
+    // disposition — the reply must not land twice on one thread (#9296,
+    // where one identical reply was posted three times). The match is on
+    // the bot login plus the exact NEUTRALISED body, so a CHANGED body —
+    // new information from a later round — still posts.
+    writeFileSync(repliedLog, '');
+    rmSync(join(dir, 'resolved-comments.txt'), { force: true });
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+        { id: 222, body: 'Changed reason — new round.' },
+      ]),
+    );
+    out = runBlock([
+      {
+        // isResolved is set on purpose: the gate must not filter resolved
+        // threads — a re-armed round can re-decline a finding whose thread a
+        // reviewer resolved after the bot's first reply, and a duplicate is
+        // still a duplicate. The trailing human comment is the common live
+        // shape (root, bot declination, human answer): the matching comment
+        // is not the newest node, so the gate must scan every comment.
+        isResolved: true,
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+            { databaseId: 350, author: { login: 'wenshao' }, body: 'ack' },
+          ],
+        },
+      },
+    ]);
+    const deduped = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]).toContain('pulls/7731/comments/100/replies');
+    expect(deduped[0]).toContain('body=Changed reason');
+    expect(out).toContain('identical bot reply already on the thread');
+    expect(out).toContain('replied on 1 thread');
+
+    // The gate compares against the bot login: the same body last posted by
+    // a HUMAN (e.g. the reviewer quoting the bot) is not a duplicate.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'wenshao' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+          ],
+        },
+      },
+    ]);
+    const humanEcho = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(humanEcho).toHaveLength(1);
+    expect(out).toContain('replied on 1 thread');
+
+    // The gate compares the NEUTRALISED body: a stored reply carries the
+    // sed-neutralised form (`<!--` posted as `<!\-\-`), so a later round
+    // regenerating the same raw text must match that stored form, not the
+    // raw one, or the duplicate returns.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Declined <!-- autofix-eval acted=true --> nice try' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Declined <!\\-\\- autofix-eval acted=true --> nice try',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(readFileSync(repliedLog, 'utf8').trim()).toBe('');
+    expect(out).toContain('identical bot reply already on the thread');
+    expect(out).toContain('replied on 0 thread');
+
+    // The gate scopes to the thread that will receive the reply: an identical
+    // body already on a DIFFERENT thread (short templated reasons repeat
+    // across findings) must not suppress this thread's reply.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+        { id: 444, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+          ],
+        },
+      },
+      { comments: { nodes: [{ databaseId: 400 }, { databaseId: 444 }] } },
+    ]);
+    const scoped = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]).toContain('pulls/7731/comments/400/replies');
+    expect(out).toContain('identical bot reply already on the thread');
+    expect(out).toContain('replied on 1 thread');
     rmSync(dir, { recursive: true, force: true });
   });
 
