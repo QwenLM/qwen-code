@@ -445,7 +445,11 @@ jobs:
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
             # Restore the bot PAT only at the push boundary so dependency
             # installation and build tooling cannot read write credentials.
-            GH_TOKEN="${CI_BOT_PAT}" gh auth setup-git
+            # Export (not inline) so GH_TOKEN is still set when `git push`
+            # invokes the credential helper, which re-resolves the token at
+            # push time rather than at `gh auth setup-git` time.
+            export GH_TOKEN="${CI_BOT_PAT}"
+            gh auth setup-git
             # The guard runs scripts/get-release-version.js from the
             # checked-out ref — the operator-controlled dispatch input `ref`
             # — not the branch this workflow file came from. A ref predating
