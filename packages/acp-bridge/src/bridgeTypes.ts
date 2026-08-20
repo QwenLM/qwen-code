@@ -44,6 +44,7 @@ import type {
   ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeSessionWorkflowTaskStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -1635,7 +1636,10 @@ export interface AcpSessionBridge {
   ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /** Read the live background task snapshot for a live session. */
-  getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+  getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ): Promise<ServeSessionTasksStatus>;
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
@@ -1653,8 +1657,27 @@ export interface AcpSessionBridge {
   cancelSessionTask(
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor',
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
+
+  /** Control a run, delete history, or start a saved workflow definition. */
+  controlSessionWorkflowTask(
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    changed: boolean;
+    status?: ServeSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
 
   /** Clear an active goal in a live session without cancelling the running prompt. */
   clearSessionGoal(

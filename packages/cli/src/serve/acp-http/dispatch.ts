@@ -268,6 +268,8 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/tasks/cancel`,
+  `${QWEN_METHOD_NS}session/tasks/workflow_action`,
   `${QWEN_METHOD_NS}session/lsp`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
@@ -3552,8 +3554,94 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/tasks`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.getSessionTasksStatus(sessionId);
+          const result = await this.bridge.getSessionTasksStatus(sessionId, {
+            includeWorkflows: params['includeWorkflows'] === true,
+          });
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/tasks/cancel`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const taskId = String(params['taskId'] ?? '');
+            if (!taskId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+                );
+              }
+              return;
+            }
+            const kind = params['kind'];
+            if (
+              kind !== 'agent' &&
+              kind !== 'shell' &&
+              kind !== 'monitor' &&
+              kind !== 'workflow'
+            ) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`kind` must be "agent", "shell", "monitor", or "workflow"',
+                  ),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.cancelSessionTask(
+              sessionId,
+              taskId,
+              kind,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/tasks/workflow_action`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const taskId = String(params['taskId'] ?? '');
+            if (!taskId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+                );
+              }
+              return;
+            }
+            const action = params['action'];
+            if (
+              action !== 'pause' &&
+              action !== 'resume' &&
+              action !== 'retry' &&
+              action !== 'rerun' &&
+              action !== 'delete-history' &&
+              action !== 'run-saved'
+            ) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+                  ),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.controlSessionWorkflowTask(
+              sessionId,
+              taskId,
+              action,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
           return;
         }
 

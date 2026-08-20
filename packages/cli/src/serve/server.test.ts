@@ -904,14 +904,30 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStatsStatus>;
-  sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  sessionTasksImpl?: (
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor',
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ) => Promise<{ cancelled: boolean }>;
+  controlSessionWorkflowTaskImpl?: (
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
@@ -1192,6 +1208,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionSupportedCommandsCalls: string[];
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
+  sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
   sessionLspCalls: string[];
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
@@ -1199,7 +1216,20 @@ interface FakeBridge extends AcpSessionBridge {
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor';
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
+    context?: BridgeClientRequestContext;
+  }>;
+  controlSessionWorkflowTaskCalls: Array<{
+    sessionId: string;
+    taskId: string;
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved';
+    context?: BridgeClientRequestContext;
   }>;
   clearSessionGoalCalls: string[];
   continueSessionCalls: string[];
@@ -1377,9 +1407,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
+    [];
   const sessionLspCalls: string[] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
+  const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
+    [];
   const clearSessionGoalCalls: string[] = [];
   const continueSessionCalls: string[] = [];
   const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
@@ -1720,6 +1754,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
+  const controlSessionWorkflowTaskImpl =
+    opts.controlSessionWorkflowTaskImpl ??
+    (async () => ({ changed: true, status: 'pausing' }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
   const continueSessionImpl =
@@ -1959,9 +1996,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     sessionStatsCalls,
     sessionTasksCalls,
+    sessionTasksOptions,
     sessionLspCalls,
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
+    controlSessionWorkflowTaskCalls,
     clearSessionGoalCalls,
     continueSessionCalls,
     continueSessionContexts,
@@ -2235,9 +2274,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionStatsCalls.push(sessionId);
       return sessionStatsImpl(sessionId);
     },
-    async getSessionTasksStatus(sessionId) {
+    async getSessionTasksStatus(sessionId, opts) {
       sessionTasksCalls.push(sessionId);
-      return sessionTasksImpl(sessionId);
+      sessionTasksOptions.push(opts);
+      return sessionTasksImpl(sessionId, opts);
     },
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
@@ -2247,9 +2287,23 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTranscriptCalls.push(req);
       return sessionTranscriptImpl(req);
     },
-    async cancelSessionTask(sessionId, taskId, taskKind) {
-      cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind);
+    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+      cancelSessionTaskCalls.push({
+        sessionId,
+        taskId,
+        taskKind,
+        ...(context ? { context } : {}),
+      });
+      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
+    },
+    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+      controlSessionWorkflowTaskCalls.push({
+        sessionId,
+        taskId,
+        action,
+        ...(context ? { context } : {}),
+      });
+      return controlSessionWorkflowTaskImpl(sessionId, taskId, action, context);
     },
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
@@ -3832,6 +3886,71 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises workflow availability per workspace before a session exists', async () => {
+      const primaryBridge = fakeBridge();
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      });
+      const secondary: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: [
+            'QWEN_CODE_ENABLE_WORKFLOWS',
+            'QWEN_CODE_DISABLE_WORKFLOWS',
+          ],
+          effectiveEnv: {
+            QWEN_CODE_ENABLE_WORKFLOWS: '1',
+            QWEN_CODE_DISABLE_WORKFLOWS: '1',
+          },
+        },
+      };
+      const untrusted = makeWorkspaceRuntimeForTest({
+        workspaceId: 'untrusted-id',
+        workspaceCwd: '/workspace/untrusted',
+        primary: false,
+        bridge: fakeBridge(),
+        trusted: false,
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: createWorkspaceRegistry([
+          primary,
+          secondary,
+          untrusted,
+        ]),
+        daemonEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
+      });
+
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({
+          id: 'primary-id',
+          workflowsEnabled: true,
+        }),
+        expect.objectContaining({
+          id: 'secondary-id',
+          workflowsEnabled: false,
+        }),
+        expect.objectContaining({
+          id: 'untrusted-id',
+          workflowsEnabled: false,
+        }),
+      ]);
+    });
+
     it('advertises the effective session restore timeout', async () => {
       const defaultResponse = await request(
         createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
@@ -3984,6 +4103,7 @@ describe('createServeApp', () => {
         workspaceRegistry: registry,
         createWorkspaceRuntime: vi.fn(),
         workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+        daemonEnv: {},
       });
 
       const before = await request(app)
@@ -4004,6 +4124,7 @@ describe('createServeApp', () => {
           cwd: WS_BOUND,
           primary: true,
           trusted: true,
+          workflowsEnabled: false,
         },
       ]);
 
@@ -4064,6 +4185,7 @@ describe('createServeApp', () => {
         displayName: 'Conversations',
         primary: false,
         trusted: true,
+        workflowsEnabled: false,
         kind: 'live',
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');
@@ -8894,6 +9016,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const workflowTasksRes = await request(app)
+        .get('/session/s-1/tasks?includeWorkflows=true')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const lspRes = await request(app)
         .get('/session/s-1/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -8906,12 +9031,18 @@ describe('createServeApp', () => {
       expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
+      expect(workflowTasksRes.status).toBe(200);
+      expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
-      expect(bridge.sessionTasksCalls).toEqual(['s-1']);
+      expect(bridge.sessionTasksCalls).toEqual(['s-1', 's-1']);
+      expect(bridge.sessionTasksOptions).toEqual([
+        { includeWorkflows: false },
+        { includeWorkflows: true },
+      ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
 
@@ -9161,12 +9292,12 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(
-        '`kind` must be "agent", "shell", or "monitor"',
+        '`kind` must be "agent", "shell", "monitor", or "workflow"',
       );
       expect(bridge.cancelSessionTaskCalls).toEqual([]);
     });
 
-    it('cancels a session task through the bridge', async () => {
+    it('cancels a workflow task through the bridge', async () => {
       const bridge = fakeBridge({
         cancelSessionTaskImpl: async () => ({ cancelled: true }),
       });
@@ -9181,12 +9312,91 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/task-1/cancel')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .send({ kind: 'agent' });
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'workflow' });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cancelled: true });
       expect(bridge.cancelSessionTaskCalls).toEqual([
-        { sessionId: 's-1', taskId: 'task-1', taskKind: 'agent' },
+        {
+          sessionId: 's-1',
+          taskId: 'task-1',
+          taskKind: 'workflow',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('controls live runs, saved definitions, and history through one route', async () => {
+      const bridge = fakeBridge({
+        controlSessionWorkflowTaskImpl: async (_sessionId, _taskId, action) =>
+          action === 'pause'
+            ? { changed: true, status: 'pausing' }
+            : { changed: true, status: 'running' },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const pauseRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ action: 'pause' });
+      const resumeRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'resume' });
+      const retryRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'retry' });
+      const rerunRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'rerun' });
+      const deleteRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'delete-history' });
+      const runSavedRes = await request(app)
+        .post('/session/s-1/tasks/deep-review/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-saved' });
+
+      expect(pauseRes.status).toBe(200);
+      expect(pauseRes.body).toEqual({ changed: true, status: 'pausing' });
+      expect(resumeRes.status).toBe(200);
+      expect(resumeRes.body).toEqual({ changed: true, status: 'running' });
+      expect(retryRes.status).toBe(200);
+      expect(retryRes.body).toEqual({ changed: true, status: 'running' });
+      expect(rerunRes.status).toBe(200);
+      expect(rerunRes.body).toEqual({ changed: true, status: 'running' });
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body).toEqual({ changed: true, status: 'running' });
+      expect(runSavedRes.status).toBe(200);
+      expect(runSavedRes.body).toEqual({ changed: true, status: 'running' });
+      expect(bridge.controlSessionWorkflowTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'task-1',
+          action: 'pause',
+          context: { clientId: 'client-1' },
+        },
+        { sessionId: 's-1', taskId: 'task-1', action: 'resume' },
+        { sessionId: 's-1', taskId: 'task-1', action: 'retry' },
+        { sessionId: 's-1', taskId: 'task-1', action: 'rerun' },
+        { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
+        { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
       ]);
     });
 

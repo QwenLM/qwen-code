@@ -499,6 +499,40 @@ class FakeBridge {
   async getSessionTasksStatus(sessionId: string) {
     return { sessionId, tasks: [] };
   }
+  lastCancelledTask:
+    | {
+        sessionId: string;
+        taskId: string;
+        kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2];
+        context: Parameters<HttpAcpBridge['cancelSessionTask']>[3];
+      }
+    | undefined;
+  async cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2],
+    context: Parameters<HttpAcpBridge['cancelSessionTask']>[3],
+  ) {
+    this.lastCancelledTask = { sessionId, taskId, kind, context };
+    return { cancelled: true };
+  }
+  lastWorkflowAction:
+    | {
+        sessionId: string;
+        taskId: string;
+        action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2];
+        context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
+      }
+    | undefined;
+  async controlSessionWorkflowTask(
+    sessionId: string,
+    taskId: string,
+    action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2],
+    context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3],
+  ) {
+    this.lastWorkflowAction = { sessionId, taskId, action, context };
+    return { changed: true, status: 'running' as const };
+  }
   async getSessionLspStatus(sessionId: string) {
     return {
       v: 1,
@@ -8045,6 +8079,72 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/tasks/cancel forwards the task and trusted client context', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'workflow-1',
+          kind: 'workflow',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+      expect(bridge.lastCancelledTask).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'workflow-1',
+        kind: 'workflow',
+        context: { clientId: 'client-1', fromLoopback: true },
+      });
+    });
+
+    it('_qwen/session/tasks/workflow_action forwards the action result and trusted client context', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'workflow-1',
+          action: 'retry',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { changed: true, status: 'running' },
+      });
+      expect(bridge.lastWorkflowAction).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'workflow-1',
+        action: 'retry',
+        context: { clientId: 'client-1', fromLoopback: true },
       });
     });
 
