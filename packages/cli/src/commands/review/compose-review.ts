@@ -1515,6 +1515,11 @@ function ledgerMarkerFor(
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
+          // The same gate the body ran: a gate Critical is a posted,
+          // counted blocker too — leaving it out let the next round's
+          // persistence half read "no prior Critical" over a round that
+          // posted one (#9526).
+          ...scriptLintGate(input.planPath).criticals,
         ],
       ),
       // The pair falls together: a sha with no model reads to the next
@@ -1679,30 +1684,6 @@ function composeReviewBody(
     relocated: relocatedCriticals,
     relocatedDeterministic,
   } = splitDeferralChannel(input.deferredSuggestions);
-  // The persistently-critical convergence signal (#9410): computed, never
-  // decided. "This round's Criticals" counts every Critical this round
-  // stands behind — the inline count, the body-only Criticals, and the
-  // relocated ones (a Critical the model deferred is relocated back to a
-  // posted blocker, so it still stands). The persistence half and the volume
-  // window come from the carried ledger (`prevConvergence`). Advisory only:
-  // it cannot move the event or cap the verdict; it only surfaces, and every
-  // input degrades open to "no assessment".
-  const convergence = convergenceAssessment({
-    prevHadCritical: prevConvergence.hadCritical,
-    // The floor-engagement conjunct is computed by the SAME predicate the
-    // enforcement backstop keys on (#9410): the advisory's "the floor will
-    // not converge it" claim is provable only where the floor is actually
-    // running, so a pre-engagement round degrades open to silence.
-    floorEngaged: severityFloorEngaged(
-      input.severityFloor,
-      input.contextUnavailable === true,
-      prevRound,
-    ),
-    thisCriticals:
-      criticalsInline + bodyCriticals.length + relocatedCriticals.length,
-    posted: postedInline,
-    prevPosted: prevConvergence.posted,
-  });
   // The floor-enforced reroutes join the model's deferrals AFTER the split:
   // they are constructed typed by this module's own code (see
   // `floorEnforcedReroute`), so routing them through the model-channel
@@ -1990,6 +1971,33 @@ function composeReviewBody(
     // dimension nobody reviewed. Inert on every diff the manifest does not mark.
     unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
+  // The persistently-critical convergence signal (#9410): computed, never
+  // decided. Computed HERE — after the relocated push above and the gate
+  // push inside this block — because it counts every Critical this round
+  // stands behind, and `bodyCriticals` is only complete once both have
+  // joined it: the SAME array, with the SAME semantics, the verdict's `c`
+  // counts below. A count taken before the pushes read a gate-only round —
+  // a standing deterministic [lint] blocker the floor can never converge —
+  // as standing behind zero Criticals, so the advisory the shape exists to
+  // surface never fired on it (#9526). The persistence half and the volume
+  // window come from the carried ledger (`prevConvergence`). Advisory only:
+  // it cannot move the event or cap the verdict; it only surfaces, and every
+  // input degrades open to "no assessment".
+  const convergence = convergenceAssessment({
+    prevHadCritical: prevConvergence.hadCritical,
+    // The floor-engagement conjunct is computed by the SAME predicate the
+    // enforcement backstop keys on (#9410): the advisory's "the floor will
+    // not converge it" claim is provable only where the floor is actually
+    // running, so a pre-engagement round degrades open to silence.
+    floorEngaged: severityFloorEngaged(
+      input.severityFloor,
+      input.contextUnavailable === true,
+      prevRound,
+    ),
+    thisCriticals: criticalsInline + bodyCriticals.length,
+    posted: postedInline,
+    prevPosted: prevConvergence.posted,
+  });
 
   // The Criticals a verifier must have ruled on before this review may post them as
   // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by

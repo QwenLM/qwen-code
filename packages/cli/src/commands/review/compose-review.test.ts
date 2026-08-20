@@ -3133,6 +3133,135 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it("counts the script-lint gate's standing Critical — advisory and work-list (#9526)", async () => {
+    // The deterministic gate posts a body-only [lint] Critical every round
+    // while the model drafts nothing — the standing-blocker loop the signal
+    // exists to name. The count must see the gate's Critical exactly like
+    // the verdict's own `c` does, and the carried work-list must record
+    // sev 'C' for it, or the whole conjunction holds semantically while the
+    // advisory stays silent and the next round's persistence half is blind.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-gate-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    // A worktree arms the gate (pr-worktree, not diff-only); the report
+    // binds to the plan diff's hash so the gate reads it as fresh.
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(
+      diffPath,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
+      'utf8',
+    );
+    const diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        worktreePath: '.qwen/tmp/review-pr-8255',
+        diffPathAbsolute: diffPath,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 1,
+                code: 'SC2086',
+                level: 'info',
+                message: 'quote the variable',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        deferred: [],
+        ok: false,
+        note: '',
+        diffHash,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    // The model drafts nothing: the gate's [lint] blocker is the round's
+    // only Critical and posts body-only, so the inline volume is 0.
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        convergence?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          posted: number;
+          prevPosted: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the gate blocker rides the body) — flat, not shrinking.
+      // Round 7 of `auto`: the floor is engaged.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.convergence).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 0,
+        prevPosted: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('CONVERGENCE: ')),
+      ).toHaveLength(1);
+      // The marker records the gate Critical as sev 'C' in the work-list,
+      // so a second gate-only round recovers the persistence half instead
+      // of reading "no prior Critical" over a round that posted one.
+      const ledger = parseLedger(composed.body ?? '');
+      expect(ledger?.findings.some((f) => f.sev === 'C')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -7777,6 +7906,16 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // operator sent to a list that does not exist is the same false record
     // in the channel the operator actually reads.
     expect(r.remediation.join('\n')).not.toContain('findings artifact');
+    // The rank-3-only tail clause: a trimmed disclosure section survives
+    // nowhere but the terminal summary, and the line must say exactly
+    // that — naming an advisory copy for an advisory that was never
+    // trimmed is the same false record in the other direction.
+    expect(
+      r.remediation.some(
+        (l) =>
+          l.startsWith('body budget:') && l.includes('their only other copy'),
+      ),
+    ).toBe(true);
   });
 
   it('names the trimmed advisory for itself — never a deferral list that does not exist (#9410)', () => {
@@ -7857,7 +7996,13 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       r.remediation.some(
         (l) =>
           l.startsWith('body budget:') &&
-          l.includes('persistently-critical convergence advisory'),
+          l.includes('persistently-critical convergence advisory') &&
+          // The tail clause is the branch under test: the advisory keeps
+          // two more durable copies, so "their only other copy" (true only
+          // of rank-3 disclosures) would be a false record here.
+          l.includes(
+            'another copy — the advisory also rides the composed JSON',
+          ),
       ),
     ).toBe(true);
   });
