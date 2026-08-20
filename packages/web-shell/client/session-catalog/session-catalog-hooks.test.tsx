@@ -9,6 +9,7 @@ import type {
   DaemonSessionListPage,
 } from '@qwen-code/sdk/daemon';
 import type { SessionCatalogQuery } from './session-catalog-store';
+import { getSessionCatalogStore } from './session-catalog-store';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -52,9 +53,11 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
 }));
 
-const { useSessionCatalogQuery, useWebShellSessions } = await import(
-  './session-catalog-hooks'
-);
+const {
+  useSessionCatalogQuery,
+  useSessionCatalogController,
+  useWebShellSessions,
+} = await import('./session-catalog-hooks');
 
 let root: Root;
 let container: HTMLDivElement;
@@ -213,5 +216,37 @@ describe('session catalog hooks', () => {
       result = await facade!.reload();
     });
     expect(result).toBeUndefined();
+  });
+
+  it('routes turn completions by live-state ownership', () => {
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    let controller: ReturnType<typeof useSessionCatalogController> | undefined;
+
+    function ControllerProbe() {
+      controller = useSessionCatalogController(client);
+      return null;
+    }
+
+    act(() => root.render(<ControllerProbe />));
+    const record = vi.spyOn(store, 'recordSessionActivity');
+    const invalidate = vi.spyOn(store, 'invalidateWorkspace');
+    const schedule = vi.spyOn(store, 'scheduleWorkspaceRefresh');
+
+    // Without live-state ownership the legacy rescan path stays.
+    act(() => controller!.turnCompleted('/w', 'sess-1'));
+    expect(invalidate).toHaveBeenCalledWith('/w');
+    expect(schedule).toHaveBeenCalledWith('/w');
+    expect(store.snapshotSessionActivity('/w')).toBeUndefined();
+
+    invalidate.mockClear();
+    schedule.mockClear();
+    const releaseLiveState = store.retainWorkspaceLiveState('/w');
+    act(() => controller!.turnCompleted('/w', 'sess-1'));
+    expect(record).toHaveBeenCalledWith('/w', 'sess-1');
+    expect(store.snapshotSessionActivity('/w')?.get('sess-1')).toBeDefined();
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+    releaseLiveState();
   });
 });

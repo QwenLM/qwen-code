@@ -85,12 +85,12 @@ import type {
   SessionArtifactStore,
 } from './sessionArtifacts.js';
 import {
-  isSessionMediaReference,
-  SessionMediaReferenceError,
-  withMediaDegradationMarker,
-  type SessionMediaReference,
-  type SessionMediaStore,
-} from './sessionMedia.js';
+  isSessionAttachmentReference,
+  SessionAttachmentReferenceError,
+  withAttachmentDegradationMarker,
+  type SessionAttachmentReference,
+  type SessionAttachmentStore,
+} from './sessionAttachments.js';
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -615,7 +615,7 @@ export interface BridgeClientSessionEntry {
   effectiveCwd: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
-  media: SessionMediaStore;
+  attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
@@ -1269,50 +1269,53 @@ export class BridgeClient implements Client {
         );
       }
     }
-    // Shared across every message in this drain: one stored mediaId that
+    // Shared across every message in this drain: one stored attachment that
     // several queued messages reference is read and base64-encoded once
     // instead of once per message.
-    const mediaMemo = new Map<string, Promise<ContentBlock>>();
-    const serializedMediaIds = new Set<string>();
+    const attachmentMemo = new Map<string, Promise<ContentBlock>>();
+    const serializedAttachmentIds = new Set<string>();
     const items: Array<{
       messageId: string;
       displayText: string;
       content: ContentBlock[];
-      mediaReferences?: SessionMediaReference[];
+      attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
       for (const item of drained) {
         let degraded = 0;
         const planned = (item.content ?? []).filter((block) => {
-          if (!isSessionMediaReference(block)) return true;
-          if (serializedMediaIds.has(block.mediaId)) {
+          if (!isSessionAttachmentReference(block)) return true;
+          if (serializedAttachmentIds.has(block.attachmentId)) {
             degraded += 1;
             return false;
           }
-          serializedMediaIds.add(block.mediaId);
+          serializedAttachmentIds.add(block.attachmentId);
           return true;
         });
         let resolvedBlocks: ContentBlock[];
-        let mediaReferences: SessionMediaReference[];
+        let attachmentReferences: SessionAttachmentReference[];
         try {
-          resolvedBlocks = await entry.media.resolveContent(planned, mediaMemo);
-          mediaReferences = planned.filter(isSessionMediaReference);
+          resolvedBlocks = await entry.attachments.resolveContent(
+            planned,
+            attachmentMemo,
+          );
+          attachmentReferences = planned.filter(isSessionAttachmentReference);
         } catch (error) {
           // Only a gone/invalid reference degrades — per block, so one dead
           // reference drops itself and keeps its siblings. Any other error
           // (fd exhaustion, I/O failure) propagates instead of silently
-          // destroying the media of every message sharing the mediaId.
-          if (!(error instanceof SessionMediaReferenceError)) throw error;
+          // destroying every message sharing the attachment.
+          if (!(error instanceof SessionAttachmentReferenceError)) throw error;
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded attachment for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
           );
-          const perBlock = await entry.media.resolveContentDegrading(
+          const perBlock = await entry.attachments.resolveContentDegrading(
             planned,
-            mediaMemo,
+            attachmentMemo,
           );
           resolvedBlocks = perBlock.resolvedBlocks;
-          mediaReferences = perBlock.retainedBlocks.filter(
-            isSessionMediaReference,
+          attachmentReferences = perBlock.retainedBlocks.filter(
+            isSessionAttachmentReference,
           );
           degraded += perBlock.degraded;
         }
@@ -1320,12 +1323,12 @@ export class BridgeClient implements Client {
           ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
           ...resolvedBlocks,
         ];
-        if (degraded > 0) content = withMediaDegradationMarker(content);
+        if (degraded > 0) content = withAttachmentDegradationMarker(content);
         items.push({
           messageId: item.messageId,
           displayText: item.text,
           content,
-          ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
+          ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }
     } catch (error) {

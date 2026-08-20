@@ -33,6 +33,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -61,6 +62,7 @@ import {
   type ResolvedModelId,
 } from './modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
@@ -78,8 +80,9 @@ export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
   /**
-   * Curated conversation history with copied Content and parts containers.
-   * Part objects are shared by reference; consumers must not mutate them.
+   * Curated conversation history with copied Content, parts arrays, and Part
+   * objects. Nested functionResponse parts are copied too; leaf payloads remain
+   * shared and must not be mutated.
    */
   history: Content[];
   /** Model identifier */
@@ -100,10 +103,22 @@ export interface CacheSafeParams {
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
 
+function clonePart(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
+  };
+}
+
 function copyHistoryContainers(history: Content[]): Content[] {
   return history.map((content) => ({
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    ...(content.parts ? { parts: content.parts.map(clonePart) } : {}),
   }));
 }
 
