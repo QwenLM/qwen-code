@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -1297,7 +1297,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           selection,
           readWorktree: (rel) => {
             try {
-              return readFileSync(resolve(wt, rel), 'utf8');
+              const abs = resolve(wt, rel);
+              // Gate the read on lstat: the paths are the PR's own, so a
+              // planted symlink or fifo reaches this closure. Opening a fifo
+              // blocks the synchronous read forever, and a device like
+              // /dev/zero grows the buffer until SIGKILL — neither throws,
+              // so the catch that frees the worktree lease never runs. An
+              // irregular file just contributes no edge: null already means
+              // "unreadable" to the widening.
+              if (!lstatSync(abs).isFile()) return null;
+              return readFileSync(abs, 'utf8');
             } catch {
               return null;
             }

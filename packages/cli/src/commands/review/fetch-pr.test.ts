@@ -238,6 +238,11 @@ const producerMocks = vi.hoisted(() => ({
   readFileSync: vi.fn((_path?: unknown): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // Same fail-closed default as readFileSync: the widening's reader gates
+  // on lstat BEFORE it reads, and a path nothing serves does not exist.
+  lstatSync: vi.fn((_path?: unknown): { isFile: () => boolean } => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
@@ -276,11 +281,13 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       mkdirSync: producerMocks.mkdirSync,
+      lstatSync: producerMocks.lstatSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
       statSync: statSyncThroughMock,
     },
     mkdirSync: producerMocks.mkdirSync,
+    lstatSync: producerMocks.lstatSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
     statSync: statSyncThroughMock,
@@ -403,6 +410,9 @@ describe('fetch-pr report assembly', () => {
     // merge base → no diff) here so every test starts from a known state
     // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.lstatSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
@@ -1258,6 +1268,10 @@ describe('fetch-pr report assembly', () => {
       baseFetchFailed: false,
     });
     servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (String(path).endsWith('b.ts')) return "import './a.js';\n";
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1280,6 +1294,56 @@ describe('fetch-pr report assembly', () => {
     // the plan naming it is worth nothing if no chunk holds its diff.
     expect(writtenDiff()).toContain('b/a.ts');
     expect(writtenDiff()).toContain('b/b.ts');
+  });
+
+  it('treats an irregular worktree file as unreadable, never reading it', async () => {
+    // The widening's reader is handed paths the PR itself names, so a planted
+    // symlink or fifo reaches it. Opening a fifo blocks the synchronous read
+    // forever, and a device like /dev/zero grows the buffer until SIGKILL —
+    // neither throws, so the catch that frees the worktree lease never runs
+    // and every later review of the PR hangs identically. The reader lstats
+    // first: anything not a regular file is unreadable, contributes no edge,
+    // and the round keeps the unwidened floor.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => false };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // The edge b.ts -> a.ts EXISTS in the content this serves — a reader
+    // that skipped the lstat gate would find it and publish the section.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: BASE,
+      scope: {
+        anchor: ANCHOR,
+        deltaFiles: ['a.ts'],
+        interaction: [],
+        contextFileCount: 1,
+      },
+    });
+    expect(writtenDiff()).toContain('b/a.ts');
+    expect(writtenDiff()).not.toContain('b/b.ts');
+    // The gate refused b.ts BEFORE any read: no readFileSync call asked for
+    // it. A gateless mutant reads the served edge and the two assertions
+    // above flip.
+    expect(
+      producerMocks.readFileSync.mock.calls.some((c) =>
+        String(c[0]).endsWith('b.ts'),
+      ),
+    ).toBe(false);
   });
 
   it('scopes the plan to a valid anchor and suppresses the full-range flags', async () => {
