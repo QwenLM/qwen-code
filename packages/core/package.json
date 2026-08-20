@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.11",
+  "version": "0.21.14",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -24,6 +24,10 @@
     "./memoryScopes": {
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
+    },
+    "./subSessionConstants": {
+      "types": "./dist/src/tools/sub-session-constants.d.ts",
+      "import": "./dist/src/tools/sub-session-constants.js"
     },
     "./toolWriteOrigin": {
       "types": "./dist/src/services/tool-write-origin.d.ts",

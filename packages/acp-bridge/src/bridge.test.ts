@@ -112,10 +112,7 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
-import {
-  SESSION_MEDIA_MAX_TOTAL_BYTES,
-  SessionMediaStore,
-} from './sessionMedia.js';
+import { SessionAttachmentStore } from './sessionAttachments.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -1393,6 +1390,40 @@ describe('createAcpSessionBridge', () => {
       bridge.invokeWorkspaceCommand('qwen/control/workspace/other'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
     expect(channelFactory).toHaveBeenCalledTimes(1);
+
+    await bridge.shutdown();
+  });
+
+  it('wraps a Goal control request in the envelope the agent reads', async () => {
+    // The agent's `sessionGoalControl` handler reads `params['request']`; this
+    // method is its only producer, and a flattened envelope makes every
+    // POST /session/:id/goal fail with "Invalid or missing Goal control
+    // request" while the route and agent tests stay green.
+    const snapshot = { v: 2, activity: 'idle', goal: null };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl
+          ? { snapshot }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const request = { action: 'create' as const, objective: 'ship it' };
+
+    await expect(
+      bridge.controlSessionGoal(session.sessionId, request),
+    ).resolves.toEqual({ snapshot });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      params: { sessionId: session.sessionId, request },
+    });
+
+    await expect(
+      bridge.controlSessionGoal(
+        '11111111-2222-3333-4444-555555555555',
+        request,
+      ),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
 
     await bridge.shutdown();
   });
@@ -13281,7 +13312,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('keeps media references on the event bus and resolves bytes for ACP', async () => {
+    it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>
         makeChannel({
@@ -13292,7 +13323,7 @@ describe('createAcpSessionBridge', () => {
         }).channel;
       const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const reference = await bridge.storeSessionMedia(
+      const reference = await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.from([1, 2, 3]),
         'image/png',
@@ -13324,11 +13355,73 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         { type: 'image', data: 'AQID', mimeType: 'image/png' },
       ]);
-      expect(prompts[0]?._meta?.['qwen.daemon.mediaReferences']).toEqual([
+      expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
       ]);
       expect(await echoed).toEqual(reference);
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('resolves text and binary file attachment references for ACP', async () => {
+      const prompts: PromptRequest[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: (request) => {
+              prompts.push(request);
+              return { stopReason: 'end_turn' };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const textReference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        new TextEncoder().encode('hello'),
+        'text/plain',
+        { clientId: session.clientId },
+        'notes.txt',
+      );
+      const binaryReference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        Uint8Array.from([0, 255, 1]),
+        'application/pdf',
+        { clientId: session.clientId },
+        'report.pdf',
+      );
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [textReference, binaryReference],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      expect(prompts[0]?.prompt).toEqual([
+        {
+          type: 'resource',
+          resource: {
+            uri: 'attachment:///notes.txt',
+            mimeType: 'text/plain',
+            text: 'hello',
+          },
+        },
+        {
+          type: 'resource',
+          resource: {
+            uri: 'attachment:///report.pdf',
+            mimeType: 'application/pdf',
+            blob: 'AP8B',
+          },
+        },
+      ]);
+      expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
+        textReference,
+        binaryReference,
+      ]);
       await bridge.shutdown();
     });
 
@@ -13372,86 +13465,23 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('retains uploaded media across last-client detach and session load', async () => {
+    it('retains uploaded attachments across last-client detach and session load', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-attachments-'),
+      );
       const bridge = makeBridge({
         channelFactory: async () =>
           makeChannel({
             loadSessionImpl: () => ({}),
           }).channel,
+        sessionAttachmentsRoot: root,
       });
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-        sessionScope: 'thread',
-      });
-      const reference = await bridge.storeSessionMedia(
-        session.sessionId,
-        Uint8Array.from([1, 2, 3]),
-        'image/png',
-        { clientId: session.clientId },
-      );
-
-      await bridge.detachClient(session.sessionId, session.clientId);
-      expect(bridge.sessionCount).toBe(0);
-
-      const restored = await bridge.loadSession({
-        sessionId: session.sessionId,
-        workspaceCwd: WS_A,
-      });
-      expect(
-        await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-          clientId: restored.clientId,
-        }),
-      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
-
-      await bridge.shutdown();
-    });
-
-    it('retains uploaded media across idle timeout and session load', async () => {
-      const bridge = makeBridge({
-        channelFactory: async () =>
-          makeChannel({ loadSessionImpl: () => ({}) }).channel,
-      });
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-        sessionScope: 'thread',
-      });
-      const reference = await bridge.storeSessionMedia(
-        session.sessionId,
-        Uint8Array.from([1, 2, 3]),
-        'image/png',
-        { clientId: session.clientId },
-      );
-
-      await bridge.closeSession(session.sessionId, undefined, {
-        reason: 'idle_timeout',
-      });
-      const restored = await bridge.loadSession({
-        sessionId: session.sessionId,
-        workspaceCwd: WS_A,
-      });
-
-      expect(
-        await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-          clientId: restored.clientId,
-        }),
-      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
-      await bridge.shutdown();
-    });
-
-    it('reaps retained media after a detached session exceeds the media TTL', async () => {
-      vi.useFakeTimers();
       try {
-        const bridge = makeBridge({
-          channelFactory: async () =>
-            makeChannel({ loadSessionImpl: () => ({}) }).channel,
-          sessionReapIntervalMs: 60 * 60_000,
-          sessionIdleTimeoutMs: 0,
-        });
         const session = await bridge.spawnOrAttach({
           workspaceCwd: WS_A,
           sessionScope: 'thread',
         });
-        const reference = await bridge.storeSessionMedia(
+        const reference = await bridge.storeSessionAttachment(
           session.sessionId,
           Uint8Array.from([1, 2, 3]),
           'image/png',
@@ -13459,63 +13489,53 @@ describe('createAcpSessionBridge', () => {
         );
 
         await bridge.detachClient(session.sessionId, session.clientId);
-        await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
+        expect(bridge.sessionCount).toBe(0);
 
         const restored = await bridge.loadSession({
           sessionId: session.sessionId,
           workspaceCwd: WS_A,
         });
         expect(
-          await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-            clientId: restored.clientId,
-          }),
-        ).toBeUndefined();
-
-        await bridge.shutdown();
+          await bridge.readSessionAttachment(
+            restored.sessionId,
+            reference.attachmentId,
+            {
+              clientId: restored.clientId,
+            },
+          ),
+        ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
       } finally {
-        vi.useRealTimers();
+        await bridge.shutdown();
+        await fsp.rm(root, { recursive: true, force: true });
       }
     });
 
-    it('still sweeps retained media when the session reaper is disabled', async () => {
-      // sessionReapIntervalMs: 0 turns off idle-session reaping, but the
-      // retained-media TTL sweep must keep running — it is the only runtime
-      // release path for detach-retained media.
-      vi.useFakeTimers();
+    it('deletes persisted attachments only when session cleanup requests it', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-attachments-delete-'),
+      );
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionAttachmentsRoot: root,
+      });
       try {
-        const bridge = makeBridge({
-          channelFactory: async () =>
-            makeChannel({ loadSessionImpl: () => ({}) }).channel,
-          sessionReapIntervalMs: 0,
-          sessionIdleTimeoutMs: 0,
-        });
-        const session = await bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          sessionScope: 'thread',
-        });
-        const reference = await bridge.storeSessionMedia(
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const reference = await bridge.storeSessionAttachment(
           session.sessionId,
-          Uint8Array.from([1, 2, 3]),
+          Uint8Array.of(1, 2, 3),
           'image/png',
           { clientId: session.clientId },
         );
 
-        await bridge.detachClient(session.sessionId, session.clientId);
-        await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
+        await bridge.closeSession(session.sessionId);
+        await bridge.deleteSessionAttachments(session.sessionId);
 
-        const restored = await bridge.loadSession({
-          sessionId: session.sessionId,
-          workspaceCwd: WS_A,
-        });
-        expect(
-          await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-            clientId: restored.clientId,
-          }),
-        ).toBeUndefined();
-
-        await bridge.shutdown();
+        const reopened = new SessionAttachmentStore(root, session.sessionId);
+        expect(await reopened.read(reference.attachmentId)).toBeUndefined();
+        await reopened.close();
       } finally {
-        vi.useRealTimers();
+        await bridge.shutdown();
+        await fsp.rm(root, { recursive: true, force: true });
       }
     });
 
@@ -13526,7 +13546,7 @@ describe('createAcpSessionBridge', () => {
       // degrading to the crash-path detach retention. (A structured
       // RequestError answer is the separate definitive-refusal case, where
       // kill spares the channel and retries later.)
-      const close = vi.spyOn(SessionMediaStore.prototype, 'close');
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
       const handle = makeChannel({
         extMethodImpl: (method) => {
           if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
@@ -13541,7 +13561,7 @@ describe('createAcpSessionBridge', () => {
       });
       try {
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        await bridge.storeSessionMedia(
+        await bridge.storeSessionAttachment(
           session.sessionId,
           Uint8Array.from([1, 2, 3]),
           'image/png',
@@ -14712,6 +14732,9 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('creates a persisted branch even when live session capacity is full', async () => {
+      const attachmentRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-attachments-'),
+      );
       const handle = makeChannel({
         extMethodImpl: async (method) => {
           if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
@@ -14722,26 +14745,48 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         maxSessions: 1,
+        sessionAttachmentsRoot: attachmentRoot,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attachment = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Uint8Array.of(1, 2, 3),
+          'application/json',
+          { clientId: session.clientId },
+          'notes.json',
+        );
 
-      const branch = await bridge.branchSession(session.sessionId, {
-        name: 'Branch 1',
-        atRecordId: '11111111-1111-4111-8111-111111111111',
-      });
+        const branch = await bridge.branchSession(session.sessionId, {
+          name: 'Branch 1',
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        });
 
-      expect(branch).toEqual({
-        sessionId: 'branch-1',
-        displayName: 'Branch 1',
-        titleSource: 'manual',
-        forkedFrom: {
-          sessionId: session.sessionId,
-          displayName: session.sessionId.slice(0, 8),
-        },
-      });
-      expect(handle.agent.loadSessionCalls).toEqual([]);
+        expect(branch).toEqual({
+          sessionId: 'branch-1',
+          displayName: 'Branch 1',
+          titleSource: 'manual',
+          forkedFrom: {
+            sessionId: session.sessionId,
+            displayName: session.sessionId.slice(0, 8),
+          },
+        });
+        expect(handle.agent.loadSessionCalls).toEqual([]);
 
-      await bridge.shutdown();
+        const branchAttachments = new SessionAttachmentStore(
+          attachmentRoot,
+          branch.sessionId,
+        );
+        await expect(
+          branchAttachments.read(attachment.attachmentId),
+        ).resolves.toEqual({
+          data: Buffer.from([1, 2, 3]),
+          mimeType: 'application/json',
+        });
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(attachmentRoot, { recursive: true, force: true });
+      }
     });
 
     it('restores a latest-state branch for v1 callers', async () => {
@@ -14756,6 +14801,13 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () => handle.channel,
       });
       const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const attachment = await bridge.storeSessionAttachment(
+        source.sessionId,
+        Uint8Array.of(1, 2, 3),
+        'application/json',
+        { clientId: source.clientId },
+        'notes.json',
+      );
 
       const branch = await bridge.branchSession(source.sessionId, {
         name: 'Live branch',
@@ -14783,6 +14835,16 @@ describe('createAcpSessionBridge', () => {
       ).resolves.toMatchObject({
         displayName: 'Live branch',
         titleSource: 'manual',
+      });
+      await expect(
+        bridge.readSessionAttachment(
+          branch.sessionId,
+          attachment.attachmentId,
+          { clientId: branch.clientId },
+        ),
+      ).resolves.toEqual({
+        data: Buffer.from([1, 2, 3]),
+        mimeType: 'application/json',
       });
       await expect(
         bridge.sendPrompt(
@@ -15405,7 +15467,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('removes uploaded media owned by a deleted queued prompt', async () => {
+    it('keeps uploaded attachments after deleting a queued prompt', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -15431,7 +15493,7 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { promptId: 'media-delete-blocker' },
       );
-      const reference = await bridge.storeSessionMedia(
+      const reference = await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.of(1, 2, 3),
         'image/png',
@@ -15454,10 +15516,14 @@ describe('createAcpSessionBridge', () => {
         }),
       ).toEqual({ removed: true });
       expect(
-        await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
-          clientId: session.clientId,
-        }),
-      ).toBeUndefined();
+        await bridge.readSessionAttachment(
+          session.sessionId,
+          reference.attachmentId,
+          {
+            clientId: session.clientId,
+          },
+        ),
+      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
       release();
       await running;
@@ -19671,100 +19737,6 @@ describe('createAcpSessionBridge', () => {
 
       abort.abort();
       await bridge.shutdown();
-    });
-
-    it('reaps retained media after an unexpectedly closed session expires', async () => {
-      vi.useFakeTimers();
-      const close = vi.spyOn(SessionMediaStore.prototype, 'close');
-      const handle = makeChannel();
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-        sessionReapIntervalMs: 1_000,
-        sessionIdleTimeoutMs: 0,
-      });
-      try {
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        await bridge.storeSessionMedia(
-          session.sessionId,
-          Uint8Array.of(1),
-          'image/png',
-          { clientId: session.clientId },
-        );
-
-        handle.crash();
-        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
-        await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1_000);
-        expect(close).not.toHaveBeenCalled();
-        await vi.advanceTimersByTimeAsync(60 * 60 * 1_000 + 1_000);
-
-        expect(close).toHaveBeenCalledOnce();
-      } finally {
-        await bridge.shutdown();
-        close.mockRestore();
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not reap retained media while a restore of the session is in flight', async () => {
-      // A restore registers inFlightRestores synchronously but lands in byId
-      // only after the async channel-spawn/loadSession gap. A sweep tick
-      // inside that gap must not release the media being restored, or the
-      // restored session non-deterministically loses every attachment.
-      vi.useFakeTimers();
-      const handles: ChannelHandle[] = [];
-      const load = deferred<LoadSessionResponse>();
-      const factory: ChannelFactory = async () => {
-        const h = makeChannel({ loadSessionImpl: () => load.promise });
-        handles.push(h);
-        return h.channel;
-      };
-      const bridge = makeBridge({
-        channelFactory: factory,
-        sessionReapIntervalMs: 1_000,
-        sessionIdleTimeoutMs: 0,
-        sessionRestoreTimeoutMs: 4 * 60 * 60 * 1_000,
-      });
-      try {
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        const reference = await bridge.storeSessionMedia(
-          session.sessionId,
-          Uint8Array.of(1),
-          'image/png',
-          { clientId: session.clientId },
-        );
-
-        // Crash path: entry removed from byId, media retained with a
-        // detachedAt stamp.
-        handles[0]!.crash();
-        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
-
-        // Start the restore and hold it open inside the loadSession gap.
-        const restore = bridge.loadSession({
-          sessionId: session.sessionId,
-          workspaceCwd: WS_A,
-        });
-        await vi.waitFor(() => {
-          expect(handles).toHaveLength(2);
-          expect(handles[1]!.agent.loadSessionCalls).toHaveLength(1);
-        });
-
-        // Sweep ticks straddling the TTL boundary land inside the gap.
-        await vi.advanceTimersByTimeAsync(3 * 60 * 60 * 1_000 + 61_000);
-
-        load.resolve({});
-        await restore;
-
-        // The retained media survived the restore.
-        const media = await bridge.readSessionMedia(
-          session.sessionId,
-          reference.mediaId,
-        );
-        expect(media).toBeDefined();
-        expect([...(media?.data ?? [])]).toEqual([1]);
-      } finally {
-        await bridge.shutdown();
-        vi.useRealTimers();
-      }
     });
 
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
@@ -26005,21 +25977,21 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('continues closing the session when media cleanup fails', async () => {
+    it('continues closing the session when attachment close fails', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         channelIdleTimeoutMs: 0,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.storeSessionMedia(
+      await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.of(1),
         'image/png',
         { clientId: session.clientId },
       );
       const closeMedia = vi
-        .spyOn(SessionMediaStore.prototype, 'close')
+        .spyOn(SessionAttachmentStore.prototype, 'close')
         .mockRejectedValueOnce(new Error('cleanup failed'));
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -26035,7 +26007,7 @@ describe('createAcpSessionBridge', () => {
           { sessionId: session.sessionId },
         ]);
         expect(stderr).toHaveBeenCalledWith(
-          expect.stringContaining('failed to release media for closed session'),
+          expect.stringContaining('failed to close attachments for session'),
         );
       } finally {
         closeMedia.mockRestore();
@@ -29909,6 +29881,103 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  /**
+   * A Goal turn runs inside the child via `prompt()` directly, so the bridge
+   * never sees a `session/prompt` RPC for it and `pendingPromptCount` stays 0
+   * for its whole duration. The child still drains this queue between tool
+   * batches, so the session is busy: without the `goalTurnActive` check every
+   * mid-turn insert during a Goal turn would be refused as idle — while the
+   * client enables the affordance precisely because a Goal turn is non-idle.
+   */
+  it('accepts a rejectIfIdle insert while a child-driven Goal turn runs', async () => {
+    const handle = makeChannel({});
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'insert me',
+        { clientId: session.clientId },
+        'goal-insert',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-insert' });
+    // Queued for the child's drain, NOT promoted into a prompt of its own.
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([
+      expect.objectContaining({ messageId: 'goal-insert', text: 'insert me' }),
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('promotes what the ending Goal turn never drained', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((res) => {
+          release = res;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'never drained',
+        { clientId: session.clientId },
+        'goal-undrained',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+
+    // A Goal turn owns no prompt slot, so its end is the only signal that can
+    // settle what its last drain missed.
+    await handle.agentConnection.extNotification('_qwencode/end_turn', {
+      sessionId: session.sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: `${session.sessionId}########1`,
+    });
+
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+        expect.objectContaining({
+          promptId: 'goal-undrained',
+          text: 'never drained',
+        }),
+      ]),
+    );
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([]);
+
+    release?.();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
@@ -29986,7 +30055,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('removes uploaded media owned by a deleted mid-turn message', async () => {
+  it('keeps uploaded attachments after deleting a mid-turn message', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -29999,7 +30068,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       undefined,
       { clientId: session.clientId },
     );
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2, 3),
       'image/png',
@@ -30021,10 +30090,14 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }),
     ).toEqual({ removed: true });
     expect(
-      await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
-        clientId: session.clientId,
-      }),
-    ).toBeUndefined();
+      await bridge.readSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        {
+          clientId: session.clientId,
+        },
+      ),
+    ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
     release();
     await prompt;
@@ -30047,7 +30120,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       )
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2, 3),
       'image/png',
@@ -30069,7 +30142,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ removed: true });
 
     // The removal settled the id; a same-id retry must hit the settled ring
-    // and ack, not throw session_media_gone (410).
+    // and ack, not throw session_attachments_gone (410).
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
@@ -30557,7 +30630,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30576,9 +30649,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
       'normal-message',
     );
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[0]!();
     await first;
@@ -30586,7 +30663,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[1]).toEqual([
       {
         type: 'text',
-        text: 'expired attachment\n[Attached media is no longer available]',
+        text: 'expired attachment\n[Attachment is no longer available]',
       },
     ]);
     releases[1]!();
@@ -30621,13 +30698,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const kept = await bridge.storeSessionMedia(
+    const kept = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2),
       'image/png',
       { clientId: session.clientId },
     );
-    const removed = await bridge.storeSessionMedia(
+    const removed = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(3, 4),
       'image/png',
@@ -30640,9 +30717,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'mixed-media',
       { content: [removed, kept] },
     );
-    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      removed.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[0]!();
     await first;
@@ -30650,7 +30731,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[1]).toEqual([
       {
         type: 'text',
-        text: 'two images\n[Attached media is no longer available]',
+        text: 'two images\n[Attachment is no longer available]',
       },
       { type: 'image', data: 'AQI=', mimeType: 'image/png' },
     ]);
@@ -30680,13 +30761,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const kept = await bridge.storeSessionMedia(
+    const kept = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2),
       'image/png',
       { clientId: session.clientId },
     );
-    const removed = await bridge.storeSessionMedia(
+    const removed = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(3, 4),
       'image/png',
@@ -30715,9 +30796,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // m1 promoted to running; m2 admitted queued behind it.
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      removed.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[1]!();
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
@@ -30726,7 +30811,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
       { type: 'image', data: 'AQI=', mimeType: 'image/png' },
     ]);
@@ -30734,75 +30819,6 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
-    await bridge.shutdown();
-  });
-
-  it('rejects queued inline media past the session byte budget', async () => {
-    // Inline base64 never passes through the media store, so admission must
-    // budget the aggregate queued inline bytes per session instead of
-    // letting a full queue pin hundreds of MiB.
-    const releases: Array<() => void> = [];
-    const handle = makeChannel({
-      promptImpl: async () => {
-        await new Promise<void>((resolve) => releases.push(resolve));
-        return { stopReason: 'end_turn' };
-      },
-    });
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const busy = bridge
-      .sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 't1' }],
-        },
-        undefined,
-        { clientId: session.clientId },
-      )
-      .catch(() => {});
-    await new Promise((r) => setTimeout(r, 10));
-
-    const half = 'x'.repeat(SESSION_MEDIA_MAX_TOTAL_BYTES / 2 + 1024);
-    const inline = {
-      type: 'image',
-      data: half,
-      mimeType: 'image/png',
-    } as const;
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'first half',
-        { clientId: session.clientId },
-        'inline-1',
-        { content: [inline] },
-      ),
-    ).toEqual({ accepted: true, messageId: 'inline-1' });
-    // The second payload pushes the queued inline total past the budget.
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'second half',
-        { clientId: session.clientId },
-        'inline-2',
-        { content: [inline] },
-      ),
-    ).toEqual({ accepted: false });
-    // A small inline payload stays admissible under the budget.
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'small',
-        { clientId: session.clientId },
-        'inline-3',
-        {
-          content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
-        },
-      ),
-    ).toEqual({ accepted: true, messageId: 'inline-3' });
-
-    releases[0]!();
-    await busy;
     await bridge.shutdown();
   });
 
@@ -30833,7 +30849,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30864,9 +30880,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await first;
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
     // An ordinary prompt admitted after the media message must stay behind it.
     const p3 = bridge.sendPrompt(
       session.sessionId,
@@ -30882,7 +30902,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
     ]);
     releases[2]!();
@@ -30938,7 +30958,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30971,7 +30991,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
     // Media disappears between admission and dispatch (async arm).
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId);
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+    );
 
     releases[1]!();
     // The degraded prompt must still reach the child — a re-admitted
@@ -30981,7 +31004,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
     ]);
     releases[2]!();
@@ -31019,10 +31042,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const admission = bridge.enqueueMidTurnMessage(
       session.sessionId,
       'leftover',
+      { clientId: session.clientId },
+      'leftover-public',
+      { rejectIfIdle: true },
     );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'leftover-public',
     });
     releases[0]!();
     await t1;
@@ -31032,6 +31058,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect.objectContaining({
         promptId: admission.messageId,
         text: 'leftover',
+        originatorClientId: session.clientId,
       }),
     ]);
     releases[1]!();
@@ -31420,12 +31447,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-      clientId: session.clientId,
-    });
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'hi',
+      { clientId: session.clientId },
+      'public-mid-turn',
+      { rejectIfIdle: true },
+    );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'public-mid-turn',
     });
 
     // Subscribe before the drain so the live injection frame is captured. The
@@ -31683,7 +31714,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getMidTurnMessages returns media blocks so a refresh keeps images', async () => {
+  it('getMidTurnMessages returns attachment blocks so a refresh keeps them', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31713,13 +31744,30 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///notes.txt',
+        mimeType: 'text/plain',
+        text: 'notes',
+      },
+    } as const;
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
         'with media',
         { clientId: session.clientId },
         'media-snap',
-        { content: [image] },
+        { content: [image, resource] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'media-snap' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'with media',
+        { clientId: session.clientId },
+        'media-snap',
+        { content: [image, resource] },
       ),
     ).toEqual({ accepted: true, messageId: 'media-snap' });
 
@@ -31732,7 +31780,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         {
           messageId: 'media-snap',
           text: 'with media',
-          content: [image],
+          content: [image, resource],
         },
       ],
       settledMessageIds: [],
@@ -31744,7 +31792,61 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getPendingPrompts returns media blocks so a refresh keeps images', async () => {
+  it('rejects queued inline attachments past the session byte budget', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const busy = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'go' }],
+      },
+      undefined,
+      { clientId: session.clientId },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+    const half = 'x'.repeat(50 * 1024 * 1024 + 1024);
+    const inline = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///large.txt',
+        mimeType: 'text/plain',
+        text: half,
+      },
+    } as const;
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'first half',
+        { clientId: session.clientId },
+        'inline-1',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'inline-1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'second half',
+        { clientId: session.clientId },
+        'inline-2',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: false });
+
+    releases[0]!();
+    await busy;
+    await bridge.shutdown();
+  });
+
+  it('getPendingPrompts returns attachment blocks for refresh', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31762,6 +31864,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = await bridge.storeSessionAttachment(
+      session.sessionId,
+      new TextEncoder().encode('notes'),
+      'text/plain',
+      { clientId: session.clientId },
+      'notes.txt',
+    );
 
     // Start first prompt that will hang
     bridge.sendPrompt(
@@ -31779,7 +31888,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       session.sessionId,
       {
         sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'with media' }, image],
+        prompt: [{ type: 'text', text: 'with media' }, image, resource],
       },
       undefined,
       { clientId: session.clientId, promptId: 'media-prompt' },
@@ -31794,7 +31903,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(mediaEntry).toMatchObject({
       promptId: 'media-prompt',
       text: 'with media',
-      content: [image],
+      content: [image, resource],
     });
 
     release?.();
@@ -32273,6 +32382,31 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       ),
     ).toEqual({ accepted: true, messageId: 'steer-idle' });
     await vi.waitFor(() => expect(promptCalls).toBe(1));
+    await bridge.shutdown();
+  });
+
+  it('rejects a public enqueue on idle only when rejectIfIdle is set', async () => {
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        promptCalls++;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'public message',
+        { clientId: session.clientId },
+        'public-idle',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: false });
+    expect(promptCalls).toBe(0);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();
   });
 

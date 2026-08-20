@@ -5,6 +5,10 @@
  */
 
 import {
+  LIVE_TASK_TOOL_NAMES,
+  type LiveTaskToolName,
+} from '@qwen-code/acp-bridge/bridgeOptions';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -13,15 +17,7 @@ import {
   type ToolResult,
 } from '@qwen-code/qwen-code-core';
 
-export const LIVE_TASK_TOOL_NAMES = [
-  'list_threads',
-  'read_thread',
-  'wait_threads',
-  'send_message_to_thread',
-  'create_thread',
-] as const;
-
-export type LiveTaskToolName = (typeof LIVE_TASK_TOOL_NAMES)[number];
+export { LIVE_TASK_TOOL_NAMES, type LiveTaskToolName };
 export type LiveTaskToolParams = Record<string, unknown>;
 export type LiveTaskToolExecutor = (
   name: LiveTaskToolName,
