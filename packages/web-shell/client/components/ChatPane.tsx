@@ -43,6 +43,7 @@ import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
   ComposerSubmitCommit,
   ComposerSubmitMetadata,
@@ -53,6 +54,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { base64ToBlob } from '../utils/base64';
 import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
@@ -569,7 +571,7 @@ export function ChatPane({
       'session_mid_turn_message_query',
     ) === true;
   const canInjectMidTurnMedia =
-    connection.capabilities?.features.includes('session_media') === true;
+    connection.capabilities?.features.includes('session_attachments') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -917,6 +919,9 @@ export function ChatPane({
     },
     [connection.sessionId, onRightPanelOpen],
   );
+  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const previewSessionIdRef = useRef(connection.sessionId);
+  previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
     (src: string, alt?: string) => {
@@ -931,6 +936,57 @@ export function ChatPane({
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
+  );
+  const handleAttachmentPreview = useCallback(
+    (file: AttachmentPreviewRequest) => {
+      const sessionId = connection.sessionId;
+      if (!sessionId) return;
+      const open = (resolvedFile: AttachmentPreviewRequest) =>
+        handleRightPanelOpen({
+          id: `attachment:${resolvedFile.attachmentId ?? resolvedFile.workspacePath ?? resolvedFile.name}`,
+          kind: 'attachment',
+          title: resolvedFile.name,
+          turnId: sessionId,
+          ...(resolvedFile.mimeType ? { mimeType: resolvedFile.mimeType } : {}),
+          ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
+          ...(resolvedFile.text !== undefined
+            ? { text: resolvedFile.text }
+            : {}),
+          ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
+          ...(resolvedFile.workspacePath
+            ? { workspacePath: resolvedFile.workspacePath }
+            : {}),
+        });
+      if (
+        file.attachmentId &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        void actions
+          .readAttachment(file.attachmentId)
+          .then((attachment) => {
+            if (previewSessionIdRef.current !== sessionId) return;
+            open({
+              ...file,
+              data: base64ToBlob(attachment.data, attachment.mimeType),
+              mimeType: attachment.mimeType,
+            });
+          })
+          .catch((error: unknown) => {
+            if (previewSessionIdRef.current !== sessionId) return;
+            reportError(error, 'Failed to preview attachment');
+          });
+        return;
+      }
+      open(file);
+    },
+    [
+      actions,
+      connection.sessionId,
+      handleRightPanelOpen,
+      paneWorkspaceCwd,
+      reportError,
+    ],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
@@ -1027,7 +1083,6 @@ export function ChatPane({
   // toolbar chip (next to where the git-branch chip sits), so it's clear which
   // workspace a message goes to. Multi-workspace-ness comes from the shared
   // workspace provider (the pane's own session connection may not carry it).
-  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
   // Memoized so the array identity is stable across renders — `ChatEditor` is
@@ -1220,6 +1275,7 @@ export function ChatPane({
               }
               onTurnOutputOpen={handleRightPanelOpen}
               onImagePreview={handleImagePreview}
+              onAttachmentPreview={handleAttachmentPreview}
               onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
@@ -1347,6 +1403,7 @@ export function ChatPane({
             onImageIngestionNotice={onImageIngestionNotice}
             sessionId={connection.sessionId}
             onImagePreview={handleImagePreview}
+            onAttachmentPreview={handleAttachmentPreview}
             atWorkspaceCwd={paneWorkspaceCwd}
             placeholderText={t('splitView.composerPlaceholder')}
           />

@@ -9,6 +9,7 @@ import {
   InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionIdCaseConflictError,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
@@ -238,11 +239,11 @@ export function sendBridgeError(
   if (
     err instanceof Error &&
     'code' in err &&
-    (err.code === 'session_media_gone' ||
-      err.code === 'invalid_session_media_reference')
+    (err.code === 'session_attachment_gone' ||
+      err.code === 'invalid_session_attachment_reference')
   ) {
     res
-      .status(err.code === 'session_media_gone' ? 410 : 400)
+      .status(err.code === 'session_attachment_gone' ? 410 : 400)
       .json({ error: err.message, code: err.code });
     return;
   }
@@ -423,6 +424,14 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionIdCaseConflictError) {
     res.status(409).json({
       error: err.message,
       code: 'session_conflict',

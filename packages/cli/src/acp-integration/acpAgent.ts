@@ -30,6 +30,7 @@ import {
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
+  SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
@@ -5247,7 +5248,9 @@ class QwenAgent implements Agent {
           } catch (error) {
             return this.cleanupAfterRequestFailure(error, async () => {
               if (
-                this.sessions.get(config.getSessionId())?.getConfig() !== config
+                this.sessions
+                  .get(normalizeSessionIdForLookup(config.getSessionId()))
+                  ?.getConfig() !== config
               ) {
                 await this.cleanupUnstoredConfig(config);
               }
@@ -5408,10 +5411,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5644,7 +5658,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
@@ -5724,10 +5740,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5799,7 +5826,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }

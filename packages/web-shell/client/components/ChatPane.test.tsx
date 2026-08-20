@@ -64,6 +64,7 @@ const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
+const readAttachment = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -74,6 +75,7 @@ const daemonActions = {
   getTasks,
   getGoal,
   controlGoal,
+  readAttachment,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -194,6 +196,16 @@ vi.mock('./MessageList', () => ({
             artifactId: 'turn-artifact',
             artifact: { id: 'turn-artifact', title: 'Turn artifact' },
             workspaceCwd: '/w',
+          })
+        }
+      />
+      <button
+        data-testid="pane-open-attachment"
+        type="button"
+        onClick={() =>
+          props.onAttachmentPreview?.({
+            name: 'data.json',
+            attachmentId: 'attachment-1',
           })
         }
       />
@@ -403,6 +415,11 @@ beforeEach(() => {
   getTasks.mockReset();
   getGoal.mockReset();
   controlGoal.mockReset();
+  readAttachment.mockReset();
+  readAttachment.mockResolvedValue({
+    data: 'eyJoaSI6IuS9oOWlvSJ9',
+    mimeType: 'application/json',
+  });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -796,6 +813,9 @@ describe('ChatPane', () => {
       expectedGoalId: 'goal-1',
       expectedRevision: 9,
     });
+    expect(appendLocalUserMessage).toHaveBeenCalledWith(
+      '/goal set ship the other thing',
+    );
   });
 
   it('closes the pane Goal edit dialog when its session changes', async () => {
@@ -1545,6 +1565,28 @@ describe('ChatPane', () => {
       turnId: 'turn-1',
       artifactId: 'turn-artifact',
       artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
+  });
+
+  it('reads daemon attachments through the pane session before previewing', async () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    await act(async () => {
+      testid('pane-open-attachment')?.click();
+      await Promise.resolve();
+    });
+
+    expect(readAttachment).toHaveBeenCalledWith('attachment-1');
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'attachment:attachment-1',
+      kind: 'attachment',
+      title: 'data.json',
+      turnId: 'sess-1',
+      mimeType: 'application/json',
+      data: expect.any(Blob),
       workspaceCwd: '/w',
       sourceSessionId: 'sess-1',
     });

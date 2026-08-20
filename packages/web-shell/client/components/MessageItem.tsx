@@ -23,6 +23,7 @@ import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 interface MessageItemProps {
   message: Message;
@@ -31,6 +32,7 @@ interface MessageItemProps {
   onShowContextDetail?: () => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
@@ -50,6 +52,7 @@ export const MessageItem = memo(function MessageItem({
   pendingApproval,
   onShowContextDetail,
   onImagePreview,
+  onAttachmentPreview,
   workspaceCwd,
   showRetryHint = false,
   onRetryClick,
@@ -89,6 +92,7 @@ export const MessageItem = memo(function MessageItem({
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
             onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
           />
         );
       case 'assistant':
@@ -284,6 +288,7 @@ function areMessageItemPropsEqual(
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
+  if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
