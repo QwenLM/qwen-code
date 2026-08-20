@@ -4860,10 +4860,7 @@ export const MessageList = memo(
 
     const renderVirtualItem = useCallback(
       (index: number) => {
-        const renderDisplayItem = (
-          displayItem: DisplayItem,
-          isLatest: boolean,
-        ): ReactNode => {
+        const renderDisplayItem = (displayItem: DisplayItem): ReactNode => {
           if (displayItem.type === 'parallel_agents') {
             return (
               <MessageTimestamp timestamp={displayItem.timestamp}>
@@ -4973,7 +4970,6 @@ export const MessageList = memo(
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               workspaceCwd={workspaceCwd}
-              isLatest={isLatest}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
               sendFailed={
@@ -5014,7 +5010,7 @@ export const MessageList = memo(
         const item = visibleItems[itemIndex];
         if (!item) return null;
 
-        return renderDisplayItem(item, itemIndex === visibleItems.length - 1);
+        return renderDisplayItem(item);
       },
       [
         hasHeader,
