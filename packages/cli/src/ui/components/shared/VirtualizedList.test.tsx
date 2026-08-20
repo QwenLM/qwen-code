@@ -468,6 +468,118 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
+  it('re-engages auto-follow when a fitting top-anchored mount grows to overflow', async () => {
+    // MainContent mounts the banner-only session top-anchored
+    // (`length <= 1 ? 0 : SCROLL_TO_ITEM_END`). While the banner fits,
+    // the re-anchor clamp moves nothing, so no clamp mark may be
+    // installed: while content fits, nothing can move the anchor off a
+    // mark, and `clampParked` would suppress the growth auto-follow
+    // branch forever — the first streamed reply would then render below
+    // the fold (#9305 review R8-1). Growth must re-engage sticking once
+    // the conversation overflows the viewport.
+    let items: Item[] = [{ id: 999, label: 'banner' }];
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(8)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+    ]);
+
+    // Sticking stays engaged: further growth keeps following.
+    items = [{ id: 999, label: 'banner' }, ...makeItems(14)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-9',
+      'item-10',
+      'item-11',
+      'item-12',
+      'item-13',
+    ]);
+  });
+
+  it('re-engages auto-follow when the first post-clear message overflows a fitting banner', async () => {
+    // Fitting-remnant counterpart of the R6 combined test above: the
+    // /clear collapse drops sticking and re-anchors to {0,0}, but the
+    // remnant FITS — the re-stick gate is already blocked by
+    // `!contentPreviouslyFit`, so no clamp mark may be installed. A
+    // mark here reads as `clampParked` on every later growth and
+    // suppresses the auto-follow branch, killing follow for the first
+    // conversation after /clear (#9305 review R8-1). The overflowing
+    // remnant keeps its park (pinned by the R6 tests).
+    let items = makeItems(20);
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(12)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+    ]);
+  });
+
   it('does not re-stick a scrolled-away list that shrinks to fit in two steps', async () => {
     // The first shrink re-anchors a scrolled-away viewport, parking it
     // exactly at the new bottom; the re-stick gate must not read that
