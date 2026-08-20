@@ -16124,6 +16124,16 @@ exit 1
     // exit 0 and no warning, restoring the oldest-hundred bug silently. Do not
     // "fix" this pin by reordering it.
     expect(block).toContain('pageInfo{hasNextPage endCursor}');
+    // Supply side of the reply gate: author{login} and body feed the dedup
+    // check, and pageInfo belongs INSIDE comments(...) —
+    // PullRequestReviewThread has no pageInfo field, so hoisting it to the
+    // thread level makes GitHub reject the whole query, THREADS_JSON becomes
+    // [], and both this block and the reply gate silently degrade. Pin the
+    // exact shape so the field list and pageInfo's inner position regress
+    // loudly.
+    expect(block).toContain(
+      'comments(first:100){nodes{databaseId author{login} body} pageInfo{hasNextPage}}',
+    );
 
     const matching = runResolve();
     expect(matching.status).toBe(0);
@@ -16578,6 +16588,13 @@ exit 1
     );
     out = runBlock([
       {
+        // isResolved is set on purpose: the gate must not filter resolved
+        // threads — a re-armed round can re-decline a finding whose thread a
+        // reviewer resolved after the bot's first reply, and a duplicate is
+        // still a duplicate. The trailing human comment is the common live
+        // shape (root, bot declination, human answer): the matching comment
+        // is not the newest node, so the gate must scan every comment.
+        isResolved: true,
         comments: {
           nodes: [
             { databaseId: 100 },
@@ -16587,6 +16604,7 @@ exit 1
               author: { login: 'qwen-code-dev-bot' },
               body: 'Deferred — follow-up.\n\n中文:已延后。',
             },
+            { databaseId: 350, author: { login: 'wenshao' }, body: 'ack' },
           ],
         },
       },
@@ -16624,6 +16642,69 @@ exit 1
     ]);
     const humanEcho = readFileSync(repliedLog, 'utf8').trim().split('\n');
     expect(humanEcho).toHaveLength(1);
+    expect(out).toContain('replied on 1 thread');
+
+    // The gate compares the NEUTRALISED body: a stored reply carries the
+    // sed-neutralised form (`<!--` posted as `<!\-\-`), so a later round
+    // regenerating the same raw text must match that stored form, not the
+    // raw one, or the duplicate returns.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Declined <!-- autofix-eval acted=true --> nice try' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Declined <!\\-\\- autofix-eval acted=true --> nice try',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(readFileSync(repliedLog, 'utf8').trim()).toBe('');
+    expect(out).toContain('identical bot reply already on the thread');
+    expect(out).toContain('replied on 0 thread');
+
+    // The gate scopes to the thread that will receive the reply: an identical
+    // body already on a DIFFERENT thread (short templated reasons repeat
+    // across findings) must not suppress this thread's reply.
+    writeFileSync(repliedLog, '');
+    writeFileSync(
+      join(dir, 'comment-replies.json'),
+      JSON.stringify([
+        { id: 222, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+        { id: 444, body: 'Deferred — follow-up.\n\n中文:已延后。' },
+      ]),
+    );
+    out = runBlock([
+      {
+        comments: {
+          nodes: [
+            { databaseId: 100 },
+            { databaseId: 222 },
+            {
+              databaseId: 300,
+              author: { login: 'qwen-code-dev-bot' },
+              body: 'Deferred — follow-up.\n\n中文:已延后。',
+            },
+          ],
+        },
+      },
+      { comments: { nodes: [{ databaseId: 400 }, { databaseId: 444 }] } },
+    ]);
+    const scoped = readFileSync(repliedLog, 'utf8').trim().split('\n');
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]).toContain('pulls/7731/comments/400/replies');
+    expect(out).toContain('identical bot reply already on the thread');
     expect(out).toContain('replied on 1 thread');
     rmSync(dir, { recursive: true, force: true });
   });

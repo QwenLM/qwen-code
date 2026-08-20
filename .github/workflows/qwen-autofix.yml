@@ -6329,7 +6329,7 @@ jobs:
                   repository(owner:$owner,name:$name){
                     pullRequest(number:$pr){
                       reviewThreads(first:100, after:$endCursor){
-                        nodes{id isResolved comments(first:100){nodes{databaseId author{login} body}} pageInfo{hasNextPage}}
+                        nodes{id isResolved comments(first:100){nodes{databaseId author{login} body} pageInfo{hasNextPage}}}
                         pageInfo{hasNextPage endCursor}
                       }
                     }
