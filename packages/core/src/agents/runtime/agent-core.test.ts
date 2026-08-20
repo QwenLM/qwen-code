@@ -434,12 +434,18 @@ describe('AgentCore.runInAgentFrames', () => {
 });
 
 describe('AgentCore approval response deduplication', () => {
-  it('retries an approval incarnation when event delivery throws', async () => {
+  function buildApprovalCore(): {
+    core: AgentCore;
+    errorSpy: ReturnType<typeof vi.fn>;
+  } {
+    const errorSpy = vi.fn();
     const config = {
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
       }),
-      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: errorSpy }),
       getToolOutputBatchBudget: vi
         .fn()
         .mockReturnValue(Number.POSITIVE_INFINITY),
@@ -453,11 +459,17 @@ describe('AgentCore approval response deduplication', () => {
       { model: 'test-model' },
       { max_turns: 1 },
     );
+    return { core, errorSpy };
+  }
+
+  it('retries an approval incarnation when event delivery throws', async () => {
+    const { core, errorSpy } = buildApprovalCore();
+    const deliveryError = new Error('approval listener failed');
     let shouldThrow = true;
     core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
       if (shouldThrow) {
         shouldThrow = false;
-        throw new Error('approval listener failed');
+        throw deliveryError;
       }
     });
     const approvalEvents: AgentApprovalRequestEvent[] = [];
@@ -503,6 +515,10 @@ describe('AgentCore approval response deduplication', () => {
     );
     try {
       await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Approval event delivery failed for call-retry; will retry on next tool update',
+        deliveryError,
+      );
     } finally {
       abortController.abort();
       await processing;
@@ -511,24 +527,7 @@ describe('AgentCore approval response deduplication', () => {
   });
 
   it('emits once per approval incarnation and allows each response', async () => {
-    const config = {
-      getToolRegistry: vi.fn().mockReturnValue({
-        getTool: vi.fn(),
-      }),
-      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
-      getToolOutputBatchBudget: vi
-        .fn()
-        .mockReturnValue(Number.POSITIVE_INFINITY),
-      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
-      getSessionId: vi.fn().mockReturnValue('approval-session'),
-    } as unknown as Config;
-    const core = new AgentCore(
-      'approval-agent',
-      config,
-      { systemPrompt: '' },
-      { model: 'test-model' },
-      { max_turns: 1 },
-    );
+    const { core } = buildApprovalCore();
     const approvalEvents: AgentApprovalRequestEvent[] = [];
     core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
       approvalEvents.push(event);

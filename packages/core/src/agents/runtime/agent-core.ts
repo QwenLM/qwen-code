@@ -1852,9 +1852,9 @@ export class AgentCore {
           const waiting = call as WaitingToolCall;
 
           // Emit approval request event for UI visibility
+          const callId = waiting.request.callId;
           try {
             const { confirmationDetails } = waiting;
-            const callId = waiting.request.callId;
             if (emittedApprovalDetails.get(callId) === confirmationDetails) {
               continue;
             }
@@ -1912,8 +1912,13 @@ export class AgentCore {
               timestamp: Date.now(),
             });
             emittedApprovalDetails.set(callId, confirmationDetails);
-          } catch {
-            // ignore UI event emission failures
+          } catch (error) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.error(
+                `Approval event delivery failed for ${callId}; will retry on next tool update`,
+                error,
+              );
           }
         }
       },
