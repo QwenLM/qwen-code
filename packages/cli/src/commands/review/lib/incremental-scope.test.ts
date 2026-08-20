@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// `computeIncrementalScope` is pure but for two injected readers, which is
-// what makes the whole scope decision testable without a repository — the
-// property its docstring claims and nothing exercised directly until now.
+// The widening is pure but for one injected reader, which is what makes it
+// testable without a repository. The selection it widens comes from the real
+// `selectNarrowing`, so these exercise the pair as the command wires it.
 
 import { describe, it, expect } from 'vitest';
-import { computeIncrementalScope } from './incremental-scope.js';
+import { widenScope } from './incremental-scope.js';
+import { assembleSections, selectNarrowing } from './narrow-diff.js';
 
 /** A one-hunk section for `path`, as `parseDiff` reads it. */
 function section(path: string): string {
@@ -24,101 +25,84 @@ function section(path: string): string {
   ].join('\n');
 }
 
-describe('computeIncrementalScope — interaction ordering', () => {
-  it('puts SECTIONLESS interaction files first, ahead of the brief cap', () => {
-    // Two kinds of interaction file, and only one of them has a second
-    // surface. An importer that carries a section of the PR's diff is also
-    // named — uncapped — in the chunk brief holding that section. A RESTORED
-    // file pulled in by the second pass carries none: its own content is base
-    // content, no chunk holds it, and the capped whole-diff list is the only
-    // place its seam is briefed at all.
-    //
-    // Insertion order appended the restored ones LAST, so on any round past
-    // `SCOPE_LIST_CAP` they were the first elided into `(+N more)` — the seam
-    // unbriefed while `scope.interaction` recorded it as covered. The cap has
-    // to bite the redundantly-named entries first.
-    const changed = 'src/changed.ts';
-    const restoredPath = 'src/restored.ts';
-    const importers = Array.from({ length: 3 }, (_, i) => `src/imp${i}.ts`);
+function selectionOf(fullPaths: string[], deltaPaths: string[]) {
+  const sel = selectNarrowing(
+    Buffer.from(fullPaths.map(section).join(''), 'utf8'),
+    Buffer.from(deltaPaths.map(section).join(''), 'utf8'),
+  );
+  if (sel === null) throw new Error('the narrowing refused this fixture');
+  return sel;
+}
 
-    const fullDiff = Buffer.from(
-      [section(changed), ...importers.map(section)].join(''),
-      'utf8',
+describe('widenScope', () => {
+  it('pulls in a still-clean importer, and publishes its section', () => {
+    // `imp.ts` is untouched since the anchor, so no delta capture can show it
+    // — but the round before cleared it against `changed.ts`'s OLD shape, and
+    // (importer@head × callee@head) is a pairing no round has seen.
+    const selection = selectionOf(
+      ['src/changed.ts', 'src/imp.ts', 'src/other.ts'],
+      ['src/changed.ts'],
     );
     const sources: Record<string, string> = {
-      // The restored file imports the still-changing one: a live seam, and
-      // it has no section of its own anywhere in the PR's diff.
-      [restoredPath]: `import './changed.js';\n`,
+      'src/imp.ts': `import './changed.js';\n`,
+      'src/other.ts': `import './unrelated.js';\n`,
     };
-    for (const p of importers) sources[p] = `import './changed.js';\n`;
 
-    const ruling = computeIncrementalScope({
+    const { paths, scope } = widenScope({
       anchor: 'a'.repeat(40),
-      fullDiff,
-      deltaFiles: [changed, restoredPath],
-      restored: (path) => path === restoredPath,
+      selection,
       readWorktree: (rel) => sources[rel] ?? null,
     });
 
-    expect(ruling.kind).toBe('scoped');
-    if (ruling.kind !== 'scoped') return;
-    const paths = ruling.scope.interaction.map((e) => e.path);
-    // The sectionless one leads, whatever the insertion order was.
-    expect(paths[0]).toBe(restoredPath);
-    // …and the sectioned importers follow, each of which a chunk brief also
-    // names in full.
-    expect(paths.slice(1).sort()).toEqual([...importers].sort());
-    // The seam itself survives — an entry with no edge is not an interaction.
-    expect(ruling.scope.interaction[0].importsChanged).toEqual([changed]);
-    expect(ruling.scope.restoredFileCount).toBe(1);
-    // The restored file owes no review of its own.
-    expect(ruling.scope.deltaFiles).toEqual([changed]);
-  });
-});
+    expect([...paths].sort()).toEqual(['src/changed.ts', 'src/imp.ts']);
+    expect(scope.deltaFiles).toEqual(['src/changed.ts']);
+    expect(scope.interaction).toEqual([
+      { path: 'src/imp.ts', importsChanged: ['src/changed.ts'] },
+    ]);
+    // `other.ts` was weighed and passed over — it imports nothing that moved.
+    expect(scope.contextFileCount).toBe(1);
 
-describe('computeIncrementalScope — a revert against a still-live contract', () => {
-  it('scopes the callee a restored importer strands, instead of stopping', () => {
-    // The shape the second widening pass exists for, and the one it could not
-    // see. Round 1 changes `i.ts` (`foo(x)` → `foo(x, y)`) together with its
-    // caller `r.ts` and clears both at the anchor; the fix round reverts ONLY
-    // `r.ts`. So the delta is `{r.ts}` and it is restored — `deltaLive` is
-    // empty — while `i.ts` carries the PR's only section, changed before the
-    // anchor and unchanged since.
-    //
-    // Two layers stopped the round dead. Keyed on `deltaLive`, the pass
-    // resolved `r.ts`'s import against an EMPTY membership and found no edge;
-    // and even with the edge, `scoped` took only the importer side, so the
-    // section that actually moves was never kept and `kept.length === 0`
-    // ruled `nothing-new` anyway. `upToDate` does not advance the anchor, so
-    // every re-run rules the same: `r.ts@base × i.ts@head` — the base-era
-    // call against the new contract — reviewed by no round, and absent from
-    // every later delta by construction.
-    const i = 'src/i.ts';
-    const r = 'src/r.ts';
-    // `r.ts` is byte-identical to the merge base, so the PR's own diff
-    // carries no section for it. `i.ts` is the whole of the PR's diff.
-    const ruling = computeIncrementalScope({
+    // The published bytes are the PR's own sections, both of them.
+    const diff = assembleSections(selection, paths);
+    expect(diff?.toString('utf8')).toContain('b/src/changed.ts');
+    expect(diff?.toString('utf8')).toContain('b/src/imp.ts');
+  });
+
+  it('returns exactly the narrowing when nothing imports what moved', () => {
+    // The floor: with no edge to follow the widened round must be the
+    // unwidened one, not a second path that could disagree with it.
+    const selection = selectionOf(
+      ['src/changed.ts', 'src/other.ts'],
+      ['src/changed.ts'],
+    );
+    const { paths, scope } = widenScope({
       anchor: 'a'.repeat(40),
-      fullDiff: Buffer.from(section(i), 'utf8'),
-      deltaFiles: [r],
-      restored: (path) => path === r,
-      readWorktree: (rel) => (rel === r ? `import './i.js';\n` : null),
+      selection,
+      readWorktree: () => `import './unrelated.js';\n`,
     });
 
-    expect(ruling.kind).toBe('scoped');
-    if (ruling.kind !== 'scoped') return;
-    // The seam is briefed…
-    expect(ruling.scope.interaction).toEqual([
-      { path: r, importsChanged: [i] },
-    ]);
-    // …and the moving side is actually published, which is the half the
-    // importer-only `scoped` set dropped.
-    expect(ruling.diff.toString('utf8')).toContain(`b/${i}`);
-    // The restored file owes no review of its own.
-    expect(ruling.scope.deltaFiles).toEqual([]);
-    expect(ruling.scope.restoredFileCount).toBe(1);
-    // `i.ts` was scoped IN as the seam's target, so it is not a file the
-    // widening considered and passed over.
-    expect(ruling.scope.contextFileCount).toBe(0);
+    expect([...paths]).toEqual(['src/changed.ts']);
+    expect(scope.interaction).toEqual([]);
+    expect(scope.contextFileCount).toBe(1);
+    expect(assembleSections(selection, paths)?.toString('utf8')).toBe(
+      assembleSections(selection, selection.touched)?.toString('utf8'),
+    );
+  });
+
+  it('does not follow a test file into scope', () => {
+    // Re-running tests is `build-test`'s job; a test importing what moved is
+    // not a seam a reading agent owes a second look.
+    const selection = selectionOf(
+      ['src/changed.ts', 'src/changed.test.ts'],
+      ['src/changed.ts'],
+    );
+    const { paths, scope } = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: () => `import './changed.js';\n`,
+    });
+
+    expect([...paths]).toEqual(['src/changed.ts']);
+    expect(scope.interaction).toEqual([]);
   });
 });

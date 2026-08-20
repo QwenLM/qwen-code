@@ -2865,7 +2865,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         incremental: {
           since: 'a'.repeat(40),
           effective: false,
-          reason: 'hunks-outside-pr-diff',
+          reason: 'nothing-to-narrow',
           diffBase: 'de17aba5e',
         },
       },

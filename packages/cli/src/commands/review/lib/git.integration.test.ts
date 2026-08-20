@@ -20,12 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  fileLineCount,
-  gitProbe,
-  gitRawTolerateDiff,
-  releaseWorktree,
-} from './git.js';
+import { gitProbe, gitRawTolerateDiff, releaseWorktree } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -261,42 +256,6 @@ describe('gitRawTolerateDiff', () => {
         'subdir',
       ),
     ).toThrow();
-  });
-});
-
-describe('fileLineCount', () => {
-  // The one consumer chain that matters: `buildPlanReport`'s post-image
-  // resolver. A count that drifts (or an import that silently breaks — the
-  // move out of fetch-pr was measured unguarded by any test) mis-classifies
-  // heaviness and silently drops invariant agents from rosters.
-  it('counts lines at a ref: trailing newline, no trailing newline, absent, empty', () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'flc-')));
-    const prev = process.cwd();
-    process.chdir(dir);
-    const iso = isolateHostGitConfig();
-    try {
-      const g = (...args: string[]) =>
-        execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
-      g('init', '-q', '--template=', '.');
-      g('config', 'user.email', 'a@b');
-      g('config', 'user.name', 'a');
-      g('config', 'commit.gpgsign', 'false');
-      writeFileSync(join(dir, 'three.txt'), 'a\nb\nc\n');
-      writeFileSync(join(dir, 'no-nl.txt'), 'a\nb');
-      writeFileSync(join(dir, 'empty.txt'), '');
-      g('add', '-A');
-      g('commit', '-q', '--no-verify', '-m', 'one');
-      const sha = g('rev-parse', 'HEAD');
-      expect(fileLineCount(sha, 'three.txt')).toBe(3);
-      expect(fileLineCount(sha, 'no-nl.txt')).toBe(2);
-      expect(fileLineCount(sha, 'empty.txt')).toBe(0);
-      expect(fileLineCount(sha, 'absent.txt')).toBe(0);
-      expect(fileLineCount('not-a-ref', 'three.txt')).toBe(0);
-    } finally {
-      process.chdir(prev);
-      iso.dispose();
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 
