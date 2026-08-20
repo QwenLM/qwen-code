@@ -16729,6 +16729,33 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(1);
     });
 
+    it('counts an input-too-large admission rejection as a compression failure', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 1_000,
+            newTokenCount: 1_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      await chat.tryCompress('input-too-large');
+      await chat.tryCompress('after-input-too-large');
+
+      expect(compressSpy.mock.calls[1][1].consecutiveFailures).toBe(1);
+    });
+
     it('forwards force=true to the compression service', async () => {
       const compressSpy = mockCompressionService('compressed');
 

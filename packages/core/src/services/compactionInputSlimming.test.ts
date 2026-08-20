@@ -223,6 +223,19 @@ describe('compactionInputSlimming', () => {
       expect(estimatePartChars({ text: 'hello' }, 1600)).toBe(5);
     });
 
+    it('counts text and a co-located thought signature', () => {
+      expect(
+        estimatePartChars(
+          {
+            text: 'reasoning',
+            thought: true,
+            thoughtSignature: 'signed-reasoning',
+          },
+          1600,
+        ),
+      ).toBe('reasoning'.length + 'signed-reasoning'.length);
+    });
+
     it('uses fixed budget for inlineData regardless of size', () => {
       const huge = 'A'.repeat(1_000_000);
       const expected = 1600 * 4;

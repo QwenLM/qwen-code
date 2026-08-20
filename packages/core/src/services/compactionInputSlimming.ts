@@ -214,7 +214,12 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    return (
+      part.text.length +
+      (typeof part.thoughtSignature === 'string'
+        ? part.thoughtSignature.length
+        : 0)
+    );
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
