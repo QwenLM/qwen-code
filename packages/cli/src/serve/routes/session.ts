@@ -4416,27 +4416,20 @@ export function registerSessionRoutes(
     withOwnerMutableSession(
       'POST /session/:id/attachments',
       async (req, res, sessionId, runtime) => {
-        const encodedName = req.headers['x-qwen-attachment-name'];
+        const name = req.query['name'];
         const contentType = req.headers['content-type']
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
         if (
-          typeof encodedName !== 'string' ||
+          typeof name !== 'string' ||
           !contentType ||
           !Buffer.isBuffer(req.body)
         ) {
           res.status(400).json({
             error:
-              'request body, Content-Type, and X-Qwen-Attachment-Name are required',
+              'request body, Content-Type, and name query parameter are required',
           });
-          return;
-        }
-        let name: string;
-        try {
-          name = decodeURIComponent(encodedName);
-        } catch {
-          res.status(400).json({ error: 'attachment name is invalid' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
