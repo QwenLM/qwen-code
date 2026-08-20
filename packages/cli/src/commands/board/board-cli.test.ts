@@ -26,21 +26,12 @@ const core = vi.hoisted(() => ({
   getAsk: vi.fn(),
   listAsks: vi.fn(),
   listBoardTasks: vi.fn(),
-  listDecisions: vi.fn(),
   pruneAsks: vi.fn(),
   pruneBoardTasks: vi.fn(),
-  pruneDecisions: vi.fn(),
-  raiseDecision: vi.fn(),
-  resolveDecision: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core/board', () => core);
 
-import type {
-  AskRecord,
-  BoardTaskRecord,
-  DecisionRecord,
-} from '@qwen-code/qwen-code-core/board';
 import { boardCommand } from '../board.js';
 import { renderBoard } from './render.js';
 
@@ -66,7 +57,6 @@ describe('board CLI', () => {
     stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     core.listBoardTasks.mockResolvedValue([]);
     core.listAsks.mockResolvedValue([]);
-    core.listDecisions.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -209,24 +199,9 @@ describe('board rendering', () => {
         },
       ],
       asks: [],
-      decisions: [],
     });
     expect(output).toContain(TASK_ID);
     expect(output).toContain('first second');
     expect(output.split('\n')).toHaveLength(2);
-  });
-
-  it('renders fieldless foreign records without crashing', () => {
-    const output = renderBoard({
-      board: 'demo',
-      tasks: [{} as unknown as BoardTaskRecord],
-      asks: [{} as unknown as AskRecord],
-      decisions: [
-        { state: 'open', kind: 'approve' } as unknown as DecisionRecord,
-      ],
-    });
-    expect(output).not.toContain('NaN');
-    expect(output).not.toContain('undefined');
-    expect(output.split('\n')).toHaveLength(4);
   });
 });

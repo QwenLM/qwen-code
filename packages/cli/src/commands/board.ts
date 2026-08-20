@@ -15,12 +15,8 @@ import {
   getAsk,
   listAsks,
   listBoardTasks,
-  listDecisions,
   pruneAsks,
   pruneBoardTasks,
-  pruneDecisions,
-  raiseDecision,
-  resolveDecision,
 } from '@qwen-code/qwen-code-core/board';
 import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
 import { requireActorName, requireBoardName } from './board/context.js';
@@ -60,10 +56,9 @@ function finiteNumber(value: unknown, flag: string, minimum: number): number {
 }
 
 async function snapshot(board: string, actor?: string): Promise<BoardSnapshot> {
-  const [tasks, asks, decisions] = await Promise.all([
+  const [tasks, asks] = await Promise.all([
     listBoardTasks(board),
     listAsks(board),
-    listDecisions(board),
   ]);
   return {
     board,
@@ -71,7 +66,6 @@ async function snapshot(board: string, actor?: string): Promise<BoardSnapshot> {
     asks: actor
       ? asks.filter((ask) => ask.from === actor || ask.to === actor)
       : asks,
-    decisions,
   };
 }
 
@@ -196,11 +190,7 @@ export const boardCommand: CommandModule = {
               return;
             }
 
-            const waitMs = finiteNumber(
-              finiteNumber(a.timeout, '--timeout', 0) * 1000,
-              '--timeout',
-              0,
-            );
+            const waitMs = finiteNumber(a.timeout * 1000, '--timeout', 0);
             const deadline = Date.now() + waitMs;
             for (;;) {
               const current = await getAsk(board, ask.id);
@@ -268,59 +258,6 @@ export const boardCommand: CommandModule = {
       })
 
       .command({
-        command: 'raise <question>',
-        describe: 'Raise a decision for a human',
-        builder: (y: Argv) =>
-          y
-            .positional('question', { type: 'string', demandOption: true })
-            .option('about', { type: 'string' }),
-        handler: (argv) =>
-          run(async () => {
-            const a = argv as CommonArgs & { question: string; about?: string };
-            const decision = await raiseDecision({
-              board: requireBoardName(a.board),
-              raisedBy: requireActorName(a.as),
-              question: a.question,
-              about: a.about,
-            });
-            emit(a, decision, `${decision.id} awaiting a decision`);
-          }),
-      })
-
-      .command({
-        command: 'resolve <id>',
-        describe: 'Resolve a decision',
-        builder: (y: Argv) =>
-          y
-            .positional('id', { type: 'string', demandOption: true })
-            .option('approve', { type: 'boolean' })
-            .option('reject', { type: 'boolean' })
-            .option('note', { type: 'string' })
-            .check((a) => {
-              if (Boolean(a['approve']) === Boolean(a['reject'])) {
-                throw new Error('Pass exactly one of --approve or --reject.');
-              }
-              return true;
-            }),
-        handler: (argv) =>
-          run(async () => {
-            const a = argv as CommonArgs & {
-              id: string;
-              approve?: boolean;
-              note?: string;
-            };
-            const decision = await resolveDecision(
-              requireBoardName(a.board),
-              a.id,
-              requireActorName(a.as),
-              a.approve ? 'approved' : 'rejected',
-              a.note,
-            );
-            emit(a, decision, `${decision.id} ${decision.state}`);
-          }),
-      })
-
-      .command({
         command: 'prune',
         describe: 'Remove settled items older than a cutoff',
         builder: (y: Argv) =>
@@ -332,13 +269,12 @@ export const boardCommand: CommandModule = {
             const board = requireBoardName(a.board);
             const cutoff =
               finiteNumber(a.olderThan, '--older-than', 0) * 86_400_000;
-            const [asks, decisions, tasks] = await Promise.all([
+            const [asks, tasks] = await Promise.all([
               pruneAsks(board, cutoff),
-              pruneDecisions(board, cutoff),
               pruneBoardTasks(board, cutoff),
             ]);
-            const removed = { asks, decisions, tasks };
-            const total = asks.length + decisions.length + tasks.length;
+            const removed = { asks, tasks };
+            const total = asks.length + tasks.length;
             emit(a, removed, `Removed ${total} settled items.`);
           }),
       })

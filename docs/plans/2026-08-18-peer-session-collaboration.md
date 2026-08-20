@@ -45,8 +45,8 @@ storage or scheduler because those are scoped to a spawned, in-process team.
 validates it before resolving the directory under `~/.qwen/boards/`.
 
 `--as` is required when creating or changing an item. Read-only commands may omit it unless
-they request an identity-filtered view. The value is written into audit fields such as
-`createdBy`, `owner`, `from`, or `resolvedBy`.
+they request an identity-filtered view. The value is written into fields such as `createdBy`,
+`owner`, or `from`.
 
 There is deliberately no default derived from the current directory, environment variable,
 global process state, or live-session registry. Those shortcuts can be added after one
@@ -58,7 +58,6 @@ unambiguous contract ships.
 ~/.qwen/boards/{board}/
     tasks/{id}.json
     asks/{id}.json
-    decisions/{id}.json
 ```
 
 Directories use mode `0700`; files use `0600`. Each item is one versioned JSON object.
@@ -75,22 +74,16 @@ without rewriting it.
 
 ### Items
 
-| Item       | Purpose                                  | Terminal states                   |
-| ---------- | ---------------------------------------- | --------------------------------- |
-| `task`     | Work with an owner, status, and notes    | pending / in_progress / completed |
-| `ask`      | A question addressed to a declared label | answered / declined / timeout     |
-| `decision` | A request for human authority            | approved / rejected               |
+| Item   | Purpose                                  | Terminal states                   |
+| ------ | ---------------------------------------- | --------------------------------- |
+| `task` | Work with an owner, status, and notes    | pending / in_progress / completed |
+| `ask`  | A question addressed to a declared label | answered / declined / timeout     |
 
 An `ask` is addressed to a label, not a registered session. A receiver chooses the same
 label with `--as` and answers it. If nobody does, its deadline determines `timeout`; no
 background sweeper is required.
 
-A `decision` has no expiry. Approval, acceptance, and adjudication must remain visibly open
-until a human resolves them. The CLI records the resolver's declared label but cannot prove
-that the caller is human; this is a documented convention, not a security claim.
-
-There is no generic message. Status belongs on a task, information requests are asks, and
-authority requests are decisions.
+There is no generic message. Status belongs on a task and information requests are asks.
 
 ### CLI
 
@@ -104,8 +97,6 @@ qwen board done --board <board> --as <name> <task-id> [--note <text>]
 qwen board ask --board <board> --as <name> <to> <question> [--wait] [--timeout <duration>]
 qwen board answer --board <board> --as <name> <ask-id> <answer>
 qwen board decline --board <board> --as <name> <ask-id> <reason>
-qwen board raise --board <board> --as <name> <question> [--about <item-id>]
-qwen board resolve --board <board> --as <name> <decision-id> --approve|--reject
 qwen board prune --board <board> --as <name> --older-than <duration>
 ```
 
@@ -133,19 +124,19 @@ That later gate must fail closed and cannot trust the sender's declared `--as` v
 
 ### Stage 1 — storage primitives
 
-Add versioned task, ask, and decision records with validation, secure permissions, one lock
-discipline, random ids, and focused transition tests.
+Add versioned task and ask records with validation, secure permissions, one lock discipline,
+random ids, and focused transition tests.
 
-Observable result: two processes can safely create, claim, answer, resolve, and prune items
-on the same named board without lost updates or id reuse.
+Observable result: two processes can safely create, claim, answer, and prune items on the
+same named board without lost updates or id reuse.
 
 ### Stage 2 — CLI
 
 Expose the storage primitives through the explicit `--board` / `--as` commands above.
 
 Observable result: two independently started agents, including a non-Qwen agent, can share
-work by running commands and can distinguish completed, declined, rejected, and timed-out
-outcomes from exit status and JSON.
+work by running commands and can distinguish completed, declined, and timed-out outcomes
+from exit status and JSON.
 
 ### Stage 3 — optional Qwen-native surfaces
 
