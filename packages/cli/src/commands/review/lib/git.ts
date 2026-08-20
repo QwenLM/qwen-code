@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
-const GIT_TIMEOUT_MS = 120_000;
+export const GIT_TIMEOUT_MS = 120_000;
 
 /**
  * Options every wrapper shares, **read fresh on every call**.

@@ -1699,6 +1699,78 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toContain('+Q');
   });
 
+  it('a LIVE rename rides the carrier section when the ranges pair DIFFERENT targets', async () => {
+    // The ride-along asks whether the full range carries a section under the
+    // SOURCE name. The two ranges can also pair the same deletion with
+    // DIFFERENT targets: base has `a.ts = A`; the anchor round rewrites
+    // `a.ts` to `A′` and adds `r.ts ≈ A`; the fix round deletes `a.ts`
+    // and adds `q.ts` as an exact copy of `A′`. `anchor..head` pairs
+    // `a.ts→q.ts` (100% similarity, zero hunks); `merge-base..head` pairs
+    // `a.ts→r.ts` and renders `q.ts` as a plain addition. The source's net
+    // hunks then sit under a section labelled `r.ts` — nothing names `a.ts`,
+    // so the source-name guard saw nothing to ride along, the lineage check
+    // passed on `q.ts` alone, and the slice retired hunks no round had
+    // reviewed at the next re-anchor. The carrier section must ride instead.
+    const FULL_SPLIT_TARGETS = [
+      'diff --git a/a.ts b/r.ts',
+      'similarity index 96%',
+      'rename from a.ts',
+      'rename to r.ts',
+      '--- a/a.ts',
+      '+++ b/r.ts',
+      '@@ -1,2 +1,2 @@',
+      ' one',
+      '-kept',
+      '+kept, edited',
+      'diff --git a/q.ts b/q.ts',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/q.ts',
+      '@@ -0,0 +1,2 @@',
+      '+one prime',
+      '+kept',
+      '',
+    ].join('\n');
+    const DELTA_RENAME_CLEAN = [
+      'diff --git a/a.ts b/q.ts',
+      'similarity index 100%',
+      'rename from a.ts',
+      'rename to q.ts',
+      '',
+    ].join('\n');
+    // q.ts and r.ts are both additions since the base: absent there, live at
+    // the head — one-sided absence is not a restoration.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      if (args.includes('ls-tree')) {
+        if (args.includes('q.ts') || args.includes('r.ts')) {
+          const name = args.includes('q.ts') ? 'q.ts' : 'r.ts';
+          return args.includes(BASE) ? '' : `100644 blob feed\t${name}`;
+        }
+        return '';
+      }
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+      probeUnavailable: false,
+    });
+    servesBothRanges(FULL_SPLIT_TARGETS, DELTA_RENAME_CLEAN);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({ since: ANCHOR, effective: true });
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    // The carrier rides beside the delta's own target.
+    expect((scope['deltaFiles'] as string[]).sort()).toEqual(['q.ts', 'r.ts']);
+    // …and the published slice keeps the hunks the full range labelled with
+    // the other target's name.
+    expect(writtenDiff()).toContain('rename to r.ts');
+    expect(writtenDiff()).toContain('-kept');
+    expect(writtenDiff()).toContain('+one prime');
+  });
+
   it('a LIVE rename target still scopes by its new name only', async () => {
     // Control for the test above: when the target is NOT restored, the
     // rename's net hunks sit under the new-side section and scoping is
@@ -1806,12 +1878,23 @@ describe('fetch-pr report assembly', () => {
     expect(legitimate.includes(0xef)).toBe(true); // the code point IS present
     expect(decodeWasLossy(legitimate)).toBe(false);
 
-    // An invalid byte does not round-trip: the substitution is three bytes
-    // where the original was one.
+    // An invalid byte is lossy.
     expect(decodeWasLossy(Buffer.from([0x61, 0xe9, 0x62]))).toBe(true);
     // …and a truncated multi-byte sequence, the other shape a capture cut
     // mid-character produces.
     expect(decodeWasLossy(Buffer.from([0xe4, 0xb8]))).toBe(true);
+
+    // LENGTH-PRESERVING substitutions, which a byte-length round-trip calls
+    // clean: Node emits one U+FFFD per maximal ill-formed subpart, and a
+    // 3-byte subpart substitutes to a 3-byte replacement character. These are
+    // exactly the shape a capture cut mid-character produces, and they are
+    // the ones that collide two filenames onto one string.
+    expect(decodeWasLossy(Buffer.from([0xf0, 0x9f, 0x98]))).toBe(true);
+    expect(decodeWasLossy(Buffer.from([0xf0, 0x9f, 0x98, 0x41]))).toBe(true);
+    expect(decodeWasLossy(Buffer.from([0xf4, 0x8f, 0xbf]))).toBe(true);
+    expect(decodeWasLossy(Buffer.from([0x61, 0xf1, 0x80, 0x80, 0x62]))).toBe(
+      true,
+    );
     // Ordinary multi-byte content is clean.
     expect(decodeWasLossy(Buffer.from('héllo 世界', 'utf8'))).toBe(false);
   });

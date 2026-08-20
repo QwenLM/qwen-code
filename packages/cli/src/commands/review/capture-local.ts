@@ -23,9 +23,9 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   repoRelativeOf,
   REVIEW_TMP_DIR,
-  safeTarget,
   tmpFile,
 } from './lib/paths.js';
+import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';

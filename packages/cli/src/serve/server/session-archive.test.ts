@@ -145,6 +145,30 @@ describe('SessionArchiveCoordinator', () => {
     });
   });
 
+  it('collapses case-variant spellings of a caller session id to one lock key', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440024';
+    const upper = sessionId.toUpperCase();
+
+    // Batch delete/archive/unarchive lock raw caller spellings while
+    // restore locks the request spelling; on a case-insensitive filesystem
+    // both reach the same transcript, so the two spellings must contend.
+    await coordinator.runSharedMany([sessionId], async () => {
+      await expect(
+        coordinator.runExclusiveMany([upper], async () => 'exclusive'),
+      ).rejects.toThrow(SessionArchivingError);
+    });
+
+    await coordinator.runExclusiveMany([sessionId], async () => {
+      await expect(
+        coordinator.runSharedMany([upper], async () => 'shared'),
+      ).rejects.toThrow(SessionArchivingError);
+      expect(() => coordinator.assertNotTransitioning(upper)).toThrow(
+        SessionArchivingError,
+      );
+    });
+  });
+
   it('allows concurrent shared access and reference-counts release', async () => {
     const coordinator = new SessionArchiveCoordinator();
     const sessionId = '550e8400-e29b-41d4-a716-446655440021';
@@ -275,6 +299,33 @@ describe('archiveDaemonSessions', () => {
     const result = await archiveDaemonSessions({
       sessionIds: [sessionId, sessionId],
       service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      archived: [sessionId],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
+
+  it('collapses case-variant spellings in one batch to a single archive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
       bridge: { closeSession },
       coordinator: new SessionArchiveCoordinator(),
     });
@@ -728,6 +779,30 @@ describe('unarchiveDaemonSessions', () => {
     ).toBe(false);
   });
 
+  it('collapses case-variant spellings in one batch to a single unarchive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      unarchived: [sessionId],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(false);
+  });
+
   it('does not unarchive while another writer holds the lease', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440015';
     writeSessionFile(workspaceDir, sessionId, 'archived');
@@ -966,16 +1041,44 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
 
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([sessionId]);
+    expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
+  });
+
+  it('collapses case-variant spellings in one batch to a single delete', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440170';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
   });
 
   it('does not delete while another writer holds the lease', async () => {
@@ -990,7 +1093,10 @@ describe('deleteDaemonSessions', () => {
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service,
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([]);
@@ -1005,6 +1111,36 @@ describe('deleteDaemonSessions', () => {
     );
 
     await lease.release();
+  });
+
+  it('reports attachment cleanup failures and allows an idempotent retry', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440075';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const deleteSessionAttachments = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('cleanup failed'))
+      .mockResolvedValue(undefined);
+    const params = {
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    };
+
+    await expect(deleteDaemonSessions(params)).resolves.toEqual({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId, error: 'cleanup failed' }],
+    });
+    await expect(deleteDaemonSessions(params)).resolves.toEqual({
+      removed: [],
+      notFound: [sessionId],
+      errors: [],
+    });
+    expect(deleteSessionAttachments).toHaveBeenCalledTimes(2);
   });
 
   it('reports a gate race per session after another batch item was deleted', async () => {
@@ -1032,6 +1168,7 @@ describe('deleteDaemonSessions', () => {
               );
             }
           }),
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
         },
         coordinator,
       });
@@ -1088,7 +1225,10 @@ describe('deleteDaemonSessions', () => {
       deleteDaemonSessions({
         sessionIds: [sessionId],
         service: new SessionService(workspaceDir),
-        bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+        bridge: {
+          closeSession: vi.fn().mockResolvedValue(undefined),
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+        },
         coordinator,
       }),
     ).rejects.toThrow(DaemonDrainingError);
