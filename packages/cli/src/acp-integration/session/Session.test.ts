@@ -489,7 +489,15 @@ describe('Session', () => {
     schemaFingerprint: ReturnType<typeof vi.fn>;
     markProxySchemaPresented: ReturnType<typeof vi.fn>;
     hasPresentedProxySchema: ReturnType<typeof vi.fn>;
+    getProxySchemaPresentationSnapshot: ReturnType<typeof vi.fn>;
+    commitProxySchemaPresentations: ReturnType<typeof vi.fn>;
+    clearProxySchemaPresentations: ReturnType<typeof vi.fn>;
   };
+  // Backing store for the mocked presentation ledger. Tests that expect a
+  // wrapper call to pass issue #6721's gate seed it (or deliver a
+  // tool_search result carrying proxySchemaPresentations, which the daemon
+  // commits at batch finalization).
+  let presentedProxySchemas: Map<string, string>;
   let mockWorkflowRunRegistry: {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
@@ -755,6 +763,7 @@ describe('Session', () => {
       rewind: vi.fn(),
     };
 
+    presentedProxySchemas = new Map<string, string>();
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
@@ -766,8 +775,28 @@ describe('Session', () => {
         names.map((name) => ({ name })),
       ),
       schemaFingerprint: vi.fn().mockReturnValue('fp'),
-      markProxySchemaPresented: vi.fn(),
-      hasPresentedProxySchema: vi.fn().mockReturnValue(true),
+      markProxySchemaPresented: vi.fn((name: string, fingerprint: string) => {
+        presentedProxySchemas.set(name, fingerprint);
+      }),
+      hasPresentedProxySchema: vi.fn(
+        (name: string, fingerprint: string) =>
+          presentedProxySchemas.get(name) === fingerprint,
+      ),
+      getProxySchemaPresentationSnapshot: vi.fn(
+        () => new Map(presentedProxySchemas),
+      ),
+      commitProxySchemaPresentations: vi.fn(
+        (
+          presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
+        ) => {
+          for (const { name, fingerprint } of presentations) {
+            presentedProxySchemas.set(name, fingerprint);
+          }
+        },
+      ),
+      clearProxySchemaPresentations: vi.fn(() => {
+        presentedProxySchemas.clear();
+      }),
     };
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
@@ -26158,6 +26187,12 @@ describe('Session', () => {
         execute: vi.fn().mockResolvedValue({
           llmContent: '<functions>cron_create</functions>',
           returnDisplay: 'Loaded cron_create',
+          // Mirrors the real tool_search delivery: the carried schema is
+          // PENDING until the daemon finalizes the batch (the carrying
+          // result entering the session record), never marked at execute.
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
         }),
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
         getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
@@ -26207,6 +26242,9 @@ describe('Session', () => {
           },
         ],
       );
+      // The delivered schema is committed only once the search batch
+      // finalized (the carrying result entering the session record).
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
       const proxyResult = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-proxy', [
@@ -26251,6 +26289,9 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue(cronTool);
       mockToolRegistry.ensureTool.mockResolvedValue(cronTool);
       mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      // Presented by an earlier turn so the fail-closed gate passes and the
+      // cancellation-after-execution path under test is actually reached.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       bridgeToolResultImagesSpy.mockImplementationOnce(
@@ -26298,6 +26339,9 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue(targetTool);
       mockToolRegistry.ensureTool.mockResolvedValue(targetTool);
       mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      // Presented by an earlier turn so the fail-closed gate passes and the
+      // hard-deny gate under test is actually reached.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
 
       const result = await (
         session as unknown as ToolCallInternals
@@ -26323,6 +26367,66 @@ describe('Session', () => {
       // The hard-deny gate must reject before execution, not merely return
       // the error-response shape.
       expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('denies a proxy call when the tool_call wrapper itself is disabled', async () => {
+      // Deny rules are mutable mid-session: even when the resolved target is
+      // enabled (its own default permission is allow, so the denied proxy
+      // route would otherwise execute outright), a rule naming the wrapper
+      // must reject the proxied route — mirroring the wrapper gate this PR
+      // adds to CoreToolScheduler.
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'cron created',
+        returnDisplay: 'cron created',
+      });
+      const cronTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(cronTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(cronTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled: vi.fn(
+          async (name: string) => name !== core.ToolNames.DEFERRED_TOOL_CALL,
+        ),
+        findMatchingDenyRule: vi.fn(({ toolName }: { toolName: string }) =>
+          toolName === core.ToolNames.DEFERRED_TOOL_CALL
+            ? 'tool_call'
+            : undefined,
+        ),
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-wrapper-denied', [
+        {
+          id: 'wrapper_denied',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse).toEqual({
+        id: 'wrapper_denied',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error: expect.stringContaining(
+            `Qwen Code requires permission to use "${core.ToolNames.DEFERRED_TOOL_CALL}"`,
+          ),
+        },
+      });
     });
 
     it('executes the deferred tool instance authorized by normalization', async () => {
@@ -26362,6 +26466,9 @@ describe('Session', () => {
       );
       let currentTool = authorizedTool;
       let replacementQueued = false;
+      // Presented by an earlier turn (runTool is invoked without a batch
+      // snapshot here, so the gate reads the live ledger).
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
       mockToolRegistry.ensureTool.mockResolvedValue(authorizedTool);
       mockToolRegistry.getTool.mockImplementation(() => currentTool);
       mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(() => {
@@ -26554,12 +26661,17 @@ describe('Session', () => {
       );
     });
 
-    it('routes same-batch tool_search and tool_call', async () => {
+    it('rejects same-batch tool_search + tool_call self-authorization', async () => {
       const toolSearchBuild = vi.fn().mockReturnValue({
         params: {},
         execute: vi.fn().mockResolvedValue({
           llmContent: '<functions>cron_create</functions>',
           returnDisplay: 'Loaded cron_create',
+          // Mirrors the real tool_search delivery: pending presentations
+          // committed at batch finalization, never at execute time.
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
         }),
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
         getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
@@ -26616,13 +26728,27 @@ describe('Session', () => {
         },
       ]);
 
-      expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      // Issue #6721's fail-closed contract: the wrapper call must be
+      // rejected instead of routed on guessed arguments. The batch gate
+      // runs against the presentation snapshot taken BEFORE the batch
+      // executed, so the schema the sibling tool_search delivered
+      // mid-batch cannot self-authorize the same-batch call (the search
+      // result cannot have entered the model context inside the batch
+      // that contains the call) — matching the core scheduler, which
+      // normalizes every request before any execution.
+      expect(cronBuild).not.toHaveBeenCalled();
       expect(sameBatchResult.parts[1]?.functionResponse?.name).toBe(
         core.ToolNames.DEFERRED_TOOL_CALL,
       );
-      expect(sameBatchResult.parts[1]?.functionResponse?.response).not.toEqual(
-        expect.objectContaining({ error: expect.anything() }),
+      expect(sameBatchResult.parts[1]?.functionResponse?.response).toEqual({
+        error: expect.stringContaining('no presented schema'),
+      });
+      // The search itself still ran and its delivered schema was committed
+      // at batch finalization, so a FOLLOW-UP turn may route the call.
+      expect(sameBatchResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.TOOL_SEARCH,
       );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
 
       const nextTurnResult = await (
         session as unknown as ToolCallInternals
@@ -26641,9 +26767,16 @@ describe('Session', () => {
       expect(nextTurnResult.parts[0]?.functionResponse?.name).toBe(
         core.ToolNames.DEFERRED_TOOL_CALL,
       );
+      expect(nextTurnResult.parts[0]?.functionResponse?.response).not.toEqual(
+        expect.objectContaining({ error: expect.anything() }),
+      );
     });
 
     it('routes tool_call independently of a failed tool_search', async () => {
+      // An earlier turn already delivered the schema; a failed follow-up
+      // search carries no presentations and must not erase the existing
+      // eligibility.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
       const toolSearchBuild = vi.fn().mockReturnValue({
         params: {},
         execute: vi.fn().mockResolvedValue({

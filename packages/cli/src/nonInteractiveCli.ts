@@ -55,6 +55,7 @@ import {
   isToolCallConcurrencySafe,
   canonicalToolName,
   unwrapDeferredToolCallShape,
+  normalizeDeferredToolCallRequest,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -1869,6 +1870,69 @@ export async function runNonInteractive(
         const executedRequests = new Set<ToolCallRequestInfo>(
           respondedRequests,
         );
+
+        // Issue #6721's fail-closed gate must run for the whole headless
+        // batch BEFORE any execution. partitionHeadlessToolCalls gives
+        // tool_search (Kind.Other, outside CONCURRENCY_SAFE_KINDS) its own
+        // sequential batch that would otherwise run fully first — its
+        // execute() settling the delivered schema presentations — before a
+        // same-batch tool_call is normalized inside its own per-request
+        // scheduler, letting the pair self-authorize on guessed arguments
+        // (the search result only ships on the next turn). The interactive
+        // single-scheduler surface rejects the identical batch because
+        // _schedule normalizes every request before any execution; mirror
+        // that contract here. Gate failures become error responses without
+        // executing; passing requests still run through the per-request
+        // scheduler's full normalization (including the wrapper deny gate).
+        // Plan-mode entry siblings are skipped here exactly like the
+        // scheduler skips them ahead of its own normalization.
+        const preGateRegistry = config.getToolRegistry();
+        const gateRejectedRequests = new Set<ToolCallRequestInfo>();
+        for (const requestInfo of requestsToExecute) {
+          if (requestInfo.name !== ToolNames.DEFERRED_TOOL_CALL) continue;
+          if (planModeEntryBoundary && requestInfo !== planModeEntryBoundary) {
+            continue;
+          }
+          const gated = await normalizeDeferredToolCallRequest(
+            requestInfo,
+            preGateRegistry,
+          );
+          if (gated.ok) continue;
+          gateRejectedRequests.add(requestInfo);
+          const gateErrorRequest: ToolCallRequestInfo = {
+            ...requestInfo,
+            ...(gated.targetName ? { name: gated.targetName } : {}),
+            providerName: gated.providerName,
+          };
+          const gateResponseParts: Part[] = [
+            {
+              functionResponse: {
+                id: requestInfo.callId,
+                name: gated.providerName,
+                response: { error: gated.error.message },
+              },
+            },
+          ];
+          const gateResponse: ToolCallResponseInfo = {
+            callId: requestInfo.callId,
+            responseParts: gateResponseParts,
+            resultDisplay: gated.error.message,
+            error: gated.error,
+            errorType: gated.errorType,
+            executionStatus: 'not_started',
+          };
+          debugLogger.debug(
+            `[runNonInteractive] Headless batch gate rejected tool call ${requestInfo.callId} (${requestInfo.name}): ${gated.error.message}`,
+          );
+          adapter.emitToolResult(gateErrorRequest, gateResponse);
+          responseByRequest.set(requestInfo, gateResponse);
+          executedRequests.add(requestInfo);
+        }
+        if (gateRejectedRequests.size > 0) {
+          requestsToExecute = requestsToExecute.filter(
+            (request) => !gateRejectedRequests.has(request),
+          );
+        }
 
         // Partition this batch by concurrency safety, then run each
         // partition. Tools that are safe to run concurrently (agent

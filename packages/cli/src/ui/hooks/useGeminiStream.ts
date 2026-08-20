@@ -859,6 +859,29 @@ export const useGeminiStream = (
     new Set<AbortController>(),
   );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
+  /**
+   * Commit the pending proxy-schema presentations carried by completed
+   * tool_search results once their delivery is accepted (issue #6721).
+   * Used by the deferred-batch flush, whose acceptance signal is not
+   * observed by the scheduler's own settlement.
+   */
+  const commitCarriedProxySchemaPresentations = useCallback(
+    (calls: TrackedToolCall[]): void => {
+      const pending = calls.flatMap((call) =>
+        'response' in call
+          ? (call.response?.pendingProxySchemaPresentations ?? [])
+          : [],
+      );
+      if (pending.length === 0) return;
+      try {
+        config.getToolRegistry().commitProxySchemaPresentations(pending);
+      } catch {
+        // Test doubles may not expose a registry; ledger commitment must
+        // never break the delivery flush.
+      }
+    },
+    [config],
+  );
   const handleCompletedToolsRef = useRef<
     (completedTools: TrackedToolCall[]) => Promise<boolean | void>
   >(async () => {});
@@ -4092,9 +4115,17 @@ export const useGeminiStream = (
               }
             }
             if (pendingCompletedTools.size > 0) {
-              await handleCompletedToolsRef.current([
-                ...pendingCompletedTools.values(),
-              ]);
+              const flushedTools = [...pendingCompletedTools.values()];
+              const flushedAccepted =
+                await handleCompletedToolsRef.current(flushedTools);
+              // Issue #6721: the scheduler settled these deferred batches
+              // with `false` (delivery not yet accepted), leaving their
+              // pending schema presentations uncommitted. Now that the
+              // flush delivered them and the context was accepted, commit
+              // the presentations the flushed results carry.
+              if (flushedAccepted === true) {
+                commitCarriedProxySchemaPresentations(flushedTools);
+              }
             }
           }
         }
@@ -4147,6 +4178,7 @@ export const useGeminiStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      commitCarriedProxySchemaPresentations,
     ],
   );
 

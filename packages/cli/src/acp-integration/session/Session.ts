@@ -8830,6 +8830,25 @@ export class Session implements SessionContext {
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
+    // Issue #6721's fail-closed gate runs wrapper calls against the ledger
+    // state as of BATCH START: runToolCalls executes calls sequentially, so
+    // without the snapshot a tool_search running earlier in this same batch
+    // would mark the ledger before a sibling tool_call is normalized and the
+    // pair would self-authorize — the exact shape the core scheduler
+    // rejects (it normalizes every request before any execution). The
+    // search result cannot have entered the model context inside the batch
+    // that contains the call.
+    const presentationSnapshot = this.config
+      .getToolRegistry()
+      .getProxySchemaPresentationSnapshot();
+    // Schema presentations delivered by this batch's tool_search results,
+    // committed only once the batch aggregates into a returned result
+    // (every runToolCalls return path either sends the parts to the model
+    // or preserves them into history; a thrown batch commits nothing).
+    const pendingPresentationsInBatch: Array<{
+      name: string;
+      fingerprint: string;
+    }> = [];
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
     const executionCallIds = new Map(
@@ -8851,6 +8870,19 @@ export class Session implements SessionContext {
     const finalizeRunToolResult = async (
       result: RunToolResult,
     ): Promise<RunToolResult> => {
+      // Issue #6721's delivery contract on the daemon surface: every
+      // runToolCalls return path either sends the aggregated parts to the
+      // model or preserves them into session history (a batch that throws
+      // never reaches this aggregator), so the schema presentations this
+      // batch's tool_search results delivered are committed here — the
+      // carrying results enter the session record from this point on.
+      // Committing at tool-execution time instead would keep marks for
+      // results a later batch failure withholds from the model.
+      if (pendingPresentationsInBatch.length > 0) {
+        this.config
+          .getToolRegistry()
+          .commitProxySchemaPresentations(pendingPresentationsInBatch);
+      }
       const orderedRecords = [...pendingToolResultRecords].sort(
         (left, right) =>
           left.ordinal - right.ordinal || left.sequence - right.sequence,
@@ -9269,6 +9301,8 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          presentationSnapshot,
+          pendingPresentationsInBatch,
         )
           .then((r) => {
             results[idx] = r;
@@ -9411,6 +9445,8 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              presentationSnapshot,
+              pendingPresentationsInBatch,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -9507,6 +9543,11 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    presentationSnapshot?: ReadonlyMap<string, string>,
+    pendingPresentationsInBatch?: Array<{
+      name: string;
+      fingerprint: string;
+    }>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -9758,6 +9799,7 @@ export class Session implements SessionContext {
     const normalizedRequest = await normalizeDeferredToolCallRequest(
       requestInfo,
       toolRegistry,
+      presentationSnapshot ? { presentationSnapshot } : undefined,
     );
     if (!normalizedRequest.ok) {
       // Failure still has three distinct identities: responses must use the
@@ -9775,6 +9817,41 @@ export class Session implements SessionContext {
           recordInvalidToolParams: true,
         },
       );
+    }
+
+    // Mirror CoreToolScheduler's wrapper gate: normalization rewrites the
+    // request to its target before any policy gate runs, and the enablement
+    // check below only sees the resolved target — so a deny rule naming the
+    // `tool_call` wrapper itself would never fire here. Deny rules are
+    // mutable mid-session, so check the wrapper identity per call before
+    // the target gates. (This path honors no legacy deny fallback — the
+    // daemon surface gates through the PermissionManager only.)
+    if (canonicalToolName(requestInfo.name) === ToolNames.DEFERRED_TOOL_CALL) {
+      const wrapperPm = this.config.getPermissionManager?.();
+      const wrapperDenied = wrapperPm
+        ? !(await wrapperPm.isToolEnabled(ToolNames.DEFERRED_TOOL_CALL))
+        : false;
+      if (wrapperDenied) {
+        const matchingRule = wrapperPm?.findMatchingDenyRule({
+          toolName: ToolNames.DEFERRED_TOOL_CALL,
+        });
+        const ruleInfo = matchingRule
+          ? ` Matching deny rule: "${matchingRule}".`
+          : '';
+        responseToolName = ToolNames.DEFERRED_TOOL_CALL;
+        telemetryProviderName = ToolNames.DEFERRED_TOOL_CALL;
+        return earlyErrorResponse(
+          new Error(
+            `Qwen Code requires permission to use "${ToolNames.DEFERRED_TOOL_CALL}", but that permission was declined.${ruleInfo}`,
+          ),
+          ToolNames.DEFERRED_TOOL_CALL,
+          {
+            status: 'error',
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          },
+        );
+      }
     }
 
     const effectiveRequest = normalizedRequest.request;
@@ -11438,6 +11515,16 @@ export class Session implements SessionContext {
           }
           if (status === 'error' && toolResult.error) {
             spanError = toolResult.error.message;
+          }
+          // Issue #6721: a successful tool_search result carries the schemas
+          // it delivered as PENDING presentations. Collect them for the
+          // batch-level commit in runToolCalls' finalizeRunToolResult —
+          // committing here at execution time would keep marks even when a
+          // later batch failure withholds the carrying parts from the model.
+          if (status === 'success' && toolResult.proxySchemaPresentations) {
+            pendingPresentationsInBatch?.push(
+              ...toolResult.proxySchemaPresentations,
+            );
           }
           return {
             parts: responseParts,

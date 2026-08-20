@@ -300,6 +300,19 @@ describe('runNonInteractive', () => {
       getTool: vi.fn(),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      // The deferred-proxy batch gate (issue #6721) normalizes wrapper
+      // calls against the registry before any headless execution. The
+      // defaults keep wrapper calls routing as before: pair registered,
+      // target eligible and already presented by an earlier turn.
+      isDeferredProxyPairRegistered: vi.fn().mockReturnValue(true),
+      isProxyEligibleDeferredTool: vi.fn().mockReturnValue(true),
+      schemaFingerprint: vi.fn().mockReturnValue('fp'),
+      hasPresentedProxySchema: vi.fn().mockReturnValue(true),
+      ensureTool: vi
+        .fn()
+        .mockImplementation(async (name: string) =>
+          mockToolRegistry.getTool(name),
+        ),
     } as unknown as ToolRegistry;
 
     mockBackgroundTaskRegistry = {
@@ -2801,12 +2814,14 @@ describe('runNonInteractive', () => {
 
     it('classifies deferred calls by the real target tool', async () => {
       setupMetricsMock();
+      // A stable tool reference: normalization's TOCTOU check compares the
+      // ensured target against the live registry entry and rejects when the
+      // tool is replaced mid-flight.
+      const deferredReadTool = {
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>;
       vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) =>
-        name === 'deferred_read'
-          ? ({ kind: Kind.Read } as unknown as ReturnType<
-              typeof mockToolRegistry.getTool
-            >)
-          : undefined,
+        name === 'deferred_read' ? deferredReadTool : undefined,
       );
 
       let started = 0;
@@ -2846,6 +2861,95 @@ describe('runNonInteractive', () => {
       );
 
       expect(started).toBe(2);
+    });
+
+    it('gates a same-batch tool_call before a headless tool_search can self-authorize', async () => {
+      // Issue #6721: the headless partition gives tool_search its own batch
+      // that runs fully first, so the whole turn batch must be gated
+      // BEFORE any execution — otherwise the search's delivery would mark
+      // the ledger mid-batch and the sibling wrapper call would execute on
+      // guessed arguments. The gate runs against the pre-batch ledger.
+      setupMetricsMock();
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Other,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      // Empty ledger at batch start: no schema presented yet this session.
+      vi.mocked(mockToolRegistry.hasPresentedProxySchema).mockReturnValue(
+        false,
+      );
+      const executed: string[] = [];
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          executed.push(request.name);
+          if (request.name === ToolNames.TOOL_SEARCH) {
+            // Simulate the delivery commitment landing mid-batch once the
+            // search executes. A post-execution gate would see `true` and
+            // wrongly route the sibling; the pre-batch gate must not.
+            vi.mocked(mockToolRegistry.hasPresentedProxySchema).mockReturnValue(
+              true,
+            );
+          }
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      const calls: ServerGeminiStreamEvent[] = [
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'search-call',
+            name: ToolNames.TOOL_SEARCH,
+            args: { query: 'select:deferred_target' },
+            isClientInitiated: false,
+            prompt_id: 'p-headless-same-batch',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'proxy-call',
+            name: ToolNames.DEFERRED_TOOL_CALL,
+            args: { name: 'deferred_target', arguments: { x: 1 } },
+            isClientInitiated: false,
+            prompt_id: 'p-headless-same-batch',
+          },
+        },
+      ];
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(calls))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-same-batch',
+      );
+
+      // Only the search executed; the wrapper call was rejected by the
+      // pre-execution batch gate.
+      expect(executed).toEqual([ToolNames.TOOL_SEARCH]);
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      const proxyResponse = nextTurnParts.find(
+        (part) => part.functionResponse?.id === 'proxy-call',
+      );
+      expect(proxyResponse?.functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(
+        String(proxyResponse?.functionResponse?.response?.['error']),
+      ).toContain('no presented schema');
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -6322,6 +6426,12 @@ describe('runNonInteractive', () => {
 
   it('records deferred calls with the normalized target identity', async () => {
     setupMetricsMock();
+    // The pre-execution batch gate resolves the target through the
+    // registry; keep the identity test focused on recording by letting
+    // the target resolve.
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+      kind: Kind.Other,
+    } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
     const emitToolResult = vi.fn();
     const adapter = {
       startAssistantMessage: vi.fn(),
