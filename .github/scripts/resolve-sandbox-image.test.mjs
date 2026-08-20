@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -506,109 +507,107 @@ test('appendStepFile refuses a directory at the step-file path', () => {
   }
 });
 
-test('the resolver refuses to export when the pull reports no Digest line', () => {
+test('the resolver refuses to export when the pull reports no Digest line', async () => {
   // End-to-end pin of main()'s headline refusal: pull exits 0 without a
   // Digest line while inspect happily reports a same-repo digest — the shape
   // an attacker-retagged image presents. The resolver must exit non-zero and
   // leave BOTH step files untouched; deleting the refusal exports the
   // unbound content (mutant probe in the #9527 review).
-  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-main-'));
-  const stub = join(dir, 'docker-stub');
-  const envFile = join(dir, 'env');
-  const outFile = join(dir, 'out');
-  writeFileSync(
-    stub,
+  await withDockerStub(
     [
-      '#!/bin/sh',
       'if [ "$1" = "pull" ]; then',
       "  printf '%s\\n' 'Status: Downloaded newer image'",
       '  exit 0',
       'fi',
       `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
     ].join('\n'),
-    { mode: 0o755 },
+    (stub) => {
+      const envFile = join(dirname(stub), 'env');
+      const outFile = join(dirname(stub), 'out');
+      const scriptPath = fileURLToPath(
+        new URL('./resolve-sandbox-image.mjs', import.meta.url),
+      );
+      let error;
+      try {
+        execFileSync(
+          process.execPath,
+          [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
+          {
+            env: {
+              ...process.env,
+              SANDBOX_COMMAND: stub,
+              GITHUB_ENV: envFile,
+              GITHUB_OUTPUT: outFile,
+            },
+            timeout: 15_000,
+            stdio: 'pipe',
+          },
+        );
+      } catch (thrown) {
+        error = thrown;
+      }
+      assert.ok(error, 'the resolver must exit non-zero');
+      assert.match(String(error.stderr), /reported no Digest line/);
+      // The untouched-file checks must run BEFORE the helper's cleanup
+      // deletes the dir — after it they can never see what the resolver
+      // wrote (#9527 review).
+      assert.equal(
+        existsSync(envFile),
+        false,
+        'GITHUB_ENV must stay untouched',
+      );
+      assert.equal(
+        existsSync(outFile),
+        false,
+        'GITHUB_OUTPUT must stay untouched',
+      );
+    },
   );
-  const scriptPath = fileURLToPath(
-    new URL('./resolve-sandbox-image.mjs', import.meta.url),
-  );
-  let error;
-  try {
-    execFileSync(
-      process.execPath,
-      [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
-      {
-        env: {
-          ...process.env,
-          SANDBOX_COMMAND: stub,
-          GITHUB_ENV: envFile,
-          GITHUB_OUTPUT: outFile,
-        },
-        timeout: 15_000,
-        stdio: 'pipe',
-      },
-    );
-  } catch (thrown) {
-    error = thrown;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  assert.ok(error, 'the resolver must exit non-zero');
-  assert.match(String(error.stderr), /reported no Digest line/);
-  assert.equal(existsSync(envFile), false, 'GITHUB_ENV must stay untouched');
-  assert.equal(existsSync(outFile), false, 'GITHUB_OUTPUT must stay untouched');
 });
 
-test('the resolver exports the digest-bound reference on the success path', () => {
+test('the resolver exports the digest-bound reference on the success path', async () => {
   // Success-path companion to the refusal pin above: with a genuine Digest
   // line and matching RepoDigests, BOTH step files must carry the
   // `<repo>@<digest>` reference, never the mutable tag. A regression to
   // exporting the requested tag ships the exact vulnerability class this
   // PR closes and must fail here — the suite stayed green for that mutant
   // until this test existed (#9527 review).
-  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-main-ok-'));
-  const stub = join(dir, 'docker-stub');
-  const envFile = join(dir, 'env');
-  const outFile = join(dir, 'out');
-  writeFileSync(
-    stub,
+  await withDockerStub(
     [
-      '#!/bin/sh',
       'if [ "$1" = "pull" ]; then',
       `  printf '%s\\n' 'Status: Downloaded newer image' 'Digest: ${GENUINE}'`,
       '  exit 0',
       'fi',
       `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
     ].join('\n'),
-    { mode: 0o755 },
-  );
-  const scriptPath = fileURLToPath(
-    new URL('./resolve-sandbox-image.mjs', import.meta.url),
-  );
-  const expected = `ghcr.io/qwenlm/qwen-code@${GENUINE}`;
-  let envContent;
-  let outContent;
-  try {
-    execFileSync(
-      process.execPath,
-      [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
-      {
-        env: {
-          ...process.env,
-          SANDBOX_COMMAND: stub,
-          GITHUB_ENV: envFile,
-          GITHUB_OUTPUT: outFile,
+    (stub) => {
+      const envFile = join(dirname(stub), 'env');
+      const outFile = join(dirname(stub), 'out');
+      const scriptPath = fileURLToPath(
+        new URL('./resolve-sandbox-image.mjs', import.meta.url),
+      );
+      const expected = `ghcr.io/qwenlm/qwen-code@${GENUINE}`;
+      execFileSync(
+        process.execPath,
+        [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
+        {
+          env: {
+            ...process.env,
+            SANDBOX_COMMAND: stub,
+            GITHUB_ENV: envFile,
+            GITHUB_OUTPUT: outFile,
+          },
+          timeout: 15_000,
+          stdio: 'pipe',
         },
-        timeout: 15_000,
-        stdio: 'pipe',
-      },
-    );
-    envContent = readFileSync(envFile, 'utf8');
-    outContent = readFileSync(outFile, 'utf8');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  assert.equal(envContent, `QWEN_SANDBOX_IMAGE=${expected}\n`);
-  assert.equal(outContent, `image=${expected}\n`);
+      );
+      assert.equal(
+        readFileSync(envFile, 'utf8'),
+        `QWEN_SANDBOX_IMAGE=${expected}\n`,
+      );
+      assert.equal(readFileSync(outFile, 'utf8'), `image=${expected}\n`);
+    },
+  );
 });
 
 // Workflow contract: the resolver's step OUTPUT is the value every agent and
@@ -616,19 +615,43 @@ test('the resolver exports the digest-bound reference on the success path', () =
 // that inherits QWEN_SANDBOX_IMAGE from it can be steered after resolution.
 // Every 'Resolve sandbox image' step must therefore carry an id, and every
 // sandbox-consuming step in the job must bind that step's image output.
-// repo-hygiene.yml runs the same resolver/consumer shape and needs the same
-// binding, but it is outside this PR's footprint and the gate rejects the
-// change here; it is tracked in the deferred review findings queue (#9527).
-const SANDBOX_WORKFLOWS = ['qwen-autofix.yml'];
-
+// The protected set is DERIVED from the tree — every workflow with a step
+// that runs the resolver — so a new resolver step cannot land untested
+// (#9527 review).
 test('every sandbox-image consumer binds the resolver step output', () => {
   const workflowsDir = join(
     dirname(fileURLToPath(import.meta.url)),
     '..',
     'workflows',
   );
-  for (const name of SANDBOX_WORKFLOWS) {
-    const doc = parse(readFileSync(join(workflowsDir, name), 'utf8'));
+  const workflows = readdirSync(workflowsDir)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .map((name) => ({
+      name,
+      doc: parse(readFileSync(join(workflowsDir, name), 'utf8')),
+    }))
+    .filter(({ doc }) =>
+      Object.values(doc?.jobs ?? {}).some((job) =>
+        (job.steps ?? []).some(
+          (step) =>
+            typeof step.run === 'string' &&
+            step.run.includes('resolve-sandbox-image.mjs'),
+        ),
+      ),
+    );
+  // repo-hygiene.yml runs the same resolver/consumer shape and needs the
+  // same binding, but it is outside this PR's footprint and the gate rejects
+  // the change here; it is tracked in the deferred review findings queue
+  // (#9527). Remove it from this set once that binding lands.
+  const UNBOUND_WORKFLOWS = ['repo-hygiene.yml'];
+  for (const name of UNBOUND_WORKFLOWS) {
+    assert.ok(
+      workflows.some((workflow) => workflow.name === name),
+      `${name} no longer runs the resolver — drop it from UNBOUND_WORKFLOWS`,
+    );
+  }
+  for (const { name, doc } of workflows) {
+    if (UNBOUND_WORKFLOWS.includes(name)) continue;
     let totalConsumers = 0;
     for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
       const steps = job.steps ?? [];
@@ -679,6 +702,20 @@ test('every sandbox-image consumer binds the resolver step output', () => {
           'default',
           `${name} job '${jobName}' step '${step.name}': pin DOCKER_CONTEXT so the pool-shared currentContext cannot steer the docker endpoint`,
         );
+        // always() runs a consumer even when the resolver FAILED, and its
+        // image binding is then empty — an empty QWEN_SANDBOX_IMAGE
+        // relaunches the CLI without any sandbox, so such a consumer must
+        // also gate on the resolver's outcome to fail closed (#9527 review).
+        if (String(step.if ?? '').includes('always()')) {
+          assert.ok(
+            resolvers.some((resolver) =>
+              String(step.if).includes(
+                `steps.${resolver.id}.outcome == 'success'`,
+              ),
+            ),
+            `${name} job '${jobName}' step '${step.name}': an always()-gated consumer must also gate on the resolver step outcome`,
+          );
+        }
       }
     }
     assert.ok(
