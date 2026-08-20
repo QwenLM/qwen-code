@@ -793,6 +793,114 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(result.current.state.modelIds).toBe(bufferAtResolve);
   });
 
+  it('keeps an unserved built-in token that is active in the custom input', async () => {
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    act(() =>
+      result.current.changeModelIds(result.current.state.modelIds, {
+        customModelIds: [RETIRED_ID],
+        activeCustomModelId: RETIRED_ID,
+      }),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+  });
+
+  it('still prunes an inactive unserved built-in while another token is edited', async () => {
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, my-dep`,
+        {
+          customModelIds: [RETIRED_ID, 'my-dep'],
+          activeCustomModelId: 'my-dep',
+        },
+      ),
+    );
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const ids = normalizeModelIds(result.current.state.modelIds);
+    expect(ids).not.toContain(RETIRED_ID);
+    expect(ids).toContain('my-dep');
+  });
+
+  it('banks an in-flight recommendation removal without banking typed prefixes', async () => {
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+    const removed = BUILT_IN_IDS[0]!;
+    const remaining = normalizeModelIds(result.current.state.modelIds).filter(
+      (id) => id !== removed,
+    );
+    act(() =>
+      result.current.changeModelIds(remaining.join(', '), {
+        customModelIds: [],
+        removedRecommendationId: removed,
+      }),
+    );
+
+    await act(async () => {
+      resolveLookup(discovered(BUILT_IN_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      removed,
+    );
+  });
+
   it('records the fallback pick once the user re-endorses it', async () => {
     // R12-2. Pair A's catalog is disjoint from the built-ins, so the prune
     // empties the selection and the wizard injects its own pick. Unchecking
@@ -824,6 +932,39 @@ describe('useProviderSetupFlow model discovery', () => {
     );
 
     // Pair B serves it and the user asked for it explicitly, so it survives.
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      'x-preview',
+    );
+  });
+
+  it('records a fallback retyped into custom input before its checkbox is cleared', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(['x-preview']));
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered([...SERVED_IDS, 'x-preview']),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.modelIds).toBe('x-preview'),
+    );
+
+    act(() =>
+      result.current.changeModelIds('x-preview', {
+        customModelIds: ['x-preview'],
+      }),
+    );
+    act(() =>
+      result.current.changeModelIds('x-preview', {
+        customModelIds: ['x-preview'],
+        removedRecommendationId: 'x-preview',
+      }),
+    );
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
     expect(normalizeModelIds(result.current.state.modelIds)).toContain(
       'x-preview',
     );

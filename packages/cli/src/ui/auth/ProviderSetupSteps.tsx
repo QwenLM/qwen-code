@@ -298,20 +298,30 @@ export function resplitCustomModelIdsText(
   selectedModelIds: string[],
   recommendedModelIds: Set<string>,
   builtInModelIds: Set<string>,
+  caret?: number,
 ): string {
   const segments = customModelIdsText.split(',');
+  const activeSegmentIndex =
+    caret === undefined ? -1 : segmentIndexAtCaret(customModelIdsText, caret);
   const hasTrailingSeparator =
     segments.length > 1 && segments[segments.length - 1].trim() === '';
   const bodySegments = hasTrailingSeparator ? segments.slice(0, -1) : segments;
 
   const keptIds = new Set<string>();
   const parts: string[] = [];
-  for (const segment of bodySegments) {
+  for (const [index, segment] of bodySegments.entries()) {
     const id = segment.trim();
-    if (id.length === 0 || recommendedModelIds.has(id) || keptIds.has(id)) {
+    const isActive = index === activeSegmentIndex;
+    if (id.length === 0) {
+      if (isActive) parts.push(segment);
       continue;
     }
-    if (builtInModelIds.has(id)) {
+    if (
+      !isActive &&
+      (recommendedModelIds.has(id) ||
+        keptIds.has(id) ||
+        builtInModelIds.has(id))
+    ) {
       continue;
     }
     keptIds.add(id);
@@ -327,6 +337,13 @@ export function resplitCustomModelIdsText(
 
   const body = parts.join(',');
   if (body.length === 0) {
+    if (
+      activeSegmentIndex >= 0 &&
+      segments[activeSegmentIndex]?.trim() === '' &&
+      customModelIdsText.includes(',')
+    ) {
+      return ',';
+    }
     // Nothing is left to separate: the ids in front of the trailing comma all
     // moved to checkboxes, so an empty input is what the user should see.
     return '';
@@ -334,6 +351,20 @@ export function resplitCustomModelIdsText(
   return hasTrailingSeparator
     ? `${body},${segments[segments.length - 1]}`
     : body;
+}
+
+function segmentIndexAtCaret(text: string, caret: number): number {
+  const clamped = Math.max(0, Math.min(caret, cpLen(text)));
+  const segments = commaSegmentsWithOffsets(text);
+  let index = 0;
+  for (let i = 0; i < segments.length; i++) {
+    if (segments[i].start <= clamped) index = i;
+  }
+  return index;
+}
+
+function modelIdAtCaret(text: string, caret: number): string | undefined {
+  return text.split(',')[segmentIndexAtCaret(text, caret)]?.trim() || undefined;
 }
 
 /**
@@ -548,11 +579,14 @@ function ModelIdsStep({
   }, []);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
+    const caret = modelIdsCaretRef.current;
+    const activeModelId = modelIdAtCaret(customModelIdsText, caret);
     const nextCustomModelIdsText = resplitCustomModelIdsText(
       customModelIdsText,
       selectedModelIds,
       recommendedModelIds,
       builtInModelIds,
+      caret,
     );
     if (nextCustomModelIdsText !== customModelIdsText) {
       setCustomModelIdsText(nextCustomModelIdsText);
@@ -566,7 +600,12 @@ function ModelIdsStep({
       );
     }
     setSelectedRecommendationKeys(
-      getRecommendedSelections(selectedModelIds, modelOptions),
+      getRecommendedSelections(
+        activeModelId === undefined
+          ? selectedModelIds
+          : selectedModelIds.filter((id) => id !== activeModelId),
+        modelOptions,
+      ),
     );
     // The new list can be shorter than the old focus index. Clamp rather than
     // reset: an empty result lands on the search input the query lives in.
@@ -591,9 +630,21 @@ function ModelIdsStep({
   );
 
   const syncModelIds = useCallback(
-    (customText: string, recommendationKeys: string[]) => {
+    (
+      customText: string,
+      recommendationKeys: string[],
+      removedRecommendationId?: string,
+    ) => {
       flow.changeModelIds(
         mergeModelIds(customText, recommendationKeys).join(', '),
+        {
+          customModelIds: normalizeModelIds(customText),
+          activeCustomModelId: modelIdAtCaret(
+            customText,
+            modelIdsCaretRef.current,
+          ),
+          ...(removedRecommendationId ? { removedRecommendationId } : {}),
+        },
       );
     },
     [flow],
@@ -630,7 +681,11 @@ function ModelIdsStep({
         .filter((option) => nextSet.has(option.key))
         .map((option) => option.key);
       setSelectedRecommendationKeys(nextKeys);
-      syncModelIds(customModelIdsText, nextKeys);
+      syncModelIds(
+        customModelIdsText,
+        nextKeys,
+        nextSet.has(item.key) ? undefined : item.key,
+      );
     },
     [
       customModelIdsText,

@@ -55,6 +55,12 @@ const STEP_ORDER: SetupStep[] = [
  */
 export type ModelDiscoveryStatus = 'idle' | 'loading' | 'success' | 'failed';
 
+export interface ModelIdsEditContext {
+  customModelIds: string[];
+  activeCustomModelId?: string;
+  removedRecommendationId?: string;
+}
+
 function getVisibleSteps(config: ProviderConfig): SetupStep[] {
   return STEP_ORDER.filter((step) => {
     if (step === 'review') return config.showAdvancedConfig === true;
@@ -177,6 +183,8 @@ export function useProviderSetupFlow(
   const displayedModelIdsRef = useRef('');
   // The selection on screen right now, keystrokes included.
   const liveModelIdsRef = useRef('');
+  const modelIdsEditInProgressRef = useRef(false);
+  const activeCustomModelIdRef = useRef<string | undefined>(undefined);
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
   // of any edit before that edit becomes the authored baseline.
@@ -185,27 +193,51 @@ export function useProviderSetupFlow(
   const setDisplayedModelIds = useCallback((value: string) => {
     displayedModelIdsRef.current = value;
     liveModelIdsRef.current = value;
+    modelIdsEditInProgressRef.current = false;
+    activeCustomModelIdRef.current = undefined;
     setModelIds(value);
   }, []);
 
   /** Move the on-screen selection without moving the authorship reference. */
-  const editModelIds = useCallback((value: string) => {
-    // R12-2: the moment the wizard's fallback pick leaves the buffer, the user
-    // has answered for it and it stops being an untouched suggestion. Holding
-    // the marker past that point makes `recordAuthoredModelIds` blind to
-    // provenance: it strips the id from BOTH halves of the next delta, so a
-    // user who unchecks it and checks it again produces an empty delta and the
-    // re-endorsed model never reaches the baseline — the next pair change
-    // silently drops it. The removal is only ever visible between keystrokes
-    // (by the next commit the id is back), so the marker has to be released
-    // here rather than at the commit.
-    const injected = injectedModelIdRef.current;
-    if (injected !== null && !normalizeModelIds(value).includes(injected)) {
-      injectedModelIdRef.current = null;
-    }
-    liveModelIdsRef.current = value;
-    setModelIds(value);
-  }, []);
+  const editModelIds = useCallback(
+    (value: string, context?: ModelIdsEditContext) => {
+      // R12-2: the moment the wizard's fallback pick leaves the buffer, the user
+      // has answered for it and it stops being an untouched suggestion. Holding
+      // the marker past that point makes `recordAuthoredModelIds` blind to
+      // provenance: it strips the id from BOTH halves of the next delta, so a
+      // user who unchecks it and checks it again produces an empty delta and the
+      // re-endorsed model never reaches the baseline — the next pair change
+      // silently drops it. The removal is only ever visible between keystrokes
+      // (by the next commit the id is back), so the marker has to be released
+      // here rather than at the commit.
+      const customModelIds = context?.customModelIds ?? [];
+      const injected = injectedModelIdRef.current;
+      if (injected !== null && customModelIds.includes(injected)) {
+        const authored = normalizeModelIds(authoredModelIdsRef.current);
+        if (!authored.includes(injected)) authored.push(injected);
+        authoredModelIdsRef.current = authored.join(', ');
+        injectedModelIdRef.current = null;
+      } else if (
+        injected !== null &&
+        !normalizeModelIds(value).includes(injected)
+      ) {
+        injectedModelIdRef.current = null;
+      }
+      const removed = context?.removedRecommendationId;
+      if (removed && !customModelIds.includes(removed)) {
+        authoredModelIdsRef.current = normalizeModelIds(
+          authoredModelIdsRef.current,
+        )
+          .filter((id) => id !== removed)
+          .join(', ');
+      }
+      modelIdsEditInProgressRef.current = true;
+      activeCustomModelIdRef.current = context?.activeCustomModelId;
+      liveModelIdsRef.current = value;
+      setModelIds(value);
+    },
+    [],
+  );
 
   /**
    * Fold the selection on screen into the authored baseline. The step composes
@@ -249,6 +281,8 @@ export function useProviderSetupFlow(
     // second pass's `before` as ids the user had removed.
     displayedModelIdsRef.current = committed;
     liveModelIdsRef.current = committed;
+    modelIdsEditInProgressRef.current = false;
+    activeCustomModelIdRef.current = undefined;
   }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
@@ -308,8 +342,7 @@ export function useProviderSetupFlow(
       // keeps the id, and the swap below hands the checkbox back ticked over
       // the top of their half-typed text. Intermediate prefixes of an id that
       // is not a built-in get banked as authored the same way.
-      const editInProgress =
-        liveModelIdsRef.current !== displayedModelIdsRef.current;
+      const editInProgress = modelIdsEditInProgressRef.current;
       if (!editInProgress) {
         recordAuthoredModelIds();
       }
@@ -325,7 +358,12 @@ export function useProviderSetupFlow(
       // sees the delta against the reference point set below.
       const kept = normalizeModelIds(
         editInProgress ? liveModelIdsRef.current : authoredModelIdsRef.current,
-      ).filter((id) => served.has(id) || !builtIn.has(id));
+      ).filter(
+        (id) =>
+          served.has(id) ||
+          !builtIn.has(id) ||
+          (editInProgress && id === activeCustomModelIdRef.current),
+      );
       // Pruning everything would leave the step with nothing checked and no
       // way to submit; fall back to the provider's first live model. That is
       // the wizard's pick, not the user's, so it stays out of the authored
@@ -659,8 +697,8 @@ export function useProviderSetupFlow(
   );
 
   const changeModelIds = useCallback(
-    (value: string) => {
-      editModelIds(value);
+    (value: string, context?: ModelIdsEditContext) => {
+      editModelIds(value, context);
       setModelIdsError(null);
     },
     [editModelIds],

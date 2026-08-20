@@ -815,6 +815,149 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps typing an exact served model id as the active custom segment', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of 'qwen4-flash') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'qwen4-flash',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'qwen4-flash' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    for (const char of '-latest') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['qwen4-flash-latest'],
+    });
+    unmount();
+  });
+
+  it('keeps typing a served built-in even when composition dedupes it', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow();
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of 'MiniMax-M3') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({ submitModelIds });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    for (const char of '-latest') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3-latest', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
+  it('keeps a leading separator and its caret across a recommendation swap', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of ',foo') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    for (let offset = 0; offset < 4; offset += 1) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'foo, MiniMax-M3',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'foo' }, { id: 'MiniMax-M3' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    await act(async () => {
+      pressLatestKey('x', 'x');
+    });
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['x', 'foo', 'MiniMax-M3'],
+    });
+    unmount();
+  });
+
   it('drops a typed built-in id the new list no longer offers', async () => {
     // R6-2: `applyDiscoveredModels` prunes a built-in id the endpoint does not
     // serve "whether it was checked by default or typed" — but a typed one
@@ -1006,6 +1149,32 @@ describe('resplitCustomModelIdsText', () => {
         BUILT_INS,
       ),
     ).toBe('kept,');
+  });
+
+  it('keeps the empty segment that owns the live caret', () => {
+    expect(
+      resplitCustomModelIdsText(
+        ',foo',
+        ['foo'],
+        new Set(['foo']),
+        BUILT_INS,
+        0,
+      ),
+    ).toBe(',');
+    expect(remapCaretAcrossResplit(',foo', ',', 0)).toBe(0);
+  });
+
+  it('keeps a middle empty segment that owns the live caret', () => {
+    expect(
+      resplitCustomModelIdsText(
+        'foo,,bar',
+        ['foo', 'bar'],
+        new Set(['foo', 'bar']),
+        BUILT_INS,
+        4,
+      ),
+    ).toBe(',');
+    expect(remapCaretAcrossResplit('foo,,bar', ',', 4)).toBe(0);
   });
 });
 
