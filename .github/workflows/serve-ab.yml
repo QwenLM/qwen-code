@@ -34,9 +34,23 @@ on:
     # acceptable best-effort miss. Doc/UI-only PRs don't need an A/B either.
     paths:
       - 'packages/cli/src/serve/**'
+      # Core files the daemon's session-admission answers are decided by:
+      # transcript lookup and creation-metadata reads, the JSONL recovery they
+      # sit on, and the two the harness MIRRORS to place its fixtures (a rename
+      # there strands every staged transcript). Named individually rather than
+      # globbing `packages/core/**`, which would fire this 2x-build A/B on most
+      # core PRs for nothing. This list is deliberately not the transitive
+      # closure of the admission path — that has no principled stop — so a PR
+      # further out lands unprobed; the drive's canaries are what keep a stale
+      # scheme loud rather than silent.
+      - 'packages/core/src/services/sessionService.ts'
+      - 'packages/core/src/utils/jsonl-utils.ts'
+      - 'packages/core/src/utils/paths.ts'
+      - 'packages/core/src/config/storage.ts'
       - '.github/workflows/serve-ab.yml'
       - '.github/scripts/serve-ab-diff.mjs'
       - '.github/scripts/serve-ab-drive.mjs'
+      - '.github/scripts/fixtures/serve-ab-session.jsonl'
 
 permissions:
   contents: 'read'
@@ -225,6 +239,19 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'head/package-lock.json'
+
+      # Unconditional, and BEFORE either drive: on the persistent pool
+      # `${RUNNER_TEMP}` outlives a run, and the drive's own reset lives inside
+      # the script — which never executes when an arm is skipped by its `if:`
+      # (no merge-base resolved, base checkout failed) or dies during
+      # `npm ci`/`npm run build`. An inherited capture set from an earlier run
+      # carries its completion marker too, so neither degraded-baseline warning
+      # would fire and the comment would diff this head against another run's
+      # base.
+      - name: 'Clear stale capture dirs'
+        run: |-
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/before" "${RUNNER_TEMP}/after"
 
       - name: 'Build + drive the PR head'
         working-directory: 'head'
