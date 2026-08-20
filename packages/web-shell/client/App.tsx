@@ -4607,6 +4607,7 @@ export function App({
     );
     if (
       sessionId &&
+      connection.skills !== undefined &&
       priorPending.length === 0 &&
       unhandled.every(
         (mutation) =>
@@ -4651,6 +4652,7 @@ export function App({
   }, [
     connected,
     connection.sessionId,
+    connection.skills,
     connection.workspaceCwd,
     reloadLoadedSkills,
     workspaceEventSignals?.lastSkillMutation,
@@ -4663,6 +4665,7 @@ export function App({
       fallbackWorkspaceCwdRef.current !== connection.workspaceCwd
     ) {
       handledSkillMutationKeysRef.current.clear();
+      pendingSkillTogglesRef.current = [];
       fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;

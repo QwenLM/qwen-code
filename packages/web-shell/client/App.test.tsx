@@ -10854,6 +10854,14 @@ describe('App session callbacks', () => {
     );
     rerender();
     await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
 
     mockConnection.workspaceCwd = '/tmp/project';
     mockConnection.sessionId = 'session-1';
@@ -10987,6 +10995,53 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
     );
+  });
+
+  it('reloads workspace skills when an applied toggle arrives while session skills are unknown', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+
+    const { rerender } = renderApp();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
+    emitSkillMutation(
+      'applied-web-search-unknown-skills',
+      [{ name: 'web-search', enabled: false }],
+      'applied',
+    );
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(
+      mockWorkspaceActions.loadSkillsStatus.mock.calls.length,
+    ).toBeGreaterThan(1);
   });
 
   it('uses the workspace Skill snapshot while the session Skill list is unknown', async () => {
