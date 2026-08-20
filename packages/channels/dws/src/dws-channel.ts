@@ -46,6 +46,7 @@ const MAX_PROCESSED_ITEMS = 5_000;
 const MAX_INBOUND_ATTEMPTS = 5;
 const MAX_IM_TARGETS = 1_000;
 const MAX_TODO_STATES = 1_000;
+const MAX_TODO_FINGERPRINT_DEPTH = 100;
 const MAX_SELF_SENDER_IDS = 20;
 const EVENT_RESTART_DELAY_MS = 2_000;
 const EVENT_RESTART_MAX_DELAY_MS = 5 * 60_000;
@@ -91,6 +92,11 @@ interface PersistedDocumentNotification {
   nextRetryAt?: number;
 }
 
+interface PersistedGroupMessage {
+  source: { kind: 'group-all' } | { kind: 'group'; conversationId: string };
+  message: DwsImMessage;
+}
+
 interface DwsCursor {
   version: 1;
   selfProfile?: string;
@@ -101,6 +107,7 @@ interface DwsCursor {
   notificationCheckpoint?: PersistedNotificationCheckpoint;
   mentionCheckpoint?: PersistedNotificationCheckpoint;
   pendingDocumentNotifications?: PersistedDocumentNotification[];
+  pendingGroupMessages?: PersistedGroupMessage[];
   processedMessages: string[];
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
@@ -294,7 +301,56 @@ function isPendingDocumentNotification(
   );
 }
 
-function stableTodoValue(value: unknown, key = ''): unknown {
+function isPendingGroupMessage(value: unknown): value is PersistedGroupMessage {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const pending = value as PersistedGroupMessage;
+  const sourceValid =
+    pending.source?.kind === 'group-all' ||
+    (pending.source?.kind === 'group' &&
+      typeof pending.source.conversationId === 'string' &&
+      Boolean(pending.source.conversationId));
+  const message = pending.message;
+  if (!sourceValid || typeof message !== 'object' || message === null) {
+    return false;
+  }
+  return (
+    (message.type === 'user_im_message_receive_group' ||
+      message.type === 'user_im_message_receive_group_all') &&
+    [
+      message.type,
+      message.eventId,
+      message.messageId,
+      message.conversationId,
+      message.content,
+      message.senderId,
+      message.senderName,
+    ].every((item) => typeof item === 'string') &&
+    (message.referencedText === undefined ||
+      typeof message.referencedText === 'string') &&
+    (message.eventTime === undefined ||
+      (Number.isSafeInteger(message.eventTime) && message.eventTime >= 0))
+  );
+}
+
+function isPersistedInboundFailure(
+  value: unknown,
+): value is PersistedInboundFailure {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const failure = value as PersistedInboundFailure;
+  return (
+    typeof failure.key === 'string' &&
+    Boolean(failure.key) &&
+    Number.isSafeInteger(failure.attempts) &&
+    failure.attempts > 0 &&
+    failure.attempts < MAX_INBOUND_ATTEMPTS
+  );
+}
+
+function stableTodoValue(value: unknown, key = '', depth = 0): unknown {
   const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/gu, '');
   if (
     normalizedKey.includes('comment') ||
@@ -305,15 +361,22 @@ function stableTodoValue(value: unknown, key = ''): unknown {
   ) {
     return undefined;
   }
+  if (
+    depth >= MAX_TODO_FINGERPRINT_DEPTH &&
+    typeof value === 'object' &&
+    value !== null
+  ) {
+    return '[max-depth]';
+  }
   if (Array.isArray(value)) {
-    return value.map((item) => stableTodoValue(item));
+    return value.map((item) => stableTodoValue(item, '', depth + 1));
   }
   if (typeof value !== 'object' || value === null) return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
       .sort(([left], [right]) => left.localeCompare(right))
       .flatMap(([childKey, childValue]) => {
-        const stable = stableTodoValue(childValue, childKey);
+        const stable = stableTodoValue(childValue, childKey, depth + 1);
         return stable === undefined ? [] : [[childKey, stable]];
       }),
   );
@@ -325,9 +388,13 @@ function todoFailureKey(taskId: string): string {
 }
 
 function todoFingerprint(task: DwsTodoTask): string {
-  return createHash('sha256')
-    .update(JSON.stringify(stableTodoValue(task.data)))
-    .digest('hex');
+  let stable: string;
+  try {
+    stable = JSON.stringify(stableTodoValue(task.data)) ?? '[undefined]';
+  } catch {
+    stable = '[unserializable]';
+  }
+  return createHash('sha256').update(stable).digest('hex');
 }
 
 function stableUuid(value: string): string {
@@ -512,6 +579,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       mentionWatermark: undefined,
       mentionCheckpoint: undefined,
       pendingDocumentNotifications: [],
+      pendingGroupMessages: [],
       processedMessages: [],
       imTargets: [],
       todosInitialized: false,
@@ -561,6 +629,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           !cursor.pendingDocumentNotifications.every(
             isPendingDocumentNotification,
           ))) ||
+      (cursor.pendingGroupMessages !== undefined &&
+        (!Array.isArray(cursor.pendingGroupMessages) ||
+          !cursor.pendingGroupMessages.every(isPendingGroupMessage))) ||
       !Array.isArray(cursor.processedMessages) ||
       !cursor.processedMessages.every((item) => typeof item === 'string') ||
       !Array.isArray(cursor.imTargets) ||
@@ -569,7 +640,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         typeof cursor.todosInitialized !== 'boolean') ||
       (cursor.todoTasks !== undefined &&
         (!Array.isArray(cursor.todoTasks) ||
-          !cursor.todoTasks.every(isPersistedTodoState)))
+          !cursor.todoTasks.every(isPersistedTodoState))) ||
+      (cursor.inboundFailures !== undefined &&
+        (!Array.isArray(cursor.inboundFailures) ||
+          !cursor.inboundFailures.every(isPersistedInboundFailure)))
     ) {
       return null;
     }
@@ -589,10 +663,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       pendingDocumentNotifications: (
         cursor.pendingDocumentNotifications ?? []
       ).slice(-MAX_PROCESSED_ITEMS),
+      pendingGroupMessages: (cursor.pendingGroupMessages ?? []).slice(
+        -MAX_PROCESSED_ITEMS,
+      ),
       processedMessages: cursor.processedMessages.slice(-MAX_PROCESSED_ITEMS),
       imTargets: cursor.imTargets.slice(-MAX_IM_TARGETS),
       todosInitialized: cursor.todosInitialized ?? false,
       todoTasks: (cursor.todoTasks ?? []).slice(-MAX_TODO_STATES),
+      inboundFailures: (cursor.inboundFailures ?? []).slice(
+        -MAX_PROCESSED_ITEMS,
+      ),
     };
   }
 
@@ -628,6 +708,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.todoTasks = [];
       this.cursor.documentIds = [];
       this.cursor.pendingDocumentNotifications = [];
+      this.cursor.pendingGroupMessages = [];
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.notificationWatermark = undefined;
@@ -947,6 +1028,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const signal = this.pollAbortController.signal;
     if (!this.connected || signal.aborted) return;
     const endTime = Date.now();
+    await this.replayPendingGroupMessages(signal);
+    if (signal.aborted || !this.connected) return;
     await this.replayPendingDocumentNotifications(signal);
     if (signal.aborted || !this.connected) return;
     try {
@@ -1075,10 +1158,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     if (!this.cursor.todosInitialized) {
       this.cursor.todosInitialized = true;
-      this.cursor.todoTasks = tasks.map((task) => ({
-        taskId: task.taskId,
-        fingerprint: todoFingerprint(task),
-      }));
+      this.cursor.todoTasks = [];
+      for (const task of tasks) {
+        try {
+          this.rememberTodoState(task.taskId, todoFingerprint(task));
+        } catch (error) {
+          process.stderr.write(
+            `[Channel:${this.name}] failed to fingerprint DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        }
+      }
       this.saveCursor();
       return;
     }
@@ -1090,9 +1179,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const task of tasks) {
       if (signal.aborted || !this.connected) return;
       this.todoTargets.set(todoChatId(task.taskId), task.taskId);
-      const fingerprint = todoFingerprint(task);
-      if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
       try {
+        const fingerprint = todoFingerprint(task);
+        if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
         if (await this.processTodoTask(task, fingerprint, signal)) {
           this.clearInboundFailure(todoFailureKey(task.taskId));
           this.rememberTodoState(task.taskId, fingerprint);
@@ -1109,7 +1198,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // poll, forever. Give it the message path's budget, and record the
         // fingerprint once that budget is spent so the loop stops.
         this.recordInboundFailure(todoFailureKey(task.taskId), error, () =>
-          this.rememberTodoState(task.taskId, fingerprint),
+          this.rememberTodoState(task.taskId, todoFingerprint(task)),
         );
       }
     }
@@ -1117,8 +1206,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (processedTaskIds.size === 0) return;
     const refreshed = await this.client.listTodoTasks(signal);
     for (const task of refreshed) {
-      if (processedTaskIds.has(task.taskId)) {
+      if (!processedTaskIds.has(task.taskId)) continue;
+      try {
         this.rememberTodoState(task.taskId, todoFingerprint(task));
+      } catch (error) {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to fingerprint refreshed DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
       }
     }
     this.saveCursor();
@@ -1438,14 +1532,25 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     try {
       await this.handleInbound(envelope);
     } catch (error) {
+      if (source.kind === 'group' || source.kind === 'group-all') {
+        this.rememberPendingGroupMessage(source, message);
+      }
       // Under budget the throw propagates exactly as before, so redelivery
       // and concurrent-duplicate retry keep their contracts. Once the budget
       // is spent the message is marked processed and the error is swallowed,
       // which is the only thing that lets the watermark move past it.
-      if (this.recordInboundFailure(key, error)) throw error;
+      if (
+        this.recordInboundFailure(key, error, () => {
+          this.markProcessedMessage(key);
+          this.removePendingGroupMessage(key);
+        })
+      ) {
+        throw error;
+      }
       return;
     }
     this.clearInboundFailure(key);
+    this.removePendingGroupMessage(key);
     this.markProcessedMessage(key);
     this.saveCursor();
   }
@@ -1513,6 +1618,32 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.cursor.inboundFailures = failures.filter(
       (failure) => failure.key !== key,
     );
+  }
+
+  private rememberPendingGroupMessage(
+    source: Extract<DwsImSource, { kind: 'group' | 'group-all' }>,
+    message: DwsImMessage,
+  ): void {
+    const key = messageKey(message);
+    const pending = this.cursor.pendingGroupMessages ?? [];
+    if (pending.some((item) => messageKey(item.message) === key)) return;
+    while (pending.length >= MAX_PROCESSED_ITEMS) {
+      const dropped = pending.shift();
+      if (!dropped) break;
+      this.clearInboundFailure(messageKey(dropped.message));
+      process.stderr.write(
+        `[Channel:${this.name}] dropping the oldest pending DWS group ` +
+          `message because the retry queue reached ${MAX_PROCESSED_ITEMS}.\n`,
+      );
+    }
+    pending.push({ source, message });
+    this.cursor.pendingGroupMessages = pending;
+  }
+
+  private removePendingGroupMessage(key: string): void {
+    this.cursor.pendingGroupMessages = (
+      this.cursor.pendingGroupMessages ?? []
+    ).filter((pending) => messageKey(pending.message) !== key);
   }
 
   private async processDocumentNotification(
@@ -1647,6 +1778,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
   }
 
+  private async replayPendingGroupMessages(signal: AbortSignal): Promise<void> {
+    for (const pending of [...(this.cursor.pendingGroupMessages ?? [])]) {
+      if (signal.aborted || !this.connected) return;
+      const key = messageKey(pending.message);
+      try {
+        await this.handleImMessage(pending.source, pending.message, true);
+        this.removePendingGroupMessage(key);
+        this.saveCursor();
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] pending DWS group message remains degraded: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
+    }
+  }
+
   private async replayPendingDocumentNotifications(
     signal: AbortSignal,
   ): Promise<void> {
@@ -1699,8 +1847,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     notification: DwsDocumentMentionNotification,
   ): void {
     const key = documentNotificationKey(notification);
-    if (this.hasPendingDocumentNotification(key)) return;
     const pending = this.cursor.pendingDocumentNotifications ?? [];
+    if (
+      pending.some(
+        (item) =>
+          documentNotificationKey(item) === key &&
+          item.senderId === message.senderId,
+      )
+    ) {
+      return;
+    }
     // Evict, never throw. The only drain is an ALLOWED sender later
     // processing the same comment, so entries parked for unapproved senders
     // persist forever and survive restarts in the cursor. Throwing at the cap

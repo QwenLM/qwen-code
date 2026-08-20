@@ -2300,6 +2300,46 @@ describe('DwsChannel', () => {
     expect(client.readDocument).toHaveBeenCalledTimes(1);
   });
 
+  it('parks the same document mention separately for each denied sender', async () => {
+    const client = new FakeDwsClient();
+    const config = makeConfig({ senderPolicy: 'pairing' });
+    const name = 'multi-sender-pending-document-dws';
+    const { channel, bridge } = await readyPolicyChannel(client, config, name);
+    const card = documentMentionCard('doc-shared', 'comment-shared');
+    const now = Date.now();
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'alice-document', card, {
+        eventTime: now,
+      }),
+      message('user_im_message_receive_o2o_all', 'bob-document', card, {
+        eventTime: now,
+        senderId: 'open-bob',
+        senderName: 'Bob',
+      }),
+    ];
+
+    await channel.poll();
+
+    expect(channel.pendingDocumentNotifications()).toEqual([
+      expect.objectContaining({ senderId: 'open-alice' }),
+      expect.objectContaining({ senderId: 'open-bob' }),
+    ]);
+    const bobPairingText = client.sendImMessage.mock.calls.find(
+      ([target]) =>
+        target.kind === 'direct' && target.openDingTalkId === 'open-bob',
+    )?.[1];
+    const bobCode = bobPairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
+    expect(bobCode).toBeDefined();
+    expect(new PairingStore(name, config.cwd).approve(bobCode!)).not.toBeNull();
+    client.directMessages = [];
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(channel.pendingDocumentNotifications()).toEqual([]);
+  });
+
   it('drops profile-scoped document work and IM targets on profile switch', async () => {
     const config = makeConfig({ senderPolicy: 'pairing' });
     const name = 'profile-scoped-pending-document-dws';
@@ -3344,6 +3384,60 @@ describe('DwsChannel', () => {
     expect(channel.mentionWatermark()).toBeGreaterThan(0);
   });
 
+  it('replays a failed ambient group message after restart', async () => {
+    const config = makeConfig({ groups: { '*': { requireMention: false } } });
+    const name = 'pending-ambient-group-dws';
+    const firstClient = new FakeDwsClient();
+    const first = await readyChannel(firstClient, config, name);
+    first.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-retry',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    await expect(firstClient.emit(1, event)).rejects.toThrow(
+      'agent unavailable',
+    );
+    first.disconnect();
+
+    const restartedClient = new FakeDwsClient();
+    const restarted = await readyChannel(restartedClient, config, name);
+    await restarted.poll();
+    await restarted.poll();
+
+    expect(restarted.inboundAttempts).toBe(1);
+    expect(restarted.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-group',
+        messageId: 'ambient-retry',
+      }),
+    ]);
+  });
+
+  it('caps retries for a persistently failing ambient group message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-poison',
+      'this group request keeps failing',
+      { conversationId: 'cid-group' },
+    );
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    for (let round = 0; round < 7; round += 1) {
+      await channel.poll();
+    }
+
+    expect(channel.inboundAttempts).toBe(5);
+  });
+
   // R4-1: the budget above was wired into the mention path only. A document
   // notification whose turn throws escaped `pollOnce`'s sorted loop, so
   // nothing was marked processed, the checkpoint and watermark never advanced,
@@ -3511,6 +3605,37 @@ describe('DwsChannel', () => {
     }
 
     expect(channel.inboundAttempts).toBe(5);
+  });
+
+  it('does not let a deeply nested todo block later tasks', async () => {
+    let nested: Record<string, unknown> = { value: 'leaf' };
+    for (let depth = 0; depth < 20_000; depth += 1) {
+      nested = { child: nested };
+    }
+    const client = new FakeDwsClient();
+    client.todoTasks = [
+      todoTask('task-deep', 'Deep task', { nested }),
+      todoTask('task-healthy', 'Healthy task'),
+    ];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+
+    await channel.poll();
+    client.todoTasks = [
+      client.todoTasks[0]!,
+      todoTask('task-healthy', 'Healthy task changed'),
+    ];
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        threadId: 'task-healthy',
+        text: expect.stringContaining('Healthy task changed'),
+      }),
+    ]);
   });
 
   it('uses the originating message for an idempotent final reply', async () => {
