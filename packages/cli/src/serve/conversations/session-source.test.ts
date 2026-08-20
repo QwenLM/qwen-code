@@ -296,6 +296,24 @@ describe('conversation session source classification', () => {
     expect(reads).toBe(0);
   });
 
+  it.each(['CON', 'nul', 'AUX.txt', 'PRN.', 'COM1', 'lpt9.jsonl'])(
+    'refuses Windows device transcript name %s without touching the store',
+    async (sessionId) => {
+      let reads = 0;
+      const deviceStore: ConversationSessionMetadataStore = {
+        async readCreationMetadataIfReadable() {
+          reads++;
+          return {};
+        },
+      };
+
+      await expect(
+        readLoadableConversationSession(sessionId, deviceStore),
+      ).resolves.toBeUndefined();
+      expect(reads).toBe(0);
+    },
+  );
+
   it('resolves a transcript that a concurrent archive moves mid-read', async () => {
     const movingStore: ConversationSessionMetadataStore = {
       async readCreationMetadataIfReadable(_sessionId, state) {

@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   partToString,
+  SessionIdCaseConflictError,
   stripTerminalControlSequences,
   type ChatRecord,
   type SessionService,
@@ -1237,7 +1238,19 @@ export class LiveTaskService {
     let persistedSessionId: string | undefined;
     if (live.kind === 'found') {
       runtime = live.runtime;
-      persistedSessionId = await resolvePersistedSessionId(runtime);
+      try {
+        persistedSessionId = await resolvePersistedSessionId(runtime);
+      } catch (error) {
+        if (
+          error instanceof SessionIdCaseConflictError &&
+          error.reason === 'case_conflict'
+        ) {
+          throw error;
+        }
+        // The resident bridge entry remains authoritative when its optional
+        // persisted-history lookup is temporarily unavailable.
+        persistedSessionId = undefined;
+      }
     } else {
       const matches = (
         await Promise.all(

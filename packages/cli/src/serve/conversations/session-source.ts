@@ -107,12 +107,19 @@ export function classifyTopLevelConversationSource(
 // builds (nil/v6/v7 UUIDs, agent-suffixed ids) must stay resolvable, while
 // path separators can never reach the joined transcript path.
 const SAFE_TRANSCRIPT_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const WINDOWS_DEVICE_NAME_PATTERN =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 async function readExistingMetadata(
   sessionId: string,
   store: ConversationSessionMetadataStore,
 ): Promise<LiveSessionCreationMetadata | undefined> {
-  if (!SAFE_TRANSCRIPT_NAME_PATTERN.test(sessionId)) return undefined;
+  if (
+    !SAFE_TRANSCRIPT_NAME_PATTERN.test(sessionId) ||
+    WINDOWS_DEVICE_NAME_PATTERN.test(sessionId)
+  ) {
+    return undefined;
+  }
   // Creation metadata is immutable, so one tolerant read per location
   // decides. Probing the location around the read would only turn a
   // concurrent archive move into a spurious "not found": a session moved

@@ -37,6 +37,7 @@ const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
 const sessionIdBatchLookups = vi.hoisted(
   () => new Array<{ cwd: string; sessionIds: string[] }>(),
 );
+const sessionIdLookupErrors = vi.hoisted(() => new Map<string, Error>());
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -68,6 +69,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       private resolveSessionIdIgnoringCase(sessionId: string) {
+        const error = sessionIdLookupErrors.get(sessionId);
+        if (error) throw error;
         const matches = [...persistedSessions.keys()].filter(
           (candidate) =>
             candidate.toLowerCase() === sessionId.toLowerCase() &&
@@ -381,6 +384,7 @@ beforeEach(() => {
   removeSessionMock.mockClear();
   removeSessionRuntimeBaseDirs.length = 0;
   sessionIdBatchLookups.length = 0;
+  sessionIdLookupErrors.clear();
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
     sessions: [],
@@ -1147,6 +1151,58 @@ describe('LiveTaskService', () => {
       thread: { id: sessionId, preview: 'first prompt' },
       turns: [{ id: 'user-1' }],
     });
+  });
+
+  it('keeps a resident task usable when its persisted alias scan fails', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440019';
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:03.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    sessionIdLookupErrors.set(
+      sessionId,
+      Object.assign(new Error('EACCES: catalog scan failed'), {
+        code: 'EACCES',
+      }),
+    );
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: { threadId: sessionId, prompt: 'continue' },
+      }),
+    ).resolves.toMatchObject({ threadId: sessionId });
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: sessionId },
+      }),
+    ).resolves.toMatchObject({
+      thread: { id: sessionId, preview: 'Resident task' },
+      turns: [],
+    });
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'wait_threads',
+        arguments: { targets: [{ threadId: sessionId }], timeoutMs: 0 },
+      }),
+    ).resolves.toMatchObject({ polls: [{ thread: { id: sessionId } }] });
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
   });
 
   it('rejects ambiguous persisted case twins behind a canonical live id', async () => {

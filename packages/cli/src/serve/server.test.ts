@@ -24374,6 +24374,63 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('rejects an internal both-state owner when an ordinary case alias exists', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-b4b4b4b4b4b4';
+      const storedSid = sid.toUpperCase();
+      const internalDir = path.join(runtimeDir, 'internal-case-alias');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(sid, 'active', internalWs);
+      await writeTranscriptSession(sid, 'archived', internalWs);
+      await writeTranscriptSession(storedSid, 'active', wsDir);
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const existsSpy = vi
+        .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
+        .mockImplementation(async (sessionId) => sessionId === storedSid);
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(500);
+        expect(res.body).toMatchObject({
+          code: 'ambiguous_session_owner',
+          sessionId: sid,
+        });
+        expect(res.body).not.toHaveProperty('workspaceIds');
+        expect(existsSpy).toHaveBeenCalledWith(storedSid);
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        existsSpy.mockRestore();
+      }
+    });
+
     it('prefers structured transcript errors found after generic scan failures', async () => {
       const sid = '55555555-bbbb-cccc-dddd-afafafafafaf';
       const secondaryDir = path.join(runtimeDir, 'archived-after-failure');

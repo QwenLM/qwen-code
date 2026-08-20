@@ -1717,7 +1717,24 @@ export function registerSessionRoutes(
       for (const ordinaryRuntime of workspaceRegistry.list()) {
         const ordinaryService =
           createWorkspaceRuntimeSessionService(ordinaryRuntime);
-        if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
+        let collides = false;
+        try {
+          const persistedSessionId =
+            await ordinaryService.findSessionIdIgnoringCase(sessionId);
+          collides =
+            persistedSessionId !== undefined &&
+            (await ordinaryService.sessionExistsInAnyState(persistedSessionId));
+        } catch (error) {
+          if (
+            error instanceof SessionIdCaseConflictError &&
+            error.reason === 'unreadable_transcript'
+          ) {
+            continue;
+          }
+          // Other failed scans cannot prove that the internal owner is unique.
+          collides = true;
+        }
+        if (collides) {
           ordinaryCollisions.push(ordinaryRuntime);
         }
       }
