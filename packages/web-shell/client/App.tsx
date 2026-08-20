@@ -7262,7 +7262,7 @@ export function App({
           ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
-        sessionCatalogController.turnCompleted(workspaceCwd);
+        sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
         if (!connectionRef.current.displayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
