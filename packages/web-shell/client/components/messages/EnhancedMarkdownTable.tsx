@@ -21,7 +21,10 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { useInteractionBlocker } from '../../interactionBlockContext';
-import { writeClipboardText } from '../../utils/clipboard';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { Button } from '../ui/button';
 import { Checkbox } from '../ui/checkbox';
 import {
@@ -2123,9 +2126,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const selectionRowBounds = useMemo(
@@ -2402,9 +2403,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const copyVisibleTable = () => {
@@ -2428,9 +2427,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {

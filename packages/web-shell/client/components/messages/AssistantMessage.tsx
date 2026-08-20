@@ -6,7 +6,10 @@ import {
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
-import { writeClipboardText } from '../../utils/clipboard';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -63,9 +66,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   }, [content]);
   return (
     <div className={styles.message}>

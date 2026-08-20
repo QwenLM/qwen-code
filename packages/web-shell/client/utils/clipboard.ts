@@ -41,6 +41,16 @@ export async function writeClipboardText(text: string): Promise<void> {
   );
 }
 
+/**
+ * Single reporter for clipboard write failures. Call sites that only want to
+ * log a failed copy (no user-visible error surface) attach
+ * `.catch(warnClipboardWriteFailure)` so the prefix/format lives in one place;
+ * callers that surface the failure in the UI keep their own handling.
+ */
+export function warnClipboardWriteFailure(error: unknown): void {
+  console.warn('[web-shell] clipboard write failed:', error);
+}
+
 function copyViaExecCommand(text: string): boolean {
   if (typeof document === 'undefined') {
     return false;

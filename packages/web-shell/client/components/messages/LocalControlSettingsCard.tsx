@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { CopyIcon, WifiIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
-import { writeClipboardText } from '../../utils/clipboard';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import {
@@ -248,8 +251,8 @@ export function LocalControlSettingsCard() {
               variant="outline"
               size="sm"
               onClick={() =>
-                void writeClipboardText(status.url!).catch((error: unknown) =>
-                  console.warn('[web-shell] clipboard write failed:', error),
+                void writeClipboardText(status.url!).catch(
+                  warnClipboardWriteFailure,
                 )
               }
             >

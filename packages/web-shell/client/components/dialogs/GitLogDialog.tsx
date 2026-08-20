@@ -19,7 +19,10 @@ import type {
   DaemonGitCommitDetail,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { writeClipboardText } from '../../utils/clipboard';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { timeAgo } from '../../utils/timeAgo';
 import { DialogShell } from './DialogShell';
 import styles from './GitLogDialog.module.css';
@@ -66,9 +69,7 @@ function CommitRow({
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   useEffect(() => {

@@ -1,5 +1,8 @@
 import { useCallback, useState, type ReactNode } from 'react';
-import { writeClipboardText } from '../utils/clipboard';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../utils/clipboard';
 import styles from './MessageTimestamp.module.css';
 
 interface MessageTimestampProps {
@@ -34,9 +37,7 @@ export function MessageTimestamp({
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   }, [copyText]);
   if (timestamp === undefined && !copyText && !toolGroupSpacing) {
     return <>{children}</>;
