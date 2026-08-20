@@ -419,9 +419,12 @@ function VirtualizedList<T>(
   useLayoutEffect(() => {
     const contentPreviouslyFit =
       prevTotalHeight.current <= prevContainerHeight.current;
+    const prevMaxScroll = prevTotalHeight.current - prevContainerHeight.current;
+    // The -1 tolerance must not span the whole scroll range: a viewport
+    // parked at the TOP of a one-row range would otherwise read as "at the
+    // bottom pixels" and yank the first growth to END (#9305 review R11-4).
     const wasScrolledToBottomPixels =
-      prevScrollTop.current >=
-      prevTotalHeight.current - prevContainerHeight.current - 1;
+      prevMaxScroll > 1 && prevScrollTop.current >= prevMaxScroll - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
     // Fitting alone is not a bottom signal for re-sticking: a top-anchored
@@ -460,9 +463,22 @@ function VirtualizedList<T>(
       shouldAutoScroll &&
       // The clamp-parked position is content-driven, not the user being at
       // the bottom, so growth must not auto-follow from it either (#9305
-      // review R6-2).
-      ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
-        (isStickingToBottom && containerChanged))
+      // review R6-2) — except growth that crosses the fit boundary: while
+      // the content fit, the user could see everything, so follow must come
+      // back once it overflows instead of every new message rendering below
+      // the fold (#9305 review R11-6).
+      ((listGrew &&
+        (isStickingToBottom ||
+          (wasAtBottom &&
+            (!clampParked ||
+              (contentPreviouslyFit &&
+                totalHeight > scrollableContainerHeight))))) ||
+        // A shrink landing in the same render must reach the drop/re-anchor
+        // branch below, not be preempted here on the stale render-time
+        // sticking flag (#9305 review R11-1).
+        (isStickingToBottom &&
+          containerChanged &&
+          data.length >= prevDataLength.current))
     ) {
       const newIndex = data.length > 0 ? data.length - 1 : 0;
       if (
