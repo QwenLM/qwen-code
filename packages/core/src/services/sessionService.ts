@@ -793,8 +793,22 @@ export class SessionService {
   async findSessionIdIgnoringCase(
     sessionId: string,
   ): Promise<string | undefined> {
-    const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
-    const candidates = new Map<string, Set<SessionArchiveState>>();
+    return (await this.findSessionIdsIgnoringCase([sessionId])).get(sessionId);
+  }
+
+  /** Resolves several case-insensitive IDs with one scan of each state. */
+  async findSessionIdsIgnoringCase(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, string | undefined>> {
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    if (uniqueSessionIds.length === 0) return new Map();
+    const expectedFileNames = new Set(
+      uniqueSessionIds.map((sessionId) => `${sessionId}.jsonl`.toLowerCase()),
+    );
+    const candidatesByFileName = new Map<
+      string,
+      Map<string, Set<SessionArchiveState>>
+    >();
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
@@ -804,73 +818,104 @@ export class SessionService {
         throw error;
       }
       for (const fileName of fileNames) {
-        if (fileName.toLowerCase() !== expectedFileName) continue;
+        const expectedFileName = fileName.toLowerCase();
+        if (!expectedFileNames.has(expectedFileName)) continue;
         // `getSessionLocation` classifies only pattern-matching names, so a
         // name it would reject (agent-suffixed ids) must not be enumerated
         // here either — otherwise it reads back as occupied-but-unreadable.
         if (!SESSION_FILE_PATTERN.test(fileName)) continue;
         const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
+        const candidates =
+          candidatesByFileName.get(expectedFileName) ?? new Map();
         const states = candidates.get(candidateSessionId) ?? new Set();
         states.add(state);
         candidates.set(candidateSessionId, states);
+        candidatesByFileName.set(expectedFileName, candidates);
       }
     }
-    // Conflict decisions are content-based, not filename-based: a file whose
-    // head recovers no records (crash-mid-append tear, foreign project) still
-    // occupies the id, but does not make a loadable session conflict with one.
-    const readable: Array<{
-      candidateSessionId: string;
-      state: SessionArchiveState;
-    }> = [];
-    for (const candidateSessionId of candidates.keys()) {
-      const location = await this.getSessionLocation(candidateSessionId);
-      if (location !== undefined) {
-        readable.push({
-          candidateSessionId,
-          // Loads prefer the active copy when both states are readable.
-          state: location === 'conflict' ? 'active' : location,
-        });
-      }
-    }
-    if (readable.length === 1) return readable[0].candidateSessionId;
-    if (readable.length > 1) {
-      // On a case-insensitive filesystem every spelling opens the same physical
-      // transcript, so several spellings can each report a readable location
-      // while only one file exists. Collapse those aliases before calling it a
-      // conflict.
-      const aliased = this.resolveAliasedReadableCandidate(
-        readable,
-        candidates,
-      );
-      if (aliased !== undefined) return aliased;
-      throw new SessionIdCaseConflictError(sessionId);
-    }
-    // No candidate recovered records. A transcript under a *different* spelling
-    // still occupies the id, because minting the requested spelling beside it
-    // would create the case-only twin that makes both permanently
-    // unrestorable. The requested spelling's own file is a twin of nothing, so
-    // it never counts as occupancy: that is how a first run which crashed
-    // before its first record resumes its own 0-byte transcript, and it keeps
-    // this resolver consistent with `getSessionLocation`, which already calls
-    // that file nonexistent. Anything that raced away is genuinely absent.
-    let occupyingSpelling: string | undefined;
-    for (const [candidateSessionId, states] of candidates) {
-      if (candidateSessionId === sessionId) continue;
-      for (const state of states) {
-        if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
-          occupyingSpelling = candidateSessionId;
-          break;
+
+    const locations = new Map<
+      string,
+      ReturnType<SessionService['getSessionLocation']>
+    >();
+    const resolve = async (sessionId: string): Promise<string | undefined> => {
+      const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+      const candidates =
+        candidatesByFileName.get(expectedFileName) ??
+        new Map<string, Set<SessionArchiveState>>();
+      // Conflict decisions are content-based, not filename-based: a file whose
+      // head recovers no records (crash-mid-append tear, foreign project) still
+      // occupies the id, but does not make a loadable session conflict with one.
+      const readable: Array<{
+        candidateSessionId: string;
+        state: SessionArchiveState;
+      }> = [];
+      for (const candidateSessionId of candidates.keys()) {
+        let location = locations.get(candidateSessionId);
+        if (!location) {
+          location = this.getSessionLocation(candidateSessionId);
+          locations.set(candidateSessionId, location);
+        }
+        const resolvedLocation = await location;
+        if (resolvedLocation !== undefined) {
+          readable.push({
+            candidateSessionId,
+            // Loads prefer the active copy when both states are readable.
+            state:
+              resolvedLocation === 'conflict' ? 'active' : resolvedLocation,
+          });
         }
       }
-      if (occupyingSpelling !== undefined) break;
-    }
-    if (occupyingSpelling === undefined) return undefined;
-    throw new SessionIdCaseConflictError(
-      sessionId,
-      // Naming the single enumerated spelling is actionable; with several, no
-      // one of them is the answer.
-      candidates.size === 1 ? occupyingSpelling : undefined,
-      'unreadable_transcript',
+      if (readable.length === 1) return readable[0].candidateSessionId;
+      if (readable.length > 1) {
+        // On a case-insensitive filesystem every spelling opens the same physical
+        // transcript, so several spellings can each report a readable location
+        // while only one file exists. Collapse those aliases before calling it a
+        // conflict.
+        const aliased = this.resolveAliasedReadableCandidate(
+          readable,
+          candidates,
+        );
+        if (aliased !== undefined) return aliased;
+        throw new SessionIdCaseConflictError(sessionId);
+      }
+      // No candidate recovered records. A transcript under a *different* spelling
+      // still occupies the id, because minting the requested spelling beside it
+      // would create the case-only twin that makes both permanently
+      // unrestorable. The requested spelling's own file is a twin of nothing, so
+      // it never counts as occupancy: that is how a first run which crashed
+      // before its first record resumes its own 0-byte transcript, and it keeps
+      // this resolver consistent with `getSessionLocation`, which already calls
+      // that file nonexistent. Anything that raced away is genuinely absent.
+      let occupyingSpelling: string | undefined;
+      for (const [candidateSessionId, states] of candidates) {
+        if (candidateSessionId === sessionId) continue;
+        for (const state of states) {
+          if (
+            fs.existsSync(this.getSessionFilePath(candidateSessionId, state))
+          ) {
+            occupyingSpelling = candidateSessionId;
+            break;
+          }
+        }
+        if (occupyingSpelling !== undefined) break;
+      }
+      if (occupyingSpelling === undefined) return undefined;
+      throw new SessionIdCaseConflictError(
+        sessionId,
+        // Naming the single enumerated spelling is actionable; with several, no
+        // one of them is the answer.
+        candidates.size === 1 ? occupyingSpelling : undefined,
+        'unreadable_transcript',
+      );
+    };
+
+    return new Map(
+      await Promise.all(
+        uniqueSessionIds.map(
+          async (sessionId) => [sessionId, await resolve(sessionId)] as const,
+        ),
+      ),
     );
   }
 

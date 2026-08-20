@@ -34,6 +34,9 @@ const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
 const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
+const sessionIdBatchLookups = vi.hoisted(
+  () => new Array<{ cwd: string; sessionIds: string[] }>(),
+);
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -64,7 +67,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         return (await this.sessionExists(sessionId)) ? 'active' : undefined;
       }
 
-      async findSessionIdIgnoringCase(sessionId: string) {
+      private resolveSessionIdIgnoringCase(sessionId: string) {
         const matches = [...persistedSessions.keys()].filter(
           (candidate) =>
             candidate.toLowerCase() === sessionId.toLowerCase() &&
@@ -75,6 +78,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           throw new actual.SessionIdCaseConflictError(sessionId);
         }
         return matches[0];
+      }
+
+      async findSessionIdIgnoringCase(sessionId: string) {
+        return this.resolveSessionIdIgnoringCase(sessionId);
+      }
+
+      async findSessionIdsIgnoringCase(sessionIds: readonly string[]) {
+        sessionIdBatchLookups.push({
+          cwd: this.cwd,
+          sessionIds: [...sessionIds],
+        });
+        return new Map(
+          sessionIds.map((sessionId) => [
+            sessionId,
+            this.resolveSessionIdIgnoringCase(sessionId),
+          ]),
+        );
       }
 
       readParentSessionId(sessionId: string) {
@@ -360,6 +380,7 @@ beforeEach(() => {
   sessionSources.clear();
   removeSessionMock.mockClear();
   removeSessionRuntimeBaseDirs.length = 0;
+  sessionIdBatchLookups.length = 0;
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
     sessions: [],
@@ -776,6 +797,97 @@ describe('LiveTaskService', () => {
         (poll) => poll.thread.id,
       ),
     ).toEqual(['task-1', 'task-2']);
+  });
+
+  it('builds one persisted id index per runtime for each wait phase', async () => {
+    const harness = makeHarness();
+    const sessionIds = Array.from(
+      { length: 8 },
+      (_, index) =>
+        `550e8400-e29b-41d4-a716-446655440${String(index + 10).padStart(3, '0')}`,
+    );
+    const summaries = sessionIds.map(
+      (sessionId): BridgeSessionSummary => ({
+        sessionId,
+        workspaceCwd: '/project',
+        createdAt: '2026-07-30T00:00:00.000Z',
+        updatedAt: '2026-07-30T00:00:03.000Z',
+        displayName: sessionId,
+        clientCount: 0,
+        hasActivePrompt: false,
+      }),
+    );
+    for (const sessionId of sessionIds) {
+      persistedSessions.set(sessionId, persisted(sessionId));
+      persistedSessionOwners.set(sessionId, '/project');
+    }
+    listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: summaries });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: sessionIds.map((threadId) => ({ threadId })),
+        timeoutMs: 0,
+      },
+    });
+
+    expect(
+      (result['polls'] as Array<{ thread: { id: string } }>).map(
+        (poll) => poll.thread.id,
+      ),
+    ).toEqual(sessionIds);
+    expect(sessionIdBatchLookups).toEqual([
+      { cwd: '/conversations', sessionIds },
+      { cwd: '/project', sessionIds },
+      { cwd: '/conversations', sessionIds },
+      { cwd: '/project', sessionIds },
+    ]);
+  });
+
+  it('preserves per-target results when a batch contains a case conflict', async () => {
+    const harness = makeHarness();
+    const validSessionId = '550e8400-e29b-41d4-a716-446655440020';
+    const conflictSessionId = '550e8400-e29b-41d4-a716-446655440021';
+    const conflictTwin = conflictSessionId.toUpperCase();
+    const summary: BridgeSessionSummary = {
+      sessionId: validSessionId,
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:03.000Z',
+      displayName: validSessionId,
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    for (const sessionId of [validSessionId, conflictSessionId, conflictTwin]) {
+      persistedSessions.set(sessionId, persisted(sessionId));
+      persistedSessionOwners.set(sessionId, '/project');
+    }
+    listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [
+          { threadId: validSessionId },
+          { threadId: conflictSessionId },
+        ],
+        timeoutMs: 0,
+      },
+    });
+
+    expect(result['polls']).toEqual([
+      expect.objectContaining({
+        thread: expect.objectContaining({ id: validSessionId }),
+      }),
+    ]);
+    expect(result['errors']).toEqual([
+      expect.objectContaining({
+        threadId: conflictSessionId,
+        message: expect.stringContaining('Multiple persisted sessions match'),
+      }),
+    ]);
   });
 
   it('suppresses previously delivered text and markers for an unchanged cursor', async () => {

@@ -13,7 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
@@ -960,14 +960,24 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
   it('updates persisted organization in the selected workspace only', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440180';
-    await writeStoredSession(sessionId, '/ws-b');
+    const persistedSessionId = sessionId.toUpperCase();
+    await writeStoredSession(persistedSessionId, '/ws-b');
+    const sessionExistsInAnyState =
+      SessionService.prototype.sessionExistsInAnyState;
+    const existsSpy = vi
+      .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
+      .mockImplementation(function (this: SessionService, candidateSessionId) {
+        return candidateSessionId === sessionId
+          ? Promise.resolve(false)
+          : sessionExistsInAnyState.call(this, candidateSessionId);
+      });
 
     const response = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 2,
       method: '_qwen/session/update_organization',
-      params: { sessionId, isPinned: true },
-    });
+      params: { sessionId: persistedSessionId, isPinned: true },
+    }).finally(() => existsSpy.mockRestore());
 
     expect(response['result']).toMatchObject({ sessionId, isPinned: true });
     const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
@@ -977,7 +987,12 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       params: { view: 'organized', group: 'pinned' },
     });
     expect(listed['result']).toMatchObject({
-      sessions: [expect.objectContaining({ sessionId, isPinned: true })],
+      sessions: [
+        expect.objectContaining({
+          sessionId: persistedSessionId,
+          isPinned: true,
+        }),
+      ],
     });
 
     const legacy = await sendWsRequest('/acp', {
@@ -992,7 +1007,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       await createSessionOrganizationService('/ws-b').readSnapshot();
     const primarySnapshot =
       await createSessionOrganizationService('/ws').readSnapshot();
-    expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
+    expect(secondarySnapshot.sessions.get(persistedSessionId)).toMatchObject({
       isPinned: true,
     });
     expect(primarySnapshot.sessions.has(sessionId)).toBe(false);

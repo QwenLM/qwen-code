@@ -754,16 +754,32 @@ function nextEmittedSessionIds(options: {
   return kept.map((entry) => entry.sessionId);
 }
 
+type ListedSessionOrganization = {
+  groupId: string | null;
+  color?: SessionGroupPresetColor | null;
+  isPinned: boolean;
+  pinnedAt?: string;
+  updatedAt: string;
+};
+
+function organizationForListedSession(
+  sessions: ReadonlyMap<string, ListedSessionOrganization>,
+  sessionId: string,
+  persistedSessionIdByCanonicalId: ReadonlyMap<string, string | undefined>,
+): ListedSessionOrganization | undefined {
+  const canonicalId = normalizeSessionIdForLookup(sessionId);
+  if (persistedSessionIdByCanonicalId.get(canonicalId) === sessionId) {
+    const exact = sessions.get(sessionId);
+    const canonical = sessions.get(canonicalId);
+    if (!exact || !canonical) return exact ?? canonical;
+    return exact.updatedAt >= canonical.updatedAt ? exact : canonical;
+  }
+  return sessions.get(sessionId);
+}
+
 function applyOrganization(
   session: BridgeSessionSummary,
-  organization:
-    | {
-        groupId: string | null;
-        color?: SessionGroupPresetColor | null;
-        isPinned: boolean;
-        pinnedAt?: string;
-      }
-    | undefined,
+  organization: ListedSessionOrganization | undefined,
 ): BridgeSessionSummary {
   return {
     ...session,
@@ -827,18 +843,22 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+    persisted.sessions.map((session) => session.sessionId),
+  );
   for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
       applyOrganization(
         clonePersistedSummary(session),
-        snapshot.sessions.get(session.sessionId),
+        organizationForListedSession(
+          snapshot.sessions,
+          session.sessionId,
+          persistedSessionIdByCanonicalId,
+        ),
       ),
     );
   }
-  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
-    bySessionId.keys(),
-  );
   // Activity floors: the key a row falls back to once its live entry is gone.
   const persistedTimeById = new Map(
     persisted.sessions.map((session) => [
@@ -860,7 +880,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
         const listedSessionId = persistedSessionId ?? live.sessionId;
         liveSessionIds.add(listedSessionId);
         const existing = bySessionId.get(listedSessionId);
-        const organization = snapshot.sessions.get(listedSessionId);
+        const organization = organizationForListedSession(
+          snapshot.sessions,
+          listedSessionId,
+          persistedSessionIdByCanonicalId,
+        );
         if (existing) {
           // Merged on every page, not just the first: the page-1 cursor is
           // encoded from merged activity keys, so a later page that keyed the

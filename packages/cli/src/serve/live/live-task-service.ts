@@ -62,6 +62,11 @@ interface WaitTarget {
   afterCursor?: string;
 }
 
+type PersistedSessionIdLookup = ReadonlyMap<
+  WorkspaceRuntime,
+  ReadonlyMap<string, string | undefined>
+>;
+
 interface WaitCursor {
   threadId: string;
   eventEpoch?: string;
@@ -703,13 +708,16 @@ export class LiveTaskService {
       typeof args['timeoutMs'] === 'number'
         ? args['timeoutMs']
         : DEFAULT_WAIT_TIMEOUT_MS;
+    const initialSessionIds = await this.buildPersistedSessionIdLookup(
+      targets.map((target) => target.threadId),
+    );
     const resolved = await Promise.all(
       targets.map(async (target) => {
         try {
           return {
             ok: true as const,
             target,
-            task: await this.locateTask(target.threadId),
+            task: await this.locateTask(target.threadId, initialSessionIds),
           };
         } catch (error) {
           return {
@@ -775,10 +783,15 @@ export class LiveTaskService {
     } else if (!wake && timeoutMs === 0 && located.length > 0) {
       timedOut = true;
     }
+    const refreshedSessionIds = await this.buildPersistedSessionIdLookup(
+      located.map(({ target }) => target.threadId),
+    );
     const refreshed = await Promise.all(
       located.map(async ({ target, task }) => ({
         target,
-        task: await this.locateTask(target.threadId).catch(() => task),
+        task: await this.locateTask(target.threadId, refreshedSessionIds).catch(
+          () => task,
+        ),
       })),
     );
     return {
@@ -1138,7 +1151,66 @@ export class LiveTaskService {
     }
   }
 
-  private async locateTask(threadId: string): Promise<LocatedTask> {
+  private async buildPersistedSessionIdLookup(
+    threadIds: readonly string[],
+  ): Promise<PersistedSessionIdLookup> {
+    const allRuntimes =
+      this.options.workspaceRegistry.listAll?.() ??
+      this.options.workspaceRegistry.list();
+    const targetsByRuntime = new Map<WorkspaceRuntime, Set<string>>();
+    const addTarget = (runtime: WorkspaceRuntime, threadId: string): void => {
+      const existing = targetsByRuntime.get(runtime);
+      if (existing) {
+        existing.add(threadId);
+      } else {
+        targetsByRuntime.set(runtime, new Set([threadId]));
+      }
+    };
+    for (const threadId of threadIds) {
+      let live: ReturnType<WorkspaceRegistry['resolveLiveSessionOwner']>;
+      try {
+        live = this.options.workspaceRegistry.resolveLiveSessionOwner(
+          normalizeSessionIdForLookup(threadId),
+        );
+      } catch {
+        continue;
+      }
+      if (live.kind === 'found') {
+        addTarget(live.runtime, threadId);
+      } else if (live.kind === 'not_found') {
+        for (const runtime of allRuntimes) addTarget(runtime, threadId);
+      }
+    }
+
+    const batches = await Promise.all(
+      [...targetsByRuntime].map(async ([runtime, threadIds]) => {
+        try {
+          const sessionIds = await createWorkspaceRuntimeSessionService(
+            runtime,
+          ).findSessionIdsIgnoringCase([...threadIds]);
+          return { runtime, sessionIds };
+        } catch {
+          // Preserve per-target errors by letting locateTask retry this runtime.
+          return { runtime };
+        }
+      }),
+    );
+    const lookup = new Map<
+      WorkspaceRuntime,
+      ReadonlyMap<string, string | undefined>
+    >();
+    for (const batch of batches) {
+      if (batch.sessionIds) {
+        lookup.set(batch.runtime, batch.sessionIds);
+      }
+    }
+    return lookup;
+  }
+
+  private async locateTask(
+    threadId: string,
+    persistedSessionIds?: PersistedSessionIdLookup,
+  ): Promise<LocatedTask> {
     const liveSessionId = normalizeSessionIdForLookup(threadId);
     const live =
       this.options.workspaceRegistry.resolveLiveSessionOwner(liveSessionId);
@@ -1152,11 +1224,11 @@ export class LiveTaskService {
       runtime: WorkspaceRuntime,
     ): Promise<string | undefined> => {
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const candidate = await service.findSessionIdIgnoringCase(threadId);
-      if (
-        candidate !== undefined &&
-        (await service.sessionExists(candidate))
-      ) {
+      const prefetched = persistedSessionIds?.get(runtime);
+      const candidate = prefetched?.has(threadId)
+        ? prefetched.get(threadId)
+        : await service.findSessionIdIgnoringCase(threadId);
+      if (candidate !== undefined && (await service.sessionExists(candidate))) {
         return candidate;
       }
       return (await service.sessionExists(threadId)) ? threadId : undefined;

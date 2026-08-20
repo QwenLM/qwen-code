@@ -30,6 +30,7 @@ import {
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
+  type SessionService,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
@@ -1879,6 +1880,17 @@ export function registerSessionRoutes(
     }
     const matches = new Set<WorkspaceRuntime>();
     if (owner.kind === 'found') matches.add(owner.runtime);
+    const persistedSessionIdInRuntime = async (
+      service: SessionService,
+    ): Promise<string | undefined> => {
+      if (await service.sessionExistsInAnyState(sessionId)) return sessionId;
+      if (owner.kind !== 'not_found') return undefined;
+      const candidate = await service.findSessionIdIgnoringCase(sessionId);
+      return candidate !== undefined &&
+        (await service.sessionExistsInAnyState(candidate))
+        ? candidate
+        : undefined;
+    };
     for (const entry of workspaceRegistry.listAllEntries()) {
       const generation = entry.current;
       if (!entry.internal || !generation) continue;
@@ -1887,13 +1899,13 @@ export function registerSessionRoutes(
       }
       const runtime = generation.runtime;
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const exists = await service.sessionExistsInAnyState(sessionId);
+      const persistedSessionId = await persistedSessionIdInRuntime(service);
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
       }
-      if (!exists) continue;
+      if (persistedSessionId === undefined) continue;
       const metadata = await readLoadableLiveConversationMetadata(
-        sessionId,
+        persistedSessionId,
         service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
@@ -1905,7 +1917,7 @@ export function registerSessionRoutes(
     if (owner.kind !== 'found' || isInternalWorkspaceRuntime(owner.runtime)) {
       for (const runtime of workspaceRegistry.list()) {
         const service = createWorkspaceRuntimeSessionService(runtime);
-        if (await service.sessionExistsInAnyState(sessionId)) {
+        if ((await persistedSessionIdInRuntime(service)) !== undefined) {
           matches.add(runtime);
         }
       }
@@ -5368,6 +5380,7 @@ export function registerSessionRoutes(
             // metadata. It intentionally applies to persisted and archived sessions.
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
+            let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -5376,6 +5389,19 @@ export function registerSessionRoutes(
                 exists = summary.workspaceCwd === runtime.workspaceCwd;
               } catch {
                 exists = false;
+              }
+            }
+            if (!exists) {
+              const persistedSessionId =
+                await sessionService.findSessionIdIgnoringCase(sessionId);
+              if (
+                persistedSessionId !== undefined &&
+                (await sessionService.sessionExistsInAnyState(
+                  persistedSessionId,
+                ))
+              ) {
+                organizationSessionId = persistedSessionId;
+                exists = true;
               }
             }
             if (!exists) {
@@ -5429,7 +5455,7 @@ export function registerSessionRoutes(
 
             const organization = await createSessionOrganizationService(
               runtime.workspaceCwd,
-            ).updateSessionOrganization(sessionId, {
+            ).updateSessionOrganization(organizationSessionId, {
               ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
               ...(rawGroupId !== undefined
                 ? { groupId: rawGroupId as string | null }

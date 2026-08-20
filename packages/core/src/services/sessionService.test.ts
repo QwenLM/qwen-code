@@ -2652,6 +2652,30 @@ describe('SessionService', () => {
       expect(readdirSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('scans both state catalogs once when resolving a batch', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${legacySessionId}.jsonl`,
+          `${sessionIdB}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      const getLocation = vi
+        .spyOn(sessionService, 'getSessionLocation')
+        .mockResolvedValue('active');
+
+      await expect(
+        sessionService.findSessionIdsIgnoringCase([sessionIdA, sessionIdB]),
+      ).resolves.toEqual(
+        new Map([
+          [sessionIdA, legacySessionId],
+          [sessionIdB, sessionIdB],
+        ]),
+      );
+      expect(readdirSpy).toHaveBeenCalledTimes(2);
+      expect(getLocation).toHaveBeenCalledTimes(2);
+    });
+
     it('rejects an exact spelling with a readable case twin', async () => {
       const legacySessionId = sessionIdA.toUpperCase();
       readdirSpy

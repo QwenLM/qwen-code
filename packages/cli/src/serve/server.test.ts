@@ -14954,6 +14954,7 @@ describe('createServeApp', () => {
       async (_name, options) => {
         const liveSessionId = '550e8400-e29b-41d4-a716-446655440000';
         const persistedSessionId = liveSessionId.toUpperCase();
+        let groupId: string | undefined;
         await writeStoredSession({
           sessionId: persistedSessionId,
           cwd: WS_BOUND,
@@ -14962,6 +14963,21 @@ describe('createServeApp', () => {
           mtime: new Date('2026-05-17T12:11:00.000Z'),
           sourceType: 'default',
         });
+        if (_name === 'organized') {
+          const organizationService = new qwenCore.SessionOrganizationService(
+            WS_BOUND,
+          );
+          const group = await organizationService.createGroup({
+            name: 'Mixed case',
+            color: 'blue',
+          });
+          groupId = group.id;
+          await organizationService.updateSessionOrganization(liveSessionId, {
+            isPinned: true,
+            groupId,
+            color: 'purple',
+          });
+        }
         const bridge = fakeBridge({
           listImpl: () => [
             {
@@ -14988,10 +15004,72 @@ describe('createServeApp', () => {
             displayName: 'Live mixed-case task',
             clientCount: 2,
             hasActivePrompt: true,
+            ...(_name === 'organized'
+              ? { isPinned: true, groupId, color: 'purple' }
+              : {}),
           }),
         ]);
       },
     );
+
+    it('updates organization through a mixed-case persisted identity after the live entry is gone', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440009';
+      const persistedSessionId = sessionId.toUpperCase();
+      await writeStoredSession({
+        sessionId: persistedSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'cold mixed-case task',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+      await new qwenCore.SessionOrganizationService(
+        WS_BOUND,
+      ).updateSessionOrganization(sessionId, {
+        isPinned: false,
+        color: 'red',
+      });
+      const sessionExistsInAnyState =
+        qwenCore.SessionService.prototype.sessionExistsInAnyState;
+      const existsSpy = vi
+        .spyOn(qwenCore.SessionService.prototype, 'sessionExistsInAnyState')
+        .mockImplementation(function (candidateSessionId) {
+          return candidateSessionId === sessionId
+            ? Promise.resolve(false)
+            : sessionExistsInAnyState.call(this, candidateSessionId);
+        });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+      );
+      const auth = (req: request.Test): request.Test =>
+        req
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+      try {
+        const update = await auth(
+          request(app).patch(`/session/${persistedSessionId}/organization`),
+        ).send({ isPinned: true, color: 'purple' });
+        expect(update.status).toBe(200);
+
+        const organized = await auth(
+          request(app).get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=pinned`,
+          ),
+        );
+        expect(organized.status).toBe(200);
+        expect(organized.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: persistedSessionId,
+            isPinned: true,
+            color: 'purple',
+          }),
+        ]);
+      } finally {
+        existsSpy.mockRestore();
+      }
+    });
 
     it('does not repeat a mixed-case persisted row across default list pages', async () => {
       const liveSessionId = '550e8400-e29b-41d4-a716-446655440010';
@@ -17589,10 +17667,24 @@ describe('createServeApp', () => {
       ).send({ name: 'Frontend', color: 'blue' });
       expect(groupRes.status).toBe(201);
 
-      const organizationRes = await auth(
-        request(app).patch(`/session/${liveId}/organization`),
-      ).send({ isPinned: true, groupId: groupRes.body.group.id });
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockRejectedValue(
+          Object.assign(new Error('disk I/O failed'), {
+            code: 'EIO',
+          }),
+        );
+      const organizationRes = await (async () => {
+        try {
+          return await auth(
+            request(app).patch(`/session/${liveId}/organization`),
+          ).send({ isPinned: true, groupId: groupRes.body.group.id });
+        } finally {
+          findSessionId.mockRestore();
+        }
+      })();
       expect(organizationRes.status).toBe(200);
+      expect(findSessionId).not.toHaveBeenCalled();
 
       const organized = await auth(
         request(app).get(

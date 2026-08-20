@@ -2935,6 +2935,7 @@ export class AcpDispatcher {
           }
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService = new SessionService(this.boundWorkspace);
+            let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -2946,11 +2947,24 @@ export class AcpDispatcher {
               }
             }
             if (!exists) {
+              const persistedSessionId =
+                await sessionService.findSessionIdIgnoringCase(sessionId);
+              if (
+                persistedSessionId !== undefined &&
+                (await sessionService.sessionExistsInAnyState(
+                  persistedSessionId,
+                ))
+              ) {
+                organizationSessionId = persistedSessionId;
+                exists = true;
+              }
+            }
+            if (!exists) {
               throw new AcpParamError(`Session not found: ${sessionId}`);
             }
             const organization = await createSessionOrganizationService(
               this.boundWorkspace,
-            ).updateSessionOrganization(sessionId, {
+            ).updateSessionOrganization(organizationSessionId, {
               ...(typeof params['isPinned'] === 'boolean'
                 ? { isPinned: params['isPinned'] }
                 : {}),
