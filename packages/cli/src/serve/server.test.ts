@@ -15022,10 +15022,16 @@ describe('createServeApp', () => {
         prompt: 'cold mixed-case task',
         mtime: new Date('2026-05-17T12:11:00.000Z'),
       });
-      await new qwenCore.SessionOrganizationService(
+      const organizationService = new qwenCore.SessionOrganizationService(
         WS_BOUND,
-      ).updateSessionOrganization(sessionId, {
+      );
+      const group = await organizationService.createGroup({
+        name: 'Legacy mixed-case',
+        color: 'blue',
+      });
+      await organizationService.updateSessionOrganization(sessionId, {
         isPinned: false,
+        groupId: group.id,
         color: 'red',
       });
       const sessionExistsInAnyState =
@@ -15050,8 +15056,13 @@ describe('createServeApp', () => {
       try {
         const update = await auth(
           request(app).patch(`/session/${persistedSessionId}/organization`),
-        ).send({ isPinned: true, color: 'purple' });
+        ).send({ isPinned: true });
         expect(update.status).toBe(200);
+        expect(update.body).toMatchObject({
+          isPinned: true,
+          groupId: group.id,
+          color: 'red',
+        });
 
         const organized = await auth(
           request(app).get(
@@ -15063,9 +15074,17 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: persistedSessionId,
             isPinned: true,
-            color: 'purple',
+            groupId: group.id,
+            color: 'red',
           }),
         ]);
+        const snapshot = await organizationService.readSnapshot();
+        expect(snapshot.sessions.has(sessionId)).toBe(false);
+        expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
+          isPinned: true,
+          groupId: group.id,
+          color: 'red',
+        });
       } finally {
         existsSpy.mockRestore();
       }

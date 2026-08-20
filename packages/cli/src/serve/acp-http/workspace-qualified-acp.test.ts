@@ -962,6 +962,15 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440180';
     const persistedSessionId = sessionId.toUpperCase();
     await writeStoredSession(persistedSessionId, '/ws-b');
+    const organizationService = createSessionOrganizationService('/ws-b');
+    const group = await organizationService.createGroup({
+      name: 'Legacy mixed-case',
+      color: 'blue',
+    });
+    await organizationService.updateSessionOrganization(sessionId, {
+      groupId: group.id,
+      color: 'purple',
+    });
     const sessionExistsInAnyState =
       SessionService.prototype.sessionExistsInAnyState;
     const existsSpy = vi
@@ -979,7 +988,12 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       params: { sessionId: persistedSessionId, isPinned: true },
     }).finally(() => existsSpy.mockRestore());
 
-    expect(response['result']).toMatchObject({ sessionId, isPinned: true });
+    expect(response['result']).toMatchObject({
+      sessionId,
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
     const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 3,
@@ -991,6 +1005,8 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         expect.objectContaining({
           sessionId: persistedSessionId,
           isPinned: true,
+          groupId: group.id,
+          color: 'purple',
         }),
       ],
     });
@@ -1009,7 +1025,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       await createSessionOrganizationService('/ws').readSnapshot();
     expect(secondarySnapshot.sessions.get(persistedSessionId)).toMatchObject({
       isPinned: true,
+      groupId: group.id,
+      color: 'purple',
     });
+    expect(secondarySnapshot.sessions.has(sessionId)).toBe(false);
     expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
   });
 

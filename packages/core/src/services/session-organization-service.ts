@@ -370,6 +370,7 @@ export class SessionOrganizationService {
   async updateSessionOrganization(
     sessionId: string,
     input: UpdateSessionOrganizationInput,
+    aliasSessionId?: string,
   ): Promise<SessionOrganizationView> {
     const hasUpdate =
       input.groupId !== undefined ||
@@ -377,7 +378,15 @@ export class SessionOrganizationService {
       input.color !== undefined;
     return this.withStoreLock(async () => {
       const store = await this.readStore();
-      const current = viewOrganization(store.sessions[sessionId]);
+      const exact = viewOrganization(store.sessions[sessionId]);
+      const alias =
+        aliasSessionId !== undefined && aliasSessionId !== sessionId
+          ? viewOrganization(store.sessions[aliasSessionId])
+          : undefined;
+      const current =
+        alias !== undefined && alias.updatedAt > exact.updatedAt
+          ? alias
+          : exact;
       if (!hasUpdate) {
         return current;
       }
@@ -410,6 +419,9 @@ export class SessionOrganizationService {
       }
       current.updatedAt = now;
       store.sessions[sessionId] = serializeOrganization(current);
+      if (aliasSessionId !== undefined && aliasSessionId !== sessionId) {
+        delete store.sessions[aliasSessionId];
+      }
       await this.writeStore(store);
       return viewOrganization(store.sessions[sessionId]);
     });

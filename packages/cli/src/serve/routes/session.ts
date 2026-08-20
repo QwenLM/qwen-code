@@ -5455,15 +5455,19 @@ export function registerSessionRoutes(
 
             const organization = await createSessionOrganizationService(
               runtime.workspaceCwd,
-            ).updateSessionOrganization(organizationSessionId, {
-              ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
-              ...(rawGroupId !== undefined
-                ? { groupId: rawGroupId as string | null }
-                : {}),
-              ...(rawColor !== undefined
-                ? { color: rawColor as SessionGroupPresetColor | null }
-                : {}),
-            });
+            ).updateSessionOrganization(
+              organizationSessionId,
+              {
+                ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
+                ...(rawGroupId !== undefined
+                  ? { groupId: rawGroupId as string | null }
+                  : {}),
+                ...(rawColor !== undefined
+                  ? { color: rawColor as SessionGroupPresetColor | null }
+                  : {}),
+              },
+              sessionId,
+            );
             invalidateSessionListsAndMarkCatalog(runtime, [
               'active',
               'archived',

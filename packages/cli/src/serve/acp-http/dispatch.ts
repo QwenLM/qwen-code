@@ -2964,17 +2964,23 @@ export class AcpDispatcher {
             }
             const organization = await createSessionOrganizationService(
               this.boundWorkspace,
-            ).updateSessionOrganization(organizationSessionId, {
-              ...(typeof params['isPinned'] === 'boolean'
-                ? { isPinned: params['isPinned'] }
-                : {}),
-              ...('groupId' in params
-                ? { groupId: params['groupId'] as string | null }
-                : {}),
-              ...('color' in params
-                ? { color: params['color'] as SessionGroupPresetColor | null }
-                : {}),
-            });
+            ).updateSessionOrganization(
+              organizationSessionId,
+              {
+                ...(typeof params['isPinned'] === 'boolean'
+                  ? { isPinned: params['isPinned'] }
+                  : {}),
+                ...('groupId' in params
+                  ? { groupId: params['groupId'] as string | null }
+                  : {}),
+                ...('color' in params
+                  ? {
+                      color: params['color'] as SessionGroupPresetColor | null,
+                    }
+                  : {}),
+              },
+              sessionId,
+            );
             this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
             this.replyConn(conn, id, { sessionId, ...organization });
           });

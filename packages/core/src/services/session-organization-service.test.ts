@@ -336,6 +336,34 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('migrates an alias organization without dropping unchanged fields', async () => {
+    const persistedSessionId = sessionIdA.toUpperCase();
+    const group = await service.createGroup({ name: 'Legacy', color: 'blue' });
+    await service.updateSessionOrganization(sessionIdA, {
+      groupId: group.id,
+      color: 'purple',
+    });
+
+    const organization = await service.updateSessionOrganization(
+      persistedSessionId,
+      { isPinned: true },
+      sessionIdA,
+    );
+
+    expect(organization).toMatchObject({
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+    expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+  });
+
   it('treats an empty session organization update as a no-op', async () => {
     const pinned = await service.updateSessionOrganization(sessionIdA, {
       isPinned: true,

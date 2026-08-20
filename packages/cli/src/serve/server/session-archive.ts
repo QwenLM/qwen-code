@@ -551,8 +551,8 @@ export async function assertSessionLoadable(
   if (location === 'conflict') {
     // Both state copies are readable (a crash inside archiveSessions leaves
     // that behind). Loading reads the active copy — parity with the CLI
-    // resume path — so the session is loadable; mutations keep refusing via
-    // assertSessionArchived and the archive pipeline's own conflict guard.
+    // resume path — so the session is loadable; archive-state mutations keep
+    // refusing via assertSessionArchived and the archive pipeline's guard.
     return 'active';
   }
   return location;
