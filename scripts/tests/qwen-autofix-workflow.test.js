@@ -10290,6 +10290,7 @@ exit 1
       'Verify with a mutation probe before',
       'temporarily remove or negate the new guard or branch',
       'and confirm they FAIL; then restore it',
+      'write a test that pins it (or drop the guard)',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
