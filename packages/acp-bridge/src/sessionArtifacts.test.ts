@@ -2203,7 +2203,7 @@ describe('SessionArtifactStore', () => {
       }),
     ]);
     expect(
-      listed.artifacts[0]?.metadata?.expandedFromDirectory,
+      listed.artifacts[0]?.metadata?.['expandedFromDirectory'],
     ).toBeUndefined();
   });
 
