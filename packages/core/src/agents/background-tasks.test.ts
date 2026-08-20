@@ -2185,6 +2185,22 @@ describe('BackgroundTaskRegistry', () => {
       },
     );
 
+    it('groups explicit null and implicit top-level owners together', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('restored', { parentAgentId: null }));
+      registry.register(makeRegistration('spawned'));
+
+      registry.complete('spawned', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+    });
+
     it('counts a paused same-owner background agent as remaining', () => {
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
