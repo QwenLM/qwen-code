@@ -85,7 +85,13 @@ export function appendPromptLedgerRecord(
 ): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
   sealTornTailSync(filePath);
-  appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+  // Owner-only at creation (mode applies only to the creating call):
+  // the ledger holds per-prompt activity metadata and must follow the
+  // transcript's 0o600 convention rather than the umask default.
+  appendFileSync(filePath, `${JSON.stringify(record)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
 }
 
 /**

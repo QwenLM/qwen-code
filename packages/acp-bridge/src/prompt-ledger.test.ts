@@ -106,6 +106,21 @@ describe('appendPromptLedgerRecord + readPromptLedgerRecords', () => {
     expect(readPromptLedgerRecords(filePath)).toHaveLength(1);
   });
 
+  it('creates the ledger owner-only, not umask-default', () => {
+    if (process.platform === 'win32') return; // POSIX mode bits only.
+    // The ledger holds per-prompt activity metadata and must follow the
+    // transcript's 0o600 convention at creation instead of inheriting the
+    // umask default (typically 0o644 on shared hosts).
+    const filePath = path.join(tmpRoot, 'perm', 'session.ledger.jsonl');
+    appendPromptLedgerRecord(filePath, {
+      v: 1,
+      promptId: 'p1',
+      state: 'in_flight',
+      at: 1,
+    });
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
   it('treats a missing file as an empty ledger', () => {
     expect(readPromptLedgerRecords(ledgerPath('missing'))).toEqual([]);
   });

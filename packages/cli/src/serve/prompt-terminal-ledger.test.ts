@@ -721,6 +721,48 @@ describe('reconcileDanglingPromptTerminals', () => {
     expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
   });
 
+  it('stays fail-closed when a backward clock step hides a post-marker compression', async () => {
+    const fixture = makeFixture();
+    // The compression checkpoint sits past p1's dispatch marker but its
+    // wall clock stepped backward below the admission time. A marker
+    // admission must fence compression by position (anything past the
+    // marker postdates admission), or the clock step hides the reset and
+    // the compressed tail is wrongly attributed to p1.
+    writeLedger(fixture, [
+      {
+        v: 1,
+        promptId: 'p1',
+        state: 'in_flight',
+        tailUuid: 'u1',
+        at: RECORD_BASE_MS - 1000,
+      },
+    ]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'question'),
+      record(fixture, 'a1', 'u1', 'answer'),
+      {
+        ...systemRecord(fixture, 'c1', 'a1', 'chat_compression', {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: 1,
+          },
+          compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        } as ChatRecord['systemPayload']),
+        // Backward clock step: pre-admission wall time, post-marker
+        // position.
+        timestamp: new Date(RECORD_BASE_MS - 60_000).toISOString(),
+      },
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toHaveLength(1);
+  });
+
   it('stays fail-closed when only post-admission system records follow', async () => {
     const fixture = makeFixture();
     // After p1's admission the transcript gains only a system record

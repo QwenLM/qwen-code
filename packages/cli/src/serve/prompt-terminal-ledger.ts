@@ -188,8 +188,9 @@ export async function reconcileDanglingPromptTerminals(
   // clock skew; a marker missing from the projection, or present with no
   // visible write after it, fails closed.
   const admissionMarker = targetAdmission.tailUuid;
+  let markerIndex = -1;
   if (admissionMarker !== undefined) {
-    const markerIndex = messages.findIndex(
+    markerIndex = messages.findIndex(
       (record) => record.uuid === admissionMarker,
     );
     let wroteAfterMarker = false;
@@ -211,15 +212,20 @@ export async function reconcileDanglingPromptTerminals(
   // verdict never sees pass the guard.
   let lastVisibleWriteMs = NaN;
   let compressedAfterAdmission = false;
-  for (const record of messages) {
+  for (let idx = 0; idx < messages.length; idx++) {
+    const record = messages[idx];
     const writeMs = Date.parse(record.timestamp);
     if (record.type === 'system') {
-      if (
-        isCompressionResetRecord(record) &&
-        Number.isFinite(writeMs) &&
-        writeMs >= targetAdmission.at
-      ) {
-        compressedAfterAdmission = true;
+      if (isCompressionResetRecord(record)) {
+        // Marker-bearing admissions order by position: anything past the
+        // marker postdates admission, so a backward clock step cannot hide
+        // a post-admission compression. Marker-less admissions fall back
+        // to the wall clock.
+        const afterAdmission =
+          admissionMarker !== undefined
+            ? idx > markerIndex
+            : Number.isFinite(writeMs) && writeMs >= targetAdmission.at;
+        if (afterAdmission) compressedAfterAdmission = true;
       }
       continue;
     }
