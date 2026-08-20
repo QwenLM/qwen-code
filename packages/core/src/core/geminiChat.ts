@@ -2123,6 +2123,11 @@ export class GeminiChat {
       customInstructions: options?.customInstructions,
       signal,
     });
+    // The service owns the compression outcome; GeminiChat owns the input
+    // provenance. Expose it so UIs can mark estimated banner numbers
+    // instead of presenting cross-path scale changes as lost context
+    // (#9309).
+    info.originalTokenCountIsEstimated = originalTokenCountIsEstimated;
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
       // ChatCompressionService owns provenance. Keep a conservative fallback
@@ -2208,6 +2213,7 @@ export class GeminiChat {
         info: {
           originalTokenCount: apiBaseline,
           newTokenCount: apiBaseline,
+          originalTokenCountIsEstimated: this.promptCountIsEstimateDerived(),
           compressionStatus: CompressionStatus.NOOP,
         },
       };
@@ -2226,6 +2232,7 @@ export class GeminiChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      originalTokenCountIsEstimated: baselineIsEstimated,
       newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',

@@ -133,6 +133,68 @@ describe('compressCommand', () => {
     expect(context.ui.setPendingItem).toHaveBeenCalledWith(null);
   });
 
+  // Issue #9309: after /compress-fast the summarize banner is measured on a
+  // different scale (local history-only estimate vs the fast banner's
+  // API-reported baseline), so the compression item must carry per-side
+  // provenance for the renderer to mark estimated numbers.
+  it('should pass token-count provenance to the compression item (interactive)', async () => {
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    await compressCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          compressionKind: 'summarize',
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: true,
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should mark estimated counts in the non-interactive message', async () => {
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChat: mockTryCompressChat,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Context compressed (~200 -> ~100).',
+    });
+  });
+
   it('should add an error message if tryCompressChat throws', async () => {
     const error = new Error('Compression failed');
     mockTryCompressChat.mockRejectedValue(error);

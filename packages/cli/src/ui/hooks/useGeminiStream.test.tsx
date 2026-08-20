@@ -10987,6 +10987,43 @@ describe('useGeminiStream', () => {
         }),
       ]);
     });
+
+    // Issue #9309: auto-compaction numbers can be local estimates rather
+    // than API-reported counts; the notice must mark them so consecutive
+    // compression banners on different scales don't read as lost context.
+    it('marks estimated compression counts in the auto-compaction notice', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              originalTokenCountIsEstimated: true,
+              newTokenCountIsEstimated: true,
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test estimated compression');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining('compressed from: ~100 to ~50 tokens'),
+        }),
+      ]);
+    });
   });
 
   describe('handleFinishedEvent', () => {

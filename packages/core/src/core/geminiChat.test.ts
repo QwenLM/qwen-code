@@ -15467,6 +15467,116 @@ describe('GeminiChat', async () => {
         }),
       );
     });
+
+    // Reproduction for issue #9309: /compress-fast followed by /compress
+    // shows banners on two different scales — compressFast anchors on the
+    // API-reported prompt count (system prompt + tools + history) while a
+    // later tryCompress re-estimates history-only once the stored count is
+    // estimate-derived. The numbers therefore cannot chain across commands;
+    // each banner must at least expose which side is an estimate so the UI
+    // can mark it instead of presenting the jump as lost context.
+    it('exposes provenance on fast-compression info: API baseline authoritative, adjusted count estimated', () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          userMsg('question'),
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      fastChat.seedResumeTokenCounts(5000, 0, false);
+
+      const { info } = fastChat.compressFast();
+
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(info.originalTokenCountIsEstimated).toBe(false);
+      expect(info.newTokenCountIsEstimated).toBe(true);
+    });
+
+    it('marks the fast-compression baseline as estimated when no API count exists', () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          userMsg('question'),
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+
+      const { info } = fastChat.compressFast();
+
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(info.originalTokenCount).toBeGreaterThan(0);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('reports original-count provenance on the summarize path after a fast compression', async () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([
+        userMsg('question'),
+        {
+          role: 'model',
+          parts: [
+            { text: 'reasoning '.repeat(100), thought: true },
+            { text: 'answer' },
+          ],
+        },
+      ]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      // /compress-fast leaves the stored count estimate-derived...
+      chat.compressFast();
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+      const adjustedAfterFast = chat.getLastPromptTokenCount();
+
+      // ...so the subsequent /compress re-estimates the history locally
+      // (a different scale than the fast banner) and must expose that its
+      // "before" number is an estimate.
+      const info = await chat.tryCompress('p-after-fast', true);
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).not.toBe(
+        adjustedAfterFast,
+      );
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('reports an authoritative original count when the API count is fresh', async () => {
+      mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress('p-authoritative-original', true);
+
+      expect(info.originalTokenCountIsEstimated).toBe(false);
+    });
   });
 
   // The circuit breaker is the three-strike replacement for the old
