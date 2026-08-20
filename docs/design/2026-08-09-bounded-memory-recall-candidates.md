@@ -83,7 +83,9 @@ is kept.
 
 Forget, Indexer, Status, and Extraction keep the capped scanner. That preserves
 their current behavior but means an older document can become recallable before
-it becomes manageable by those non-recall flows.
+it becomes manageable by those non-recall flows. Superseded for Forget: issue
+#9378 moved Forget to the uncapped scanner, with its own bound on the
+model-selection prompt. Indexer, Status, and Extraction remain capped.
 
 ## Failure and compatibility boundaries
 

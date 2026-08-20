@@ -11,8 +11,8 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
-  scanAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
+  scanAllAutoMemoryTopicDocuments,
+  scanAllUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import {
   forgetManagedAutoMemoryMatches,
@@ -31,9 +31,10 @@ vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: vi.fn(),
 }));
 
-vi.mock('./scan.js', () => ({
-  scanAutoMemoryTopicDocuments: vi.fn(),
-  scanUserAutoMemoryTopicDocuments: vi.fn(),
+vi.mock('./scan.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./scan.js')>()),
+  scanAllAutoMemoryTopicDocuments: vi.fn(),
+  scanAllUserAutoMemoryTopicDocuments: vi.fn(),
 }));
 
 describe('selectManagedAutoMemoryForgetCandidates', () => {
@@ -46,8 +47,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     vi.resetAllMocks();
     vi.mocked(mockConfig.getModel).mockReturnValue('main-model');
     vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model');
-    vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
         type: 'user',
         filePath: '/tmp/auto/user/note.md',
@@ -85,6 +86,82 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     );
   });
 
+  it('bounds the model prompt but keeps a matching entry that ranks past the bound', async () => {
+    // 500 documents: the newest 499 are noise, the oldest one matches the
+    // query. A plain recency slice would drop it; the bound must not.
+    const docs = Array.from({ length: 499 }, (_, index) => ({
+      type: 'reference' as const,
+      filePath: `/tmp/project/memory/reference/noise-${index}.md`,
+      relativePath: `reference/noise-${index}.md`,
+      filename: `noise-${index}.md`,
+      title: `Noise ${index}`,
+      description: 'Unrelated',
+      body: 'Unrelated historical note',
+      mtimeMs: 1_000 + index,
+    }));
+    docs.push({
+      type: 'reference' as const,
+      filePath: '/tmp/project/memory/reference/overflow.md',
+      relativePath: 'reference/overflow.md',
+      filename: 'overflow.md',
+      title: 'Overflow',
+      description: 'Oldest',
+      body: 'the saved codeword is overflow-zephyr-7040',
+      mtimeMs: 1,
+    });
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig },
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]?.[1];
+    const prompt = options?.contents[0]?.parts?.[0]?.text ?? '';
+    expect(prompt.match(/^id: /gm)).toHaveLength(400);
+    expect(prompt).toContain('id: project:reference/overflow.md');
+  });
+
+  it('falls back to the full uncapped candidate list when the model fails', async () => {
+    const docs = Array.from({ length: 500 }, (_, index) => ({
+      type: 'reference' as const,
+      filePath: `/tmp/project/memory/reference/noise-${index}.md`,
+      relativePath: `reference/noise-${index}.md`,
+      filename: `noise-${index}.md`,
+      title: `Noise ${index}`,
+      description: 'Unrelated',
+      body: 'Unrelated historical note',
+      mtimeMs: 1_000 + index,
+    }));
+    docs.push({
+      type: 'reference' as const,
+      filePath: '/tmp/project/memory/reference/overflow.md',
+      relativePath: 'reference/overflow.md',
+      filename: 'overflow.md',
+      title: 'Overflow',
+      description: 'Oldest',
+      body: 'the saved codeword is overflow-zephyr-7040',
+      mtimeMs: 1,
+    });
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig },
+    );
+
+    expect(result.strategy).toBe('heuristic');
+    expect(result.matches.map((match) => match.filePath)).toContain(
+      '/tmp/project/memory/reference/overflow.md',
+    );
+  });
+
   it('wraps the forget query as user data in the selector prompt', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
       selectedCandidateIds: [],
@@ -105,7 +182,7 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
   });
 
   it('indexes user and project candidates with scope-prefixed ids', async () => {
-    vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
         type: 'user',
         filePath: '/tmp/user/memories/user/note.md',
@@ -117,7 +194,7 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         mtimeMs: 2,
       },
     ]);
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
         type: 'project',
         filePath: '/tmp/project/memory/user/note.md',
@@ -163,8 +240,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
   });
 
   it('can select user-level memories through heuristic search', async () => {
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
-    vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
         type: 'user',
         filePath: '/tmp/user/memories/user/editor.md',
@@ -393,8 +470,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         ].join('\n'),
         'utf-8',
       );
-      vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
-      vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
 
       const result = await forgetManagedAutoMemoryMatches(
         projectRoot,
@@ -474,8 +551,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         ].join('\n'),
         'utf-8',
       );
-      vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
-      vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
 
       const result = await forgetManagedAutoMemoryMatches(
         projectRoot,
@@ -552,8 +629,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         'utf-8',
       );
       await fs.mkdir(getUserAutoMemoryIndexPath(), { recursive: true });
-      vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
-      vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
 
       const result = await forgetManagedAutoMemoryMatches(
         projectRoot,

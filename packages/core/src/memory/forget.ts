@@ -27,13 +27,22 @@ import {
   isUserAutoMemPath,
 } from './paths.js';
 import {
-  scanAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
+  scanAllAutoMemoryTopicDocuments,
+  scanAllUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 
 const debugLogger = createDebugLogger('MEMORY_FORGET');
+
+/**
+ * Upper bound on the candidates interpolated into the model-selection prompt.
+ * The scan is uncapped, but `buildForgetSelectionPrompt` renders every
+ * candidate, so the prompt needs its own bound. 400 is the exposure the capped
+ * scan already permitted at steady state: 200 project + 200 user documents at
+ * the one-memory-per-file the extraction format writes.
+ */
+const MAX_MODEL_FORGET_CANDIDATES = 400;
 
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
@@ -62,6 +71,7 @@ interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   storageScope: AutoMemoryStorageScope;
   why?: string;
   howToApply?: string;
+  mtimeMs: number;
 }
 
 export type AutoMemoryStorageScope = 'user' | 'project';
@@ -94,9 +104,11 @@ async function listIndexedForgetCandidates(
   abortSignal?: AbortSignal,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
+  // Uncapped, to match the recall universe (recall.ts scans uncapped): an
+  // entry that recall can inject must be one that forget can remove.
   const [projectDocs, userDocs] = await Promise.all([
-    scanAutoMemoryTopicDocuments(projectRoot),
-    scanUserAutoMemoryTopicDocuments(),
+    scanAllAutoMemoryTopicDocuments(projectRoot),
+    scanAllUserAutoMemoryTopicDocuments(),
   ]);
   abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];
@@ -124,6 +136,7 @@ async function listIndexedForgetCandidates(
           entryIndex: i,
           why: entry.why,
           howToApply: entry.howToApply,
+          mtimeMs: doc.mtimeMs,
         });
       }
     }
@@ -162,6 +175,34 @@ function buildForgetSelectionPrompt(
       ].join('\n'),
     ),
   ].join('\n');
+}
+
+/**
+ * Bound the model prompt without dropping anything the heuristic fallback
+ * would have matched: literal query matches go in first, then the most
+ * recently modified remainder fills the budget. A semantic-only match ranked
+ * past the budget can still be missed by the model path; the heuristic
+ * fallback below keeps scanning the full uncapped list.
+ */
+function selectModelForgetCandidates(
+  candidates: IndexedForgetCandidate[],
+  query: string,
+): IndexedForgetCandidate[] {
+  if (candidates.length <= MAX_MODEL_FORGET_CANDIDATES) {
+    return candidates;
+  }
+  const queryLower = query.replace(/\s+/g, ' ').trim().toLowerCase();
+  const matched: IndexedForgetCandidate[] = [];
+  const rest: IndexedForgetCandidate[] = [];
+  for (const candidate of candidates) {
+    if (buildAutoMemoryEntrySearchText(candidate).includes(queryLower)) {
+      matched.push(candidate);
+    } else {
+      rest.push(candidate);
+    }
+  }
+  rest.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return [...matched, ...rest].slice(0, MAX_MODEL_FORGET_CANDIDATES);
 }
 
 async function selectByModel(
@@ -271,7 +312,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
   if (options.config) {
     try {
       return await selectByModel(
-        candidates,
+        selectModelForgetCandidates(candidates, query),
         query,
         options.config,
         limit,
