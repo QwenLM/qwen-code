@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   isDebugLoggingDegraded,
   resetDebugLoggingState,
+  runWithDebugLogSession,
   runWithoutDebugLogSession,
   setDebugLogSession,
   type DebugLogSession,
@@ -17,6 +18,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { getTraceContext } from '../telemetry/trace-context.js';
+import { sessionIdContext } from './sessionIdContext.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -295,6 +297,66 @@ describe('debugLogger', () => {
       const call = vi.mocked(fs.appendFile).mock.calls[0];
       expect(call?.[1]).toContain('foo');
       expect(call?.[1]).toContain('bar');
+    });
+
+    it('prefers sessionIdContext over the global debug session', async () => {
+      // Simulate daemon mode: a Config for session-B was created last and
+      // overwrote the process-wide debug session, but this code is running
+      // inside session-A's async context.
+      setDebugLogSession({ getSessionId: () => 'session-B' });
+      const logger = createDebugLogger('DAEMON');
+
+      sessionIdContext.run('session-A', () => {
+        logger.info('message from A');
+      });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        Storage.getDebugLogPath('session-A'),
+        expect.stringContaining('[DAEMON] message from A'),
+        'utf8',
+      );
+      expect(fs.appendFile).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath('session-B'),
+        expect.stringContaining('message from A'),
+        'utf8',
+      );
+    });
+
+    it('preserves runWithDebugLogSession override above sessionIdContext', async () => {
+      setDebugLogSession({ getSessionId: () => 'session-B' });
+      const logger = createDebugLogger('OVERRIDE');
+
+      sessionIdContext.run('session-A', () => {
+        runWithDebugLogSession({ getSessionId: () => 'session-C' }, () => {
+          logger.info('message from C');
+        });
+      });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        Storage.getDebugLogPath('session-C'),
+        expect.stringContaining('[OVERRIDE] message from C'),
+        'utf8',
+      );
+      expect(fs.appendFile).toHaveBeenCalledOnce();
+    });
+
+    it('honors runWithoutDebugLogSession suppression inside sessionIdContext', async () => {
+      setDebugLogSession({ getSessionId: () => 'session-B' });
+      const logger = createDebugLogger('SUPPRESSED');
+
+      sessionIdContext.run('session-A', () => {
+        runWithoutDebugLogSession(() => {
+          logger.info('this must not be logged');
+        });
+      });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).not.toHaveBeenCalled();
     });
   });
 

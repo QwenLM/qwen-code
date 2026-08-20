@@ -14,6 +14,7 @@ import {
   getTraceContext,
   type TraceContext,
 } from '../telemetry/trace-context.js';
+import { sessionIdContext } from './sessionIdContext.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -45,7 +46,19 @@ export function isDebugLogFileEnabled(): boolean {
 function getActiveSession(): DebugLogSession | null {
   const contextSession = sessionContext.getStore();
   if (contextSession === false) return null;
-  return contextSession ?? globalSession;
+  if (contextSession) return contextSession;
+
+  // In daemon/ACP mode one process hosts many concurrent sessions. The async
+  // context already carries the owning session ID via sessionIdContext, so
+  // prefer it over the process-wide session set by Config creation. Without
+  // this, creating a Config for session B would redirect logs belonging to
+  // session A's in-flight work into session B's debug log file.
+  const sessionId = sessionIdContext.getStore();
+  if (sessionId) {
+    return { getSessionId: () => sessionId };
+  }
+
+  return globalSession;
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -203,8 +216,9 @@ export function runWithoutDebugLogSession<T>(fn: () => T): T {
  * Creates a debug logger that writes to the current debug log session.
  *
  * Session resolution order:
- * 1) async-local suppression or session
- * 2) process-wide session (setDebugLogSession)
+ * 1) async-local suppression or session (runWithoutDebugLogSession / runWithDebugLogSession)
+ * 2) async-local session ID from the daemon context (sessionIdContext)
+ * 3) process-wide session (setDebugLogSession)
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {
