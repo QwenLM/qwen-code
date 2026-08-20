@@ -4640,25 +4640,63 @@ export function App({
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
-  const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
+  const skillMutationHandlingRef = useRef<
+    | {
+        id: string;
+        sessionId: string | undefined;
+        workspaceCwd: string | undefined;
+        phase: 'idle' | 'processing' | 'handled';
+      }
+    | undefined
+  >(undefined);
   useEffect(() => {
-    if (!connected) return;
+    if (!connected) {
+      if (skillMutationHandlingRef.current) {
+        skillMutationHandlingRef.current.phase = 'idle';
+      }
+      return;
+    }
     const mutation = workspaceEventSignals?.lastSkillMutation;
-    if (!mutation || handledSkillMutationIdRef.current === mutation.id) return;
-    handledSkillMutationIdRef.current = mutation.id;
+    if (!mutation) return;
+    let handling = skillMutationHandlingRef.current;
+    if (!handling || handling.id !== mutation.id) {
+      handling = {
+        id: mutation.id,
+        sessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd,
+        phase: 'idle',
+      };
+      skillMutationHandlingRef.current = handling;
+    }
+    if (handling.workspaceCwd !== connection.workspaceCwd) {
+      handling.phase = 'idle';
+      return;
+    }
+    if (
+      handling.sessionId === connection.sessionId &&
+      handling.phase !== 'idle'
+    ) {
+      return;
+    }
+    handling.sessionId = connection.sessionId;
+    handling.phase = 'processing';
     const sessionId = connection.sessionId;
+    const sessionSkills = connectionSkillSnapshotRef.current.skills;
     if (
       sessionId &&
-      connection.skills !== undefined &&
+      sessionSkills !== undefined &&
       mutation.activation === 'applied' &&
       mutation.sessionsFailed === 0
     ) {
+      handling.phase = 'handled';
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
     let cancelled = false;
     void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded || !sessionId) return;
+      if (cancelled || skillMutationHandlingRef.current !== handling) return;
+      handling.phase = 'handled';
+      if (!loaded || !sessionId) return;
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
@@ -4670,11 +4708,16 @@ export function App({
     });
     return () => {
       cancelled = true;
+      if (
+        skillMutationHandlingRef.current === handling &&
+        handling.phase === 'processing'
+      ) {
+        handling.phase = 'idle';
+      }
     };
   }, [
     connected,
     connection.sessionId,
-    connection.skills,
     connection.workspaceCwd,
     reloadLoadedSkills,
     workspaceEventSignals?.lastSkillMutation,
