@@ -170,7 +170,10 @@ import {
   promptIdContext,
   todoWorkChainContext,
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
   hasImageParts,
@@ -479,7 +482,6 @@ function getAbortAwareEndTurnStopReason(
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
-  repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
@@ -3579,6 +3581,13 @@ export class Session implements SessionContext {
       return false;
     }
 
+    // Deliberate twin divergence: the TUI twin (isUserTextContent in
+    // packages/cli/src/ui/utils/historyMapping.ts) excludes microcompaction
+    // media-clear placeholders ('[Old inline media cleared: ...]') from the
+    // rewind prompt count because a cleared media-only entry never produced
+    // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
+    // maps against per-prompt file-history snapshots, which ARE created for
+    // media-only prompts. Do not mirror that exclusion into this twin.
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
@@ -4149,7 +4158,7 @@ export class Session implements SessionContext {
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
    * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
    * call, same `enableCacheSharing` flag forwarding, same curated
-   * history slice (`getHistory(true).slice(-40)`).
+   * history tail (`getHistoryTail(40, true)`).
    *
    * Differences from the CLI:
    *   - Triggers only on `stopReason === 'end_turn'` (the daemon
@@ -4189,24 +4198,27 @@ export class Session implements SessionContext {
 
     void (async () => {
       try {
-        const fullHistory = chat.getHistory(true);
-        const lastEntry = fullHistory[fullHistory.length - 1];
+        const conversationHistory = chat.getHistoryTail(40, true);
+        const lastEntry = conversationHistory[conversationHistory.length - 1];
         if (!lastEntry || lastEntry.role !== 'model') {
           debugLogger.debug(
             'Skipping followup suggestion: last history entry is not model',
           );
           return;
         }
-        const conversationHistory =
-          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
         const r = await generatePromptSuggestion(
           this.config,
           conversationHistory,
           ac.signal,
           {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value
+            // is `undefined` and a `=== true` gate left the cache-aware fork
+            // as dead code unless the flag was explicitly set (#9230). Mirrors
+            // AppContainer — only an explicit `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
@@ -6600,13 +6612,6 @@ export class Session implements SessionContext {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
       return { message: null, hadMidTurnUserInput: false };
     }
-    if (toolRun.repeatedDuplicateProviderToolCall) {
-      this.todoStopGuard.suspend();
-      debugLogger.debug(
-        'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
-      );
-      return { message: null, hadMidTurnUserInput: false };
-    }
     const drained = await this.#drainMidTurnInput(abortSignal, {
       watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
@@ -8945,27 +8950,50 @@ export class Session implements SessionContext {
     };
     type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
-    const handledProviderToolCallIds = new Set(
-      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    // The accessor returns a fresh map per call; copy anyway so a future
+    // cached accessor cannot turn per-batch recording into shared-state
+    // mutation.
+    const handledToolCallFingerprints = new Map(
+      this.#getCurrentChat().getHistoryToolCallFingerprints(),
     );
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       dedupedFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       this.duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
       const providerCallId =
         getProviderToolCallId(repeatedDuplicateCall) ??
         repeatedDuplicateCall.id;
-      debugLogger.debug(
-        `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
-          `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
-      );
+      const message =
+        `Stopping ACP turn after repeated duplicate provider tool-call id: ` +
+        `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'}).`;
+      if (toolLoopState) {
+        recordDaemonLoopDetected(
+          this.config,
+          promptId,
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          message,
+          toolLoopState,
+        );
+      } else {
+        debugLogger.warn(message);
+      }
       return await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: true,
+        loopDetected: true,
       });
     }
 
@@ -9055,7 +9083,7 @@ export class Session implements SessionContext {
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           const callId = executionCallIds.get(fc)!;
           pushDuplicateBatch(fc, {
             callId,
@@ -9067,7 +9095,11 @@ export class Session implements SessionContext {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
 
       // Canonical names match core's isToolCallConcurrencySafe predicate,
@@ -9355,7 +9387,6 @@ export class Session implements SessionContext {
             return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: true,
-              repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
             });
           }
@@ -9393,7 +9424,6 @@ export class Session implements SessionContext {
               return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: true,
-                repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
               });
             }
@@ -9403,7 +9433,6 @@ export class Session implements SessionContext {
       return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
       });
     } finally {

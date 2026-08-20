@@ -203,6 +203,44 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('normalizes an unchanged tool block content to a stable reference', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'body' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const second = transcriptBlocksToDaemonMessages([block]);
+
+    const firstContent = (first[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    const secondContent = (second[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    // The normalizer caches by the original block reference, so a block that
+    // did not change yields the same content array across frames,
+    // allowing MessageItem's JSON cache to avoid re-serializing the output.
+    expect(secondContent).toBe(firstContent);
+    expect(Object.isFrozen(firstContent)).toBe(true);
+  });
+
+  it('renormalizes content when a caller replaces the tool block', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'before' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const content = block.content as Array<{
+      type: 'content';
+      content: { type: 'text'; text: string };
+    }>;
+    content[0].content.text = 'after';
+    const second = transcriptBlocksToDaemonMessages([{ ...block }]);
+
+    expect(
+      (first[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'before' } }]);
+    expect(
+      (second[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'after' } }]);
+  });
+
   it('preserves user file attachment metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'check this', 1, false, {
