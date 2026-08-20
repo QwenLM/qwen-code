@@ -23,7 +23,8 @@ import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/serve-ab.yml', 'utf8');
 
-const steps = parse(workflow).jobs['ab'].steps;
+const job = parse(workflow).jobs['ab'];
+const steps = job.steps;
 const WIPE = 'Wipe stale workspace before checkout';
 const wipe = steps.find((s) => s.name === WIPE);
 
@@ -62,6 +63,14 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     // Hosted runners are ephemeral; the wipe (and its guard) exist for the
     // reusable ECS pool only.
     expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
+  });
+
+  // The job drives BOTH checkouts end-to-end (npm ci, full monorepo build,
+  // daemon drive, each); a healthy run lands near twenty minutes, so the
+  // old 30-minute bound left a slow runner no headroom and the run timed
+  // out as CANCELLED. Pin the floor — dropping it back re-cancels the run.
+  it('keeps a job timeout with headroom for two full build cycles', () => {
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(45);
   });
 
   it('carries the full checkout-heal guard (#9220, #9265)', () => {
