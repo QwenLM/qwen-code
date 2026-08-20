@@ -14,6 +14,7 @@ import {
   type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
+  type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
@@ -64,6 +65,7 @@ export interface WebShellDaemonScenario {
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
+  sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
@@ -128,6 +130,7 @@ type ScenarioOverrides = Partial<
     | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
+    | 'sessionCatalogVersion'
     | 'state'
   >
 > & {
@@ -146,6 +149,7 @@ type ScenarioOverrides = Partial<
   pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
+  sessionCatalogVersion?: DaemonSessionCatalogVersion;
   state?: Partial<DaemonSessionState>;
 };
 
@@ -362,6 +366,10 @@ export function createWebShellDaemonScenario(
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
+    sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
+      generation: 'web-shell-e2e',
+      revision: 0,
+    },
     events: overrides.events ?? [],
     state,
     artifacts: overrides.artifacts ?? [],
@@ -617,7 +625,9 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
       path,
@@ -690,12 +700,22 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     return true;
   }
   if (
@@ -905,6 +925,31 @@ async function handleDaemonRoute(
   }
   if (
     method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
+    await json(route, {
+      v: 1,
+      catalogVersion: scenario.sessionCatalogVersion,
+      sessions: scenario.sessions
+        .filter(
+          (session) =>
+            (session.clientCount ?? 0) > 0 ||
+            session.hasActivePrompt === true ||
+            session.isWaitingForPermission === true ||
+            session.isWaitingForUserQuestion === true,
+        )
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount ?? 0,
+          hasActivePrompt: session.hasActivePrompt ?? false,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        })),
+    });
+    return;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
@@ -913,7 +958,11 @@ async function handleDaemonRoute(
     });
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     const catalog: DaemonSessionGroupCatalog = {
       groups: scenario.sessionGroups,
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],

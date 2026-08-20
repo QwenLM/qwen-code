@@ -432,7 +432,11 @@ describe('LiveSessionCoordinator', () => {
     const harness = makeHarness();
     harness.host.setCoordinator.mockReturnValueOnce(false);
 
-    await harness.coordinator.start({ epoch: 1, callId: 'call-1', mode: 'new' });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
 
     expect(harness.host.failCall).toHaveBeenCalledWith(
       1,

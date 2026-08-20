@@ -583,6 +583,38 @@ describe('ChatPane', () => {
     expect(footerProps.at(-1)?.disabled).toBe(true);
   });
 
+  it('hides the pane composer while an approval is pending', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('pane-approval')).not.toBeNull();
+    // The streaming status and the editor share the approval-hidden wrapper,
+    // so neither lingers below the dialog.
+    expect(testid('pane-streaming')?.parentElement?.className).toContain(
+      'composerHidden',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+  });
+
+  it('restores the pane composer after the approval resolves', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+
+    pendingPermission = null;
+    rerender();
+    expect(testid('pane-approval')).toBeNull();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).not.toContain('composerHidden');
+  });
+
   it('adds no composer footer DOM when omitted or returning null', () => {
     render();
     const composer = container!.querySelector('[data-web-shell-composer]');
@@ -1122,7 +1154,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
   });
 
   it('does not duplicate turn completion owned by the outer session', () => {
@@ -1156,7 +1191,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-late',
+    );
   });
 
   it('captures a pane workspace that becomes available mid-turn', () => {
@@ -1170,9 +1208,13 @@ describe('ChatPane', () => {
     rerender();
 
     expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/secondary');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/secondary',
+      'sess-1',
+    );
     expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
       '/primary',
+      'sess-1',
     );
   });
 
