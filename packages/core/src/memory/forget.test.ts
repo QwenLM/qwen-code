@@ -123,6 +123,55 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     const prompt = options?.contents[0]?.parts?.[0]?.text ?? '';
     expect(prompt.match(/^id: /gm)).toHaveLength(400);
     expect(prompt).toContain('id: project:reference/overflow.md');
+    // Pins the recency order of the filler: noise-498 is the newest and must
+    // be kept, noise-0 falls outside the remaining slots and must not be.
+    expect(prompt).toContain('id: project:reference/noise-498.md');
+    expect(prompt).not.toContain('id: project:reference/noise-0.md');
+  });
+
+  it('keeps every scope represented in the model prompt when one scope is much newer', async () => {
+    // 400 project entries, all newer than the 3 user entries, and a query that
+    // matches none of them literally. A single global recency budget would
+    // seat 400 project entries and zero user entries, making user memory
+    // unselectable while recall can still inject it.
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      Array.from({ length: 400 }, (_, index) => ({
+        type: 'reference' as const,
+        filePath: `/tmp/project/memory/reference/proj-${index}.md`,
+        relativePath: `reference/proj-${index}.md`,
+        filename: `proj-${index}.md`,
+        title: `Project ${index}`,
+        description: 'Unrelated',
+        body: 'Unrelated project note',
+        mtimeMs: 10_000 + index,
+      })),
+    );
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
+      Array.from({ length: 3 }, (_, index) => ({
+        type: 'user' as const,
+        filePath: `/tmp/user/memories/user/old-${index}.md`,
+        relativePath: `user/old-${index}.md`,
+        filename: `old-${index}.md`,
+        title: `Old ${index}`,
+        description: 'Oldest',
+        body: 'An old cross-project preference',
+        mtimeMs: index + 1,
+      })),
+    );
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'that cross-project preference I mentioned',
+      { config: mockConfig },
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]?.[1];
+    const prompt = options?.contents[0]?.parts?.[0]?.text ?? '';
+    expect(prompt.match(/^id: /gm)).toHaveLength(400);
+    for (let index = 0; index < 3; index++) {
+      expect(prompt).toContain(`id: user:user/old-${index}.md`);
+    }
   });
 
   it('falls back to the full uncapped candidate list when the model fails', async () => {
@@ -160,6 +209,35 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     expect(result.matches.map((match) => match.filePath)).toContain(
       '/tmp/project/memory/reference/overflow.md',
     );
+  });
+
+  it('gives the heuristic fallback the full list, not the bounded one', async () => {
+    // 450 literal matches with a limit above that: handing the fallback the
+    // 400-candidate prompt budget instead of the full list would silently
+    // leave 50 entries undeleted after a model failure.
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      Array.from({ length: 450 }, (_, index) => ({
+        type: 'reference' as const,
+        filePath: `/tmp/project/memory/reference/match-${index}.md`,
+        relativePath: `reference/match-${index}.md`,
+        filename: `match-${index}.md`,
+        title: `Match ${index}`,
+        description: 'Matching',
+        body: 'the saved codeword is overflow-zephyr-7040',
+        mtimeMs: 1_000 + index,
+      })),
+    );
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig, limit: 500 },
+    );
+
+    expect(result.strategy).toBe('heuristic');
+    expect(result.matches).toHaveLength(450);
   });
 
   it('wraps the forget query as user data in the selector prompt', async () => {

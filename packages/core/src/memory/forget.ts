@@ -36,13 +36,23 @@ import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 const debugLogger = createDebugLogger('MEMORY_FORGET');
 
 /**
+ * Per-scope share of the model-selection prompt. The capped scanners this
+ * replaced ran per scope, so each scope was guaranteed seats however old its
+ * entries were relative to the other scope's. Ranking both scopes into one
+ * global budget would drop that guarantee: on a store whose project entries
+ * are all newer than its user entries, user memory would get no seats at all
+ * and become unselectable while recall could still inject it.
+ */
+const MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE = 200;
+
+/**
  * Upper bound on the candidates interpolated into the model-selection prompt.
  * The scan is uncapped, but `buildForgetSelectionPrompt` renders every
- * candidate, so the prompt needs its own bound. 400 is the exposure the capped
- * scan already permitted at steady state: 200 project + 200 user documents at
- * the one-memory-per-file the extraction format writes.
+ * candidate, so the prompt needs its own bound. This is the exposure the
+ * capped scan already permitted at steady state: 200 project + 200 user
+ * documents at the one-memory-per-file the extraction format writes.
  */
-const MAX_MODEL_FORGET_CANDIDATES = 400;
+const MAX_MODEL_FORGET_CANDIDATES = MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE * 2;
 
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
@@ -108,7 +118,17 @@ async function listIndexedForgetCandidates(
   // entry that recall can inject must be one that forget can remove.
   const [projectDocs, userDocs] = await Promise.all([
     scanAllAutoMemoryTopicDocuments(projectRoot),
-    scanAllUserAutoMemoryTopicDocuments(),
+    // Best-effort, as in recall.ts and extractionAgentPlanner.ts: an
+    // unreadable `~/.qwen/memories` must not make project-level forget fail
+    // outright. `scan.ts` swallows only ENOENT.
+    scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; project-level forget continues: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return [];
+    }),
   ]);
   abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];
@@ -177,12 +197,45 @@ function buildForgetSelectionPrompt(
   ].join('\n');
 }
 
+/** Shared by the prompt bound and the heuristic so the two cannot drift. */
+function normalizeForgetQuery(query: string): string {
+  return query.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** Shared by the prompt bound and the heuristic so the two cannot drift. */
+function matchesForgetQuery(
+  candidate: IndexedForgetCandidate,
+  queryLower: string,
+): boolean {
+  return buildAutoMemoryEntrySearchText(candidate).includes(queryLower);
+}
+
+/** Literal query matches first, then the rest, each newest first. */
+function rankScopeForPrompt(
+  scopeCandidates: IndexedForgetCandidate[],
+  queryLower: string,
+): IndexedForgetCandidate[] {
+  const byRecency = (a: IndexedForgetCandidate, b: IndexedForgetCandidate) =>
+    b.mtimeMs - a.mtimeMs;
+  const matched = scopeCandidates
+    .filter((candidate) => matchesForgetQuery(candidate, queryLower))
+    .sort(byRecency);
+  const rest = scopeCandidates
+    .filter((candidate) => !matchesForgetQuery(candidate, queryLower))
+    .sort(byRecency);
+  return [...matched, ...rest];
+}
+
 /**
- * Bound the model prompt without dropping anything the heuristic fallback
- * would have matched: literal query matches go in first, then the most
- * recently modified remainder fills the budget. A semantic-only match ranked
- * past the budget can still be missed by the model path; the heuristic
- * fallback below keeps scanning the full uncapped list.
+ * Bound the model prompt. Each scope keeps its own quota so a scope whose
+ * entries are all older than the other's still reaches the model, and whatever
+ * a smaller scope leaves unused is handed to the other. Within a scope,
+ * literal query matches rank ahead of the rest and both are ordered newest
+ * first, so truncation is deterministic rather than scan-order.
+ *
+ * Entries past the bound are not offered to the model at all. The heuristic
+ * fallback rescues only the model-failure path: a successful selection that
+ * returns nothing short-circuits with 'none' and never consults the full list.
  */
 function selectModelForgetCandidates(
   candidates: IndexedForgetCandidate[],
@@ -191,18 +244,34 @@ function selectModelForgetCandidates(
   if (candidates.length <= MAX_MODEL_FORGET_CANDIDATES) {
     return candidates;
   }
-  const queryLower = query.replace(/\s+/g, ' ').trim().toLowerCase();
-  const matched: IndexedForgetCandidate[] = [];
-  const rest: IndexedForgetCandidate[] = [];
-  for (const candidate of candidates) {
-    if (buildAutoMemoryEntrySearchText(candidate).includes(queryLower)) {
-      matched.push(candidate);
-    } else {
-      rest.push(candidate);
-    }
+  const queryLower = normalizeForgetQuery(query);
+  const scopes: AutoMemoryStorageScope[] = ['user', 'project'];
+  const ranked = scopes.map((scope) =>
+    rankScopeForPrompt(
+      candidates.filter((candidate) => candidate.storageScope === scope),
+      queryLower,
+    ),
+  );
+
+  const take = ranked.map((scopeRanked) =>
+    Math.min(scopeRanked.length, MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE),
+  );
+  let spare = MAX_MODEL_FORGET_CANDIDATES - take.reduce((sum, n) => sum + n, 0);
+  for (let i = 0; i < ranked.length && spare > 0; i++) {
+    const extra = Math.min(spare, ranked[i].length - take[i]);
+    take[i] += extra;
+    spare -= extra;
   }
-  rest.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return [...matched, ...rest].slice(0, MAX_MODEL_FORGET_CANDIDATES);
+
+  const selected = ranked.flatMap((scopeRanked, i) =>
+    scopeRanked.slice(0, take[i]),
+  );
+  debugLogger.warn(
+    `Managed auto-memory forget prompt bounded to ${selected.length} of ` +
+      `${candidates.length} candidates; entries past the bound cannot be ` +
+      `selected by the model.`,
+  );
+  return selected;
 }
 
 async function selectByModel(
@@ -270,12 +339,9 @@ function selectByHeuristic(
   query: string,
   limit: number,
 ): AutoMemoryForgetSelectionResult {
-  const normalizedQuery = query.replace(/\s+/g, ' ').trim();
-  const queryLower = normalizedQuery.toLowerCase();
+  const queryLower = normalizeForgetQuery(query);
   const matches = candidates
-    .filter((candidate) =>
-      buildAutoMemoryEntrySearchText(candidate).includes(queryLower),
-    )
+    .filter((candidate) => matchesForgetQuery(candidate, queryLower))
     .slice(0, limit)
     .map(({ topic, summary, filePath, entryIndex }) => ({
       topic,
