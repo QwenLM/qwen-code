@@ -22,6 +22,7 @@ jobs:
       name: 'production-release'
     permissions:
       contents: 'read'
+      id-token: 'write'
     steps:
       - uses: 'actions/checkout@v4'
 
@@ -67,6 +68,6 @@ jobs:
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm publish --access public'
+        run: 'npm publish --provenance --access public'
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
