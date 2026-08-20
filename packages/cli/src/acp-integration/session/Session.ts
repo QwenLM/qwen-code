@@ -17,7 +17,6 @@ import type {
 } from '@google/genai';
 import type {
   Config,
-  SessionWorkflowPlanRevision,
   GeminiChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -1872,6 +1871,7 @@ export class Session implements SessionContext {
     planId: string;
     sourceCallId: string;
   };
+  private activeTodoPlanStructure?: string;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -2619,6 +2619,7 @@ export class Session implements SessionContext {
 
   clearActiveTodoPlanRevision(): void {
     this.activeTodoPlanRevision = undefined;
+    this.activeTodoPlanStructure = undefined;
     this.config.clearSessionWorkflowPlanRevision?.();
   }
 
@@ -6238,8 +6239,14 @@ export class Session implements SessionContext {
     const canUpdateTodoPlanRevision =
       update.sessionUpdate === 'plan' &&
       this.config.getApprovalMode() === ApprovalMode.PLAN;
+    const todoPlanRevision = canUpdateTodoPlanRevision
+      ? this.#readTodoPlanRevision(update)
+      : undefined;
+    const preservesPendingRevision =
+      todoPlanRevision !== undefined &&
+      todoPlanRevision.structure === this.activeTodoPlanStructure;
 
-    if (canUpdateTodoPlanRevision) {
+    if (canUpdateTodoPlanRevision && !preservesPendingRevision) {
       // Clear before delivery: a plan update the client never receives
       // must not stay bound to the next exit_plan_mode approval. The
       // capture below re-stamps only after delivery succeeds.
@@ -6248,15 +6255,33 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
     if (
       canUpdateTodoPlanRevision &&
-      this.config.getApprovalMode() === ApprovalMode.PLAN
+      this.config.getApprovalMode() === ApprovalMode.PLAN &&
+      todoPlanRevision?.allPending
     ) {
-      this.#captureTodoPlanRevision(update);
+      this.activeTodoPlanRevision = {
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+      };
+      this.activeTodoPlanStructure = todoPlanRevision.structure;
+      this.config.setSessionWorkflowPlanRevision?.({
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+        todoIds: todoPlanRevision.todoIds,
+      });
     }
   }
 
-  #captureTodoPlanRevision(
+  #readTodoPlanRevision(
     update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
-  ): void {
+  ):
+    | {
+        planId: string;
+        sourceCallId: string;
+        todoIds: string[];
+        structure: string;
+        allPending: boolean;
+      }
+    | undefined {
     const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
     const plan = isRecord(meta?.['qwenTodoPlan'])
       ? meta['qwenTodoPlan']
@@ -6272,14 +6297,12 @@ export class Session implements SessionContext {
       planId.trim() !== '' &&
       typeof sourceCallId === 'string' &&
       sourceCallId.trim() !== '' &&
-      update.entries.length > 0 &&
-      update.entries.every((entry) => entry.status === 'pending');
+      update.entries.length > 0;
     const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
-    if (!workflowEnabled || !workflowPlan || !hasValidIdentity) return;
+    if (!workflowEnabled || !workflowPlan || !hasValidIdentity)
+      return undefined;
 
-    this.activeTodoPlanRevision = { planId, sourceCallId };
-
-    const todoIds = update.entries.flatMap((entry) => {
+    const todos = update.entries.flatMap((entry) => {
       const entryRecord = entry as unknown as Record<string, unknown>;
       const entryMeta = isRecord(entryRecord['_meta'])
         ? entryRecord['_meta']
@@ -6288,19 +6311,38 @@ export class Session implements SessionContext {
         ? entryMeta['qwenTodo']
         : undefined;
       const todoId = todo?.['id'];
-      return typeof todoId === 'string' && todoId.trim() !== '' ? [todoId] : [];
+      const blockedBy = todo?.['blockedBy'];
+      if (
+        typeof todoId !== 'string' ||
+        todoId.trim() === '' ||
+        (blockedBy !== undefined &&
+          (!Array.isArray(blockedBy) ||
+            !blockedBy.every((dependency) => typeof dependency === 'string')))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: todoId,
+          content: entry.content,
+          priority: entry.priority,
+          blockedBy: blockedBy ?? [],
+        },
+      ];
     });
+    const todoIds = todos.map((todo) => todo.id);
     if (
-      todoIds.length === update.entries.length &&
-      new Set(todoIds).size === todoIds.length
-    ) {
-      const revision: SessionWorkflowPlanRevision = {
-        planId,
-        sourceCallId,
-        todoIds,
-      };
-      this.config.setSessionWorkflowPlanRevision?.(revision);
-    }
+      todos.length !== update.entries.length ||
+      new Set(todoIds).size !== todoIds.length
+    )
+      return undefined;
+    return {
+      planId,
+      sourceCallId,
+      todoIds,
+      structure: JSON.stringify([planId, todos]),
+      allPending: update.entries.every((entry) => entry.status === 'pending'),
+    };
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
