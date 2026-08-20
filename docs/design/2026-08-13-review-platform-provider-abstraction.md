@@ -332,6 +332,31 @@ Enterprise paragraph.
     binds case-insensitively; the cross-session scan is last-writer-wins
     by mtime, and the newest same-PR recording decides (host or unbound)
     instead of harvesting an older session's stale host.
+  - **Hardened again (2026-08-20, third review round of #9491):** the
+    next review pass found the layer under that one. (11) The cwd arm of
+    the write gate now probes the origin through the canonical predicate
+    itself instead of delegating to the registry's family-wildcard
+    detection — a `ghe.alibaba-inc.com` origin no longer takes the a1
+    path. (12) `submit` FORCES context-unavailable into the compose input
+    on the Aone path — the cap no longer rides the model-written state,
+    so an omitted field cannot buy a real platform approval; the docs now
+    say the native approve does not fire this phase. (13) A mid-batch
+    failure now emits `"partial": true` with the landed counts/ids —
+    `posted: false` alone invited a wrapper retry that double-posts; and
+    a deliberate pre-write refusal (drift, oversized) reads as
+    `aone-post-refused`, while an UNEXPECTED pre-write error rethrows
+    (gh parity — nothing landed, a re-run is safe). (14) The floor
+    recovery's host axis binds to the host the write routes at
+    (explicit ?? recorded ?? gh fallback), so a flagless Aone post no
+    longer drops the operator's recorded floor. (15) The batch re-reads
+    the head once after posting and discloses a mid-batch amend
+    (`headMovedDuringPost`) instead of claiming the pins held. The
+    approve-failure and oversized refusals name the USER as the manual
+    actor; the completion contract reads `partial`/`approved`; and the
+    repeat-round caveats (no dedup backing, no self-PR detection) are
+    documented for the user. Still open: dedup/self-PR backing for Aone,
+    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
+    render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

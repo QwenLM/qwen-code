@@ -67,8 +67,8 @@ import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
 } from './lib/authorization.js';
-import { getPlatformReader } from './lib/platform/registry.js';
-import { isAoneCanonicalHost } from './lib/remote-match.js';
+import { isAoneCanonicalHost, parseRemoteUrl } from './lib/remote-match.js';
+import { gitOpt } from './lib/git.js';
 import {
   AonePartialPostError,
   submitAoneReview,
@@ -243,6 +243,17 @@ function compose(
   cliVersion: string,
   attribution: boolean,
   runtimeModelId: string | undefined,
+  /**
+   * The Aone write path FORCES context-unavailable, whatever the
+   * model-written state claims: this phase has no Aone backing for
+   * pr-context/comment-status/presubmit, so no Aone run can have read the
+   * MR's existing discussion. Letting the state's `contextUnavailable`
+   * decide would let a forged or omitted field compose an APPROVE that the
+   * a1 path then turns into a REAL platform approval — the exact forgery
+   * class this command exists to defeat. The cap lives HERE, where
+   * `aoneWrite` is a fact, not in the state.
+   */
+  aoneWrite: boolean,
 ): {
   event: string;
   body: string;
@@ -282,6 +293,9 @@ function compose(
   const r = composeReview(
     {
       ...rest,
+      // Forced for the Aone write path — see the parameter comment. For
+      // GitHub the state's own claim stands (the reads are backed there).
+      contextUnavailable: aoneWrite || rest.contextUnavailable === true,
       criticalsInline,
       suggestionsInline,
       draftedComments: comments,
@@ -597,11 +611,21 @@ export function runSubmit(
     process.exitCode = 3;
     return;
   }
+  // The cwd arm probes the origin's host through the SAME canonical
+  // predicate — it must not delegate to the registry's detection, which
+  // matches the `*.alibaba-inc.com` FAMILY wildcard: safe for reads, not
+  // for writes — an origin on an org GHE family host (ghe.alibaba-inc.com)
+  // would take the a1 path with nothing proving a canonical Aone target.
+  // A family-only resemblance falls through to the gh path.
+  const cwdOriginUrl = gitOpt('remote', 'get-url', 'origin');
+  const cwdOriginHost = cwdOriginUrl
+    ? parseRemoteUrl(cwdOriginUrl)?.host
+    : undefined;
   const aoneWrite =
     isAoneCanonicalHost(explicitHost ?? recordedHost) ||
     (explicitHost === undefined &&
       recordedHost === undefined &&
-      getPlatformReader().kind === 'aone');
+      isAoneCanonicalHost(cwdOriginHost));
   // The gh write binds its routing host to the SAME evidence that selected
   // it: an explicit flag, else the recorded binding. Without the rebind a
   // recorded non-Aone host (e.g. a GHE instance) posted wherever the
@@ -657,7 +681,12 @@ export function runSubmit(
         : undefined,
     callerPr: args.pr,
     callerRepo: args.repo,
-    callerHost: resolveGhHost(args.host),
+    // The host axis binds to the host the WRITE actually routes at —
+    // explicit flag, else the recorded binding, else the gh fallback.
+    // resolveGhHost alone never yields a recorded Aone host, so a flagless
+    // Aone post (routed via the recorded binding) would bind the floor to
+    // github.com/ambient and silently drop the operator's recorded floor.
+    callerHost: explicitHost ?? recordedHost ?? resolveGhHost(args.host),
     defaultSeverityFloor: opts.defaultSeverityFloor,
     skillArgs: args.skillArgs,
   });
@@ -703,6 +732,7 @@ export function runSubmit(
       // forgeable posture DESIGN.md records for the cache path.
       // The identity this round runs under — see lib/round-model.ts.
       roundModelIdFrom(process.env),
+      aoneWrite,
     ));
   } catch (err) {
     throw new Error(
@@ -830,24 +860,47 @@ export function runSubmit(
         })),
       });
     } catch (err) {
-      // The SAME shape as an unauthorised refusal (stderr explanation,
-      // stdout `{"posted": false}`, exit 3): Step 7 treats that shape as
-      // terminal, and a throw instead would surface as a failed command
-      // an agent might re-run — a retry here DOUBLE-POSTS every comment
-      // that already landed.
       const partial = err instanceof AonePartialPostError ? err : undefined;
-      // `ambiguous` counts as landed: the FAILED write may have reached
-      // the server (accepted, then the transport died), so the MR can
-      // carry a comment the count never saw. Undercounting by one would
-      // suppress this advisory and a re-run would double-post it.
+      if (partial === undefined) {
+        // Two shapes here. The DELIBERATE pre-write refusals (head drift,
+        // oversized message) keep the exit-3 refusal shape: deterministic,
+        // nothing landed, named in the skill's refusal-shape list.
+        // EVERYTHING else — auth expiry, a DNS blip in the mr view read,
+        // the 120 s deadline — is an ordinary command failure with
+        // provably nothing landed: RETHROW it, the same shape the gh path
+        // gives, so a recoverable blip is retryable instead of reading as
+        // "a complete, correct outcome" and losing the authorised review.
+        if (!((err as Error)?.message ?? '').startsWith('refusing to post:')) {
+          throw err;
+        }
+        writeStderrLine(
+          `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
+            `Aone Code: ${(err as Error).message} Nothing was written; ` +
+            `the findings are in the terminal output and the saved report.`,
+        );
+        writeStdoutLine(
+          JSON.stringify(
+            { posted: false, reason: 'aone-post-refused' },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 3;
+        return;
+      }
+      // A mid-batch failure: part of the review IS on the MR. The JSON
+      // carries the structured counts AonePartialPostError exists for —
+      // `posted: false` alone would let a wrapper that retries on
+      // "not posted" double-post everything that landed. `partial: true`
+      // is the do-not-retry signal; the ids make "inspect the MR"
+      // concrete. `ambiguous` counts as landed: the FAILED write may have
+      // reached the server (accepted, then the transport died), so the MR
+      // can carry a comment the count never saw.
       const landed =
-        partial !== undefined &&
-        (partial.postedInline > 0 ||
-          partial.summaryPosted ||
-          partial.ambiguous);
+        partial.postedInline > 0 || partial.summaryPosted || partial.ambiguous;
       writeStderrLine(
         `FAILED to post the review to ${args.repo}#${args.pr} on Aone ` +
-          `Code: ${(err as Error).message}` +
+          `Code: ${partial.message}` +
           (landed
             ? ` Part of the review may already be on the MR — do NOT ` +
               `re-run submit (it would post twice); inspect the MR. ` +
@@ -856,7 +909,18 @@ export function runSubmit(
             : ''),
       );
       writeStdoutLine(
-        JSON.stringify({ posted: false, reason: 'aone-post-failed' }, null, 2),
+        JSON.stringify(
+          {
+            posted: false,
+            reason: 'aone-post-failed',
+            partial: true,
+            postedInline: partial.postedInline,
+            postedCommentIds: partial.inlineCommentIds,
+            summaryPosted: partial.summaryPosted,
+          },
+          null,
+          2,
+        ),
       );
       process.exitCode = 3;
       return;
@@ -891,12 +955,26 @@ export function runSubmit(
     }
     if (event === 'APPROVE' && !result.approved) {
       // Inline + summary are posted; only the native approval is missing.
-      // The post stands — name the one command that completes it.
+      // The post stands — name the one command that completes it, and name
+      // the USER as its actor: Step 7 forbids the agent every `a1` write,
+      // and "run it by hand" without an actor would hand the agent the
+      // exact call the rule exists to prevent.
       writeStderrLine(
         `WARNING: the review is posted but \`a1 repo mr approve ` +
           `${args.pr} --repo ${args.repo}\` failed` +
           (result.approveError ? ` (${result.approveError})` : '') +
-          ` — run it by hand to complete the approval.`,
+          ` — ask the USER to run that command to complete the approval; ` +
+          `it is never an agent action.`,
+      );
+    }
+    if (result.headMovedDuringPost) {
+      // The drift gate is check-then-post; an AGit-Flow amend pushed
+      // DURING the (minutes-long) batch orphans every inline comment. The
+      // post stands — disclose that the pins may not.
+      writeStderrLine(
+        `WARNING: the MR head MOVED during posting — the inline comments ` +
+          `may reference code the author already replaced. Re-review the ` +
+          `new head before relying on the posted pins.`,
       );
     }
     writeStdoutLine(

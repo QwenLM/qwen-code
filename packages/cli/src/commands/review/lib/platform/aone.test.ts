@@ -778,13 +778,16 @@ describe('aoneReader.fetchDiff', () => {
 });
 
 describe('submitAoneReview (the a1 write path)', () => {
-  function mrView(head: string) {
+  function mrView(head: string | undefined) {
     // a1Json serves the READ calls (mr view); a1JsonOnce the writes.
+    // `undefined` OMITS the sourceBranch key entirely — the shape
+    // AoneMrView types as optional, which `mrView('')` structurally
+    // could not express.
     a1JsonMock.mockImplementation((...args: string[]) => {
       if (args.includes('view')) {
         return {
           mergeRequest: {
-            sourceBranch: head,
+            ...(head === undefined ? {} : { sourceBranch: head }),
             detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
           },
         };
@@ -935,6 +938,17 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.summaryPosted).toBe(true);
   });
 
+  it('a MISSING sourceBranch key cannot gate either (the typed-optional shape)', () => {
+    // AoneMrView types sourceBranch optional; the guard defends with
+    // `(view.sourceBranch ?? '')`. A refactor to `view.sourceBranch.trim()`
+    // would crash with a raw TypeError before any write on the answer
+    // lacking the key, instead of the intended unanchored post.
+    mrView(undefined);
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
   it('a mid-batch failure throws AonePartialPostError naming what landed', () => {
     a1JsonOnceMock
       .mockReturnValueOnce({ id: 101 })
@@ -978,6 +992,12 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toContain(
       'over the 131072-byte single-argument limit',
+    );
+    // The remedy names the USER as the actor — Step 7 forbids the agent
+    // every hand-run `a1` write, and an actorless "post them manually"
+    // would hand the agent the exact call the rule exists to prevent.
+    expect((caught as Error).message).toContain(
+      'the USER can post them by hand',
     );
     // Nothing posted — neither a comment create nor an approve ran, and
     // the failure is NOT a partial post (nothing is ambiguous either).
@@ -1071,6 +1091,10 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(partial.summaryPosted).toBe(false);
     expect(partial.message).toContain('2 of 2');
     expect(partial.message).not.toContain('and the summary');
+    // State the summary's fate explicitly: "2 of 2 landed" alone reads
+    // as a complete review, but the verdict carrier is absent from the
+    // MR — the one fact remainder-completion needs.
+    expect(partial.message).toContain('the summary did NOT land');
     expect(partial.ambiguous).toBe(true);
   });
 
@@ -1177,5 +1201,49 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(caught).toBeInstanceOf(AonePartialPostError);
     expect(partial.message).toContain('HTTP 422: real a1 error');
     expect(partial.message).not.toContain('line two of the body');
+  });
+
+  it('discloses a head that moved DURING the batch (the gate is check-then-post)', () => {
+    // The gate reads the head once, BEFORE the batch; an AGit-Flow amend
+    // pushed mid-batch slips it. The success report must disclose the
+    // orphaned pins instead of claiming they held.
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-amended',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      });
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.headMovedDuringPost).toBe(true);
+  });
+
+  it('a stable head through the batch reports no mid-batch drift', () => {
+    const result = submitAoneReview(req());
+    expect(result.headMovedDuringPost).toBe(false);
+  });
+
+  it('a post-batch re-read failure does not fail a successful post', () => {
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 repo mr view — network gone');
+      });
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.headMovedDuringPost).toBe(false);
   });
 });

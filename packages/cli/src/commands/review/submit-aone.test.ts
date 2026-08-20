@@ -28,6 +28,7 @@ const {
   ghWithInputMock,
   setGhHostMock,
   getPlatformReaderMock,
+  gitOptMock,
   authMock,
   submitAoneMock,
   composeMock,
@@ -38,6 +39,7 @@ const {
   ghWithInputMock: vi.fn(),
   setGhHostMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
+  gitOptMock: vi.fn(),
   authMock: vi.fn(),
   submitAoneMock: vi.fn(),
   composeMock: vi.fn(),
@@ -63,6 +65,16 @@ vi.mock('./lib/platform/registry.js', async (importOriginal) => {
   return {
     ...actual,
     getPlatformReader: getPlatformReaderMock,
+  };
+});
+
+// The cwd arm of the write gate reads the origin URL through gitOpt —
+// steer it so the cwd-probe cells fire regardless of the vitest cwd.
+vi.mock('./lib/git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/git.js')>();
+  return {
+    ...actual,
+    gitOpt: gitOptMock,
   };
 });
 
@@ -207,6 +219,9 @@ describe('submit posts an authorised Aone target through a1', () => {
       recordedHost: 'gitlab.alibaba-inc.com',
     });
     getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    // Default cwd probe: no origin — the cwd arm yields nothing, so the
+    // routing keys off the recorded/explicit host alone.
+    gitOptMock.mockReturnValue(null);
     submitAoneMock.mockReturnValue({ ...AONE_RESULT });
     composeMock.mockReturnValue({
       event: 'REQUEST_CHANGES',
@@ -291,15 +306,15 @@ describe('submit posts an authorised Aone target through a1', () => {
   });
 
   it('the AMBIENT GH_HOST never selects Aone for a write — even pointing at the canonical Aone git host', () => {
-    // GH_HOST is a GitHub-ROUTING variable; read detection never consults
-    // it, and a write that did could read one platform and write another.
+    // GH_HOST is a GitHub-ROUTING variable; the write gate never consults
+    // it — the cwd probe (a github origin here) decides, not GH_HOST.
     // Slow-path shape (a same-session recording with `--comment`, no
-    // host): the cwd probe — not GH_HOST — decides, and it reads github.
+    // host).
     authMock.mockReturnValue({
       ok: true,
       why: '`--comment` was in the review arguments for #1',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    gitOptMock.mockReturnValue('git@github.com:acme/web.git');
     ghWithInputMock.mockReturnValue('');
     process.env['GH_HOST'] = 'gitlab.alibaba-inc.com';
     expect(() =>
@@ -319,7 +334,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       ok: true,
       why: '`--comment` was in the review arguments for #1',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    gitOptMock.mockReturnValue('git@github.com:acme/web.git');
     ghWithInputMock.mockReturnValue('');
     process.env['GH_HOST'] = 'ghe.alibaba-inc.com';
     expect(() =>
@@ -476,7 +491,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       ok: true,
       why: '`--comment` was in the review arguments for #1',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
     expect(() =>
       runSubmit(base({ userAuthorized: false }), 'unknown', {
         defaultComment: false,
@@ -485,6 +500,27 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(process.exitCode).toBeUndefined();
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
     expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a cwd origin on a FAMILY-WILDCARD host (an org GHE) never takes the a1 path', () => {
+    // The cwd arm probes the origin through the CANONICAL predicate, not
+    // the registry's family-wildcard detection: `ghe.alibaba-inc.com`
+    // matches `*.alibaba-inc.com` but is a GitHub Enterprise instance,
+    // and an irreversible write must not ride a family resemblance. It
+    // falls through to the gh path.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+    });
+    gitOptMock.mockReturnValue('git@ghe.alibaba-inc.com:ghe-org/ghe-repo.git');
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
   });
 
   it('a recorded-but-hostless target still refuses — a write must not guess the platform', () => {
@@ -554,9 +590,12 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(out.event).toBe('REQUEST_CHANGES');
   });
 
-  it('a mid-batch a1 failure exits 3 and warns against a re-run', () => {
+  it('a mid-batch a1 failure exits 3, warns against a re-run, and carries the structured counts', () => {
     // A retry would double-post every comment that already landed; the
-    // exit-3 shape is what Step 7 accepts as terminal.
+    // exit-3 shape is what Step 7 accepts as terminal. `posted: false`
+    // alone would let a wrapper that retries on "not posted" double-post,
+    // so the JSON carries `partial: true` (the do-not-retry signal) and
+    // the landed ids (what "inspect the MR" reconciles against).
     submitAoneMock.mockImplementation(() => {
       throw new AonePartialPostError(
         'boom after 1 of 3 landed',
@@ -569,7 +608,14 @@ describe('submit posts an authorised Aone target through a1', () => {
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(process.exitCode).toBe(3);
-    expect(postedJson()).toEqual({ posted: false, reason: 'aone-post-failed' });
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'aone-post-failed',
+      partial: true,
+      postedInline: 1,
+      postedCommentIds: [11],
+      summaryPosted: false,
+    });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),
     );
@@ -594,13 +640,20 @@ describe('submit posts an authorised Aone target through a1', () => {
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(process.exitCode).toBe(3);
-    expect(postedJson()).toEqual({ posted: false, reason: 'aone-post-failed' });
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'aone-post-failed',
+      partial: true,
+      postedInline: 0,
+      postedCommentIds: [],
+      summaryPosted: false,
+    });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),
     );
   });
 
-  it('a pre-write failure (head drift) exits 3 without the partial-post warning', () => {
+  it('a deliberate pre-write refusal (head drift) exits 3 as a refusal, distinct from a failure', () => {
     submitAoneMock.mockImplementation(() => {
       throw new Error('refusing to post: the MR head moved …');
     });
@@ -608,10 +661,28 @@ describe('submit posts an authorised Aone target through a1', () => {
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(process.exitCode).toBe(3);
-    expect(postedJson()).toEqual({ posted: false, reason: 'aone-post-failed' });
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'aone-post-refused',
+    });
     const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
     expect(stderr).toContain('the MR head moved');
     expect(stderr).not.toContain('do NOT re-run submit');
+  });
+
+  it('an UNEXPECTED pre-write error rethrows — gh parity, retryable, nothing landed', () => {
+    // Auth expiry, a DNS blip in the mr view read, the 120 s deadline:
+    // provably nothing landed, so folding these into the exit-3 refusal
+    // shape would lose an authorised review to a recoverable blip. The
+    // gh path surfaces the same shape as an ordinary command failure.
+    submitAoneMock.mockImplementation(() => {
+      throw new Error('a1 auth check failed — token expired');
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).toThrow(/token expired/);
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
   it('an APPROVE runs the native approval and reports it', () => {
@@ -668,11 +739,34 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(postedJson().approved).toBe(false);
     // Pin the FULL hand-run remedy — the pr/repo interpolations included.
     // A transposed or --repo-less command fails by hand and the MR stays
-    // silently unapproved.
+    // silently unapproved. And the USER is named as the actor: Step 7
+    // forbids the agent every `a1` write, and "run it by hand" without an
+    // actor would hand the agent the exact call the rule exists to
+    // prevent.
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining(
         'a1 repo mr approve 1 --repo maxcompute/odps_src',
       ),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('ask the USER to run that command'),
+    );
+  });
+
+  it('a head that moved DURING posting discloses the orphaned pins', () => {
+    // The drift gate is check-then-post; an amend pushed mid-batch slips
+    // it. The post stands, but the success report must not claim the pins
+    // held.
+    submitAoneMock.mockReturnValue({
+      ...AONE_RESULT,
+      headMovedDuringPost: true,
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(postedJson().posted).toBe(true);
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('MR head MOVED during posting'),
     );
   });
 

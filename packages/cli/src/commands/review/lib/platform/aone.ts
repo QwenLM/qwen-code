@@ -640,6 +640,10 @@ export interface AoneSubmitResult {
   /** False only when the event was APPROVE and the approve call failed. */
   approved: boolean;
   approveError?: string;
+  /** True when the head moved DURING the posting batch — the pre-write
+   *  drift gate is check-then-post, so an amend pushed mid-batch orphans
+   *  every inline comment; the post stands but the pins may not. */
+  headMovedDuringPost?: boolean;
   webUrl: string;
 }
 
@@ -810,8 +814,9 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       `refusing to post: ${oversized.what} is ` +
         `${Buffer.byteLength(oversized.text, 'utf8')} bytes — over the ` +
         `${A1_ARG_MAX_BYTES}-byte single-argument limit a1 must pass it ` +
-        `as. The findings are in the terminal output and the saved ` +
-        `report; post them manually.`,
+        `as. Nothing was written; the findings are in the terminal ` +
+        `output and the saved report, and the USER can post them by ` +
+        `hand — hand-posting is never an agent action.`,
     );
   }
 
@@ -852,10 +857,19 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     // MR even though the count never saw it: mark the failure ambiguous
     // so submit's do-not-re-run advisory fires regardless of the count.
     const ids = postedIds.filter((n): n is number => typeof n === 'number');
+    // State the summary's fate explicitly when it was the write that died:
+    // "N of N inline comment(s) landed" alone reads as a complete review,
+    // but the verdict carrier (the blocking header on a Request changes)
+    // is then absent from the MR — the one fact remainder-completion needs.
+    const summaryFate =
+      !summaryPosted && postedIds.length === req.comments.length
+        ? `; the summary did NOT land`
+        : '';
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
-        `${summaryPosted ? ' and the summary' : ''} landed: ` +
+        `${summaryPosted ? ' and the summary' : ''} landed` +
+        `${summaryFate}: ` +
         a1Cause(err),
       postedIds.length,
       ids,
@@ -894,6 +908,20 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     summaryPosted,
     approved,
     approveError,
+    // The drift gate above is check-then-post; the batch is N+1 sequential
+    // execs (minutes for a long review), so a head that moves DURING it
+    // slips the gate. Re-read once and disclose — the success report must
+    // not claim the pins held. A read failure after a successful post must
+    // not fail the post.
+    headMovedDuringPost: (() => {
+      try {
+        const after = mrView(req.prNumber, req.ownerRepo);
+        const afterHead = (after.sourceBranch ?? '').trim();
+        return afterHead !== '' && afterHead !== req.commitId;
+      } catch {
+        return false;
+      }
+    })(),
     webUrl: view.detailUrl ?? '',
   };
 }

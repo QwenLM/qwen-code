@@ -100,6 +100,23 @@ describe('aone-client write discipline', () => {
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 
+  it('a1JsonOnce NEVER retries a TRANSIENT error either — the comment-write invariant', () => {
+    // a1JsonOnce is the helper every comment write rides (createMrComment).
+    // The "a write is never retried" invariant must hold for IT, not only
+    // for a1Once: routing it through the retrying path would survive every
+    // other test while double-posting a finding after a 502 that arrived
+    // once the server had accepted the create.
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error(
+        'Command failed: a1 repo mr comment create\nHTTP 502 Bad Gateway\n',
+      );
+    });
+    expect(() =>
+      a1JsonOnce('repo', 'mr', 'comment', 'create', '--mr', '7'),
+    ).toThrow();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
   it('a1 (the read path) surfaces a NON-transient error at once', () => {
     // Only the transient class retries; anything else must not pay the
     // delay (and this exercises the shared exec path without its sleep).
