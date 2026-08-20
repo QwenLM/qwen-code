@@ -67,6 +67,10 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./promptLedger": {
+      "types": "./dist/prompt-ledger.d.ts",
+      "import": "./dist/prompt-ledger.js"
+    },
     "./sessionRestoreTimeout": {
       "types": "./dist/session-restore-timeout.d.ts",
       "import": "./dist/session-restore-timeout.js"

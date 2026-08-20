@@ -105,6 +105,11 @@ import {
   sessionExportFormatValues,
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
+import {
+  readRecentPromptTerminals,
+  reconcileDanglingPromptTerminals,
+  withPromptTerminals,
+} from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   omitSkillDetailsForSdkSurface,
@@ -3282,7 +3287,37 @@ export function registerSessionRoutes(
                 throw error;
               }
             }
-            return restored;
+            // Prompt terminal ledger: reconcile prompts left in_flight by
+            // a dead previous daemon before responding. Only the cold path
+            // (no live entry attached and no active prompt on a live entry)
+            // is eligible — an attached load has a live owner that will
+            // publish the real terminal itself, and live-conversation
+            // workspaces store transcripts outside the runtime layout this
+            // reconciliation reads. Gated on `action === 'load'` to match
+            // the load-mediation contract (resume keeps its exact
+            // pre-existing response shape).
+            if (
+              action === 'load' &&
+              !restored.attached &&
+              !restored.hasActivePrompt &&
+              runtime.provenance !== 'live-conversation'
+            ) {
+              try {
+                await reconcileDanglingPromptTerminals(
+                  sessionService,
+                  sessionId,
+                );
+              } catch {
+                // Best-effort: a failure leaves dangling prompts unknown
+                // (fail-closed) and must never fail the load itself.
+              }
+            }
+            return withPromptTerminals(
+              restored,
+              action === 'load'
+                ? readRecentPromptTerminals(sessionService, sessionId)
+                : undefined,
+            );
           },
         );
         try {

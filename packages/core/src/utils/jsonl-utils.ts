@@ -8,7 +8,7 @@
  * Efficient JSONL (JSON Lines) file utilities.
  *
  * Reading operations:
- * - readLines() - Reads the first N lines efficiently using buffered I/O
+ * - readLines() - Reads the first N records efficiently using buffered I/O
  * - read() - Reads entire file into memory as array
  *
  * Writing operations:
@@ -194,14 +194,11 @@ async function closeLineReader(
   await closed;
 }
 
-/**
- * Reads the first N lines from a JSONL file efficiently.
- * Returns an array of parsed objects.
- */
 async function readLinesWithIntegrityInternal<T = unknown>(
   filePath: string,
   count: number,
   options: JsonlReadLinesOptions = {},
+  budget: 'records' | 'lines' = 'records',
 ): Promise<{ records: T[]; complete: boolean }> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
@@ -217,14 +214,21 @@ async function readLinesWithIntegrityInternal<T = unknown>(
 
     const results: T[] = [];
     let complete = true;
+    let scannedLines = 0;
     for await (const line of rl) {
-      if (results.length >= count) break;
+      if (
+        (budget === 'records' && results.length >= count) ||
+        (budget === 'lines' && scannedLines >= count)
+      ) {
+        break;
+      }
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
+      scannedLines++;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       complete &&= parsed.complete;
       for (const obj of parsed.records) {
-        if (results.length >= count) break;
+        if (budget === 'records' && results.length >= count) break;
         results.push(obj);
       }
     }
@@ -235,7 +239,7 @@ async function readLinesWithIntegrityInternal<T = unknown>(
     options.signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(
-        `Error reading first ${count} lines from ${filePath}:`,
+        `Error reading up to ${count} ${budget} from ${filePath}:`,
         error,
       );
     }
@@ -251,17 +255,25 @@ export async function readLines<T = unknown>(
   count: number,
   options: JsonlReadLinesOptions = {},
 ): Promise<T[]> {
-  return (await readLinesWithIntegrityInternal<T>(filePath, count, options))
-    .records;
+  // The slice preserves this reader's record-budget contract: at most `count`
+  // records even when a glued line recovers several.
+  return (
+    await readLinesWithIntegrityInternal<T>(filePath, count, options)
+  ).records.slice(0, count);
 }
 
-/** Reports whether every scanned non-empty line was fully recoverable. */
+/**
+ * Reads every record from the first `count` non-empty lines. `complete`
+ * reports whether each of those lines was fully recoverable, so fail-closed
+ * callers get a deterministic line-prefix coverage rather than one that
+ * shrinks when early lines are `}{`-glued.
+ */
 export async function readLinesWithIntegrity<T = unknown>(
   filePath: string,
   count: number,
   options: JsonlReadLinesOptions = {},
 ): Promise<{ records: T[]; complete: boolean }> {
-  return readLinesWithIntegrityInternal<T>(filePath, count, options);
+  return readLinesWithIntegrityInternal<T>(filePath, count, options, 'lines');
 }
 
 /**
