@@ -10,6 +10,7 @@ import { writeClipboardText } from './clipboard';
 describe('writeClipboardText (issue #9485)', () => {
   let clipboardDescriptor: PropertyDescriptor | undefined;
   let originalExecCommand: Document['execCommand'] | undefined;
+  let copiedValue: string | null = null;
 
   afterEach(() => {
     if (clipboardDescriptor) {
@@ -22,6 +23,8 @@ describe('writeClipboardText (issue #9485)', () => {
       document.execCommand = originalExecCommand;
       originalExecCommand = undefined;
     }
+    copiedValue = null;
+    document.body.innerHTML = '';
   });
 
   const captureClipboard = () => {
@@ -39,11 +42,13 @@ describe('writeClipboardText (issue #9485)', () => {
 
   const captureExecCommand = () => {
     const execCommand = vi.fn().mockImplementation((command: string) => {
-      // Mirror a real copy: the fallback selects a temporary textarea.
-      return command === 'copy' &&
-        document.querySelector('textarea')?.value !== undefined
-        ? true
-        : false;
+      // Mirror a real copy: the fallback selects a temporary textarea that
+      // must hold the requested text — capture it so tests can assert the
+      // value assignment itself, not just that execCommand ran.
+      if (command === 'copy') {
+        copiedValue = document.querySelector('textarea')?.value ?? null;
+      }
+      return command === 'copy' && copiedValue !== null;
     });
     originalExecCommand = document.execCommand;
     document.execCommand = execCommand;
@@ -67,6 +72,43 @@ describe('writeClipboardText (issue #9485)', () => {
     await writeClipboardText('hello fallback');
 
     expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(copiedValue).toBe('hello fallback');
+  });
+
+  it('appends the fallback textarea inside a focused Radix layer', async () => {
+    delete (navigator as { clipboard?: unknown }).clipboard;
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const copyButton = document.createElement('button');
+    dialog.appendChild(copyButton);
+    document.body.appendChild(dialog);
+    copyButton.focus();
+
+    let textareaParent: string | null = null;
+    originalExecCommand = document.execCommand;
+    document.execCommand = vi.fn().mockImplementation((command: string) => {
+      const textarea = document.querySelector('textarea');
+      textareaParent = textarea?.parentElement?.getAttribute('role') ?? null;
+      return command === 'copy' && textarea !== null;
+    });
+
+    await writeClipboardText('inside dialog');
+
+    expect(textareaParent).toBe('dialog');
+    expect(document.querySelector('textarea')).toBeNull();
+  });
+
+  it('restores focus to the previously focused element after the fallback', async () => {
+    delete (navigator as { clipboard?: unknown }).clipboard;
+    captureExecCommand();
+    const composer = document.createElement('textarea');
+    composer.setAttribute('data-testid', 'composer');
+    document.body.appendChild(composer);
+    composer.focus();
+
+    await writeClipboardText('hello fallback');
+
+    expect(document.activeElement).toBe(composer);
   });
 
   it('cleans up the temporary textarea after a fallback copy', async () => {

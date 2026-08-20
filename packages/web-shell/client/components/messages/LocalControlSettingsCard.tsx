@@ -247,7 +247,9 @@ export function LocalControlSettingsCard() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => void writeClipboardText(status.url!)}
+              onClick={() =>
+                void writeClipboardText(status.url!).catch(() => {})
+              }
             >
               <CopyIcon aria-hidden="true" />
               {t('common.copy')}
