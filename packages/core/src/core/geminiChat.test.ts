@@ -3279,6 +3279,67 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('drops a dangling unsigned trailing thought episode when the turn is truncated before its terminating signature (avoids permanently wedging the session)', async () => {
+      // ep1 completes normally (has its signature); ep2 starts but the
+      // stream is cut off (MAX_TOKENS) before ep2's terminating
+      // signature-only chunk ever arrives -- flushThoughtEpisode's own
+      // "Known limitation" note documents this as exactly the case where a
+      // trailing episode can end up unsigned. Left in history alongside a
+      // tool_use in the same turn, this permanently wedges proxy-hosted
+      // adaptive Claude sessions: once the tool result arrives, the turn
+      // enters the active tool-use chain, and every subsequent request
+      // throws from dropUnsignedThinkingFromAssistantMessages -- nothing
+      // in-tree repairs an already-persisted history entry.
+      //
+      // A user-set max_tokens override keeps this test focused on the
+      // consolidation fix by skipping the unrelated MAX_TOKENS
+      // escalation/recovery machinery entirely (see the "does not
+      // escalate ... when max tokens are user-set" test above) rather
+      // than making it a no-op via a functionCall in the truncated turn:
+      // recovery's own functionCall skip only breaks out of a loop it
+      // already entered, but escalation itself is gated solely on
+      // `!hasUserMaxTokensOverride`.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        samplingParams: { max_tokens: 4096 },
+      });
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'ep1', thought: true, thoughtSignature: 'sig1' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'ep2 partial', thought: true }, // truncated: no signature
+                ],
+              },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'truncated tool turn' },
+        'p-truncated-tool-turn',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.parts).toEqual([
+        { text: 'ep1', thought: true, thoughtSignature: 'sig1' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
+    });
+
     it('should split back-to-back reasoning episodes with no intervening tool call, once the first episode has its signature', async () => {
       // Both wires terminate an episode with a text-less, signature-only
       // chunk. Fresh text arriving after an already-signed open episode can
@@ -3364,6 +3425,92 @@ describe('GeminiChat', async () => {
       expect(history[1].parts).toEqual([
         { text: 'A', thought: true, thoughtSignature: 'frag1frag2' },
         { text: 'visible response' },
+      ]);
+    });
+
+    it('does not split an episode when its signature-only chunk arrives before any thinking text', async () => {
+      // Guards the `openEpisodeText.length > 0` clause in the episode-split
+      // condition: without it, a signature arriving before any text for
+      // its episode (a non-compliant proxy ordering, defended against by
+      // this guard) would flush a phantom empty signed episode as soon as
+      // the first real text chunk arrived, then flush that text again
+      // unsigned at the end of the turn -- two corrupted parts instead of
+      // one correct one.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { thought: true, thoughtSignature: 's' },
+                  { text: 'A', thought: true },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'signature before text' },
+        'p-signature-before-text',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 's' },
+      ]);
+    });
+
+    it('concatenates text across multiple deltas within the same still-open episode (the normal live-streaming shape)', async () => {
+      // Guards the `openEpisodeSignature !== ''` clause in the
+      // episode-split condition: a live thinking block arrives as one
+      // `{text, thought: true}` chunk per delta event, terminated by a
+      // separate signature-only chunk -- so multiple consecutive
+      // text-bearing thought parts before any signature is the NORMAL
+      // live shape, not a boundary between two episodes. Without this
+      // clause, every such block would fragment into N-1 unsigned parts
+      // plus one signed tail, which -- on proxy-hosted Claude, whenever
+      // the turn also contains a tool_use -- risks the same active-chain
+      // hazard as a truncation-induced dangling episode.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'part one ', thought: true },
+                  { text: 'part two', thought: true },
+                  { thought: true, thoughtSignature: 'sig' },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'multi-delta episode' },
+        'p-multi-delta-episode',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'part one part two', thought: true, thoughtSignature: 'sig' },
       ]);
     });
 

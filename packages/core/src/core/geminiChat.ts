@@ -4273,6 +4273,13 @@ export class GeminiChat {
     const flushThoughtEpisode = () => {
       if (!hasOpenEpisode) return;
       const text = openEpisodeText.trim();
+      // A signature-only episode (no text) is kept, not dropped: it is
+      // still potentially replayable per Anthropic's spec, and this is
+      // the ACTIVE (latest) turn's thinking, which must replay byte-exact
+      // -- unlike converter.ts's dropEmptyTextThinkingBlocks, which drops
+      // this same empty-text shape but only from non-latest turns, where
+      // the rationale is that prior-turn thinking is disposable, not that
+      // an empty-text signed block is inherently invalid.
       if (text !== '' || openEpisodeSignature !== '') {
         const episodePart: Part = { text, thought: true };
         if (openEpisodeSignature) {
@@ -4317,6 +4324,27 @@ export class GeminiChat {
       }
     }
     flushThoughtEpisode();
+
+    // A thought episode can be flushed while still incomplete if the
+    // stream is cut off before its terminating signature-only chunk
+    // arrives (SSE drop, MAX_TOKENS) -- see the "Known limitation" note
+    // above for the mechanics. Left in history, an unsigned trailing
+    // episode alongside a tool_use in the SAME turn permanently wedges the
+    // session: once the tool result comes back, this turn enters the
+    // active tool-use chain, and proxy-hosted adaptive Claude throws on
+    // every subsequent request (dropUnsignedThinkingFromAssistantMessages)
+    // rather than silently dropping it there, while native Anthropic
+    // rejects the unsigned block itself -- neither is recoverable without
+    // editing history out-of-band. Scoped to `hasToolCall`: a dangling
+    // unsigned episode with no tool_use in the same turn is filtered out
+    // safely downstream instead of ever entering the active-chain path.
+    if (hasToolCall) {
+      const lastPart =
+        consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
+      if (lastPart?.thought && !lastPart.thoughtSignature) {
+        consolidatedHistoryParts.pop();
+      }
+    }
 
     // Single predicate for "visible text part", shared by contentText's
     // computation here, its post-recovery recompute below, and the
@@ -4399,8 +4427,9 @@ export class GeminiChat {
           });
         }
         consolidatedHistoryParts.push(...recovery.functionCallParts);
-        // Recompute contentText so the JSONL recording below stays
-        // aligned with in-memory history (--resume fidelity).
+        // Recompute contentText so the post-recovery validation below
+        // (and the recovery debug log) reflects the rewritten parts; the
+        // JSONL recording reads consolidatedHistoryParts directly.
         contentText = consolidatedHistoryParts
           .filter(isVisibleTextPart)
           .map((part) => part.text)

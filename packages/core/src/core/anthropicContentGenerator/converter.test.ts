@@ -1235,6 +1235,138 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[4]?.id).toBe('t2');
     });
 
+    it('ensureLeadingAssistantThinking only reorders the LAST assistant message, leaving earlier ones in chronological order', () => {
+      // Every other case here collapses all model turns into exactly one
+      // assistant message, so the backward scan (target the last assistant
+      // message) has no discriminating test -- a mutation to a forward
+      // scan (reorder the FIRST assistant message and return) would leave
+      // every other test green while reordering the wrong turn and leaving
+      // the real final turn text-leading, which Anthropic rejects.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 1',
+                  thought: true,
+                  thoughtSignature: 'sig1',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'text B' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 2',
+                  thought: true,
+                  thoughtSignature: 'sig2',
+                },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(2);
+
+      const earlierBlocks = assistantMessages[0]?.content as Array<{
+        type: string;
+      }>;
+      expect(earlierBlocks.map((b) => b.type)).toEqual([
+        'text',
+        'thinking',
+        'tool_use',
+      ]);
+
+      const latestBlocks = assistantMessages[1]?.content as Array<{
+        type: string;
+      }>;
+      expect(latestBlocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+    });
+
+    it('ensureLeadingAssistantThinking relocates a multi-block first thinking run as a single unit', () => {
+      // Every other case here has a first thinking run exactly one block
+      // long, so the run-extension loop's contract ("only the first
+      // thinking run moves, as a unit") has no discriminating test -- a
+      // mutation that stops extending the run after one block (e.g.
+      // `runEnd = runStart + 1`) would still pass every other case while
+      // splitting a multi-block first run apart from itself.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking X',
+                  thought: true,
+                  thoughtSignature: 'sigX',
+                },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking Y',
+                  thought: true,
+                  thoughtSignature: 'sigY',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        thinking?: string;
+        text?: string;
+      }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+      // The run moves as a unit, preserving its own internal order.
+      expect(blocks[0]?.thinking).toBe('thinking X');
+      expect(blocks[1]?.thinking).toBe('thinking Y');
+      expect(blocks[2]?.text).toBe('text A');
+    });
+
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
       // A genuine orphan requires a subsequent message that was actually
       // scanned and found lacking a matching tool_result -- not merely the
