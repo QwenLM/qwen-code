@@ -71,7 +71,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 

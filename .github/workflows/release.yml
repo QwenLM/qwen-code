@@ -100,7 +100,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 
@@ -173,7 +175,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 
@@ -233,7 +237,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 
@@ -282,7 +288,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 
@@ -401,7 +409,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # Run only the repository-owned install steps skipped above.
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
           npm run postinstall
           npm run generate
 
@@ -443,8 +453,11 @@ jobs:
             git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
-            # Restore the bot PAT only at the push boundary so dependency
-            # installation and build tooling cannot read write credentials.
+            # Restore the bot PAT in this step rather than persisting it in
+            # git credentials at checkout, so dependency installation and
+            # build tooling in earlier steps cannot read write credentials.
+            # The push itself needs the PAT (not the job token): pushes made
+            # with GITHUB_TOKEN do not trigger downstream CI workflows.
             # Export (not inline) so GH_TOKEN is still set when `git push`
             # invokes the credential helper, which re-resolves the token at
             # push time rather than at `gh auth setup-git` time.

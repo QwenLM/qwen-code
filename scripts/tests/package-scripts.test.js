@@ -446,9 +446,14 @@ describe('package scripts', () => {
     const exportTokenIdx = commitStep.indexOf(
       'export GH_TOKEN="${CI_BOT_PAT}"',
     );
-    expect(
-      commitStep.indexOf('gh auth setup-git', exportTokenIdx),
-    ).toBeGreaterThan(exportTokenIdx);
+    const setupGitIdx = commitStep.indexOf(
+      'gh auth setup-git',
+      exportTokenIdx,
+    );
+    expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
+    expect(setupGitIdx).toBeLessThan(
+      commitStep.indexOf('git push --force --set-upstream'),
+    );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 

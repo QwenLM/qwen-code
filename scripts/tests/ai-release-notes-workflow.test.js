@@ -112,6 +112,9 @@ describe('stable release notes workflow', () => {
     expect(changelog).not.toContain('continue-on-error: true');
     expect(changelog).toContain("GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(changelog).toContain('gh auth setup-git');
+    expect(changelog.indexOf('gh auth setup-git')).toBeLessThan(
+      changelog.indexOf('git push origin "${BRANCH_NAME}"'),
+    );
   });
 
   it('updates the changelog before opening the release PR', () => {
