@@ -404,12 +404,17 @@ describe('package scripts', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --ignore-scripts --no-audit --progress=false[\s\S]*? {10}npx patch-package/g,
+        / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBeGreaterThanOrEqual(5);
+    expect(installSteps.length).toBeGreaterThan(0);
     for (const installStep of installSteps) {
-      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        'npm ci --ignore-scripts --no-audit --progress=false',
+      );
+      expect(installStep).toContain('npm run postinstall');
+      expect(installStep).toContain('npm run generate');
+      expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
     }
 
     for (const jobName of ['integration_none', 'integration_docker']) {

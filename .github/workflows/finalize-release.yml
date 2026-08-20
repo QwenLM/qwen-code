@@ -53,6 +53,7 @@ jobs:
           token: '${{ secrets.CI_BOT_PAT }}'
           ref: '${{ steps.meta.outputs.release_branch }}'
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Setup Node.js'
         if: |-
@@ -68,9 +69,11 @@ jobs:
           ${{ steps.meta.outputs.is_stable == 'true' }}
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Configure Git User'
         if: |-
@@ -182,11 +185,12 @@ jobs:
         if: |-
           ${{ steps.meta.outputs.is_stable == 'true' }}
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           BRANCH_NAME: '${{ steps.meta.outputs.release_branch }}'
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
         run: |-
           set -euo pipefail
+          gh auth setup-git
           node scripts/generate-changelog.js
           git add CHANGELOG.md
           if git diff --cached --quiet -- CHANGELOG.md; then

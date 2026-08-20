@@ -98,11 +98,11 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # --ignore-scripts skips postinstall; apply patches explicitly.
-          npx patch-package
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Get the version'
         id: 'version'
@@ -171,11 +171,11 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # --ignore-scripts skips postinstall; apply patches explicitly.
-          npx patch-package
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Format Project'
         run: |-
@@ -231,11 +231,11 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # --ignore-scripts skips postinstall; apply patches explicitly.
-          npx patch-package
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -280,11 +280,11 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # --ignore-scripts skips postinstall; apply patches explicitly.
-          npx patch-package
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -400,11 +400,11 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --ignore-scripts --no-audit --progress=false
-          # --ignore-scripts skips postinstall; apply patches explicitly.
-          npx patch-package
+          # Run only the repository-owned install steps skipped above.
+          npm run postinstall
+          npm run generate
 
       - name: 'Configure Git User'
         run: |-
