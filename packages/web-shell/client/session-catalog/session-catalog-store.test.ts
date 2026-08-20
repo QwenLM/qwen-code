@@ -550,6 +550,359 @@ describe('SessionCatalogStore', () => {
     ]);
   });
 
+  it('stamps a fresher live watermark and reorders the active page', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'b',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:03.000Z',
+      },
+    ]);
+
+    expect(
+      store.getSnapshot(target).page?.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        updatedAt: session.updatedAt,
+      })),
+    ).toEqual([
+      { sessionId: 'a', updatedAt: '2026-08-17T00:00:03.000Z' },
+      { sessionId: 'b', updatedAt: '2026-08-17T00:00:02.000Z' },
+    ]);
+  });
+
+  it('ignores stale, invalid, or archived-row watermarks', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'gone',
+          workspaceCwd: '/work',
+          isArchived: true,
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    // Each case applies separately — live-state rows are indexed by session
+    // id, so batching duplicate ids would drop all but the last entry.
+    // Stale and unparsable stamps must not regress or corrupt the row.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:01.000Z',
+      },
+    ]);
+    store.applyLiveState('/work', [
+      { sessionId: 'a', ...volatileState, updatedAt: 'not-a-timestamp' },
+    ]);
+    // An archived row never accepts a live activity stamp.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'gone',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:09.000Z',
+      },
+    ]);
+
+    expect(
+      store.getSnapshot(target).page?.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        updatedAt: session.updatedAt,
+      })),
+    ).toEqual([
+      { sessionId: 'a', updatedAt: '2026-08-17T00:00:02.000Z' },
+      { sessionId: 'gone', updatedAt: '2026-08-17T00:00:01.000Z' },
+    ]);
+  });
+
+  it('never stamps archived or cursored pages', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const archived = {
+      ...query('/work'),
+      options: { pageSize: 1000, archiveState: 'archived' as const },
+    };
+    const cursored = {
+      ...query('/work'),
+      options: { ...query('/work').options, cursor: 'cursor-1' },
+    };
+    await store.loadOnce(archived, { fresh: true });
+    await store.loadOnce(cursored, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 3,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:09.000Z',
+      },
+    ]);
+
+    for (const target of [archived, cursored]) {
+      const row = store.getSnapshot(target).page?.sessions[0];
+      // The volatile overlay still applies; only the activity stamp is
+      // rejected outside reorder-owning pages.
+      expect(row).toMatchObject({
+        sessionId: 'a',
+        clientCount: 3,
+        updatedAt: '2026-08-17T00:00:01.000Z',
+      });
+    }
+  });
+
+  it('keeps pinned rows ahead when reordering an organized page', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'pinned',
+          workspaceCwd: '/work',
+          isPinned: true,
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+        {
+          sessionId: 'b',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:03.000Z',
+        },
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+      ],
+    });
+    const organized = {
+      ...query('/work'),
+      options: {
+        ...query('/work').options,
+        view: 'organized' as const,
+        group: 'all',
+      },
+    };
+    await store.loadOnce(organized, { fresh: true });
+
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 0,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:00:04.000Z',
+      },
+    ]);
+
+    expect(
+      store
+        .getSnapshot(organized)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['pinned', 'a', 'b']);
+  });
+
+  it('records, snapshots, and resolves pending session activity', () => {
+    const wake = vi.fn();
+    const stopWake = store.onLiveStateWake(wake);
+
+    // Without live-state ownership the record is a no-op.
+    store.recordSessionActivity('/work', 'a');
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(wake).not.toHaveBeenCalled();
+
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+    store.recordSessionActivity('/work', 'a');
+    expect(wake).toHaveBeenCalledWith('/work');
+    const first = store.snapshotSessionActivity('/work');
+    const firstSequence = first?.get('a');
+    expect(firstSequence).toBeDefined();
+
+    // A completion recorded mid-flight bumps the sequence; settling with
+    // the stale sequence must keep the newer pending entry.
+    store.recordSessionActivity('/work', 'a');
+    store.resolveSessionActivity('/work', 'a', firstSequence!);
+    const second = store.snapshotSessionActivity('/work');
+    expect(second?.get('a')).toBeGreaterThan(firstSequence!);
+
+    store.resolveSessionActivity('/work', 'a', second!.get('a')!);
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+
+    // Releasing the last live-state user drops pending completions.
+    store.recordSessionActivity('/work', 'b');
+    releaseLiveState();
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    stopWake();
+  });
+
+  it('absorbs watermarks only for rows on reorder-owning pages', async () => {
+    legacy.mockImplementation(
+      async (_cwd: string, options: { archiveState?: string }) => ({
+        sessions:
+          options.archiveState === 'archived'
+            ? [{ sessionId: 'archived-only', workspaceCwd: '/work' }]
+            : [
+                { sessionId: 'a', workspaceCwd: '/work' },
+                {
+                  sessionId: 'row-archived',
+                  workspaceCwd: '/work',
+                  isArchived: true,
+                },
+                { sessionId: 'foreign-row', workspaceCwd: '/elsewhere' },
+                { sessionId: 'no-watermark', workspaceCwd: '/work' },
+              ],
+      }),
+    );
+    await store.loadOnce(query('/work'), { fresh: true });
+    await store.loadOnce(
+      {
+        ...query('/work'),
+        options: { pageSize: 1000, archiveState: 'archived' as const },
+      },
+      { fresh: true },
+    );
+    // The cursored page holds the only copy of a distinct session id, so a
+    // watermark for it must not be reported as absorbed.
+    legacy.mockResolvedValue({
+      sessions: [{ sessionId: 'cursor-only', workspaceCwd: '/work' }],
+    });
+    await store.loadOnce(
+      {
+        ...query('/work'),
+        options: { ...query('/work').options, cursor: 'cursor-1' },
+      },
+      { fresh: true },
+    );
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    const stamp = '2026-08-17T00:00:09.000Z';
+    const absorbed = store.applyLiveState('/work', [
+      { sessionId: 'a', ...volatileState, updatedAt: stamp },
+      { sessionId: 'row-archived', ...volatileState, updatedAt: stamp },
+      { sessionId: 'foreign-row', ...volatileState, updatedAt: stamp },
+      { sessionId: 'archived-only', ...volatileState, updatedAt: stamp },
+      { sessionId: 'cursor-only', ...volatileState, updatedAt: stamp },
+      { sessionId: 'unknown', ...volatileState, updatedAt: stamp },
+      { sessionId: 'no-watermark', ...volatileState },
+    ]);
+
+    expect([...absorbed]).toEqual(['a']);
+  });
+
+  it('orders unstamped rows by createdAt and bounds stamps by createdAt', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'm',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:03.000Z',
+        },
+        {
+          sessionId: 'zzz',
+          workspaceCwd: '/work',
+          createdAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'aaa',
+          workspaceCwd: '/work',
+          createdAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    const volatileState = {
+      clientCount: 0,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    // A live stamp older than a row's createdAt lower bound is rejected.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'zzz',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:01.500Z',
+      },
+    ]);
+    expect(
+      store
+        .getSnapshot(target)
+        .page?.sessions.find((session) => session.sessionId === 'zzz')
+        ?.updatedAt,
+    ).toBeUndefined();
+
+    // A fresher stamp on another row triggers a re-sort; the unstamped rows
+    // must order by their createdAt lower bound, not the id tie-break.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'm',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:04.000Z',
+      },
+    ]);
+    expect(
+      store.getSnapshot(target).page?.sessions.map((s) => s.sessionId),
+    ).toEqual(['m', 'zzz', 'aaa']);
+
+    // A stamp above the createdAt lower bound is accepted.
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'zzz',
+        ...volatileState,
+        updatedAt: '2026-08-17T00:00:05.000Z',
+      },
+    ]);
+    expect(
+      store.getSnapshot(target).page?.sessions.map((s) => s.sessionId),
+    ).toEqual(['zzz', 'm', 'aaa']);
+  });
+
   it('stages active queries through their own route kind and stales retained pages', async () => {
     legacy.mockImplementation(async (cwd: string) => page(cwd, cwd));
     const active = query('/work');
