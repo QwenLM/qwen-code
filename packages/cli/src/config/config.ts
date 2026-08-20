@@ -46,6 +46,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1385,6 +1386,57 @@ function resolveAdvisorModel(
   return trimmed;
 }
 
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(config: Config, rawModel: string): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const selector = (() => {
+    try {
+      return resolveModelId(modelName);
+    } catch {
+      return undefined;
+    }
+  })();
+  const availableModels = (
+    selector?.authType
+      ? config.getAvailableModelsForAuthType(selector.authType)
+      : config.getAllConfiguredModels()
+  ).filter(
+    (model) =>
+      !model.fastOnly &&
+      !model.voiceOnly &&
+      !model.visionOnly &&
+      !model.imageOnly,
+  );
+
+  if (
+    !selector ||
+    !availableModels.some((model) => model.id === selector.modelId)
+  ) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        Array.from(new Set(availableModels.map((model) => model.id))),
+      ),
+    );
+  }
+}
+
 export function isDebugMode(argv: CliArgs): boolean {
   if (argv.debug) return true;
   const debugVal = process.env['DEBUG'];
@@ -2496,6 +2548,9 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+  if (argv.advisor !== undefined) {
+    validateCliAdvisorModel(config, argv.advisor);
+  }
 
   if (lspEnabled) {
     try {

@@ -1325,12 +1325,45 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
-      { advisorModel: 'settings-advisor' },
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
       argv,
     );
 
     expect(config.getAdvisorModel()).toBe('cli-advisor');
     expect(config.hasAdvisorModelOverride()).toBe(true);
+  });
+
+  it('should reject unavailable --advisor models', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'missing-advisor'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig(
+        {
+          modelProviders: {
+            openai: [
+              {
+                id: 'available-advisor',
+                apiKey: 'test-key',
+                models: [{ id: 'available-advisor' }],
+              },
+            ],
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
   it('should disable Advisor for --advisor off without changing max uses', async () => {
