@@ -147,8 +147,10 @@ export const MessageItem = memo(function MessageItem({
             source={message.source}
             data={message.data}
             images={message.images}
+            files={message.files}
             onShowContextDetail={onShowContextDetail}
             onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
             isLatest={isLatest}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}

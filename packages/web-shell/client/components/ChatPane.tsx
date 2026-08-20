@@ -90,6 +90,7 @@ import type {
   TurnOutputOpenRequest,
 } from './artifacts/TurnOutputs';
 import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -241,6 +242,9 @@ export function ChatPane({
   const connection = useConnection();
   const actions = useActions();
   const workspace = useWorkspace();
+  const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -545,6 +549,7 @@ export function ChatPane({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
     sessionActions: actions,
     store,
@@ -1118,6 +1123,7 @@ export function ChatPane({
             onDelete={removeQueuedPrompt}
             onEdit={editQueuedPrompt}
             onImagePreview={handleImagePreview}
+            onAttachmentPreview={handleAttachmentPreview}
           />
           {unknownPromptAdmission && (
             <div
