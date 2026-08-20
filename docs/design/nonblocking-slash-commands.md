@@ -34,7 +34,7 @@ stdout while Ink is rendering.
 
 ## Extended Command Set
 
-The same criteria were later applied to the remaining builtins:
+The same criteria were later applied to eleven more builtins:
 
 - UI-preference commands whose saved changes apply through the existing
   settings hooks without touching the active turn: `/theme`, `/editor`,
