@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 import { getStartupWarnings } from './startupWarnings.js';
 import * as fs from 'node:fs/promises';
 import { getErrorMessage } from '@qwen-code/qwen-code-core';
@@ -20,8 +20,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('startupWarnings', () => {
+  const warningsFilePath = '/tmp/qwen-code-startup-warnings-test.txt';
+
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', warningsFilePath);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('should return warnings from the file and delete it', async () => {
@@ -32,10 +39,19 @@ describe('startupWarnings', () => {
 
     const warnings = await getStartupWarnings();
 
-    expect(fs.access).toHaveBeenCalled();
-    expect(fs.readFile).toHaveBeenCalled();
-    expect(fs.unlink).toHaveBeenCalled();
+    expect(fs.access).toHaveBeenCalledWith(warningsFilePath);
+    expect(fs.readFile).toHaveBeenCalledWith(warningsFilePath, 'utf-8');
+    expect(fs.unlink).toHaveBeenCalledWith(warningsFilePath);
     expect(warnings).toEqual(['Warning 1', 'Warning 2']);
+  });
+
+  it('does not read a shared warnings file when no scoped path is provided', async () => {
+    delete process.env['QWEN_CODE_WARNINGS_FILE'];
+
+    const warnings = await getStartupWarnings();
+
+    expect(warnings).toEqual([]);
+    expect(fs.access).not.toHaveBeenCalled();
   });
 
   it('should return an empty array if the file does not exist', async () => {

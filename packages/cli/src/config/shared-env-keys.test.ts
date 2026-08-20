@@ -40,6 +40,11 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  it('excludes QWEN_CODE_WARNINGS_FILE so a project .env cannot redirect temp warnings', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WARNINGS_FILE',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
