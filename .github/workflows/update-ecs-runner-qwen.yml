@@ -23,7 +23,7 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner: ['ecs-update-sg', 'ecs-update-64c']
+        runner: ['ecs-update-sg', 'ecs-update-64c', 'ecs-update-hk-1', 'ecs-update-hk-2']
       fail-fast: false
     runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
     concurrency:

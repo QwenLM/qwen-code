@@ -33,6 +33,21 @@ export const writeStderrLine = (message: string): void => {
 };
 
 /**
+ * `writeStdoutLine` that cannot throw.
+ *
+ * Same contract as `writeStderrLineSafe`: use it where the write is
+ * incidental to the work in hand — an informational block whose reader
+ * going away (`qwen … | head`) must not fail the command.
+ */
+export const writeStdoutLineSafe = (message: string): void => {
+  try {
+    writeStdoutLine(message);
+  } catch {
+    // stdout is gone. Whatever this line had to say, its reader left.
+  }
+};
+
+/**
  * `writeStderrLine` that cannot throw.
  *
  * `process.stderr.write` throws on EPIPE or a closed fd — reachable whenever

@@ -1,4 +1,4 @@
-name: 'CD: cua-driver (relative-coordinate fork)'
+name: 'CD: Qwen CUA Driver'
 # Cross-platform release for the vendored cua-driver fork under
 # packages/cua-driver. Adapted from upstream trycua/cua
 # cd-rust-cua-driver.yml, with two changes for this repo:
@@ -13,8 +13,8 @@ name: 'CD: cua-driver (relative-coordinate fork)'
 #
 # Artifact convention (matches the qwen-code computer-use downloader):
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
-#            (each contains the universal binary + signed QwenCuaDriver.app)
-#            + *-binary.tar.gz (bare universal binary)
+#            (each contains the Qwen binary, SDK payload, and signed
+#            QwenCuaDriver.app) + *-binary.tar.gz (runtime + SDK payload)
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
 on:
@@ -25,7 +25,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.7.3'
+        default: '0.17.0'
       notarize:
         description: 'Codesign + notarize the macOS artifacts (false to skip during
           iteration)'
@@ -91,8 +91,14 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
-            libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev
+            libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev \
+            libxkbcommon-dev
       - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -118,7 +124,14 @@ jobs:
             cua-driver-linux-${{ matrix.arch }}-
       - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver --release --locked --target ${{ matrix.target }}'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --features cua-driver/portal-input --target ${{ matrix.target }}'
+      - name: 'Build Electron-compatible Node runtime'
+        working-directory: 'packages/cua-driver'
+        run: |
+          npm --prefix typescript ci --ignore-scripts
+          node scripts/build-node-runtime.mjs \
+            --target "${{ matrix.target }}" \
+            --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         run: |
@@ -127,9 +140,16 @@ jobs:
           STAGE="cua-driver-rs-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "release/${STAGE}"
           cp "target/${TARGET}/release/qwen-cua-driver" "release/${STAGE}/"
-          cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
+          cp "target/${TARGET}/release/cua-cursor-theme" "release/${STAGE}/"
+          cp "target/${TARGET}/release/libcua_driver_sdk.so" "release/${STAGE}/"
+          cp "target/${TARGET}/release/cua_driver_node_runtime.node" "release/${STAGE}/"
+          cp include/cua_driver_abi.h "release/${STAGE}/"
+          cp -R ../wayland-helper "release/${STAGE}/wayland-helper"
+          cp ../../../LICENSE "release/${STAGE}/LICENSE"
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
-          tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
+          tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" \
+            qwen-cua-driver cua-cursor-theme libcua_driver_sdk.so \
+            cua_driver_node_runtime.node cua_driver_abi.h wayland-helper
           ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
       - uses: 'actions/upload-artifact@v4'
         with:
@@ -152,6 +172,11 @@ jobs:
             target: 'aarch64-pc-windows-msvc'
     steps:
       - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -177,7 +202,15 @@ jobs:
             cua-driver-windows-${{ matrix.arch }}-
       - name: 'Build (release, unsigned)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cua-driver-uia --release --locked --target ${{ matrix.target }}'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
+      - name: 'Build Electron-compatible Node runtime'
+        working-directory: 'packages/cua-driver'
+        shell: 'bash'
+        run: |
+          npm --prefix typescript ci --ignore-scripts
+          node scripts/build-node-runtime.mjs \
+            --target "${{ matrix.target }}" \
+            --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         shell: 'pwsh'
@@ -187,9 +220,14 @@ jobs:
           $stage   = "cua-driver-rs-$version-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path "release/$stage" | Out-Null
           Copy-Item "target/$target/release/qwen-cua-driver.exe" "release/$stage/"
-          Copy-Item "target/$target/release/cua-driver-uia.exe" "release/$stage/"
+          Copy-Item "target/$target/release/cua-cursor-theme.exe" "release/$stage/"
+          Copy-Item "target/$target/release/cua-driver-uia.exe" "release/$stage/qwen-cua-driver-uia.exe"
+          Copy-Item "target/$target/release/cua_driver_sdk.dll" "release/$stage/"
+          Copy-Item "target/$target/release/cua_driver_node_runtime.node" "release/$stage/"
+          Copy-Item "include/cua_driver_abi.h" "release/$stage/"
+          Copy-Item "../../../LICENSE" "release/$stage/LICENSE"
           Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
-          Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-driver-uia.exe" -DestinationPath "release/$stage-binary.zip" -Force
+          Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-cursor-theme.exe","release/$stage/qwen-cua-driver-uia.exe","release/$stage/cua_driver_sdk.dll","release/$stage/cua_driver_node_runtime.node","release/$stage/cua_driver_abi.h" -DestinationPath "release/$stage-binary.zip" -Force
           Get-ChildItem "release/$stage*.zip"
       - uses: 'actions/upload-artifact@v4'
         with:
@@ -201,13 +239,18 @@ jobs:
   build-macos:
     name: 'macos-universal'
     needs: ['validate-version']
-    runs-on: 'macos-latest'
+    runs-on: 'macos-26'
     env:
       # Sign+notarize on tag push (real release); on manual dispatch honor the
       # `notarize` input so the pipeline can be iterated without Apple's notary.
       DO_NOTARIZE: '${{ startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || inputs.notarize == true }}'
     steps:
       - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -232,10 +275,24 @@ jobs:
             cua-driver-darwin-universal-
       - name: 'Build arm64'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver --release --locked --target aarch64-apple-darwin'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --target aarch64-apple-darwin'
       - name: 'Build x86_64'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver --release --locked --target x86_64-apple-darwin'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --target x86_64-apple-darwin'
+      - name: 'Build Electron-compatible Node runtimes'
+        working-directory: 'packages/cua-driver'
+        run: |
+          npm --prefix typescript ci --ignore-scripts
+          node scripts/build-node-runtime.mjs \
+            --target aarch64-apple-darwin \
+            --output rust/target/aarch64-apple-darwin/release/cua_driver_node_runtime.node
+          node scripts/build-node-runtime.mjs \
+            --target x86_64-apple-darwin \
+            --output rust/target/x86_64-apple-darwin/release/cua_driver_node_runtime.node
       - name: 'Create universal binary (lipo)'
         working-directory: 'packages/cua-driver/rust'
         run: |
@@ -244,7 +301,28 @@ jobs:
             target/aarch64-apple-darwin/release/qwen-cua-driver \
             target/x86_64-apple-darwin/release/qwen-cua-driver \
             -output release/universal/qwen-cua-driver
+          lipo -create \
+            target/aarch64-apple-darwin/release/cua-cursor-theme \
+            target/x86_64-apple-darwin/release/cua-cursor-theme \
+            -output release/universal/cua-cursor-theme
+          lipo -create \
+            target/aarch64-apple-darwin/release/libcua_driver_sdk.dylib \
+            target/x86_64-apple-darwin/release/libcua_driver_sdk.dylib \
+            -output release/universal/libcua_driver_sdk.dylib
+          lipo -create \
+            target/aarch64-apple-darwin/release/cua_driver_node_runtime.node \
+            target/x86_64-apple-darwin/release/cua_driver_node_runtime.node \
+            -output release/universal/cua_driver_node_runtime.node
           lipo -info release/universal/qwen-cua-driver
+          lipo -info release/universal/cua-cursor-theme
+          lipo -info release/universal/libcua_driver_sdk.dylib
+          lipo -info release/universal/cua_driver_node_runtime.node
+          test "$(otool -D release/universal/libcua_driver_sdk.dylib | tail -n 1)" = \
+            '@rpath/libcua_driver_sdk.dylib'
+          otool -l release/universal/libcua_driver_sdk.dylib | \
+            grep -A2 LC_RPATH | grep -Fq 'path /usr/lib/swift'
+          otool -l release/universal/libcua_driver_sdk.dylib | \
+            grep -A2 LC_RPATH | grep -Fq 'path @loader_path'
       - name: 'Import signing certificate + discover identity'
         if: 'env.DO_NOTARIZE == ''true'''
         env:
@@ -279,7 +357,13 @@ jobs:
           codesign --force --timestamp --options runtime \
             --entitlements scripts/CuaDriver.entitlements \
             --sign "$SIGN_IDENTITY" release/universal/qwen-cua-driver
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" release/universal/cua-cursor-theme
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" release/universal/libcua_driver_sdk.dylib
           codesign --verify --strict --verbose=2 release/universal/qwen-cua-driver
+          codesign --verify --strict --verbose=2 release/universal/cua-cursor-theme
+          codesign --verify --strict --verbose=2 release/universal/libcua_driver_sdk.dylib
       - name: 'Assemble QwenCuaDriver.app bundle'
         working-directory: 'packages/cua-driver/rust'
         run: |
@@ -287,7 +371,9 @@ jobs:
           mkdir -p release/QwenCuaDriver.app
           cp -R scripts/CuaDriverBundle/Contents release/QwenCuaDriver.app/Contents
           cp release/universal/qwen-cua-driver release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          cp release/universal/cua-cursor-theme release/QwenCuaDriver.app/Contents/MacOS/cua-cursor-theme
           chmod +x release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          chmod +x release/QwenCuaDriver.app/Contents/MacOS/cua-cursor-theme
           plutil -replace CFBundleShortVersionString -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
           plutil -replace CFBundleVersion -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
           rm -f release/QwenCuaDriver.app/Contents/MacOS/.gitkeep
@@ -328,11 +414,18 @@ jobs:
             # Same universal slice in all three named tarballs (matches the
             # upstream convention so arch-keyed downloaders still work).
             cp release/universal/qwen-cua-driver "release/${STAGE}/"
+            cp release/universal/cua-cursor-theme "release/${STAGE}/"
+            cp release/universal/libcua_driver_sdk.dylib "release/${STAGE}/"
+            cp release/universal/cua_driver_node_runtime.node "release/${STAGE}/"
+            cp include/cua_driver_abi.h "release/${STAGE}/"
             cp -R release/QwenCuaDriver.app "release/${STAGE}/QwenCuaDriver.app"
-            cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
+            cp ../../../LICENSE "release/${STAGE}/LICENSE"
             (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
-            tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
           done
+          tar -czf "release/cua-driver-rs-${VERSION}-darwin-universal-binary.tar.gz" \
+            -C release/universal qwen-cua-driver cua-cursor-theme \
+            libcua_driver_sdk.dylib cua_driver_node_runtime.node \
+            -C ../../include cua_driver_abi.h
           ls -lh release/cua-driver-rs-*-darwin-*.tar.gz
       - uses: 'actions/upload-artifact@v4'
         with:
@@ -340,16 +433,54 @@ jobs:
           path: 'packages/cua-driver/rust/release/cua-driver-rs-*-darwin-*.tar.gz'
           if-no-files-found: 'error'
 
+  verify-release-artifacts:
+    name: 'release artifact contract'
+    needs: ['build-linux', 'build-windows', 'build-macos']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: 'actions/download-artifact@v4'
+        with:
+          path: 'artifacts'
+      - name: 'Verify installer and SDK payloads'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          mapfile -t archives < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          [[ ${#archives[@]} -eq 12 ]] || {
+            printf 'expected 12 release archives, found %s\n' "${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          }
+          for archive in "${archives[@]}"; do
+            case "$archive" in
+              *.tar.gz) members=$(tar -tzf "$archive") ;;
+              *.zip) members=$(unzip -Z1 "$archive") ;;
+            esac
+            grep -Eq '(^|/)qwen-cua-driver(\.exe)?$' <<<"$members"
+            grep -Eq '(^|/)cua-cursor-theme(\.exe)?$' <<<"$members"
+            grep -Eq '(^|/)cua_driver_abi\.h$' <<<"$members"
+            grep -Eq '(^|/)cua_driver_node_runtime\.node$' <<<"$members"
+            case "$archive" in
+              *windows*)
+                grep -Eq '(^|/)qwen-cua-driver-uia\.exe$' <<<"$members"
+                grep -Eq '(^|/)cua_driver_sdk\.dll$' <<<"$members"
+                ;;
+              *darwin*) grep -Eq '(^|/)libcua_driver_sdk\.dylib$' <<<"$members" ;;
+              *linux*) grep -Eq '(^|/)libcua_driver_sdk\.so$' <<<"$members" ;;
+            esac
+          done
+
   # ── Release ──────────────────────────────────────────────────────────────
   release:
     name: 'Create GitHub Release'
-    needs: ['build-linux', 'build-windows', 'build-macos']
+    needs: ['build-linux', 'build-windows', 'build-macos', 'verify-release-artifacts']
     runs-on: 'ubuntu-latest'
     outputs:
       version: '${{ steps.version.outputs.version }}'
     if: 'startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || (github.event_name
       == ''workflow_dispatch'' && inputs.dry_run == false)'
     steps:
+      - uses: 'actions/checkout@v4'
       - uses: 'actions/download-artifact@v4'
         with:
           path: 'release-upload'
@@ -367,6 +498,20 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: 'Stage installers and skill pack'
+        shell: 'bash'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cp packages/cua-driver/scripts/install.sh release-upload/install.sh
+          cp packages/cua-driver/scripts/install.ps1 release-upload/install.ps1
+          cp packages/cua-driver/scripts/_install-rust.sh release-upload/_install-rust.sh
+          cp packages/cua-driver/scripts/uninstall.sh release-upload/uninstall.sh
+          cp packages/cua-driver/scripts/uninstall.ps1 release-upload/uninstall.ps1
+          SKILLS_STAGE="cua-driver-rs-v${VERSION}-skills"
+          mkdir -p "$SKILLS_STAGE"
+          cp -R packages/cua-driver/rust/Skills/cua-driver/. "$SKILLS_STAGE/"
+          tar -czf "release-upload/${SKILLS_STAGE}.tar.gz" "$SKILLS_STAGE"
+          (cd release-upload && sha256sum cua-driver-rs-*.tar.gz cua-driver-rs-*.zip > checksums.txt)
       - name: 'Create GitHub Release'
         uses: 'softprops/action-gh-release@v2'
         with:
@@ -377,7 +522,7 @@ jobs:
           prerelease: true
           generate_release_notes: true
           body: |
-            cua-driver prebuilt binaries — relative-coordinate fork
+            Qwen CUA Driver prebuilt binaries
             (vendored under `packages/cua-driver`).
 
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
@@ -419,14 +564,14 @@ jobs:
           sed -E -i.bak "s/^CUA_DRIVER_RS_BAKED_VERSION=\"[^\"]+\"$/CUA_DRIVER_RS_BAKED_VERSION=\"${VERSION}\"/" packages/cua-driver/scripts/_install-rust.sh
           sed -E -i.bak "s/^\\\$Script:CuaDriverRsBakedVersion = \"[^\"]+\"$/\\\$Script:CuaDriverRsBakedVersion = \"${VERSION}\"/" packages/cua-driver/scripts/install.ps1
           sed -E -i.bak "s/(CUA_DRIVER_RS_VERSION=)[0-9]+\\.[0-9]+\\.[0-9]+/\\1${VERSION}/" packages/cua-driver/README.md
-          sed -E -i.bak "s/(\\\$env:CuaDriverRsVersion = \"|\\\$env:CUA_DRIVER_RS_VERSION = \"|Expected: cua-driver )[0-9]+\\.[0-9]+\\.[0-9]+/\\1${VERSION}/" packages/cua-driver/README.md
+          sed -E -i.bak "s/(\\\$env:CuaDriverRsVersion = \"|\\\$env:CUA_DRIVER_RS_VERSION = \"|Expected: qwen-cua-driver )[0-9]+\\.[0-9]+\\.[0-9]+/\\1${VERSION}/" packages/cua-driver/README.md
           rm -f packages/cua-driver/README.md.bak packages/cua-driver/scripts/_install-rust.sh.bak packages/cua-driver/scripts/install.ps1.bak
 
           grep -Fqx "CUA_DRIVER_RS_BAKED_VERSION=\"${VERSION}\"" packages/cua-driver/scripts/_install-rust.sh
           grep -Fqx "\$Script:CuaDriverRsBakedVersion = \"${VERSION}\"" packages/cua-driver/scripts/install.ps1
           grep -Fq "CUA_DRIVER_RS_VERSION=${VERSION} " packages/cua-driver/README.md
           grep -Fq "\$env:CUA_DRIVER_RS_VERSION = \"${VERSION}\"" packages/cua-driver/README.md
-          grep -Fq "Expected: cua-driver ${VERSION}" packages/cua-driver/README.md
+          grep -Fq "Expected: qwen-cua-driver ${VERSION}" packages/cua-driver/README.md
 
           if git diff --quiet; then
             echo "Installer references already point to ${VERSION}"

@@ -29,6 +29,69 @@ function textBlock(
   };
 }
 
+describe('Assistant branch anchors', () => {
+  it('preserves the checkpoint on the rendered Assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'answer', 1, false, {
+        branchRecordId: 'checkpoint-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      branchRecordId: 'checkpoint-1',
+    });
+  });
+
+  it('does not anchor an insight-only block onto the previous reply', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'first answer',
+    });
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    expect(messages.some((message) => message.role === 'insight_ready')).toBe(
+      true,
+    );
+    expect(messages.some((message) => 'branchRecordId' in message)).toBe(false);
+  });
+
+  it("anchors a checkpoint onto the insight block's own text segment", () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}} done',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    const anchored = messages.find(
+      (message) => message.role === 'assistant' && message.content === 'done',
+    );
+    expect(anchored).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+      branchRecordId: 'checkpoint-2',
+    });
+  });
+});
+
 function statusBlock(
   id: string,
   text: string,
@@ -138,6 +201,89 @@ describe('transcriptBlocksToDaemonMessages', () => {
       content: 'scheduled prompt',
       source: 'cron',
     });
+  });
+
+  it('normalizes an unchanged tool block content to a stable reference', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'body' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const second = transcriptBlocksToDaemonMessages([block]);
+
+    const firstContent = (first[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    const secondContent = (second[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    // The normalizer caches by the original block reference, so a block that
+    // did not change yields the same content array across frames,
+    // allowing MessageItem's JSON cache to avoid re-serializing the output.
+    expect(secondContent).toBe(firstContent);
+    expect(Object.isFrozen(firstContent)).toBe(true);
+  });
+
+  it('renormalizes content when a caller replaces the tool block', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'before' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const content = block.content as Array<{
+      type: 'content';
+      content: { type: 'text'; text: string };
+    }>;
+    content[0].content.text = 'after';
+    const second = transcriptBlocksToDaemonMessages([{ ...block }]);
+
+    expect(
+      (first[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'before' } }]);
+    expect(
+      (second[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'after' } }]);
+  });
+
+  it('preserves user file attachment metadata', () => {
+    const data = new Blob(['line one']);
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this', 1, false, {
+        files: [
+          {
+            name: 'app.log',
+            mimeType: 'text/plain',
+            data,
+            text: 'line one',
+            attachmentId: 'app.log',
+          },
+        ],
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this',
+      files: [
+        {
+          name: 'app.log',
+          mimeType: 'text/plain',
+          data,
+          text: 'line one',
+          attachmentId: 'app.log',
+        },
+      ],
+    });
+  });
+
+  it('preserves literal attachment-looking user text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this\n\n@attachment:///data.json', 1),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this\n\n@attachment:///data.json',
+    });
+    expect(messages[0]).not.toHaveProperty('files');
   });
 
   it('preserves user input annotations metadata', () => {
@@ -268,6 +414,51 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }
     },
   );
+
+  it('projects a replayed user background agent notification onto its tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 1, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      textBlock(
+        'agent-terminal',
+        'user',
+        'background agent finished',
+        2,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'completed',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', status: 'completed', endTime: 2 }],
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      source: 'background_notification',
+      data: {
+        kind: 'agent',
+        status: 'completed',
+        taskId: 'agent-task',
+        toolUseId: 'agent-call',
+      },
+    });
+  });
 
   it('does not apply a non-agent background notification to an agent tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -403,28 +594,169 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('localizes structured mid-turn inserted status blocks', () => {
-    const messages = transcriptBlocksToDaemonMessages(
-      [
-        statusBlock('mid-1', 'Inserted message: hello', 1, {
-          source: 'mid_turn_message_injected',
-          data: { sessionId: 's1', messages: ['你好'] },
-        }),
-      ],
-      {
-        labels: {
-          midTurnInserted: (message) => `已插入消息：${message}`,
-        },
-      },
-    );
+  it('shows structured mid-turn inserted text without a status prefix', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '你好', 1, {
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
 
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '已插入消息：你好',
+        content: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
       }),
+    ]);
+  });
+
+  it('extracts images from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'look at this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['look at this'],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'look at this',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('shows the degraded-media notice when the echo text is empty', () => {
+    // When the stored media is gone at drain, the daemon echoes an empty
+    // messages array whose items carry only the placeholder text block; the
+    // notice must be surfaced instead of rendering an empty bubble.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [''],
+          messageIds: ['mid-gone'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'text',
+                  text: '[Attachment is no longer available]',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: '[Attachment is no longer available]',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that look like status noise', () => {
+    // User content that merely starts like a filtered status line must not be
+    // dropped by the noise filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'Model switched: check this too', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['Model switched: check this too'],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'Model switched: check this too',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that start like plan JSON', () => {
+    // User content starting with the plan projection shape must not be
+    // misrendered as a plan card (which also drops the attached images).
+    const planLikeText =
+      'plan: {"sessionUpdate":"plan","entries":[{"content":"step"}]}';
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', planLikeText, 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [planLikeText],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: planLikeText,
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('keeps replayed mid-turn user blocks as inserted messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('mid-1', 'user', 'with image', 1, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+      textBlock('mid-2', 'user', 'text only', 2, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'system',
+        content: 'with image',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      },
+      {
+        role: 'system',
+        content: 'text only',
+        source: 'mid_turn_message_injected',
+      },
     ]);
   });
 
@@ -1227,6 +1559,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'debug-1',
         kind: 'debug',
+        debugReason: 'unrecognized_event',
         text:
           'language_changed (unrecognized daemon event): ' +
           '{"sessionId":"dd699cc0-6ef7-4882-92d9-1076ac5b87e9",' +
@@ -1238,6 +1571,273 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([]);
+  });
+
+  it('filters legacy unrecognized-event blocks that carry no debugReason', () => {
+    // `WebShellTranscript` takes already-projected blocks from its caller, so
+    // blocks projected or persisted by an SDK older than `debugReason` still
+    // arrive with no reason. They must keep being filtered — and not only the
+    // two event types that used to be suppressed by name.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy(
+        'legacy-1',
+        'language_changed (unrecognized daemon event): {"language":"en"}',
+      ),
+      legacy(
+        'legacy-2',
+        'session_cwd_changed (unrecognized daemon event): {"cwd":"/work"}',
+      ),
+      legacy(
+        'legacy-3',
+        'some_future_event (unrecognized daemon event): {"a":1}',
+      ),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('filters unrecognized session_update kinds the daemon adds later', () => {
+    // The event kind here is deliberately one no normalizer case handles: the
+    // filter must key off `debugReason`, not a list of known-noisy prefixes.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-2',
+        kind: 'debug',
+        debugReason: 'unrecognized_session_update',
+        text: 'some_future_kind: {"payload":{"nested":"json"}}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('keys the filter off the unrecognized_ category prefix, not the enum', () => {
+    // A newer SDK may stamp reasons this build's `DaemonUiDebugReason` does
+    // not list; the category prefix is the contract. `unrecognized_*` noise
+    // hides, `malformed_*` defect signals keep rendering.
+    const block = (id: string, debugReason: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        debugReason,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      block(
+        'future-unrecognized',
+        'unrecognized_tool_frame',
+        'tool_frame: {"frameId":"f1"}',
+      ),
+      block(
+        'future-malformed',
+        'malformed_tool_frame',
+        'tool_frame: broken frame payload',
+      ),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['future-malformed']);
+  });
+
+  it('keeps malformed-payload debug blocks visible', () => {
+    // A frame the client *does* know about arrived broken — that is a real
+    // defect signal, not forward-compatibility noise.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-3',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'memory_changed: malformed memory_changed payload',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-3',
+        role: 'system',
+        content: 'memory_changed: malformed memory_changed payload',
+        variant: 'info',
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('filters legacy usage_update and a2ui blocks that carry no debugReason', () => {
+    // The original spam report. #8790 stopped the SDK inserting new
+    // `usage_update` blocks, but a transcript persisted or projected before
+    // that still holds them, and `WebShellTranscript` renders whatever its
+    // caller passes — so without this the reported spam returns on upgrade.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('legacy-usage', 'usage_update: {"used":46351,"size":1000000}'),
+      legacy('legacy-a2ui', 'a2ui: {"surfaceId":"s1","commands":[]}'),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('filters legacy projections whose payload is not an object', () => {
+    // `DaemonEvent.data` is `unknown`, and `stringifyJson` returns strings
+    // verbatim, primitives as `42` / `true` / `null`, and `''` for undefined.
+    // Keying the match on a leading `{` let all of those through.
+    const legacy = (id: string, payload: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text: `some_future_event (unrecognized daemon event): ${payload}`,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('obj', '{"a":1}'),
+      legacy('arr', '[1,2]'),
+      legacy('str', 'plain text payload'),
+      legacy('num', '42'),
+      legacy('bool', 'true'),
+      legacy('null', 'null'),
+      legacy('empty', ''),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('only matches the legacy shape, never a quoted marker or a status block', () => {
+    // The text match is a compatibility shim, so it must be scoped to `debug`
+    // blocks and anchored to the whole projection. Matching the marker as a
+    // substring would hide any block that merely relays it.
+    const block = (
+      id: string,
+      kind: string,
+      text: string,
+      extra: Record<string, unknown> = {},
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        ...extra,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      // A status line is real content even when it quotes the marker.
+      block(
+        'status-1',
+        'status',
+        'peer reported (unrecognized daemon event): malformed frame',
+      ),
+      // A legacy malformed payload relaying an upstream message.
+      block(
+        'legacy-malformed',
+        'debug',
+        'permission_request: {"message":"peer said (unrecognized daemon event): x"}',
+      ),
+      // A client-dispatched summary that happens to quote it.
+      block(
+        'client-1',
+        'debug',
+        'Model switch failed: upstream said (unrecognized daemon event): x',
+        { source: 'model_switch_summary' },
+      ),
+      // A status block whose text starts with a suppressed session-update kind.
+      block('status-2', 'status', 'usage_update: {"used":1}'),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual([
+      'status-1',
+      'legacy-malformed',
+      'client-1',
+      'status-2',
+    ]);
+  });
+
+  it('does not let the legacy prefixes swallow prose or classified blocks', () => {
+    // The prefix list is a compatibility shim for a specific projection
+    // shape, not a content filter: it must not hide a block the normalizer
+    // explicitly classified, nor text that merely starts with the word.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'malformed-1',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'usage_update: {"used":1}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+      {
+        id: 'prose-1',
+        kind: 'debug',
+        text: 'usage_update: rejected by the proxy',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['malformed-1', 'prose-1']);
+  });
+
+  it('keeps client-dispatched debug blocks that carry no debugReason', () => {
+    // Web Shell dispatches its own `debug` event for the model-switch summary.
+    // Only the normalizer stamps `debugReason`, so client-side debug blocks
+    // must not be swept up by the unrecognized-event filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-4',
+        kind: 'debug',
+        text: 'Model switched to qwen3-coder-plus',
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-4',
+        role: 'system',
+        content: 'Model switched to qwen3-coder-plus',
+        variant: 'info',
+        timestamp: 1,
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+      },
+    ]);
   });
 
   it('filters SDK model switch status noise', () => {
@@ -2418,6 +3018,30 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('renders loop detection errors from a structured localized label', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-loop',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'loop_detected' as const,
+          text: 'internal fallback',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      { labels: { loopDetected: 'Localized loop guidance.' } },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized loop guidance.',
+      retryable: false,
+      source: 'turn_error',
+    });
   });
 
   it('renders model stream interruption errors from structured errorKind labels', () => {

@@ -22,6 +22,9 @@ import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
+import type { InlineImageData } from '../../types.js';
+import { TerminalImage } from '../TerminalImage.js';
+import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('THINK_RENDER');
 
@@ -40,6 +43,8 @@ interface UserShellMessageProps {
 
 interface AssistantMessageProps {
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -48,6 +53,8 @@ interface AssistantMessageProps {
 
 interface AssistantMessageContentProps {
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -89,6 +96,8 @@ interface PrefixedTextMessageProps {
 
 interface PrefixedMarkdownMessageProps {
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   prefix: string;
   prefixColor: string;
   isPending: boolean;
@@ -101,6 +110,8 @@ interface PrefixedMarkdownMessageProps {
 
 interface ContinuationMarkdownMessageProps {
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -148,6 +159,8 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
 
 const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   text,
+  images,
+  omittedImageCount,
   prefix,
   prefixColor,
   isPending,
@@ -158,6 +171,10 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
+  const imageHeightBudget =
+    availableTerminalHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      : availableTerminalHeight;
 
   return (
     <Box flexDirection="row">
@@ -167,14 +184,27 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
         </Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={isPending}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - prefixWidth}
-          textColor={textColor}
-          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-        />
+        {text.length > 0 && (
+          <MarkdownDisplay
+            text={text}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth - prefixWidth}
+            textColor={textColor}
+            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          />
+        )}
+        {images?.map((image, index) => (
+          <TerminalImage
+            key={index}
+            image={image}
+            contentWidth={contentWidth - prefixWidth}
+            availableTerminalHeight={imageHeightBudget}
+          />
+        ))}
+        {omittedImageCount !== undefined && omittedImageCount > 0 && (
+          <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+        )}
       </Box>
     </Box>
   );
@@ -184,6 +214,8 @@ const ContinuationMarkdownMessage: React.FC<
   ContinuationMarkdownMessageProps
 > = ({
   text,
+  images,
+  omittedImageCount,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -192,17 +224,34 @@ const ContinuationMarkdownMessage: React.FC<
   sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
+  const imageHeightBudget =
+    availableTerminalHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      : availableTerminalHeight;
 
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - prefixWidth}
-        textColor={textColor}
-        sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-      />
+      {text.length > 0 && (
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - prefixWidth}
+          textColor={textColor}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+        />
+      )}
+      {images?.map((image, index) => (
+        <TerminalImage
+          key={index}
+          image={image}
+          contentWidth={contentWidth - prefixWidth}
+          availableTerminalHeight={imageHeightBudget}
+        />
+      ))}
+      {omittedImageCount !== undefined && omittedImageCount > 0 && (
+        <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+      )}
     </Box>
   );
 };
@@ -236,6 +285,8 @@ export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
 
 export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   text,
+  images,
+  omittedImageCount,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -243,6 +294,8 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
+    images={images}
+    omittedImageCount={omittedImageCount}
     prefix={ICON.DIAMOND}
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
@@ -257,6 +310,8 @@ export const AssistantMessageContent: React.FC<
   AssistantMessageContentProps
 > = ({
   text,
+  images,
+  omittedImageCount,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -264,6 +319,8 @@ export const AssistantMessageContent: React.FC<
 }) => (
   <ContinuationMarkdownMessage
     text={text}
+    images={images}
+    omittedImageCount={omittedImageCount}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}

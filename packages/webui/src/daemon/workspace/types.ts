@@ -17,6 +17,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
@@ -36,6 +37,7 @@ import type {
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionInstallResponse,
   ExtensionUpdateCheckResponse,
   DaemonInitWorkspaceResult,
@@ -206,7 +208,7 @@ export interface DaemonChannelPairingActions {
   approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
   revoke(
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
@@ -559,6 +561,10 @@ export interface DaemonWorkspaceActions {
   // Extensions
   installExtension(
     params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse>;
+  installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
     clientId?: string,
   ): Promise<ExtensionInstallResponse>;
   extensionOperationStatus(

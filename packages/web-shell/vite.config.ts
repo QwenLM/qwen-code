@@ -10,10 +10,11 @@ const daemonProxy: ProxyOptions = {
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
-    // `/extensions/*` is both a daemon API and a client source directory.
+    // These paths overlap daemon route prefixes and client source directories.
     if (
       req.method === 'GET' &&
-      req.url?.startsWith('/extensions/') &&
+      (req.url?.startsWith('/extensions/') ||
+        req.url?.startsWith('/session-catalog/')) &&
       /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
     ) {
       return req.url;

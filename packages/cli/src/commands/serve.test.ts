@@ -10,11 +10,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { serveCommand, maybeOpenWebShellBrowser } from './serve.js';
+import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockQr = vi.hoisted(() => ({
+  generate: vi.fn(
+    (
+      _input: string,
+      _opts?: { small: boolean },
+      callback?: (qrcode: string) => void,
+    ) => callback?.('QR'),
+  ),
+  setErrorLevel: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -24,6 +34,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     shouldLaunchBrowser: mockShouldLaunchBrowser,
   };
 });
+vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
@@ -79,6 +90,13 @@ describe('serve command args', () => {
     expect(parsed['initialize-timeout-ms']).toBe(30000);
   });
 
+  it('parses --session-restore-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--session-restore-timeout-ms 60000',
+    );
+    expect(parsed['session-restore-timeout-ms']).toBe(60000);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
@@ -87,6 +105,11 @@ describe('serve command args', () => {
   it('leaves --initialize-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['initialize-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --session-restore-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['session-restore-timeout-ms']).toBeUndefined();
   });
 
   it('defaults external tool guarding to off', () => {
@@ -129,6 +152,82 @@ describe('serve command args', () => {
   it('parses --open (default false)', () => {
     expect(buildParser().parseSync('')['open']).toBe(false);
     expect(buildParser().parseSync('--open')['open']).toBe(true);
+  });
+
+  it('leaves the journal caps undefined unless the operator pins them', () => {
+    // Adaptive growth is disabled only for PINNED caps: yargs defaults here
+    // would make every unpinned boot look pinned and silently disable it.
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-journal-events']).toBeUndefined();
+    expect(parsed['max-journal-bytes']).toBeUndefined();
+    expect(
+      buildParser().parseSync('--max-journal-events 5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes 1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
+  it('rejects valueless journal cap flags instead of silently unpinning', () => {
+    // Presence pins the caps and disables adaptive growth; without nargs a
+    // bare flag parses as undefined and the pin never reaches runQwenServe.
+    for (const input of [
+      '--max-journal-events',
+      '--max-journal-bytes',
+      '--no-web --max-journal-events',
+      '--max-journal-events --max-journal-bytes',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: max-journal-(events|bytes)/,
+      );
+    }
+    expect(
+      buildParser().parseSync('--max-journal-events=5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes=1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
+  it('parses --local-control without taking over daemon credentials', () => {
+    expect(buildParser().parseSync('')['local-control']).toBe(false);
+    expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');
+    expect(
+      buildParser().parseSync('--allow-origin http://localhost:3000')[
+        'allow-origin'
+      ],
+    ).toEqual(['http://localhost:3000']);
+    expect(buildParser().parseSync('--local-control')['local-control']).toBe(
+      true,
+    );
+    const composed = buildParser().parseSync(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+    expect(composed['token']).toBe('fixed');
+    expect(composed['allow-origin']).toEqual(['http://localhost:3000']);
+    expect(composed['port']).toBe(0);
+    expect(() => buildParser().parseSync('--local-control --no-web')).toThrow(
+      /Local Control requires the Web Shell/,
+    );
+    expect(() =>
+      buildParser().parseSync('--local-control --hostname 192.168.1.2'),
+    ).toThrow(/Local Control requires --hostname 127\.0\.0\.1/);
+    expect(() =>
+      buildParser().parseSync('--local-control-address 192.168.1.2'),
+    ).toThrow(/requires --local-control/);
+    expect(
+      buildParser().parseSync(
+        '--local-control --local-control-address 192.168.1.2',
+      )['local-control-address'],
+    ).toBe('192.168.1.2');
   });
 
   it('parses repeatable --channel values', () => {
@@ -229,6 +328,9 @@ describe('serve rate limit env parsing', () => {
     });
   }
 
+  // Call this at most once per test: it waits on `toHaveBeenCalled()`, which a
+  // previous call in the same test already satisfies, so a second invocation
+  // returns before its own args land and assertions read the first call's.
   async function startServeHandlerWithArgs(args: string) {
     const handler = serveCommand.handler;
     if (!handler) throw new Error('serve handler missing');
@@ -277,6 +379,213 @@ describe('serve rate limit env parsing', () => {
         rateLimitWindowMs: 60000,
       }),
     );
+  });
+
+  it('omits the journal caps for an unpinned boot so adaptive growth stays enabled', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).not.toHaveProperty('maxJournalEvents');
+    expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards pinned journal caps to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --max-journal-events 5000 --max-journal-bytes 1048576',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxJournalEvents: 5000,
+        maxJournalBytes: 1048576,
+      }),
+    );
+  });
+
+  it('forwards a single pinned entry cap without the byte cap', async () => {
+    // The two conditional spreads are independent; pinning ONE flag must
+    // forward it alone. Coupling them would silently drop the pinned cap.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-events 5000');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalEvents: 5000 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalBytes',
+    );
+  });
+
+  it('forwards a single pinned byte cap without the entry cap', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-bytes 1048576');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalBytes: 1048576 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalEvents',
+    );
+  });
+
+  it('delegates Local Control to the daemon service and prints its pairing URL', async () => {
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'https://192.168.1.20/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: true,
+      encrypted: true,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --open --port 443 --tls-cert cert.pem --tls-key key.pem',
+    );
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        hostname: '127.0.0.1',
+        token: undefined,
+      }),
+    );
+    expect(options).not.toHaveProperty('strictPort');
+    expect(enable).toHaveBeenCalledWith({});
+    expect(mockQr.setErrorLevel).toHaveBeenCalledWith('Q');
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'https://192.168.1.20/#token=pairing',
+      { small: true },
+      expect.any(Function),
+    );
+    expect(stdoutWrites.join('')).toContain('Local Control is on');
+    expect(stdoutWrites.join('')).toContain('Sleep is inhibited');
+    expect(stdoutWrites.join('')).toContain('Traffic is encrypted');
+    await vi.waitFor(() =>
+      expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+        'https://127.0.0.1/',
+      ),
+    );
+  });
+
+  it('forwards --token and --allow-origin through to runQwenServe with --local-control', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getLocalControl: () => ({
+        enable: vi.fn().mockResolvedValue({
+          active: true,
+          url: 'http://192.168.1.20:4170/#token=pairing',
+          interfaceName: 'en0',
+          sleepInhibited: false,
+          encrypted: false,
+        }),
+      }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        token: 'fixed',
+        allowOrigins: ['http://localhost:3000'],
+      }),
+    );
+  });
+
+  it('closes the daemon when pairing output fails', async () => {
+    const close = vi.fn().mockRejectedValue(new Error('close failed'));
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockQr.generate.mockImplementationOnce(() => {
+      throw new Error('QR failed');
+    });
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(stderrWrites.join('')).toContain('QR failed');
+    expect(stderrWrites.join('')).not.toContain('close failed');
+  });
+
+  it('closes Local Control when the authenticated Web Shell is unavailable', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4170/',
+      webShellMounted: false,
+      runtimeReady: Promise.resolve(),
+      close,
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(mockQr.generate).not.toHaveBeenCalled();
   });
 
   it('passes normalized named channels to runQwenServe', async () => {
@@ -332,12 +641,10 @@ describe('serve rate limit env parsing', () => {
       webShellMounted: false,
     });
 
-    await startServeHandlerWithArgs(
-      '--no-web --memory-project-scope workspace',
-    );
+    await startServeHandlerWithArgs('--no-web --memory-project-scope git-root');
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryProjectScope: 'workspace' }),
+      expect.objectContaining({ memoryProjectScope: 'git-root' }),
     );
   });
 
@@ -382,6 +689,72 @@ describe('serve rate limit env parsing', () => {
       'externalToolGuard',
     );
     expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('passes --memory-pressure-mode to runQwenServe', async () => {
+    // Without this, deleting the `memoryPressureMode` line in the handler
+    // leaves every other suite green: the fast path parses the flag in its
+    // own module, and the status builder supplies the same default itself.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --memory-pressure-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'off' }),
+    );
+  });
+
+  it('passes --child-heap-mode to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'off' }),
+    );
+  });
+
+  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'observe' }),
+    );
+    // `enforce` is not a value yet, and boot must say so rather than accept
+    // it: applying the partition needs an observation this daemon cannot make.
+    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+      /Invalid values/,
+    );
+  });
+
+  it('defaults the memory pressure mode to observe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'observe' }),
+    );
+  });
+
+  it('rejects a memory pressure mode outside the choices', () => {
+    expect(() =>
+      buildParser().parseSync('--memory-pressure-mode enforce'),
+    ).toThrow(/Invalid values/);
   });
 
   it('passes --channel all as an all-channel selection', async () => {

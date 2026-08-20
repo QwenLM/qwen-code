@@ -61,6 +61,14 @@ export enum AuthType {
   USE_ANTHROPIC = 'anthropic',
 }
 
+export type PromptCacheSharingParameters = GenerateContentParameters & {
+  /**
+   * Marks reusable history before a non-reusable trailing directive. The
+   * final message is deliberately excluded from cache breakpoints.
+   */
+  promptCacheSharing?: boolean;
+};
+
 /**
  * Supported input modalities for a model.
  * Omitted or false fields mean the model does not support that input type.
@@ -87,11 +95,18 @@ export type ContentGeneratorConfig = {
   // The SDK `timeout` only covers connect + first response, so a stream that
   // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
   streamIdleTimeoutMs?: number;
+  // Total-lifetime cap for one streaming response, NOT refreshed by chunk
+  // arrival: a drip-fed stream resets the idle watchdog forever while never
+  // completing the message (issue #8597), so that shape needs a bound the
+  // chunks cannot reset. `<= 0` disables it. Honored only by the
+  // OpenAI-compatible pipeline today — the Anthropic/Gemini generators do not
+  // implement it, so on those auth types the drip-fed shape stays unbounded.
+  streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
-  enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  enableCacheControl?: boolean; // Enable provider prompt-cache controls
   // Force `scope: 'global'` on Anthropic cache_control entries even when the
   // base URL is not an Anthropic-native origin (e.g. proxy providers like
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields

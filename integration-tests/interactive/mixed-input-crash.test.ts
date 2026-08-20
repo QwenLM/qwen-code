@@ -10,7 +10,7 @@ import { TestRig } from '../test-helper.js';
 describe('mixed input crash prevention', () => {
   it('should not crash when using mixed prompt inputs', async () => {
     const rig = new TestRig();
-    rig.setup('should not crash when using mixed prompt inputs');
+    await rig.setup('should not crash when using mixed prompt inputs');
 
     // Test: echo "say '1'." | gemini --prompt-interactive="say '2'." say '3'.
     const stdinContent = "say '1'.";
@@ -41,7 +41,7 @@ describe('mixed input crash prevention', () => {
 
   it('should provide clear error message for mixed input', async () => {
     const rig = new TestRig();
-    rig.setup('should provide clear error message for mixed input');
+    await rig.setup('should provide clear error message for mixed input');
 
     try {
       await rig.run(

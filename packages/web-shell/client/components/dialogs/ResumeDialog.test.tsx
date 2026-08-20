@@ -31,15 +31,21 @@ const sessions = [
     updatedAt: '2026-01-01T00:00:00Z',
   },
 ];
+let scopedSessionsOptions: unknown;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
-    sessions,
-    loading: false,
-    error: undefined,
-  }),
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: (_workspaceCwd: unknown, options: unknown) => {
+    scopedSessionsOptions = options;
+    return {
+      sessions,
+      loading: false,
+      error: undefined,
+    };
+  },
 }));
 
 const { ResumeDialog } = await import('./ResumeDialog');
@@ -104,6 +110,10 @@ describe('ResumeDialog', () => {
   it('opens with no highlight; Enter does not switch sessions', () => {
     mount();
 
+    expect(scopedSessionsOptions).toEqual({
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
     expect(rows()).toHaveLength(3);
     expect(rows().some(isCursor)).toBe(false);
 

@@ -6,10 +6,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { Static } from 'ink';
+import { Static, useIsScreenReaderEnabled } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import {
+  prepareInlineTerminalImage,
   renderTerminalImage,
   type TerminalImageRenderResult,
 } from '../utils/terminal-image-renderer.js';
@@ -18,6 +19,7 @@ import { TerminalImage } from './TerminalImage.js';
 const { writtenKeys } = vi.hoisted(() => ({ writtenKeys: new Set<string>() }));
 
 vi.mock('../utils/terminal-image-renderer.js', () => ({
+  prepareInlineTerminalImage: vi.fn(),
   renderTerminalImage: vi.fn(),
   wasKittyImageWritten: vi.fn((key: string) => writtenKeys.has(key)),
   markKittyImageWritten: vi.fn((key: string) => {
@@ -25,7 +27,16 @@ vi.mock('../utils/terminal-image-renderer.js', () => ({
   }),
 }));
 
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useIsScreenReaderEnabled: vi.fn(() => false),
+  };
+});
+
 const mockedRenderTerminalImage = vi.mocked(renderTerminalImage);
+const mockedPrepareInlineTerminalImage = vi.mocked(prepareInlineTerminalImage);
 
 function configWithWorkspaceResult(isWithinWorkspace: boolean): Config {
   return {
@@ -39,6 +50,11 @@ const IMAGE = {
   type: 'terminal_image' as const,
   filePath: '/workspace/chart.png',
   mimeType: 'image/png' as const,
+};
+
+const INLINE_IMAGE = {
+  data: 'iVBORw0KGgo=',
+  mimeType: 'image/png',
 };
 
 const KITTY_RESULT: TerminalImageRenderResult = {
@@ -77,6 +93,7 @@ describe('TerminalImage', () => {
   beforeEach(() => {
     writtenKeys.clear();
     vi.clearAllMocks();
+    vi.mocked(useIsScreenReaderEnabled).mockReturnValue(false);
   });
 
   it('writes trusted Kitty data and renders its placeholder', async () => {
@@ -182,5 +199,65 @@ describe('TerminalImage', () => {
 
     expect(secondWriteRaw).not.toHaveBeenCalled();
     second.unmount();
+  });
+
+  it('renders inline image data through the shared renderer', async () => {
+    const writeRaw = vi.fn();
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: KITTY_RESULT,
+    });
+
+    const { lastFrame } = render(
+      <TerminalOutputProvider value={writeRaw}>
+        <TerminalImage image={INLINE_IMAGE} contentWidth={80} />
+      </TerminalOutputProvider>,
+    );
+
+    await vi.waitFor(() => {
+      expect(writeRaw).toHaveBeenCalledWith(KITTY_RESULT.sequence);
+    });
+    expect(lastFrame()).toContain('placeholder');
+    expect(mockedPrepareInlineTerminalImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: INLINE_IMAGE.data,
+        mimeType: INLINE_IMAGE.mimeType,
+        disabled: false,
+      }),
+    );
+  });
+
+  it('explains why an inline image renderer is unavailable', () => {
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: {
+        kind: 'unavailable',
+        reason: 'chafa is not installed',
+      },
+    });
+
+    const { lastFrame } = render(
+      <TerminalImage image={INLINE_IMAGE} contentWidth={80} />,
+    );
+
+    expect(lastFrame()).toContain('[image: 1x1 png]');
+    expect(lastFrame()).toContain('chafa is not installed');
+  });
+
+  it('uses the deterministic inline placeholder for screen readers', () => {
+    vi.mocked(useIsScreenReaderEnabled).mockReturnValue(true);
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: null,
+    });
+
+    const { lastFrame } = render(
+      <TerminalImage image={INLINE_IMAGE} contentWidth={80} />,
+    );
+
+    expect(lastFrame()).toContain('[image: 1x1 png]');
+    expect(mockedPrepareInlineTerminalImage).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: true }),
+    );
   });
 });

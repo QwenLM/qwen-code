@@ -19,6 +19,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -31,7 +32,15 @@ export interface UseResumeCommandOptions {
     UseHistoryManagerReturn,
     'addItem' | 'clearItems' | 'loadHistory'
   >;
+  /**
+   * Optional override for history replacement. AppContainer passes a
+   * latch-reconciling wrapper here so same-id resume (which changes no
+   * sessionId the re-arm effect could observe) still reconciles the
+   * context-files announcement latch. Defaults to historyManager.loadHistory.
+   */
+  loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -79,12 +88,15 @@ export function useResumeCommand(
     config,
     settings,
     historyManager,
+    loadHistory: loadHistoryOverride,
     startNewSession,
+    clearPendingState,
     setSessionName,
     remount,
   } = options;
 
-  const { addItem, clearItems, loadHistory } = historyManager;
+  const { addItem, clearItems } = historyManager;
+  const loadHistory = loadHistoryOverride ?? historyManager.loadHistory;
   const handleResume = useCallback(
     async (sessionId: string) => {
       if (!config) {
@@ -94,7 +106,10 @@ export function useResumeCommand(
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
-          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          text: buildBackgroundWorkBlockedMessage(
+            config,
+            BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          ),
         };
         addItem(blockedMessage, Date.now());
         closeResumeDialog();
@@ -177,6 +192,7 @@ export function useResumeCommand(
         //    into the old JSONL (split-brain).
         startNewSession(sessionId);
         setSessionName?.(customTitle ?? null);
+        clearPendingState?.();
         clearItems();
         loadHistory(uiHistoryItems);
         if (recoveredBackgroundAgentsNotice) {
@@ -242,6 +258,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,

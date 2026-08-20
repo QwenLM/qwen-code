@@ -19,6 +19,7 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
+import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
 import type {
   ChatMessage,
@@ -814,7 +815,10 @@ export class QwenAgentManager {
           msgs.push({
             role:
               r.type === 'user' ? ('user' as const) : ('assistant' as const),
-            content: this.contentToText(r.message),
+            content:
+              r.type === 'user'
+                ? qwenRecordToText(r)
+                : qwenContentToText(r.message),
             timestamp: new Date(r.timestamp).getTime(),
           });
         }
@@ -1026,38 +1030,6 @@ export class QwenAgentManager {
       }
     }
     return String(value);
-  }
-
-  // Extract plain text from Content (genai Content)
-  private contentToText(message: unknown): string {
-    try {
-      // Type guard for message
-      if (typeof message !== 'object' || message === null) {
-        return '';
-      }
-
-      // Cast to a more specific type for easier handling
-      const typedMessage = message as Record<string, unknown>;
-
-      const parts = Array.isArray(typedMessage.parts) ? typedMessage.parts : [];
-      const texts: string[] = [];
-      for (const p of parts) {
-        // Type guard for part
-        if (typeof p !== 'object' || p === null) {
-          continue;
-        }
-
-        const typedPart = p as Record<string, unknown>;
-        if (typeof typedPart.text === 'string') {
-          texts.push(typedPart.text);
-        } else if (typeof typedPart.data === 'string') {
-          texts.push(typedPart.data);
-        }
-      }
-      return texts.join('\n');
-    } catch {
-      return '';
-    }
   }
 
   /**

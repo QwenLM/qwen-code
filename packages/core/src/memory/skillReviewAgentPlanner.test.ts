@@ -416,18 +416,21 @@ describe('buildTaskPrompt', () => {
     expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
-  it('excludes archived directory names carrying control bytes from the prompt', async () => {
-    // Mirrors the curator's charset guard: a crafted archived directory name
-    // with ANSI/control bytes must not reach the task prompt verbatim.
-    const directoryName = 'auto-skill-evil\u001b[31m';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
-    );
+  it.skipIf(process.platform === 'win32')(
+    'excludes archived directory names carrying control bytes from the prompt',
+    async () => {
+      // Mirrors the curator's charset guard: a crafted archived directory name
+      // with ANSI/control bytes must not reach the task prompt verbatim.
+      const directoryName = 'auto-skill-evil\u001b[31m';
+      await fs.mkdir(
+        path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+        { recursive: true },
+      );
 
-    const prompt = await buildTaskPrompt(projectRoot);
-    expect(prompt).not.toContain('\u001b[31m');
-  });
+      const prompt = await buildTaskPrompt(projectRoot);
+      expect(prompt).not.toContain('\u001b[31m');
+    },
+  );
 
   it('falls back to a placeholder line when no skills exist yet', async () => {
     const prompt = await buildTaskPrompt(projectRoot);

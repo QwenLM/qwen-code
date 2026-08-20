@@ -30,6 +30,7 @@ import {
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
+  SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
@@ -72,11 +73,13 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  isTurnResultRecordPayload,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
-  getActiveGoal,
-  unregisterGoalHook,
+  BranchPointInvalidError,
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
   ToolNames,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
@@ -90,8 +93,14 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  applyReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+  type GoalSnapshotV2,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -107,13 +116,18 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
+  type ReasoningEffort,
   type ResumedSessionData,
+  type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
+  type SessionLiveRestoreProjection,
+  type SessionRestoreProjection,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -148,8 +162,8 @@ import type {
   ResumeSessionResponse,
   SessionConfigOption,
   SessionInfo,
-  SessionModeState,
   SessionUpdate,
+  SessionModeState,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModelRequest,
@@ -163,10 +177,15 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
+import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -178,6 +197,10 @@ import {
   SettingScope,
 } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -195,6 +218,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -217,11 +241,24 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { HistoryReplayer } from './session/history-replayer.js';
+import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
+import {
+  shouldProbeChildHeap,
+  startChildHeapProbe,
+  type ChildHeapProbe,
+} from './child-heap-probe.js';
+import {
+  getModelConfiguration,
+  type ModelReasoningConfiguration,
+} from './model-configuration.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
@@ -237,7 +274,9 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -300,17 +339,31 @@ import {
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   isValidExternalToolGuardDenialReason,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+  SHELL_EXECUTING_TOOL_NAMES,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MODEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  LOAD_REPLAY_MAX_BYTES,
+  LOAD_REPLAY_MAX_UPDATES,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
@@ -318,6 +371,7 @@ import {
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
@@ -339,7 +393,7 @@ import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
-  restoreGoalFromHistory,
+  findGoalToRestore,
 } from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -357,24 +411,81 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const ACP_REASONING_EFFORT_DEFAULT = 'default';
+const ACP_REASONING_EFFORT_NONE = 'none';
+const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
-type AcpSessionStartStage =
+const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
+const TURN_STATUS_SCAN_MAX_PAGES = 10;
+
+async function findSettledTurnResult(
+  reader: SessionTranscriptReader,
+  sessionId: string,
+  promptId: string | undefined,
+  workspaceCwd: string,
+): Promise<TurnResultRecordPayload | undefined> {
+  let cursor: string | undefined;
+  for (let page = 0; page < TURN_STATUS_SCAN_MAX_PAGES; page++) {
+    const result = await reader.readPage(sessionId, {
+      ...(cursor !== undefined
+        ? { cursor }
+        : { direction: 'backward' as const }),
+      limit: TURN_STATUS_SCAN_PAGE_LIMIT,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+    for (let i = result.records.length - 1; i >= 0; i--) {
+      const record = result.records[i]!;
+      if (record.type !== 'system' || record.subtype !== 'turn_result') {
+        continue;
+      }
+      const payload = record.systemPayload;
+      if (!isTurnResultRecordPayload(payload)) continue;
+      if (promptId === undefined || payload.promptId === promptId) {
+        return payload;
+      }
+    }
+    if (!result.hasMore || result.nextCursorState === undefined) {
+      return undefined;
+    }
+    cursor = encodeSessionTranscriptCursor(
+      result.nextCursorState,
+      workspaceCwd,
+    );
+  }
+  return undefined;
+}
+
+type AcpSessionProfileStage =
   | 'settings_load'
+  | 'live_restore'
+  | 'existence_check'
   | 'config_setup'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
-  | 'response_build';
+  | 'runtime_initialize'
+  | 'response_build'
+  | 'history_replay'
+  | 'post_replay_services';
 
-interface AcpSessionStartSpan {
+interface AcpSessionProfileSpan {
   setAttribute(name: string, value: string | number | boolean): unknown;
 }
 
-function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
-  let failedStage: AcpSessionStartStage | undefined;
+function createAcpSessionProfiler(
+  span: AcpSessionProfileSpan | undefined,
+  attributePrefix: 'session_start' | 'session_restore',
+) {
+  let failedStage: AcpSessionProfileStage | undefined;
   const setAttribute = (
     name: string,
     value: string | number | boolean,
@@ -382,24 +493,30 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     try {
       span?.setAttribute(name, value);
     } catch {
-      // Telemetry must not affect session creation.
+      // Telemetry must not affect session creation or restore.
     }
   };
-  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+  const recordStage = (stage: AcpSessionProfileStage, start: number): void => {
     const durationMs = Math.round((performance.now() - start) * 100) / 100;
     if (Number.isFinite(durationMs) && durationMs >= 0) {
-      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+      setAttribute(
+        `qwen-code.daemon.${attributePrefix}.${stage}_ms`,
+        durationMs,
+      );
     }
   };
-  const recordFailure = (stage: AcpSessionStartStage): void => {
+  const recordFailure = (stage: AcpSessionProfileStage): void => {
     if (failedStage !== undefined) return;
     failedStage = stage;
-    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+    setAttribute(`qwen-code.daemon.${attributePrefix}.failed_stage`, stage);
   };
 
   return {
+    fail(stage: AcpSessionProfileStage): void {
+      recordFailure(stage);
+    },
     async time<T>(
-      stage: AcpSessionStartStage,
+      stage: AcpSessionProfileStage,
       fn: () => T | Promise<T>,
     ): Promise<T> {
       if (!span) return await fn();
@@ -413,7 +530,7 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
         recordStage(stage, start);
       }
     },
-    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+    timeSync<T>(stage: AcpSessionProfileStage, fn: () => T): T {
       if (!span) return fn();
       const start = performance.now();
       try {
@@ -430,6 +547,22 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     },
   };
 }
+
+function createAcpSessionStartProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_start');
+}
+
+function createAcpSessionRestoreProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_restore');
+}
+
+type AcpSessionRestoreProfiler = ReturnType<
+  typeof createAcpSessionRestoreProfiler
+>;
 
 function workspaceMemoryErrorData(
   code: string,
@@ -497,11 +630,17 @@ async function waitForSessionDrain(
   operation: Promise<void>,
   timeoutMs: number,
   kind: 'close' | 'restore',
+  displayTimeoutMs?: number,
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
+      () =>
+        reject(
+          new Error(
+            `Session ${kind} timed out after ${displayTimeoutMs ?? timeoutMs}ms`,
+          ),
+        ),
       timeoutMs,
     );
     timer.unref();
@@ -646,6 +785,196 @@ function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
 }
 
+function loadRestoreOptions(
+  params: LoadSessionRequest,
+): SelectiveSessionRestoreOptions {
+  const hideInheritedHistory = shouldHideInheritedHistory(params);
+  if (!isBulkLoadReplayRequest(params)) {
+    return { replay: { kind: 'all', hideInheritedHistory } };
+  }
+  const limit = getLoadReplayPageSize(params);
+  return limit === undefined
+    ? { replay: { kind: 'all', hideInheritedHistory } }
+    : { replay: { kind: 'recent', limit, hideInheritedHistory } };
+}
+
+const RESUME_RESTORE_OPTIONS: SelectiveSessionRestoreOptions = {
+  replay: { kind: 'none' },
+};
+
+function mapSessionRestoreRequestError(
+  error: unknown,
+  sessionId: string,
+): unknown {
+  const mappedWriterError = mapSessionWriterRequestError(error);
+  if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+    return new RequestError(-32010, error.message, {
+      errorKind: 'transcript_snapshot_unavailable',
+      sessionId,
+    });
+  }
+  if (error instanceof SessionTranscriptTooLargeError) {
+    return new RequestError(-32011, error.message, {
+      errorKind: 'transcript_too_large',
+      sessionId,
+      snapshotSize: error.snapshotSize,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof SessionTranscriptPageTooLargeError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      'bytes',
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      pageBytes: error.pageBytes,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof HistoryReplayLimitError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      error.reason,
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      reason: error.reason,
+      observed: error.observed,
+      limit: error.limit,
+    });
+  }
+  return error;
+}
+
+function validateLoadReplayEnvelope(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  enforceLimits: boolean,
+): void {
+  if (!enforceLimits) return;
+  if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'updates',
+      envelope.updates.length,
+      LOAD_REPLAY_MAX_UPDATES,
+    );
+  }
+  const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'bytes',
+      pageBytes,
+      LOAD_REPLAY_MAX_BYTES,
+    );
+  }
+}
+
+function replayGoalBootstrap(
+  projection:
+    | SessionRestoreProjection
+    | SessionLiveRestoreProjection
+    | undefined,
+): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
+  if (projection && !('runtime' in projection)) {
+    const sourceUuid = projection.goalRecoverySourceUuid;
+    if (!sourceUuid) return undefined;
+    if (
+      projection.replay?.records.some((record) => record.uuid === sourceUuid)
+    ) {
+      return undefined;
+    }
+    const replay = projection.replay?.replay;
+    if (isObjectRecord(replay)) {
+      const bootstrap = HistoryReplayer.v2GoalBootstrap(
+        replay['goalState'],
+        replay['goalCause'],
+      );
+      if (bootstrap) return bootstrap;
+    }
+    const sourceRecord = projection.goalRecords?.find(
+      (record) => record.uuid === sourceUuid,
+    );
+    if (sourceRecord?.subtype === 'goal_state') {
+      const payload = isObjectRecord(sourceRecord.systemPayload)
+        ? sourceRecord.systemPayload
+        : undefined;
+      return HistoryReplayer.v2GoalBootstrap(
+        payload?.['snapshot'],
+        payload?.['cause'],
+      );
+    }
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
+    );
+    return active
+      ? {
+          goalStatus: {
+            kind: active.iterations > 0 ? 'checking' : 'set',
+            condition: active.condition,
+            iterations: active.iterations,
+            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+          },
+        }
+      : undefined;
+  }
+  const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
+  if (!projection?.replay || !sourceUuid) return undefined;
+  if (projection.replay.records.some((record) => record.uuid === sourceUuid)) {
+    return undefined;
+  }
+  const goalBootstrapRecords = projection.replay.goalBootstrapRecords ?? [];
+  const sourceRecord = goalBootstrapRecords.find(
+    (record) => record.uuid === sourceUuid,
+  );
+  if (sourceRecord?.subtype === 'goal_state') {
+    const payload = isObjectRecord(sourceRecord.systemPayload)
+      ? sourceRecord.systemPayload
+      : undefined;
+    return HistoryReplayer.v2GoalBootstrap(
+      payload?.['snapshot'],
+      payload?.['cause'],
+    );
+  }
+  const active = findGoalToRestore(
+    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
+  );
+  if (!active) return undefined;
+  return {
+    goalStatus: {
+      kind: active.iterations > 0 ? 'checking' : 'set',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+    },
+  };
+}
+
+function replayInitialGoalState(
+  projection: SessionRestoreProjection | undefined,
+): {
+  initialGoalState?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalState'];
+  initialGoalCause?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalCause'];
+} {
+  const replay = projection?.replay?.replay;
+  if (!isObjectRecord(replay)) return {};
+  const initialGoalState = parseGoalSnapshotV2(replay['goalState']);
+  const initialGoalCause = parseGoalStateCause(replay['goalCause']);
+  return {
+    ...(initialGoalState ? { initialGoalState } : {}),
+    ...(initialGoalCause ? { initialGoalCause } : {}),
+  };
+}
+
 export function selectVisibleHistoryRecords(
   records: ChatRecord[],
   hideInheritedHistory: boolean,
@@ -712,30 +1041,20 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
-function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+function deriveForkBaseName(
+  name: unknown,
+  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
+  sessionId: string,
+): string {
+  if (typeof name === 'string' && name.trim().length > 0) {
+    return name.trim();
+  }
+  const existingTitle = recording?.getCurrentCustomTitle();
+  const stripped = existingTitle
+    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+    .trim();
+  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
 }
-
-function selectRecentHistoryRecords(
-  records: ChatRecord[],
-  pageSize: number | undefined,
-): { records: ChatRecord[]; hasMore: boolean } {
-  if (pageSize === undefined || records.length <= pageSize) {
-    return { records, hasMore: false };
-  }
-  let start = records.length - pageSize;
-  for (let i = start; i < records.length; i++) {
-    if (isHistoryTurnStart(records[i]!)) {
-      start = i;
-      break;
-    }
-  }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
-  }
-  return { records: records.slice(start), hasMore: start > 0 };
-}
-
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
     get(target, prop) {
@@ -2729,30 +3048,42 @@ export async function deliverClientMcpMessage(
  */
 export function createManagedExternalToolGuard(
   connection: AgentSideConnection,
+  options: { externalProviderAttached: boolean } = {
+    externalProviderAttached: false,
+  },
 ): ToolInvocationGuard {
   return async (context) => {
+    // With only the daemon's built-in policy attached there is no external
+    // provider to consult: every non-shell tool is structurally allowed,
+    // so resolve locally instead of paying a serialized child-daemon-child
+    // round trip on every tool call. The shell-executing tools still go to
+    // the daemon because they are the only ones the built-in policy inspects.
+    if (
+      !options.externalProviderAttached &&
+      !SHELL_EXECUTING_TOOL_NAMES.has(context.toolName)
+    ) {
+      return { allowed: true };
+    }
     const invocation = context.invocationContext;
-    if (!invocation) {
+    if (!invocation && options.externalProviderAttached) {
       throw new Error(
         'Managed external tool guard requires a runtime invocation context.',
+      );
+    }
+    // Subagent reasoning loops, cron turns, background notifications, and
+    // resumed background agents run without an invocation context by design.
+    // Under the built-in policy alone the daemon only needs the session
+    // identity, so fall back to the scheduler-owned session id and skip the
+    // prompt binding instead of denying every shell call those paths make.
+    const sessionId = invocation?.sessionId ?? context.sessionId;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error(
+        'Managed external tool guard requires a session identity.',
       );
     }
     if (context.signal.aborted) {
       throw new DOMException('Tool invocation aborted', 'AbortError');
     }
-    if (
-      context.toolName === ToolNames.AGENT ||
-      context.toolName === ToolNames.WORKFLOW ||
-      context.toolName === ToolNames.CREATE_SUB_SESSION ||
-      context.toolName === ToolNames.SEND_MESSAGE
-    ) {
-      return {
-        allowed: false,
-        reason:
-          'Managed external tool guard v1 does not support nested or delegated agent execution.',
-      };
-    }
-
     let rejectOnAbort: ((error: Error) => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       rejectOnAbort = reject;
@@ -2770,11 +3101,16 @@ export function createManagedExternalToolGuard(
         connection.extMethod(
           SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
           {
-            sessionId: invocation.sessionId,
-            promptId: invocation.promptId,
+            sessionId,
+            ...(invocation ? { promptId: invocation.promptId } : {}),
             toolCallId: context.callId,
             toolName: context.toolName,
             arguments: context.args,
+            // A sub-agent pinned to a worktree executes here, not in the
+            // session's own directory; the host validates this before use.
+            ...(typeof context.cwd === 'string' && context.cwd.length > 0
+              ? { invocationCwd: context.cwd }
+              : {}),
           },
         ),
         aborted,
@@ -2927,6 +3263,7 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     externalToolGuardRequired?: boolean;
+    externalToolGuardProviderAttached?: boolean;
   },
 ) {
   // Freeze the restart-required writer protocol before the first await.
@@ -2942,8 +3279,11 @@ export async function runAcpAgent(
       : options.privateParentCapability;
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  const externalToolGuardProviderAttached =
+    options?.externalToolGuardProviderAttached === true;
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
@@ -3010,7 +3350,10 @@ export async function runAcpAgent(
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
     const stream = ndJsonStream(stdout, stdin, {
-      onMessageObserved: ({ direction, message }) => {
+      onMessageObserved: ({ direction, bytes, message }) => {
+        if (direction === 'sent') {
+          observeAcpToolResultWire(message, bytes);
+        }
         if (
           direction === 'received' &&
           'id' in message &&
@@ -3071,7 +3414,9 @@ export async function runAcpAgent(
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
       const managedToolInvocationGuard = externalToolGuardRequired
-        ? createManagedExternalToolGuard(conn)
+        ? createManagedExternalToolGuard(conn, {
+            externalProviderAttached: externalToolGuardProviderAttached,
+          })
         : undefined;
       agentInstance = new QwenAgent(
         config,
@@ -3081,6 +3426,7 @@ export async function runAcpAgent(
         privateParentCapability,
         sessionWriterLeaseEnabledAtStartup,
         managedToolInvocationGuard,
+        externalToolGuardProviderAttached,
       );
       return agentInstance;
     }, stream);
@@ -3489,8 +3835,19 @@ interface ActivePromptCall {
   settled: Promise<void>;
 }
 
+function isOwnerOnlyDirectory(stats: Stats): boolean {
+  if (process.platform === 'win32') return false;
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
+    return false;
+  }
+  return (stats.mode & 0o077) === 0;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly historyMutationTails = new Map<string, Promise<void>>();
+  private readonly startingSessionIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -3520,6 +3877,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -3543,6 +3902,16 @@ class QwenAgent implements Agent {
     }
   })();
   private prevChildCpuAt = Date.now();
+  /**
+   * Lifetime old-generation high-water marks, for the daemon's
+   * `workspaceResource` poll. `undefined` outside a daemon-spawned child — see
+   * {@link shouldProbeChildHeap} for why the gate is where it is.
+   *
+   * Started at construction rather than on the first poll: the peaks that
+   * matter include the ones reached before anyone asks.
+   */
+  private readonly childHeapProbe: ChildHeapProbe | undefined =
+    shouldProbeChildHeap(process.env) ? startChildHeapProbe() : undefined;
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -3583,8 +3952,55 @@ class QwenAgent implements Agent {
     }
   }
 
+  private async runExclusiveHistoryMutation<T>(
+    sessionId: string,
+    operation: () => Promise<T>,
+    waitTimeoutMs?: number,
+    waitDisplayTimeoutMs?: number,
+  ): Promise<T> {
+    const previous =
+      this.historyMutationTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.then(() => gate);
+    this.historyMutationTails.set(sessionId, current);
+    try {
+      if (waitTimeoutMs === undefined) {
+        await previous;
+      } else {
+        await waitForSessionDrain(
+          previous,
+          waitTimeoutMs,
+          'close',
+          waitDisplayTimeoutMs,
+        );
+      }
+    } catch (error) {
+      release();
+      void current.then(() => {
+        if (this.historyMutationTails.get(sessionId) === current) {
+          this.historyMutationTails.delete(sessionId);
+        }
+      });
+      throw error;
+    }
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.historyMutationTails.get(sessionId) === current) {
+        this.historyMutationTails.delete(sessionId);
+      }
+    }
+  }
+
   private rejectUnsupportedGuardedHiddenAgent(operation: string): void {
-    if (this.managedToolInvocationGuard) {
+    if (
+      this.managedToolInvocationGuard &&
+      this.externalToolGuardProviderAttached
+    ) {
       throw RequestError.invalidParams(
         undefined,
         `Managed external tool guard v1 does not support ${operation}.`,
@@ -4061,11 +4477,6 @@ class QwenAgent implements Agent {
       }
     }
     try {
-      unregisterGoalHook(session.getConfig(), sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    try {
       this.mcpPool?.releaseSession(sessionId);
     } catch (error) {
       cleanupErrors.push(error);
@@ -4076,6 +4487,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4090,7 +4504,11 @@ class QwenAgent implements Agent {
   private async withLiveSessionRestore<T>(
     sessionId: string,
     session: Session,
-    operation: (config: Config, data: ResumedSessionData) => Promise<T>,
+    options: SelectiveSessionRestoreOptions,
+    operation: (
+      config: Config,
+      projection: SessionLiveRestoreProjection | undefined,
+    ) => Promise<T>,
   ): Promise<T> {
     await session.assertCanStartTurn();
     const config = session.getConfig();
@@ -4102,15 +4520,17 @@ class QwenAgent implements Agent {
         'restore',
       );
       const recorder = config.getChatRecordingService();
-      const loadAuthoritative = () =>
-        config.getSessionService().loadSession(sessionId);
-      const data = recorder
-        ? await recorder.runWithWriteBarrier(loadAuthoritative)
-        : await loadAuthoritative();
-      if (!data) throw new SessionWriterUnavailableError();
-      return await operation(config, data);
+      const readProjection = () =>
+        config
+          .getSessionService()
+          .readLiveRestoreProjection(sessionId, options);
+      const projection = recorder
+        ? await recorder.runWithWriteBarrier(readProjection)
+        : await readProjection();
+      if (!projection) throw new SessionWriterUnavailableError();
+      return await operation(config, projection);
     } catch (error) {
-      throw mapSessionWriterRequestError(error);
+      throw mapSessionRestoreRequestError(error, sessionId);
     } finally {
       releaseGate();
     }
@@ -4142,6 +4562,7 @@ class QwenAgent implements Agent {
   private async cleanupAfterRequestFailure(
     error: unknown,
     cleanup: () => Promise<void>,
+    sessionId?: string,
   ): Promise<never> {
     try {
       await cleanup();
@@ -4150,7 +4571,9 @@ class QwenAgent implements Agent {
         `Session cleanup failed while preserving the original request error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
       );
     }
-    throw mapSessionWriterRequestError(error);
+    throw sessionId
+      ? mapSessionRestoreRequestError(error, sessionId)
+      : mapSessionWriterRequestError(error);
   }
 
   private pendingConfigCleanupKey(
@@ -4195,31 +4618,64 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
     const requireFlush = opts?.requireFlush === true;
-    if (requireFlush) {
-      await recorder?.flush();
-    }
-
+    if (requireFlush) await recorder?.flush();
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
+    const conditionalDrainDeadline = opts?.onlyIfUnheld
+      ? Date.now() + drainTimeoutMs
+      : undefined;
+    // Reject known work before disturbing any active turn. The close gate
+    // prevents new turns, but a turn that was already running can still settle
+    // into a new hold while the drain below is in progress, so this early read
+    // is an optimization rather than the final authorization.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
     }
     let removedFromStore = false;
     try {
+      if (opts?.onlyIfUnheld) {
+        // Let the turn that already owned the gate settle without cancelling
+        // queues or stopping schedulers. It may create a hold while settling;
+        // a refusal must leave the retained Session untouched.
+        await waitForSessionDrain(
+          session.waitForActiveTurnsToSettle(),
+          drainTimeoutMs,
+          'close',
+        );
+        const holds = session.collectActiveWorkHolds();
+        if (holds.length > 0) {
+          return { closed: false, holds };
+        }
+      }
+
+      for (const [requestId, generation] of this.generationControllers) {
+        if (generation.sessionId !== sessionId) continue;
+        generation.controller.abort();
+        this.generationControllers.delete(requestId);
+      }
       await waitForSessionDrain(
         (async () => {
           try {
@@ -4233,41 +4689,85 @@ class QwenAgent implements Agent {
           }
           await session.waitForActiveTurnsToSettle();
         })(),
-        drainTimeoutMs,
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         'close',
+        // Report the shared budget, not the phase-2 residue — a residue like
+        // "1ms" hides that the settle phase consumed the budget and sends
+        // oncall grepping for a timeout setting that does not exist.
+        drainTimeoutMs,
       );
 
-      recorder?.finalize();
-      let flushError: unknown;
-      try {
-        await recorder?.flush();
-      } catch (error) {
-        flushError = error;
-      }
-      if (flushError !== undefined && requireFlush) {
-        throw flushError;
-      }
+      const blockedByHolds = await this.runExclusiveHistoryMutation(
+        sessionId,
+        async () => {
+          if (this.sessions.get(sessionId) !== session) {
+            removedFromStore = true;
+            return undefined;
+          }
 
-      let closeError: unknown;
-      try {
-        await recorder?.close();
-      } catch (error) {
-        closeError = error;
-      }
-      if (recorder?.hasWriteOwnership()) {
-        throw closeError ?? new SessionWriterUnavailableError();
-      }
+          // Existing out-of-scope work such as a cron turn may have
+          // registered a background shell while it drained. Re-check after
+          // every active turn has settled, while both the close gate and the
+          // history-mutation gate still block destructive races.
+          if (opts?.onlyIfUnheld) {
+            const holds = session.collectActiveWorkHolds();
+            if (holds.length > 0) {
+              return { closed: false, holds };
+            }
+          }
 
-      const cleanupErrors: unknown[] = [];
-      if (flushError !== undefined) cleanupErrors.push(flushError);
-      if (closeError !== undefined) cleanupErrors.push(closeError);
-      await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
-        shutdownConfig: opts?.shutdownConfig,
-      });
-      removedFromStore = true;
+          recorder?.finalize();
+          let flushError: unknown;
+          try {
+            await recorder?.flush();
+          } catch (error) {
+            flushError = error;
+          }
+          if (flushError !== undefined && requireFlush) {
+            throw flushError;
+          }
+
+          let closeError: unknown;
+          try {
+            await recorder?.close();
+          } catch (error) {
+            closeError = error;
+          }
+          if (recorder?.hasWriteOwnership()) {
+            throw closeError ?? new SessionWriterUnavailableError();
+          }
+
+          const cleanupErrors: unknown[] = [];
+          if (flushError !== undefined) cleanupErrors.push(flushError);
+          if (closeError !== undefined) cleanupErrors.push(closeError);
+          await this.removeStoredSessionEntry(
+            sessionId,
+            session,
+            cleanupErrors,
+            {
+              shutdownConfig: opts?.shutdownConfig,
+            },
+          );
+          removedFromStore = true;
+          return undefined;
+        },
+        // The mutation wait shares the conditional close's budget too, or
+        // the whole round trip can outlast the daemon's outer wait — the
+        // coupling the drain budget exists to keep. The mutation body
+        // itself stays untimed, so the guarantee remains approximate. The
+        // message reports the shared budget, not the residue.
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
+        drainTimeoutMs,
+      );
+      if (blockedByHolds) return blockedByHolds;
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -4287,6 +4787,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4318,6 +4820,7 @@ class QwenAgent implements Agent {
     private readonly expectedPrivateParentCapability?: string,
     private readonly sessionWriterLeaseEnabledAtStartup = false,
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
+    private readonly externalToolGuardProviderAttached = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -4506,6 +5009,41 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
+      : undefined;
+    const requestedActiveWorkCategories = activeWorkRequested
+      ? (requestedActiveWork as Record<string, unknown>)['categories']
+      : undefined;
+    const activeWorkCategories = activeWorkRequested
+      ? Array.isArray(requestedActiveWorkCategories)
+        ? ACTIVE_WORK_HOLD_CATEGORIES.filter((category) =>
+            requestedActiveWorkCategories.includes(category),
+          )
+        : ACTIVE_WORK_LEGACY_HOLD_CATEGORIES
+      : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+        activeWorkCategories ?? [],
+      );
+    }
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4516,6 +5054,15 @@ class QwenAgent implements Agent {
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkIntervalMs !== undefined
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...(activeWorkCategories ?? [])],
+            },
+          }
         : {}),
     };
     return Object.keys(responseMeta).length > 0
@@ -4553,355 +5100,679 @@ class QwenAgent implements Agent {
     }
   }
 
+  private reserveStartingSessionId(sessionId: string): () => void {
+    if (
+      this.sessions.has(sessionId) ||
+      this.startingSessionIds.has(sessionId)
+    ) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active or starting.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    this.startingSessionIds.add(sessionId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.startingSessionIds.delete(sessionId);
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const parsedSessionId = parseCallerSuppliedSessionId(
+      params._meta?.[REQUESTED_SESSION_ID_META_KEY],
+    );
+    if (parsedSessionId.kind === 'invalid') {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `\`_meta["${REQUESTED_SESSION_ID_META_KEY}"]\` must be an RFC UUID v1-v5`,
+        { errorKind: 'invalid_session_id', httpStatus: 400 },
+      );
+    }
     const requestedSessionId =
-      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
-        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
-        : undefined;
-    const sessionSource = getSessionSource(params);
+      parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const releaseStartingSessionId = requestedSessionId
+      ? this.reserveStartingSessionId(requestedSessionId)
+      : undefined;
+    try {
+      const sessionSource = getSessionSource(params);
+      const parentContext = extractDaemonTraceContext(params);
+      return await withDaemonSpan(
+        'qwen-code.daemon.session_start',
+        { 'qwen-code.daemon.operation': 'acp_session_new' },
+        async (span) => {
+          const profiler = createAcpSessionStartProfiler(span);
+          // Per-request settings: session handlers run concurrently, and
+          // `this.settings` is only a "latest loaded" cache for agent-level
+          // readers. Threading the instance explicitly keeps a slow session
+          // creation from picking up whichever workspace loaded last — Session
+          // persists model changes through this instance, so a mix-up writes to
+          // another workspace's settings.json.
+          const settings = profiler.timeSync('settings_load', () =>
+            loadSettingsCached(cwd),
+          );
+          this.settings = settings;
+          const config = await profiler.time('config_setup', () =>
+            this.newSessionConfig(
+              cwd,
+              mcpServers,
+              settings,
+              sessionSource,
+              requestedSessionId,
+              undefined,
+              shouldDeferMcpDiscovery(params)
+                ? { skipMcpDiscovery: true }
+                : undefined,
+            ),
+          );
+          let session: Session;
+          try {
+            await profiler.time('auth', () => this.ensureAuthenticated(config));
+            profiler.timeSync('file_system_setup', () =>
+              this.setupFileSystem(config),
+            );
+            session = await profiler.time('session_register', () =>
+              this.createAndStoreSession(config, settings),
+            );
+          } catch (error) {
+            return this.cleanupAfterRequestFailure(error, async () => {
+              if (
+                this.sessions
+                  .get(normalizeSessionIdForLookup(config.getSessionId()))
+                  ?.getConfig() !== config
+              ) {
+                await this.cleanupUnstoredConfig(config);
+              }
+            });
+          }
+          profiler.setSessionId(session.getId());
+          return profiler.timeSync('response_build', () => ({
+            sessionId: session.getId(),
+            models: this.buildAvailableModels(config),
+            modes: this.buildModesData(config),
+            configOptions: this.buildConfigOptions(config),
+          }));
+        },
+        parentContext ? { parentContext } : {},
+      );
+    } finally {
+      releaseStartingSessionId?.();
+    }
+  }
+
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
-      'qwen-code.daemon.session_start',
-      { 'qwen-code.daemon.operation': 'acp_session_new' },
-      async (span) => {
-        const profiler = createAcpSessionStartProfiler(span);
-        // Per-request settings: session handlers run concurrently, and
-        // `this.settings` is only a "latest loaded" cache for agent-level
-        // readers. Threading the instance explicitly keeps a slow session
-        // creation from picking up whichever workspace loaded last — Session
-        // persists model changes through this instance, so a mix-up writes to
-        // another workspace's settings.json.
-        const settings = profiler.timeSync('settings_load', () =>
-          loadSettingsCached(cwd),
-        );
-        this.settings = settings;
-        const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(
-            cwd,
-            mcpServers,
-            settings,
-            sessionSource,
-            requestedSessionId,
-            undefined,
-            shouldDeferMcpDiscovery(params)
-              ? { skipMcpDiscovery: true }
-              : undefined,
-          ),
-        );
-        let session: Session;
-        try {
-          await profiler.time('auth', () => this.ensureAuthenticated(config));
-          profiler.timeSync('file_system_setup', () =>
-            this.setupFileSystem(config),
-          );
-          session = await profiler.time('session_register', () =>
-            this.createAndStoreSession(config, settings),
-          );
-        } catch (error) {
-          return this.cleanupAfterRequestFailure(error, async () => {
-            if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
-            ) {
-              await this.cleanupUnstoredConfig(config);
-            }
-          });
-        }
-        profiler.setSessionId(session.getId());
-        return profiler.timeSync('response_build', () => ({
-          sessionId: session.getId(),
-          models: this.buildAvailableModels(config),
-          modes: this.buildModesData(config),
-          configOptions: this.buildConfigOptions(config),
-        }));
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_load',
+        'qwen-code.daemon.session_restore.action': 'load',
+        'session.id': sessionId,
       },
+      async (span) =>
+        this.loadSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
       parentContext ? { parentContext } : {},
     );
   }
 
-  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+  private async loadSessionWithProfiler(
+    params: LoadSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<LoadSessionResponse> {
+    let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
-    // Load per-request settings BEFORE the existence check: the check must
-    // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
-    // whichever settings a concurrent handler loaded last.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
+    const restoreOptions = loadRestoreOptions(params);
+    const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) => {
-          const response: LoadSessionResponse = {
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          } as LoadSessionResponse;
-          const records = sessionData.conversation.messages;
-          const visibleRecords = selectVisibleHistoryRecords(
-            records,
-            shouldHideInheritedHistory(params),
-          );
-          if (visibleRecords.length === 0) return response;
-
-          const bulkReplay = isBulkLoadReplayRequest(params);
-          const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(
-                visibleRecords,
-                getLoadReplayPageSize(params),
-              )
-            : { records: visibleRecords, hasMore: false };
-          const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData.historyGaps,
-            cumulativeUsage: createReplayCumulativeUsage(),
-            logger: debugLogger,
-          });
-          if (!bulkReplay) {
-            try {
-              for (const update of replay.updates) {
-                await liveSession.sendUpdate(update);
-              }
-            } finally {
-              // Replayed plan updates re-stamp the revision via sendUpdate;
-              // drop it so a replayed snapshot cannot bind a later approval
-              // (same rule Session.replayHistory applies to cold loads),
-              // even if delivery fails part-way. The bulk path keeps a live
-              // binding on purpose: it hands the updates to the client
-              // instead of replaying them through this session.
-              liveSession.clearActiveTodoPlanRevision();
-            }
-            if (replay.replayError !== undefined) {
-              throw RequestError.internalError(undefined, replay.replayError);
-            }
-            return response;
-          }
-
-          return {
-            ...response,
-            _meta: {
-              [LOAD_REPLAY_META_KEY]: {
-                v: LOAD_REPLAY_VERSION,
-                updates: replay.updates,
-                ...(replay.replayError !== undefined
-                  ? { partial: true as const, replayError: replay.replayError }
-                  : {}),
-                ...(replayPage.hasMore ? { hasMore: true as const } : {}),
-              },
-            },
-          };
-        },
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
-    }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
-      },
-    );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    // Adopt into the "latest loaded" cache only once the session is
-    // confirmed — a failed probe for a stale id must not repoint
-    // agent-level readers at this request's workspace.
-    this.settings = settings;
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          restoreOptions,
+          async (config, projection) => {
+            const response = profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
+                    : {}),
+                }) as LoadSessionResponse,
+            );
+            const replayPage = projection?.replay;
+            if (!replayPage || replayPage.records.length === 0) return response;
 
-    const config = await this.newSessionConfig(
-      params.cwd,
-      // `LoadSessionRequest.mcpServers` is required in today's ACP
-      // schema, but mirror `unstable_resumeSession` and tolerate a
-      // future loosening — `newSessionConfig` iterates the list, so
-      // a `null`/`undefined` would otherwise throw `TypeError`.
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    const sessionData = config.getResumedSessionData();
-    const bulkReplay = isBulkLoadReplayRequest(params);
-    const replayPageSize = bulkReplay
-      ? getLoadReplayPageSize(params)
-      : undefined;
-    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(config, settings, sessionData, {
-        ...(bulkReplay ? { replayHistory: false } : {}),
-        beforeStartPostReplayServices: async (createdSession) => {
-          if (bulkReplay) {
-            const records = sessionData?.conversation.messages;
-            let replayUpdates: SessionUpdate[] = [];
-            if (records) {
-              createdSession.primeTurnFromHistory(records);
-              const visibleRecords = selectVisibleHistoryRecords(
-                records,
-                shouldHideInheritedHistory(params),
-              );
-              const replayPage = selectRecentHistoryRecords(
-                visibleRecords,
-                replayPageSize,
-              );
-              const replayUsage = createReplayCumulativeUsage();
-              const replay = await collectHistoryReplayUpdates({
-                sessionId: params.sessionId,
+            const bulkReplay = isBulkLoadReplayRequest(params);
+            const replay = await profiler.time('history_replay', () =>
+              collectHistoryReplayUpdates({
+                sessionId,
                 config,
                 records: replayPage.records,
-                gaps: sessionData?.historyGaps,
-                cumulativeUsage: replayUsage,
-                supersedeUnrestorableGoal: true,
+                gaps: replayPage.gaps,
+                cumulativeUsage: createReplayCumulativeUsage(),
+                replayState: replayPage.replay,
+                goalBootstrap: replayGoalBootstrap(projection),
+                ...(restoreOptions.replay.kind === 'recent'
+                  ? {
+                      limits: {
+                        maxBytes: LOAD_REPLAY_MAX_BYTES,
+                        maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                      },
+                    }
+                  : {}),
                 logger: debugLogger,
-              });
-              replayUpdates = replay.updates;
-              copyCumulativeUsage(createdSession.cumulativeUsage, replayUsage);
+              }),
+            );
+            addDaemonRequestAttribute(
+              'qwen-code.daemon.session_restore.partial_replay',
+              replay.replayError !== undefined,
+            );
+            if (!bulkReplay) {
+              try {
+                for (const update of replay.updates) {
+                  await liveSession.sendUpdate(update);
+                }
+              } finally {
+                // Replayed plan updates re-stamp the revision via sendUpdate;
+                // drop it so a replayed snapshot cannot bind a later approval
+                // (same rule Session.replayHistory applies to cold loads),
+                // even if delivery fails part-way. The bulk path keeps a live
+                // binding on purpose: it hands the updates to the client
+                // instead of replaying them through this session.
+                liveSession.clearActiveTodoPlanRevision();
+              }
               if (replay.replayError !== undefined) {
+                throw RequestError.internalError(undefined, replay.replayError);
+              }
+              return response;
+            }
+
+            const envelope: BridgeLoadReplayEnvelope = {
+              v: LOAD_REPLAY_VERSION,
+              updates: replay.updates,
+              ...(replayPage.anchorRecordId
+                ? { anchorRecordId: replayPage.anchorRecordId }
+                : {}),
+              ...(replay.replayError !== undefined
+                ? {
+                    partial: true,
+                    replayError: replay.replayError,
+                  }
+                : {}),
+              ...(replayPage.hasMore ? { hasMore: true } : {}),
+            };
+            validateLoadReplayEnvelope(
+              sessionId,
+              envelope,
+              restoreOptions.replay.kind === 'recent',
+            );
+            return {
+              ...response,
+              _meta: {
+                [LOAD_REPLAY_META_KEY]: envelope,
+              },
+            };
+          },
+        );
+      });
+    }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Load per-request settings only after reserving a non-live id. The check
+      // must resolve `advanced.runtimeOutputDir` from this request's cwd.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
+          }
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      // Adopt into the "latest loaded" cache only once the session is
+      // confirmed — a failed probe for a stale id must not repoint
+      // agent-level readers at this request's workspace.
+      this.settings = settings;
+
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          // `LoadSessionRequest.mcpServers` is required in today's ACP
+          // schema, but mirror `unstable_resumeSession` and tolerate a
+          // future loosening — `newSessionConfig` iterates the list, so
+          // a `null`/`undefined` would otherwise throw `TypeError`.
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+          {},
+          undefined,
+          restoreOptions,
+        ),
+      );
+      const projection = config.consumeSessionRestoreProjection?.();
+      const suppressRecoveredGoalPresentation =
+        projection?.runtime.goalRecoverySourceUuid !== undefined &&
+        projection.runtime.goalRecoverySourceUuid !==
+          projection.replay?.goalRecoverySourceUuid;
+      const bulkReplay = isBulkLoadReplayRequest(params);
+      let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+      const replayUsage = createReplayCumulativeUsage();
+      let recoveredGoalPublicationKey: string | undefined;
+      let suppressedRecoveredGoalId: string | undefined;
+      let streamGoalUpdates: SessionUpdate[] = [];
+      let response: LoadSessionResponse | undefined;
+      const buildResponse = () =>
+        profiler.timeSync('response_build', () => ({
+          modes: this.buildModesData(config),
+          models: this.buildAvailableModels(config),
+          configOptions: this.buildConfigOptions(config),
+          ...(projection?.runtime.artifactSnapshot
+            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+            : {}),
+          ...(replayEnvelope
+            ? {
+                _meta: {
+                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                },
+              }
+            : {}),
+        })) as LoadSessionResponse;
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, undefined, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            replayHistory: false,
+            prepareBeforeSessionCreate: async () => {
+              if (bulkReplay && projection?.replay) {
+                const replay = await profiler.time('history_replay', () =>
+                  collectHistoryReplayUpdates({
+                    sessionId,
+                    config,
+                    records: projection.replay!.records,
+                    gaps: projection.replay!.gaps,
+                    cumulativeUsage: replayUsage,
+                    replayState: projection.replay!.replay,
+                    goalBootstrap: replayGoalBootstrap(projection),
+                    ...(restoreOptions.replay.kind === 'recent'
+                      ? {
+                          limits: {
+                            maxBytes: LOAD_REPLAY_MAX_BYTES,
+                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                          },
+                        }
+                      : {}),
+                    logger: debugLogger,
+                  }),
+                );
+                addDaemonRequestAttribute(
+                  'qwen-code.daemon.session_restore.partial_replay',
+                  replay.replayError !== undefined,
+                );
                 replayEnvelope = {
                   v: LOAD_REPLAY_VERSION,
-                  updates: replayUpdates,
-                  partial: true,
-                  replayError: replay.replayError,
-                  ...(replayPage.hasMore ? { hasMore: true } : {}),
+                  updates: replay.updates,
+                  ...(projection.replay.anchorRecordId
+                    ? { anchorRecordId: projection.replay.anchorRecordId }
+                    : {}),
+                  ...(replay.replayError !== undefined
+                    ? {
+                        partial: true,
+                        replayError: replay.replayError,
+                      }
+                    : {}),
+                  ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
               }
-              replayEnvelope ??= {
-                v: LOAD_REPLAY_VERSION,
-                updates: replayUpdates,
-                ...(replayPage.hasMore ? { hasMore: true } : {}),
-              };
+              const goalBootstrap = replayGoalBootstrap(projection);
+              const rendered = await renderPreparedGoalUpdate(
+                () => config.getGoalRuntimePrepared(),
+                {
+                  ...(projection?.replay?.records
+                    ? { replayedRecords: projection.replay.records }
+                    : {}),
+                  ...(suppressRecoveredGoalPresentation
+                    ? { hideRuntimeGoal: true }
+                    : {}),
+                  ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                },
+              ).catch((error) => {
+                if (suppressRecoveredGoalPresentation) throw error;
+                debugLogger.debug(
+                  `Failed to render recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+                return {
+                  publicationKey: undefined,
+                  suppressedGoalId: undefined,
+                  updates: [],
+                };
+              });
+              recoveredGoalPublicationKey = rendered.publicationKey;
+              suppressedRecoveredGoalId = rendered.suppressedGoalId;
+              if (!bulkReplay) {
+                streamGoalUpdates = rendered.updates;
+                return;
+              }
+              const goalUpdates = rendered.updates;
+              if (goalUpdates.length > 0) {
+                replayEnvelope ??= {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: [],
+                };
+                replayEnvelope.updates.push(...goalUpdates);
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
+              }
+            },
+            beforeSessionCreate: () => {
+              response = buildResponse();
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+                copyCumulativeUsage(
+                  createdSession.cumulativeUsage,
+                  replayUsage,
+                );
+                createdSession.primeRecoveredGoalPublication(
+                  recoveredGoalPublicationKey,
+                  suppressedRecoveredGoalId,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              if (!bulkReplay && projection?.replay) {
+                await profiler.time('history_replay', async () => {
+                  const goalBootstrap = replayGoalBootstrap(projection);
+                  const initialGoalState = replayInitialGoalState(projection);
+                  const hasGoalReplayState =
+                    goalBootstrap !== undefined ||
+                    initialGoalState.initialGoalState !== undefined ||
+                    initialGoalState.initialGoalCause !== undefined;
+                  if (hasGoalReplayState) {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                      {
+                        ...(goalBootstrap ? { goalBootstrap } : {}),
+                        ...initialGoalState,
+                      },
+                    );
+                  } else {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                    );
+                  }
+                });
+                try {
+                  for (const update of streamGoalUpdates) {
+                    await createdSession.sendUpdate(update);
+                  }
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
+              await profiler.time('post_replay_services', async () => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+              });
+            },
+          }),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
+            if (
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
             }
-            replayEnvelope ??= {
-              v: LOAD_REPLAY_VERSION,
-              updates: replayUpdates,
-            };
-          }
-
-          await this.#restoreWorktreeOnResume(config, createdSession);
-          await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-          this.#restoreGoalOnResume(config, createdSession);
-        },
-      });
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
+          },
+          sessionId,
+        );
+      }
+      return response!;
+    } finally {
+      releaseStartingSessionId();
     }
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const response: LoadSessionResponse = {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as LoadSessionResponse;
-    if (!replayEnvelope) {
-      return response;
-    }
-    return {
-      ...response,
-      _meta: {
-        [LOAD_REPLAY_META_KEY]: replayEnvelope,
-      },
-    };
   }
 
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const sessionSource = getSessionSource(params);
-    // Same per-request settings discipline as `loadSession`.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
-    if (liveSession) {
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) =>
-          ({
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          }) as ResumeSessionResponse,
-      );
-    }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_resume',
+        'qwen-code.daemon.session_restore.action': 'resume',
+        'session.id': sessionId,
       },
+      async (span) =>
+        this.resumeSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
     );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    this.settings = settings;
+  }
 
-    const config = await this.newSessionConfig(
-      params.cwd,
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(
-        config,
-        settings,
-        config.getResumedSessionData(),
-        {
-          replayHistory: false,
-          beforeStartPostReplayServices: async (createdSession) => {
-            await this.#restoreWorktreeOnResume(config, createdSession);
-            await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-            this.#restoreGoalOnResume(config, createdSession);
-          },
-        },
+  private async resumeSessionWithProfiler(
+    params: ResumeSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<ResumeSessionResponse> {
+    let sessionId = initialSessionId;
+    const sessionSource = getSessionSource(params);
+    const liveSession = this.sessions.get(sessionId);
+    if (liveSession) {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          RESUME_RESTORE_OPTIONS,
+          async (config, projection) =>
+            profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
+                    : {}),
+                }) as ResumeSessionResponse,
+            ),
+        );
       });
     }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Same per-request settings discipline as `loadSession`.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
+          }
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      this.settings = settings;
 
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+          {},
+          undefined,
+          RESUME_RESTORE_OPTIONS,
+        ),
+      );
+      const projection = config.consumeSessionRestoreProjection?.();
+      let response: ResumeSessionResponse | undefined;
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, undefined, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            replayHistory: false,
+            beforeSessionCreate: () => {
+              response = profiler.timeSync('response_build', () => ({
+                modes: this.buildModesData(config),
+                models: this.buildAvailableModels(config),
+                configOptions: this.buildConfigOptions(config),
+                ...(projection?.runtime.artifactSnapshot
+                  ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+                  : {}),
+              })) as ResumeSessionResponse;
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              await profiler.time('post_replay_services', async () => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+              });
+            },
+          }),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
+            if (
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
+          },
+          sessionId,
+        );
+      }
 
-    const sessionData = config.getResumedSessionData();
-    return {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as ResumeSessionResponse;
+      return response!;
+    } finally {
+      releaseStartingSessionId();
+    }
   }
 
   /**
@@ -4934,63 +5805,6 @@ class QwenAgent implements Agent {
     await config.loadPausedBackgroundAgents(config.getSessionId());
     session.pendingRecoveredAgentsNotice =
       config.consumePendingRecoveredAgentsNotice();
-  }
-
-  /**
-   * Re-registers the `/goal` Stop hook when a resumed transcript ends on an
-   * unsatisfied goal — the daemon counterpart of the TUI's resume restore.
-   * Without this the goal loop silently dies whenever a session is reloaded or
-   * `qwen serve` restarts, even though the transcript still shows it as active.
-   *
-   * The `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
-   * used here — the daemon's terminal card goes out over the wire, not into an
-   * Ink history. But restore reaches `unregisterGoalHook` on every path,
-   * including the one where there was nothing to restore, and that clears the
-   * observer the `Session` constructor installed. So it is put back afterwards,
-   * unconditionally: without it a restored goal that later achieves or fails
-   * emits no terminal update and persists no terminal card, and the next reload
-   * revives a goal that already finished.
-   *
-   * Best-effort: a failed restore must not block session load.
-   */
-  #restoreGoalOnResume(config: Config, session: Session): void {
-    try {
-      const records = config.getResumedSessionData()?.conversation.messages;
-      if (!records?.length) return;
-      const restored = restoreGoalFromHistory(
-        collectGoalStatusItemsFromRecords(records),
-        config,
-      );
-      if (restored.restored) {
-        debugLogger.info(
-          `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
-        );
-      } else if (
-        restored.blockedBy &&
-        restored.blockedBy !== 'condition-invalid'
-      ) {
-        // The transcript still holds an active goal card. `HistoryReplayer`
-        // supersedes it with a `cleared` card so the client does not show a
-        // goal that nothing is driving; say why on stderr.
-        //
-        // `condition-invalid` is excluded: `restoreGoalFromHistory` already
-        // wrote a line for it (it is the only caller that knows the condition
-        // is malformed). Logging here too would double-report the one case,
-        // while the env gates below report once.
-        writeStderrLineSafe(
-          `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
-        );
-      }
-    } catch (error) {
-      // Not debugLogger: it no-ops unless a debug session is active, and a
-      // failed restore is invisible from the outside — the transcript still
-      // shows the goal as active while no hook drives it.
-      writeStderrLineSafe(
-        `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
-      );
-    } finally {
-      session.installGoalTerminalObserver();
-    }
   }
 
   async unstable_listSessions(
@@ -5037,33 +5851,36 @@ class QwenAgent implements Agent {
   async setSessionMode(
     params: SetSessionModeRequest,
   ): Promise<SetSessionModeResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode(params);
+    return session.setMode({ ...params, sessionId });
   }
 
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel(params);
+    return await session.setModel({ ...params, sessionId });
   }
 
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
-    const { sessionId, configId, value } = params;
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const { configId, value } = params;
 
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -5091,6 +5908,51 @@ class QwenAgent implements Agent {
         );
         break;
       }
+      case 'reasoning_effort': {
+        const modelReasoning = this.getModelReasoningConfiguration(
+          session.getConfig(),
+        );
+        if (modelReasoning) {
+          const selected =
+            value === ACP_REASONING_EFFORT_NONE
+              ? ACP_REASONING_EFFORT_NONE
+              : modelReasoning.efforts.find((effort) => effort === value);
+          if (!selected) {
+            throw RequestError.invalidParams(
+              undefined,
+              `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_NONE}, ${modelReasoning.efforts.join(', ')}`,
+            );
+          }
+          const generation = session.getConfig().getContentGeneratorConfig();
+          if (selected === ACP_REASONING_EFFORT_NONE) {
+            generation.reasoning = false;
+          } else {
+            const current = generation.reasoning;
+            generation.reasoning = {
+              ...(current || {}),
+              effort: selected,
+            };
+          }
+          break;
+        }
+        const effort =
+          value === ACP_REASONING_EFFORT_DEFAULT
+            ? undefined
+            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+          );
+        }
+        if (!applyReasoningEffort(session.getConfig(), effort)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Reasoning effort cannot be applied while thinking is disabled',
+          );
+        }
+        break;
+      }
       default:
         throw RequestError.invalidParams(
           undefined,
@@ -5104,18 +5966,56 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
-    const sanitizedParams = { ...params };
+    const sanitizedParams = { ...params, sessionId };
     const meta =
       params._meta && typeof params._meta === 'object'
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+    // The user-facing display projection is caller-controlled metadata; honor
+    // it only for trusted parents (the daemon bridge re-injects the trusted
+    // channel-worker value here). A plain delete would drop that re-injection.
+    if (
+      this.privateParentState === 'trusted' &&
+      typeof suppliedPromptDisplayText === 'string'
+    ) {
+      meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
+    // Channel classification is trusted-parent metadata: only the channel
+    // bridges and the daemon bridge hold the private parent capability. An
+    // untrusted caller must not be able to mark its own prompt as a channel
+    // turn — that opts the turn out of loop-detected rejection and the
+    // repeated-failure guard.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelPrompt === true
+    ) {
+      meta[CHANNEL_PROMPT_META_KEY] = true;
+    }
+    // Channel delivery is a daemon-managed side effect (the prompt route
+    // injects it from the trusted context); an untrusted direct-ACP caller
+    // must not self-schedule its own response delivery through the key.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelDelivery !== undefined
+    ) {
+      meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
+    }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
     } else {
@@ -5136,6 +6036,22 @@ class QwenAgent implements Agent {
         'Invalid trusted ACP invocation context',
       );
     }
+    const modelPrompt =
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      isValidTrustedModelPrompt(suppliedModelPrompt)
+        ? suppliedModelPrompt
+        : undefined;
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      modelPrompt === undefined
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP model prompt',
+      );
+    }
     let settleCall = () => {};
     const call: ActivePromptCall = {
       controller: new AbortController(),
@@ -5143,10 +6059,10 @@ class QwenAgent implements Agent {
         settleCall = resolve;
       }),
     };
-    let calls = this.activePromptCalls.get(params.sessionId);
+    let calls = this.activePromptCalls.get(sessionId);
     if (!calls) {
       calls = new Set();
-      this.activePromptCalls.set(params.sessionId, calls);
+      this.activePromptCalls.set(sessionId, calls);
     }
     calls.add(call);
     try {
@@ -5154,20 +6070,29 @@ class QwenAgent implements Agent {
         sanitizedParams,
         invocationContext,
         call.controller.signal,
+        modelPrompt,
       );
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
-        this.activePromptCalls.delete(params.sessionId);
+        this.activePromptCalls.delete(sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, a background shell, or a terminal notification — has to
+      // already be on the wire or the daemon sees an idle Session for as long
+      // as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
     try {
       await session.cancelPendingPrompt();
@@ -5175,6 +6100,13 @@ class QwenAgent implements Agent {
       if (!isNotCurrentlyGeneratingCancelError(error)) {
         throw error;
       }
+    }
+    // Prompt calls still waiting at Session admission are tracked in
+    // activePromptCalls but have no session pendingPrompt yet, so
+    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+    // cancelled prompt would run in full once admission frees.
+    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+      call.controller.abort();
     }
   }
 
@@ -6645,14 +7577,24 @@ class QwenAgent implements Agent {
 
       const disabled = config.getDisabledTools();
       const tools: ServeWorkspaceToolStatus[] = registry
-        .getAllTools()
-        .filter((tool) => !('serverName' in tool))
-        .map((tool) => ({
-          name: tool.name,
-          displayName: tool.displayName,
-          description: tool.description,
-          enabled: !disabled.has(tool.name),
-        }));
+        .getAllToolNames()
+        .flatMap((name) => {
+          const tool = registry.getTool(name);
+          if (tool && 'serverName' in tool) return [];
+          return [
+            {
+              name,
+              ...(tool
+                ? {
+                    displayName: tool.displayName,
+                    description: tool.description,
+                  }
+                : {}),
+              enabled: !disabled.has(name),
+            },
+          ];
+        })
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -7436,7 +8378,24 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
-      return await this.extMethodInternal(method, params);
+      const rawSessionId = params['sessionId'];
+      const normalizedParams =
+        typeof rawSessionId === 'string'
+          ? {
+              ...params,
+              sessionId: normalizeSessionIdForLookup(rawSessionId),
+            }
+          : params;
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        this.privateParentState !== 'trusted'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Background notifications require a trusted private ACP parent',
+        );
+      }
+      return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -7709,9 +8668,18 @@ class QwenAgent implements Agent {
         } catch {
           /* restricted container — report 0 rss */
         }
+        // Spread rather than always-present fields: a child without the probe
+        // (no daemon marker) omits them entirely, so the daemon can tell "not
+        // measured" from a measured zero. Reporting 0 here would read as "this
+        // child needs no heap", which is the one wrong answer. The probe
+        // itself returns undefined until its first successful read, so a child
+        // whose every V8 call throws (restricted container) omits heap the
+        // same way instead of publishing a zeroed, coverage-complete report.
+        const childHeap = this.childHeapProbe?.snapshot();
         return {
           rssBytes,
           cpuPercent,
+          ...(childHeap ? { heap: childHeap } : {}),
         };
       }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
@@ -7853,6 +8821,8 @@ class QwenAgent implements Agent {
                 ?.flush();
             }
             const reader = new SessionTranscriptReader(cwd);
+            const activePromptBeforeRead =
+              this.activePromptCalls.has(sessionId);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
@@ -7869,6 +8839,9 @@ class QwenAgent implements Agent {
               sessionId,
               page,
               config,
+              finalizeDangling:
+                !activePromptBeforeRead &&
+                !this.activePromptCalls.has(sessionId),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,
@@ -8028,8 +9001,10 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
           available:
-            !this.managedToolInvocationGuard &&
-            this.config.isManagedMemoryAvailable(),
+            !(
+              this.managedToolInvocationGuard &&
+              this.externalToolGuardProviderAttached
+            ) && this.config.isManagedMemoryAvailable(),
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
         this.rejectUnsupportedGuardedHiddenAgent(
@@ -9054,6 +10029,9 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
+        if (isCompatibleLiveSessionSource(source)) {
+          await session.enableLiveScreenContext();
+        }
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
@@ -9070,6 +10048,172 @@ class QwenAgent implements Agent {
             : {}),
           persisted: ok,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
+        const sessionId = params['sessionId'];
+        const active = params['active'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof active !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing active state',
+          );
+        }
+        await this.sessionOrThrow(sessionId).setLiveConversationActive(active);
+        return { sessionId, active };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript: {
+        const sessionId = params['sessionId'];
+        const entries = params['entries'];
+        const model = params['model'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof model !== 'string' ||
+          model.length === 0 ||
+          model.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing realtime model',
+          );
+        }
+        if (!Array.isArray(entries) || entries.length > 128) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid realtime transcript entries',
+          );
+        }
+        const transcript: Array<{
+          role: 'user' | 'assistant';
+          text: string;
+        }> = [];
+        let totalLength = 0;
+        for (const entry of entries) {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          const role = (entry as Record<string, unknown>)['role'];
+          const text = (entry as Record<string, unknown>)['text'];
+          if (
+            (role !== 'user' && role !== 'assistant') ||
+            typeof text !== 'string' ||
+            text.length === 0 ||
+            text.length > 32_768
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          totalLength += text.length;
+          if (totalLength > 131_072) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Realtime transcript is too large',
+            );
+          }
+          transcript.push({ role, text });
+        }
+        await this.sessionOrThrow(sessionId).appendLiveConversationTranscript(
+          transcript,
+          model,
+        );
+        return { sessionId, persisted: transcript.length };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
+        const sessionId = params['sessionId'];
+        const displayText = params['displayText'];
+        const modelText = params['modelText'];
+        const taskId = params['taskId'];
+        const status = params['status'];
+        const kind = params['kind'];
+        const toolUseId = params['toolUseId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof displayText !== 'string' ||
+          displayText.length === 0 ||
+          displayText.length > 8_192
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification displayText',
+          );
+        }
+        if (
+          typeof modelText !== 'string' ||
+          modelText.length === 0 ||
+          modelText.length > 32_768
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification modelText',
+          );
+        }
+        if (
+          typeof taskId !== 'string' ||
+          taskId.length === 0 ||
+          taskId.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification taskId',
+          );
+        }
+        if (
+          status !== 'completed' &&
+          status !== 'failed' &&
+          status !== 'cancelled'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification status',
+          );
+        }
+        if (kind !== 'agent') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification kind',
+          );
+        }
+        if (
+          toolUseId !== undefined &&
+          (typeof toolUseId !== 'string' ||
+            toolUseId.length === 0 ||
+            toolUseId.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification toolUseId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const result = await session.enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId,
+          status,
+          kind,
+          ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+        });
+        return { sessionId, accepted: result.accepted };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
@@ -9092,13 +10236,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -9120,6 +10269,17 @@ class QwenAgent implements Agent {
             'Invalid or missing path (must be an absolute path)',
           );
         }
+        const managedRelocation = params['managedRelocation'];
+        if (
+          managedRelocation !== undefined &&
+          managedRelocation !== 'live-conversation'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid managed relocation capability',
+          );
+        }
+        const allowedRoots = params['allowedRoots'];
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
@@ -9151,12 +10311,116 @@ class QwenAgent implements Agent {
         // Canonicalize path
         const canonicalPath = await fs.realpath(targetPath);
 
+        let containmentRoots = allowedRoots;
+        let managedTrustAllowed = false;
+        if (managedRelocation === 'live-conversation') {
+          if (this.privateParentState !== 'trusted') {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires a trusted private ACP parent',
+            );
+          }
+          if (
+            !Array.isArray(allowedRoots) ||
+            allowedRoots.length !== 1 ||
+            typeof allowedRoots[0] !== 'string' ||
+            !path.isAbsolute(allowedRoots[0]) ||
+            allowedRoots[0].includes('\0')
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires one absolute allowed root',
+            );
+          }
+
+          const rootPath = allowedRoots[0];
+          let rootBefore: Stats;
+          let canonicalRoot: string;
+          let rootAfter: Stats;
+          try {
+            rootBefore = await fs.lstat(rootPath);
+            canonicalRoot = await fs.realpath(rootPath);
+            rootAfter = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootBefore) ||
+            !isOwnerOnlyDirectory(rootAfter) ||
+            rootBefore.dev !== rootAfter.dev ||
+            rootBefore.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+
+          let targetBefore: Stats;
+          let targetAfter: Stats;
+          try {
+            targetBefore = await fs.lstat(targetPath);
+            targetAfter = await fs.lstat(canonicalPath);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+          const relativeTarget = path.relative(canonicalRoot, canonicalPath);
+          if (
+            !isOwnerOnlyDirectory(targetBefore) ||
+            !isOwnerOnlyDirectory(targetAfter) ||
+            targetBefore.dev !== targetAfter.dev ||
+            targetBefore.ino !== targetAfter.ino ||
+            relativeTarget.length === 0 ||
+            relativeTarget.startsWith('..') ||
+            path.isAbsolute(relativeTarget) ||
+            relativeTarget.includes(path.sep)
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+
+          let rootFinal: Stats;
+          try {
+            rootFinal = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootFinal) ||
+            rootFinal.dev !== rootAfter.dev ||
+            rootFinal.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          containmentRoots = [canonicalRoot];
+          managedTrustAllowed = true;
+        }
+
         // Server-controlled containment check (worktree create/restore).
         // Must run BEFORE the no-op check: a no-op cd to a directory
         // outside the allowed roots must still be rejected.
-        const allowedRoots = params['allowedRoots'];
-        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
-          const contained = allowedRoots.some((root: unknown) => {
+        if (Array.isArray(containmentRoots) && containmentRoots.length > 0) {
+          const contained = containmentRoots.some((root: unknown) => {
             if (typeof root !== 'string') return false;
             const rel = path.relative(root, canonicalPath);
             return !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -9173,7 +10437,10 @@ class QwenAgent implements Agent {
         const previousCwd = config.getTargetDir();
         let trustValidated = false;
         const validateTrust = () => {
-          if (!isFolderTrustEnabled(this.settings.merged)) {
+          if (
+            managedTrustAllowed ||
+            !isFolderTrustEnabled(this.settings.merged)
+          ) {
             trustValidated = true;
             return;
           }
@@ -9576,7 +10843,10 @@ class QwenAgent implements Agent {
         return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
-        if (this.managedToolInvocationGuard) {
+        if (
+          this.managedToolInvocationGuard &&
+          this.externalToolGuardProviderAttached
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Managed external tool guard v1 does not support /fork.',
@@ -9795,21 +11065,40 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const cleared = unregisterGoalHook(config, sessionId);
-        if (cleared) {
-          session.emitGoalStatus({
-            kind: 'cleared',
-            condition: cleared.condition,
-            iterations: cleared.iterations,
-            durationMs: Date.now() - cleared.setAt,
-          });
+        let runtime;
+        try {
+          runtime = await config.getGoalRuntimeReady();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // No persistence means no goal to clear. Answering honestly beats
+          // failing the request: `general.chatRecording: false` is a config
+          // choice, and a sticky `recoveryError` from a malformed transcript
+          // record would otherwise break clear for this session forever.
+          debugLogger.info(
+            `sessionGoalClear sessionId=${sessionId} cleared=false (goal persistence unavailable)`,
+          );
+          return {
+            cleared: false,
+            condition: undefined,
+            snapshot: emptyGoalSnapshot(),
+          };
         }
+        const before = runtime.getSnapshot();
+        const goal = before.goal;
+        const response = goal
+          ? await runtime.dispatch({
+              action: 'clear',
+              expectedGoalId: goal.goalId,
+              expectedRevision: goal.revision,
+            })
+          : { snapshot: before };
         debugLogger.info(
-          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!goal} objective=${goal?.objective ?? '(none)'}`,
         );
         return {
-          cleared: !!cleared,
-          condition: cleared?.condition,
+          cleared: !!goal,
+          condition: goal?.objective,
+          snapshot: response.snapshot,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
@@ -9820,25 +11109,130 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        // Throws when the session is not live. That is the honest answer: the
-        // goal store is in-memory, so a goal only exists — and only advances —
-        // while its session is resident.
-        this.sessionOrThrow(sessionId);
-        const active = getActiveGoal(sessionId);
+        const session = this.sessionOrThrow(sessionId);
+        let snapshot: GoalSnapshotV2;
+        try {
+          snapshot = (
+            await session.getConfig().getGoalRuntimeReady()
+          ).getSnapshot();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // A session that cannot persist goals has no goal, which is a
+          // perfectly describable state. Rejecting instead would make
+          // `GET /goals` drop this session on every poll and report it as
+          // unreachable, which reads as a wedged child rather than a config.
+          snapshot = emptyGoalSnapshot();
+        }
+        const activeGoal =
+          snapshot.goal?.status === 'active' ? snapshot.goal : null;
         return {
-          // Projected field by field: `ActiveGoal` also carries `hookId` and
-          // `tokensAtStart`, which are this process's business.
-          active: active
+          snapshot,
+          active: activeGoal
             ? {
-                condition: active.condition,
-                iterations: active.iterations,
-                setAt: active.setAt,
-                ...(active.lastReason !== undefined
-                  ? { lastReason: active.lastReason }
+                condition: activeGoal.objective,
+                iterations: activeGoal.turnCount,
+                setAt: activeGoal.createdAt,
+                ...(activeGoal.lastReason !== undefined
+                  ? { lastReason: activeGoal.lastReason }
                   : {}),
               }
             : null,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawPromptId = params['promptId'];
+        if (
+          rawPromptId !== undefined &&
+          (typeof rawPromptId !== 'string' || rawPromptId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const settings = loadSettingsCached(cwd);
+        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          try {
+            await session.getConfig().getChatRecordingService()?.flush();
+          } catch {
+            // Read the last durable snapshot after a best-effort flush.
+          }
+          let reader: SessionTranscriptReader | undefined;
+          try {
+            reader = new SessionTranscriptReader(cwd);
+            const turnResult = await findSettledTurnResult(
+              reader,
+              sessionId,
+              typeof rawPromptId === 'string' ? rawPromptId : undefined,
+              cwd,
+            );
+            return {
+              v: 1,
+              sessionId,
+              turnResult: turnResult ?? null,
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              // Transcript file not written yet (no settled turn
+              // persisted). Scoped to the read so an unrelated ENOENT
+              // (settings/runtime resolution) still surfaces.
+              return { v: 1, sessionId, turnResult: null };
+            }
+            if (
+              error instanceof SessionTranscriptSnapshotUnavailableError &&
+              reader
+            ) {
+              try {
+                const transcript = await fs.stat(
+                  reader.getSessionFilePath(sessionId),
+                );
+                if (transcript.size === 0) {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              } catch (statError) {
+                if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              }
+            }
+            if (error instanceof InvalidSessionTranscriptCursorError) {
+              throw new RequestError(-32602, error.message, {
+                errorKind: 'invalid_transcript_cursor',
+              });
+            }
+            if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: 'transcript_snapshot_unavailable',
+                sessionId,
+              });
+            }
+            if (error instanceof SessionTranscriptTooLargeError) {
+              throw new RequestError(-32011, error.message, {
+                errorKind: 'transcript_too_large',
+                sessionId,
+                snapshotSize: error.snapshotSize,
+                maxBytes: error.maxBytes,
+              });
+            }
+            if (error instanceof SessionTranscriptPageTooLargeError) {
+              throw new RequestError(-32012, error.message, {
+                errorKind: 'transcript_page_too_large',
+                sessionId,
+                pageBytes: error.pageBytes,
+                maxBytes: error.maxBytes,
+              });
+            }
+            throw error;
+          }
+        });
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
@@ -10104,12 +11498,41 @@ class QwenAgent implements Agent {
           );
         }
 
+        // Fail fast like branch admission: the bridge bounds this RPC with a
+        // timeout that races but cannot cancel queued work, so a rewind
+        // admitted behind an active turn would still truncate history after
+        // the client was told it failed. rewindToTurn re-checks inside the
+        // gate.
+        if (!session.isTurnIdle()) {
+          throw new RequestError(
+            -32602,
+            'Cannot rewind while a prompt is running',
+            {
+              errorKind: 'session_busy',
+            },
+          );
+        }
+
+        // Validate request FORMAT synchronously at RPC entry so a malformed
+        // rewind fails with a deterministic invalid_rewind_target instead of
+        // queueing behind an active mutation and surfacing as a bridge
+        // timeout (which for a destructive op means "may have executed").
+        // Only the snapshot-index resolution needs the gate.
+        const rawPromptId = params['promptId'];
+        if (rawPromptId !== undefined && typeof rawPromptId !== 'string') {
+          throw new RequestError(-32602, 'Invalid promptId format', {
+            errorKind: 'invalid_rewind_target',
+          });
+        }
+        const promptId =
+          typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
           | number
           | undefined;
-        const promptId = params['promptId'] as string | undefined;
-
-        if (promptId && (turnIndex === undefined || turnIndex === null)) {
+        const resolveFromPromptId =
+          promptId !== undefined &&
+          (turnIndex === undefined || turnIndex === null);
+        if (resolveFromPromptId) {
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
             throw new RequestError(-32602, 'Invalid promptId format', {
@@ -10124,121 +11547,133 @@ class QwenAgent implements Agent {
               { errorKind: 'invalid_rewind_target' },
             );
           }
-          // Derive turnIndex from the snapshot's position in the array,
-          // NOT from the promptId suffix. Session.turn is monotonic and
-          // does not reset on rewind, so after a rewind cycle the suffix
-          // no longer matches the turn's position in the current history.
-          const fhs = session.getConfig().getFileHistoryService();
-          const snapshots = fhs.getSnapshots();
-          const snapshotIdx = snapshots.findIndex(
-            (s) => s.promptId === promptId,
-          );
-          if (snapshotIdx < 0) {
-            throw new RequestError(
-              -32602,
-              'Snapshot not found for the given promptId',
-              { errorKind: 'invalid_rewind_target' },
-            );
-          }
-          turnIndex = snapshotIdx;
-        }
-
-        if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
+        } else if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing targetTurnIndex',
           );
         }
 
-        const rewindFiles = params['rewindFiles'] !== false;
-        const historyBeforeRewind = session.captureHistorySnapshot();
-        let rewindResult;
-        try {
-          rewindResult = session.rewindToTurn(turnIndex as number, {
-            rewindFiles,
-          });
-        } catch (err) {
-          if (err instanceof RequestError) {
-            const msg = err.message;
-            if (msg.includes('Cannot rewind while a prompt is running')) {
-              throw new RequestError(err.code, msg, {
-                errorKind: 'session_busy',
-              });
-            }
-            if (msg.includes('compressed or does not exist')) {
-              throw new RequestError(err.code, msg, {
-                errorKind: 'invalid_rewind_target',
-              });
-            }
-          }
-          throw err;
-        }
-
-        let filesChanged: string[] = [];
-        let filesFailed: string[] = [];
-        if (rewindFiles && promptId) {
-          const fhs = session.getConfig().getFileHistoryService();
-          try {
-            const fileResult = await fhs.rewind(promptId, true);
-            filesChanged = fileResult.filesChanged;
-            filesFailed = fileResult.filesFailed;
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            debugLogger.error(
-              `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (resolveFromPromptId) {
+            // Derive turnIndex from the snapshot's position in the array,
+            // NOT from the promptId suffix. Session.turn is monotonic and
+            // does not reset on rewind, so after a rewind cycle the suffix
+            // no longer matches the turn's position in the current history.
+            const fhs = session.getConfig().getFileHistoryService();
+            const snapshots = fhs.getSnapshots();
+            const snapshotIdx = snapshots.findIndex(
+              (s) => s.promptId === promptId,
             );
-            filesFailed = [`file-history-rewind: ${reason}`];
+            if (snapshotIdx < 0) {
+              throw new RequestError(
+                -32602,
+                'Snapshot not found for the given promptId',
+                { errorKind: 'invalid_rewind_target' },
+              );
+            }
+            turnIndex = snapshotIdx;
           }
-        }
-        let artifactSnapshot: unknown;
-        let artifactSnapshotUnavailable: string | undefined;
-        try {
-          const config = session.getConfig();
-          const recording = config.getChatRecordingService();
-          await recording?.flush();
-          const loadAuthoritative = () =>
-            config.getSessionService().loadSession(sessionId);
-          const sessionData = recording
-            ? await recording.runWithWriteBarrier(loadAuthoritative)
-            : await loadAuthoritative();
-          if (sessionData === undefined) {
-            artifactSnapshotUnavailable =
-              'session data unavailable after rewind';
-          } else if (sessionData.artifactSnapshot) {
-            artifactSnapshot = sessionData.artifactSnapshot;
-          } else {
-            // A successful reload with no artifact records is a valid empty
-            // artifact timeline, distinct from an unavailable reload.
-            artifactSnapshot = {
-              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-              sessionId,
-              sequence: 0,
-              artifacts: [],
-              tombstonedIds: [],
-              stickyEphemeralIds: [],
-              warnings: [],
-            };
-          }
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          artifactSnapshotUnavailable =
-            'artifact snapshot unavailable after rewind';
-          debugLogger.warn(
-            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
-          );
-        }
 
-        return {
-          success: true,
-          historyBeforeRewind,
-          ...rewindResult,
-          filesChanged,
-          filesFailed,
-          ...(artifactSnapshot ? { artifactSnapshot } : {}),
-          ...(artifactSnapshotUnavailable
-            ? { artifactSnapshotUnavailable }
-            : {}),
-        };
+          const rewindFiles = params['rewindFiles'] !== false;
+          const historyBeforeRewind = session.captureHistorySnapshot();
+          let rewindResult;
+          let releaseHistoryMutation: () => void;
+          try {
+            rewindResult = session.rewindToTurn(turnIndex as number, {
+              rewindFiles,
+            });
+            releaseHistoryMutation = session.beginHistoryMutation();
+          } catch (err) {
+            if (err instanceof RequestError) {
+              const msg = err.message;
+              if (
+                msg.includes('Cannot rewind while a prompt is running') ||
+                msg.includes('Session is busy processing a turn')
+              ) {
+                throw new RequestError(err.code, msg, {
+                  errorKind: 'session_busy',
+                });
+              }
+              if (msg.includes('compressed or does not exist')) {
+                throw new RequestError(err.code, msg, {
+                  errorKind: 'invalid_rewind_target',
+                });
+              }
+            }
+            throw err;
+          }
+
+          try {
+            let filesChanged: string[] = [];
+            let filesFailed: string[] = [];
+            if (rewindFiles && promptId) {
+              const fhs = session.getConfig().getFileHistoryService();
+              try {
+                const fileResult = await fhs.rewind(promptId, true);
+                filesChanged = fileResult.filesChanged;
+                filesFailed = fileResult.filesFailed;
+              } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                debugLogger.error(
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+                );
+                filesFailed = [`file-history-rewind: ${reason}`];
+              }
+            }
+            let artifactSnapshot: unknown;
+            let artifactSnapshotUnavailable: string | undefined;
+            try {
+              const config = session.getConfig();
+              const recording = config.getChatRecordingService();
+              await recording?.flush();
+              const loadAuthoritative = () =>
+                config.getSessionService().loadSession(sessionId);
+              const sessionData = recording
+                ? await recording.runWithWriteBarrier(loadAuthoritative)
+                : await loadAuthoritative();
+              if (sessionData === undefined) {
+                artifactSnapshotUnavailable =
+                  'session data unavailable after rewind';
+              } else if (sessionData.artifactSnapshot) {
+                artifactSnapshot = sessionData.artifactSnapshot;
+              } else {
+                // A successful reload with no artifact records is a valid empty
+                // artifact timeline, distinct from an unavailable reload.
+                artifactSnapshot = {
+                  v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                  sessionId,
+                  sequence: 0,
+                  artifacts: [],
+                  tombstonedIds: [],
+                  stickyEphemeralIds: [],
+                  warnings: [],
+                };
+              }
+            } catch (err) {
+              const reason = err instanceof Error ? err.message : String(err);
+              artifactSnapshotUnavailable =
+                'artifact snapshot unavailable after rewind';
+              debugLogger.warn(
+                `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
+              );
+            }
+
+            return {
+              success: true,
+              historyBeforeRewind,
+              ...rewindResult,
+              filesChanged,
+              filesFailed,
+              ...(artifactSnapshot ? { artifactSnapshot } : {}),
+              ...(artifactSnapshotUnavailable
+                ? { artifactSnapshotUnavailable }
+                : {}),
+            };
+          } finally {
+            releaseHistoryMutation();
+          }
+        });
       }
       case 'qwen/session/loadUpdates': {
         const sessionId = params['sessionId'] as string;
@@ -10350,6 +11785,16 @@ class QwenAgent implements Agent {
           );
         }
         const name = params['name'];
+        const atRecordId = params['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
+        }
+        if (isSideTask && atRecordId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'atRecordId is not supported for side tasks',
+          );
+        }
 
         const sourceSession = this.sessions.get(sessionId);
         if (!sourceSession) {
@@ -10359,70 +11804,83 @@ class QwenAgent implements Agent {
           });
         }
 
-        const sourceConfig = sourceSession.getConfig();
-        const recording = sourceConfig.getChatRecordingService();
-        if (recording) {
-          await recording.flush();
+        if (!isSideTask) {
+          if (!sourceSession.isTurnIdle()) {
+            throw new RequestError(
+              -32602,
+              'Cannot branch while a prompt is running',
+              { errorKind: 'session_busy' },
+            );
+          }
+          try {
+            return await this.runExclusiveHistoryMutation(
+              sessionId,
+              async () => {
+                await sourceSession.assertCanStartTurn();
+                const releaseHistoryMutation =
+                  sourceSession.beginHistoryMutation();
+                try {
+                  const sourceConfig = sourceSession.getConfig();
+                  const recording = sourceConfig.getChatRecordingService();
+                  const sessionService = sourceConfig.getSessionService();
+
+                  const baseName = deriveForkBaseName(
+                    name,
+                    recording,
+                    sessionId,
+                  );
+
+                  const title = await computeUniqueBranchTitle(
+                    baseName,
+                    sessionService,
+                  );
+                  const newSessionId = randomUUID();
+                  const fork = () =>
+                    sessionService.forkSession(sessionId, newSessionId, {
+                      title,
+                      ...(atRecordId !== undefined ? { atRecordId } : {}),
+                    });
+                  if (recording) {
+                    await recording.runWithWriteBarrier(fork);
+                  } else {
+                    await fork();
+                  }
+                  return { newSessionId, title, displayName: title };
+                } finally {
+                  releaseHistoryMutation();
+                }
+              },
+            );
+          } catch (error) {
+            if (error instanceof BranchPointInvalidError) {
+              throw new RequestError(-32009, error.message, {
+                errorKind: 'branch_point_invalid',
+                recordId: error.recordId,
+              });
+            }
+            throw error;
+          }
         }
 
-        const newSessionId = randomUUID();
+        const sourceConfig = sourceSession.getConfig();
+        const recording = sourceConfig.getChatRecordingService();
+        if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
+        const title = deriveForkBaseName(name, recording, sessionId);
+        const newSessionId = randomUUID();
         const fork = () =>
-          isSideTask
-            ? sessionService.forkSession(sessionId, newSessionId, {
-                source: {
-                  sourceType: 'side_task',
-                  sourceId: sessionId,
-                },
-              })
-            : sessionService.forkSession(sessionId, newSessionId);
-        if (isSideTask && recording) {
+          sessionService.forkSession(sessionId, newSessionId, {
+            source: {
+              sourceType: 'side_task',
+              sourceId: sessionId,
+            },
+            title,
+          });
+        if (recording) {
           await recording.runWithWriteBarrier(fork);
         } else {
           await fork();
         }
-
-        let title: string;
-        try {
-          let baseName: string;
-          if (typeof name === 'string' && name.trim().length > 0) {
-            baseName = name.trim();
-          } else {
-            const existingTitle = recording?.getCurrentCustomTitle();
-            const stripped = existingTitle
-              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-              .trim();
-            if (stripped && stripped.length > 0) {
-              baseName = stripped;
-            } else {
-              baseName = sessionId.slice(0, 8);
-            }
-          }
-
-          title = isSideTask
-            ? baseName
-            : await computeUniqueBranchTitle(baseName, sessionService);
-          const renamed = await sessionService.renameSession(
-            newSessionId,
-            title,
-            'manual',
-          );
-          if (!renamed) {
-            throw new RequestError(
-              -32603,
-              `Failed to set title on forked session ${newSessionId}`,
-              { errorKind: 'internal', sessionId: newSessionId },
-            );
-          }
-        } catch (err) {
-          sessionService.removeSession(newSessionId).catch((rmErr) => {
-            process.stderr.write(
-              `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
-            );
-          });
-          throw err;
-        }
-
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
@@ -11048,6 +12506,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     try {
       this.assertManagedSessionAdmission();
@@ -11065,11 +12524,15 @@ class QwenAgent implements Agent {
           resume,
           initializeOptions,
           chatRecording,
+          restoreOptions,
         );
       });
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
-        throw RequestError.invalidParams(undefined, error.message);
+        throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
+          errorKind: 'session_id_conflict',
+          sessionId: error.sessionId,
+        });
       }
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -11077,7 +12540,9 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw error;
+      throw sessionId && restoreOptions
+        ? mapSessionRestoreRequestError(error, sessionId)
+        : error;
     }
   }
 
@@ -11090,6 +12555,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -11202,8 +12668,25 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard
-        ? { toolInvocationGuard: this.managedToolInvocationGuard }
+      this.managedToolInvocationGuard || restoreOptions
+        ? {
+            ...(this.managedToolInvocationGuard
+              ? { toolInvocationGuard: this.managedToolInvocationGuard }
+              : {}),
+            ...(restoreOptions && sessionId
+              ? {
+                  sessionRestore: {
+                    projectionSource: (restoreSessionId) =>
+                      new SessionService(cwd, {
+                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                      }).readRestoreProjection(
+                        restoreSessionId,
+                        restoreOptions,
+                      ),
+                  },
+                }
+              : {}),
+          }
         : undefined,
     );
     if (sessionSource) {
@@ -11314,6 +12797,7 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
+    startNonInteractiveOpenAILogHousekeeping(config, settings);
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
@@ -11386,11 +12870,15 @@ class QwenAgent implements Agent {
     sessionData?: ResumedSessionData,
     options: {
       replayHistory?: boolean;
+      enableLiveScreenContext?: boolean;
+      prepareBeforeSessionCreate?: () => Promise<void>;
+      beforeSessionCreate?: () => void;
+      primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
-    const sessionId = config.getSessionId();
+    const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const geminiClient = config.getGeminiClient();
     const needsInitialize = !geminiClient.isInitialized();
 
@@ -11400,13 +12888,46 @@ class QwenAgent implements Agent {
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} is already active.`);
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
-    this.sessions.set(sessionId, session);
-    this.initializingConfigs.delete(config);
+    await options.prepareBeforeSessionCreate?.();
+    this.assertManagedSessionAdmission();
+    if (this.sessions.has(sessionId)) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    options.beforeSessionCreate?.();
+
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
+      () => this.activeWorkReporter?.notifyChanged(),
+    );
+    let published = false;
     try {
+      options.primeSession?.(session);
+      config.hydrateSessionRestoreFileHistory?.();
+      this.sessions.set(sessionId, session);
+      published = true;
+      // The Session set itself is part of the snapshot: publish so the daemon
+      // learns about this Session from a report rather than inferring it.
+      this.activeWorkReporter?.notifyChanged();
+      this.initializingConfigs.delete(config);
+      if (options.enableLiveScreenContext) {
+        await session.enableLiveScreenContext();
+      }
+
       if (sessionData?.fileHistorySnapshots?.length) {
         config
           .getFileHistoryService()
@@ -11427,12 +12948,31 @@ class QwenAgent implements Agent {
           sessionData.conversation.messages,
           sessionData.historyGaps,
         );
+        // Strictly after replay: Goal recovery ran in the Config constructor,
+        // before this Session existed to subscribe, and replay streams the
+        // pre-migration records. Without this the client's newest goal card
+        // is the legacy `set` one and it shows a phantom running goal until
+        // the next reload. Never fatal — a session that cannot publish its
+        // goal state must still open.
+        try {
+          await session.publishRecoveredGoalState(
+            sessionData.conversation.messages,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Failed to publish recovered Goal state: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       await options.beforeStartPostReplayServices?.(session);
 
       // Install rewriter AFTER history replay to avoid rewriting historical messages
       session.installRewriter();
+
+      config.finalizeSessionRestore?.();
 
       // After replay and resume-state restoration so a durable cron fire can't
       // interleave with either.
@@ -11443,6 +12983,16 @@ class QwenAgent implements Agent {
       }, 0);
       return session;
     } catch (error) {
+      if (!published) {
+        try {
+          session.dispose();
+        } catch (disposeError) {
+          debugLogger.warn(
+            `Failed to dispose unpublished session ${sessionId}: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`,
+          );
+        }
+        throw error;
+      }
       try {
         await this.discardStoredSessionIfCurrent(sessionId, session, {
           shutdownConfig: false,
@@ -11556,7 +13106,80 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const currentModelEffort = config.getReasoningEffort?.();
+    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
+      ? {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue:
+            config.getContentGeneratorConfig().reasoning === false
+              ? ACP_REASONING_EFFORT_NONE
+              : (modelReasoning.efforts.find(
+                  (effort) => effort === currentModelEffort,
+                ) ?? modelReasoning.defaultEffort),
+          options: [
+            {
+              value: ACP_REASONING_EFFORT_NONE,
+              name: 'Thinking off',
+              description: 'Disable thinking for this session',
+            },
+            ...modelReasoning.efforts.map((effort) => ({
+              value: effort,
+              name: ACP_REASONING_EFFORT_NAMES[effort],
+              description: 'Apply this effort to the next request',
+            })),
+          ],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: modelReasoning.defaultEffort,
+            },
+          },
+        }
+      : {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          description: 'How hard reasoning-capable models should think',
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
+          options: [
+            {
+              value: ACP_REASONING_EFFORT_DEFAULT,
+              name: 'Default',
+              description: 'Use the model or provider default',
+            },
+            ...REASONING_EFFORT_TIERS.map((effort) => ({
+              value: effort,
+              name: ACP_REASONING_EFFORT_NAMES[effort],
+              description:
+                'Providers map or clamp the requested tier for the active model',
+            })),
+          ],
+        };
+
+    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
+  }
+
+  private getModelReasoningConfiguration(
+    config: Config,
+  ): ModelReasoningConfiguration | undefined {
+    if (
+      config.getActiveRuntimeModelSnapshot?.() ||
+      config.getReasoningEffortOverride?.() ||
+      config.getContentGeneratorConfig().thinkingMandatory === true
+    ) {
+      return undefined;
+    }
+    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
+    const currentEffort = config.getReasoningEffort?.();
+    return reasoning?.thinking &&
+      (!currentEffort || reasoning.efforts.includes(currentEffort))
+      ? reasoning
+      : undefined;
   }
 
   private buildSelectableModelOptions(config: Config) {

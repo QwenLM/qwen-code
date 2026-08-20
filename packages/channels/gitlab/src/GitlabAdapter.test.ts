@@ -222,6 +222,44 @@ describe('GitlabChannel', () => {
       expect(ch.config.allowedUsers).toEqual(['alice']);
       ch.disconnect();
     });
+
+    it('does not warn about groupPolicy when pairing is configured', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const config = makeConfig({ groupPolicy: 'pairing' });
+        const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+        await ch.connect();
+        ch.disconnect();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('groupPolicy is'),
+          ),
+        ).toBe(false);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('warns on connect when groupPolicy cannot dispatch todos', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const config = makeConfig({ groupPolicy: 'disabled' });
+        const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+        await ch.connect();
+        ch.disconnect();
+        const warnings = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .filter((text) => text.includes('groupPolicy is "disabled"'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain('"pairing"');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
   });
 
   describe('pollOnce', () => {

@@ -24,8 +24,14 @@
 // Nothing here is supplied by the caller. A roster the caller could shrink is a
 // roster that gets shrunk.
 
-import type { RoleId } from './agent-briefs.js';
+import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
+// The topology gate lives in `budget.ts` — it is a size ruling, and the round
+// cap needs the same one. Re-exported here because this file was its home and
+// the roster is where a reader looks for "which fan-out was owed".
+export { isTerritoryFanOut } from './budget.js';
+import { isTerritoryFanOut } from './budget.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -72,6 +78,7 @@ export interface RosterPlan {
    * recomputation then all read the same value and cannot disagree.
    */
   effort?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -92,20 +99,6 @@ export function reviewMode(plan: RosterPlan): ReviewMode {
   }
   if (Array.isArray(plan.untrackedFiles)) return 'local';
   return 'diff-only';
-}
-
-/**
- * The topology gate, in code.
- *
- * The same two numbers the skill's prose turns on. It is here so the roster and
- * the reader cannot disagree about which fan-out was owed — a disagreement that
- * would show up as a review being told it forgot eleven agents it was never
- * supposed to launch.
- */
-export function isTerritoryFanOut(plan: RosterPlan): boolean {
-  const src = Number(plan.srcDiffLines ?? 0);
-  const total = Number(plan.diffLines ?? 0);
-  return !(src <= 500 && total <= 3200);
 }
 
 /** Does the diff remove or replace anything? If not, 1b has nothing to audit. */
@@ -273,5 +266,47 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     }
   }
 
+  const repositoryContext = repositoryContextOf(plan);
+  for (const role of repositoryContext?.requiredAgents ?? []) {
+    if (!contextRoleRunsInThisReview(role, plan, mode)) continue;
+    if (!out.some((agent) => agent.role === role && agent.file === undefined)) {
+      add(role);
+    }
+  }
+
   return out;
+}
+
+/**
+ * A repository context may REQUIRE an agent this review's policy already runs;
+ * it may not override the policy. The effort gate, the topology split, and the
+ * mode are cost and capability decisions the roster owns — a manifest naming a
+ * role they exclude would otherwise silently inflate a medium review with the
+ * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
+ * demand a tree-grepping tracer from a review that has no tree.
+ */
+function contextRoleRunsInThisReview(
+  role: RepositoryContextRoleId,
+  plan: RosterPlan,
+  mode: ReviewMode,
+): boolean {
+  const fanOut = isTerritoryFanOut(plan);
+  switch (role) {
+    case '6a':
+    case '6b':
+    case '6c':
+      return !fanOut && plan.effort !== 'medium';
+    case 'test-matrix':
+      return fanOut;
+    case '1c':
+      return mode !== 'diff-only';
+    case '1b':
+      // Both topologies run the removed-behavior audit; whether it has work is
+      // the diff's business (hasDeletions), not the policy's.
+      return true;
+    default:
+      // Whole-diff dimension walkers exist only in Step 3A; a 3B chunk agent
+      // already owns every dimension for its own lines.
+      return !fanOut;
+  }
 }

@@ -165,6 +165,117 @@ describe('requiredAgents — Step 3A', () => {
     // But there IS a tree, so the tracer and the build still run.
     expect(keys(local)).toEqual(expect.arrayContaining(['1c', '7']));
   });
+
+  it('requires existing roles recorded by validated repository context without duplicates', () => {
+    const context = {
+      version: 1,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: ['runtime'],
+      relatedPaths: ['src/runtime.ts'],
+      recommendedTests: ['test:runtime'],
+      requiredConfigurations: ['linux-x64'],
+      requiredAgents: ['1a', '1b'],
+      unverifiedDimensions: ['Alternate runtime was not exercised'],
+      verificationNotes: ['Use the repository native test runner'],
+    };
+    // 1b is policy-permitted but data-gated away here (the diff deletes
+    // nothing); a context may require it back. 1a is already required and
+    // must not duplicate.
+    const roster = keys({ ...PR, repositoryContext: context });
+    expect(roster).toContain('1b');
+    expect(roster.filter((role) => role === '1a')).toHaveLength(1);
+  });
+
+  it('does not let repository context override the effort, topology, or mode gates', () => {
+    // A manifest may require agents the policy already runs; it may not
+    // inflate or wedge the run by re-adding roles the policy excludes.
+    const context = (requiredAgents: string[]) => ({
+      version: 1,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents,
+      unverifiedDimensions: [],
+      verificationNotes: [],
+    });
+
+    // The adversarial personas are a high-effort dimension: a medium review
+    // stays medium even when the repository names them.
+    const medium = keys({
+      ...PR,
+      effort: 'medium',
+      repositoryContext: context(['6a', '6b', '6c']),
+    });
+    expect(medium).not.toContain('6a');
+    expect(medium).not.toContain('6b');
+    expect(medium).not.toContain('6c');
+    // At high effort the same requirement is honoured (and deduplicated).
+    expect(
+      keys({ ...PR, repositoryContext: context(['6a']) }).filter(
+        (role) => role === '6a',
+      ),
+    ).toHaveLength(1);
+
+    // A lightweight review has no tree to grep: 1c cannot be required back.
+    const light = {
+      ...PR,
+      worktreePath: undefined,
+      prNumber: undefined,
+      repositoryContext: context(['1c']),
+    };
+    expect(keys(light)).not.toContain('1c');
+
+    // test-matrix is a fan-out role: a manifest cannot require it into a
+    // whole-diff (Step 3A) review, whose flow is not built around it — the
+    // denial half of the gate, which a `return fanOut` → `return true`
+    // regression would silently drop.
+    expect(
+      keys({ ...PR, repositoryContext: context(['test-matrix']) }),
+    ).not.toContain('test-matrix');
+
+    // A Step 3B fan-out keeps its topology: whole-diff dimension walkers and
+    // the high-effort personas stay out, while 3B's own roles are honoured.
+    const big = { ...PR, srcDiffLines: 5000, diffLines: 6000 };
+    const fanOut = keys({
+      ...big,
+      repositoryContext: context(['1b', '2', '6a', 'test-matrix']),
+    });
+    expect(fanOut).not.toContain('2');
+    expect(fanOut).not.toContain('6a');
+    expect(fanOut.filter((role) => role === 'test-matrix')).toHaveLength(1);
+    expect(fanOut).toContain('1b');
+  });
+
+  it('fails closed on a present-but-invalid repository context', () => {
+    // Full wire shape but version 2: the exact-keys check passes, the
+    // version gate throws. A try/catch-return-null wrapper around
+    // repositoryContextOf would silently drop every context-required role
+    // from the roster AND the coverage certification — certifying a run
+    // where the agents the repository required never launched.
+    const future = {
+      version: 2,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents: [],
+      unverifiedDimensions: [],
+      verificationNotes: [],
+    };
+    expect(() => keys({ ...PR, repositoryContext: future })).toThrow(
+      'unsupported repositoryContext version',
+    );
+  });
+
+  it('keeps the generic roster when repository context is absent', () => {
+    expect(keys(PR)).not.toContain('test-matrix');
+  });
 });
 
 describe('hasExecutableScript — the script-lint gate predicate', () => {

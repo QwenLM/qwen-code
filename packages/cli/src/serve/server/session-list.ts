@@ -5,8 +5,10 @@
  */
 
 import {
+  addDaemonRequestAttribute,
   SessionService,
   SessionOrganizationError,
+  Storage,
   readWorktreeSession,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -17,10 +19,23 @@ import type {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  PersistedSessionListCache,
+  type PersistedSessionListSnapshot,
+} from './persisted-session-list-cache.js';
+import { laterActivityTimestamp } from './activity-timestamp.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
 const MAX_ORGANIZED_SESSIONS = 50_000;
+// Bounds the emitted-identity list an activity cursor may carry; the cursor
+// travels as a query parameter, so it must stay well under URL/header limits.
+const MAX_EMITTED_CURSOR_SESSION_IDS = 64;
+const PERSISTED_SESSION_LIST_CACHE_TTL_MS = 2_000;
+const persistedSessionListCache = new PersistedSessionListCache(
+  PERSISTED_SESSION_LIST_CACHE_TTL_MS,
+  MAX_ORGANIZED_SESSIONS,
+);
 
 export interface ListWorkspaceSessionsOptions {
   cursor?: string;
@@ -73,6 +88,34 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Runtime root owned by the selected managed workspace. */
+  runtimeBaseDir?: string;
+  /** Aborts this caller's wait without cancelling other shared waiters. */
+  signal?: AbortSignal;
+}
+
+interface ResolvedListWorkspaceSessionsReadOptions {
+  mergeLive?: boolean;
+  runtimeBaseDir: string;
+  signal?: AbortSignal;
+}
+
+export interface InvalidateWorkspaceSessionListCacheOptions {
+  runtimeBaseDir: string;
+  workspaceCwd: string;
+  archiveStates: readonly SessionArchiveState[];
+}
+
+export function invalidateWorkspaceSessionListCache(
+  options: InvalidateWorkspaceSessionListCacheOptions,
+): void {
+  for (const archiveState of options.archiveStates) {
+    persistedSessionListCache.invalidate({
+      runtimeBaseDir: options.runtimeBaseDir,
+      workspaceCwd: options.workspaceCwd,
+      archiveState,
+    });
+  }
 }
 
 export class InvalidCursorError extends Error {
@@ -106,6 +149,7 @@ interface OrganizedCursor {
   sourceType?: string;
   sourceId?: string;
   last: OrganizedCursorKey;
+  emitted?: string[];
 }
 
 interface OrganizedCursorKey {
@@ -119,6 +163,21 @@ interface LiveSessionCursorKey {
   sessionId: string;
 }
 
+/**
+ * `emitted` is optional so cursors minted before the field existed stay
+ * valid; absent means no identities are excluded.
+ */
+function parseEmittedSessionIds(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.some((id) => typeof id !== 'string' || id.length === 0)
+  ) {
+    return undefined;
+  }
+  return value as string[];
+}
+
 function parseOrganizedCursor(
   cursor: string,
   expected: {
@@ -127,7 +186,7 @@ function parseOrganizedCursor(
     sourceType?: string;
     sourceId?: string;
   },
-): OrganizedCursorKey | undefined {
+): { last: OrganizedCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -152,7 +211,11 @@ function parseOrganizedCursor(
     ) {
       throw new Error('invalid organized cursor');
     }
-    return last;
+    const emitted = parseEmittedSessionIds((parsed as OrganizedCursor).emitted);
+    if (emitted === undefined) {
+      throw new Error('invalid organized cursor');
+    }
+    return { last, emitted };
   } catch {
     throw new InvalidCursorError(cursor, 'organized');
   }
@@ -164,9 +227,17 @@ function encodeOrganizedCursor(
   archiveState: SessionArchiveState,
   sourceType?: string,
   sourceId?: string,
+  emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
-    JSON.stringify({ group, archiveState, sourceType, sourceId, last }),
+    JSON.stringify({
+      group,
+      archiveState,
+      sourceType,
+      sourceId,
+      last,
+      ...(emitted.length > 0 ? { emitted } : {}),
+    }),
     'utf8',
   ).toString('base64url');
 }
@@ -226,7 +297,7 @@ function matchesSessionMetadataSource(
 function parseMetadataSessionCursor(
   cursor: string,
   expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
-): LiveSessionCursorKey | undefined {
+): { last: LiveSessionCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
     const parsed = JSON.parse(
@@ -253,7 +324,16 @@ function parseMetadataSessionCursor(
     ) {
       throw new Error('invalid metadata cursor');
     }
-    return { activityTime: last.activityTime, sessionId: last.sessionId };
+    const emitted = parseEmittedSessionIds(
+      (parsed as { emitted?: unknown }).emitted,
+    );
+    if (emitted === undefined) {
+      throw new Error('invalid metadata cursor');
+    }
+    return {
+      last: { activityTime: last.activityTime, sessionId: last.sessionId },
+      emitted,
+    };
   } catch {
     throw new InvalidCursorError(
       cursor,
@@ -266,9 +346,15 @@ function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
   filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
+  emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
-    JSON.stringify({ ...filter, archiveState, last }),
+    JSON.stringify({
+      ...filter,
+      archiveState,
+      last,
+      ...(emitted.length > 0 ? { emitted } : {}),
+    }),
     'utf8',
   ).toString('base64url');
 }
@@ -282,21 +368,33 @@ async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
     if (summary.worktree) continue;
-    const sidecar = await readWorktreeSession(
-      sessionService.getWorktreeSessionPathForArchiveState(
+    let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
+    try {
+      const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
         sessionId,
         archiveState,
-      ),
-    ).catch(() => null);
+      );
+      sidecar = signal
+        ? await readWorktreeSession(sidecarPath, { signal })
+        : await readWorktreeSession(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
     if (sidecar) {
-      summary.worktree = {
-        slug: sidecar.slug,
-        path: sidecar.worktreePath,
-        branch: sidecar.worktreeBranch,
-      };
+      bySessionId.set(sessionId, {
+        ...summary,
+        worktree: {
+          slug: sidecar.slug,
+          path: sidecar.worktreePath,
+          branch: sidecar.worktreeBranch,
+        },
+      });
     }
   }
 }
@@ -332,7 +430,8 @@ function toSummary(item: {
  * Merges a live session's summary onto its persisted counterpart for a session
  * that exists in both. The persisted record owns identity/immutable facts
  * (`createdAt`, `parentSessionId` lineage) while the live entry owns volatile
- * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`/`updatedAt`).
+ * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`). `updatedAt`
+ * is the one field neither side owns outright: the later valid value wins.
  * Shared by all three list paths (default, organized, metadata-filtered) so the merge
  * rule lives in one place.
  */
@@ -351,28 +450,44 @@ function mergeLiveSessionSummary(
     sourceType: existing.sourceType ?? live.sourceType,
     sourceId:
       existing.sourceType !== undefined ? existing.sourceId : live.sourceId,
-    updatedAt: live.updatedAt ?? existing.updatedAt,
+    updatedAt: laterActivityTimestamp(live.updatedAt, existing.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,
   };
 }
 
-async function listAllPersistedSummaries(
+function clonePersistedSummary(
+  session: Readonly<BridgeSessionSummary>,
+): BridgeSessionSummary {
+  return {
+    ...session,
+    ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
+  };
+}
+
+async function loadAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
-): Promise<{ sessions: BridgeSessionSummary[]; truncated: boolean }> {
+  signal: AbortSignal,
+): Promise<PersistedSessionListSnapshot> {
+  const scanStartedAt = performance.now();
+  signal.throwIfAborted();
   // Organized view needs global pin/group ordering before pagination; v1 keeps
   // the storage API unchanged and performs that merge in memory.
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
+  let scanPages = 0;
   let cursor: number | undefined;
   do {
+    scanPages += 1;
     const page = await sessionService.listSessions({
       cursor,
       size: 10_000,
       archiveState,
+      signal,
     });
+    signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -390,7 +505,78 @@ async function listAllPersistedSummaries(
       break;
     }
   } while (cursor !== undefined);
-  return { sessions, truncated };
+  const bySessionId = new Map(
+    sessions.map((session) => [session.sessionId, session]),
+  );
+  await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    signal,
+  );
+  signal.throwIfAborted();
+  return {
+    sessions: [...bySessionId.values()],
+    truncated,
+    scanPages,
+    scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
+  };
+}
+
+async function listAllPersistedSummaries(
+  sessionService: SessionService,
+  workspaceCwd: string,
+  archiveState: SessionArchiveState,
+  runtimeBaseDir: string,
+  queryKind: 'organized' | 'metadata',
+  signal?: AbortSignal,
+): Promise<PersistedSessionListSnapshot> {
+  const lookup = persistedSessionListCache.lookup(
+    { runtimeBaseDir, workspaceCwd, archiveState },
+    (loadSignal) =>
+      loadAllPersistedSummaries(sessionService, archiveState, loadSignal),
+    { signal },
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.cache_status',
+    lookup.status,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.archive_state',
+    archiveState,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.query_kind',
+    queryKind,
+  );
+  if (lookup.cacheAgeMs !== undefined) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.cache_age_ms',
+      lookup.cacheAgeMs,
+    );
+  }
+
+  const snapshot = await lookup.promise;
+  signal?.throwIfAborted();
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.persisted_sessions',
+    snapshot.sessions.length,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.scan_pages',
+    snapshot.scanPages,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.truncated',
+    snapshot.truncated,
+  );
+  if (lookup.status !== 'cache_hit') {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.scan_duration_ms',
+      snapshot.scanDurationMs,
+    );
+  }
+  return snapshot;
 }
 
 function getSummaryActivityTime(session: BridgeSessionSummary): number {
@@ -449,6 +635,68 @@ function compareOrganizedCursorKeys(
   return a.sessionId.localeCompare(b.sessionId);
 }
 
+/**
+ * Rebuilds the emitted-identity list an activity cursor carries across a
+ * pagination pass. A row's activity key is not stable: a live watermark that
+ * leads the transcript mtime evaporates when the live entry retires, and a
+ * live-only row gains a persisted key only after its first flush. Either
+ * transition can drop a row already emitted on an earlier page back behind
+ * the cursor boundary, where the strictly-older key filter would admit it a
+ * second time. The cursor therefore names the emitted rows whose keys were
+ * live-derived, and the after-cursor filter excludes them for the rest of the
+ * pass.
+ *
+ * The list stays bounded. An identity is dropped once its persisted key alone
+ * can no longer pass the key filter (`reenters`). Past
+ * MAX_EMITTED_CURSOR_SESSION_IDS the identities with the highest persisted
+ * keys are dropped first — they leave the re-admission window soonest — and a
+ * dropped identity degrades to an at-most-once duplicate instead of failing
+ * the pass.
+ */
+function nextEmittedSessionIds(options: {
+  carried: ReadonlySet<string>;
+  page: readonly BridgeSessionSummary[];
+  liveSessionIds: ReadonlySet<string>;
+  listedById: ReadonlyMap<string, BridgeSessionSummary>;
+  persistedTimeById: ReadonlyMap<string, number>;
+  reenters: (row: BridgeSessionSummary, persistedTime: number) => boolean;
+}): string[] {
+  const candidates = new Set(options.carried);
+  for (const row of options.page) {
+    if (options.liveSessionIds.has(row.sessionId)) {
+      candidates.add(row.sessionId);
+    }
+  }
+  const kept: Array<{ sessionId: string; persistedTime: number }> = [];
+  for (const sessionId of candidates) {
+    const row = options.listedById.get(sessionId);
+    if (!row) {
+      // Absent from the filtered collection — but absence can be transient:
+      // the persisted snapshot is a short-TTL cache that can predate a
+      // live-only row's first flush, group membership can move mid-pass, and
+      // the live list can be unavailable. Retain the identity until a
+      // persisted floor rules re-admission out; the cap bounds the list.
+      kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
+      continue;
+    }
+    const persistedTime = options.persistedTimeById.get(sessionId);
+    if (persistedTime === undefined) {
+      // Live-only: no persisted floor yet, so it can land anywhere once it
+      // flushes.
+      kept.push({ sessionId, persistedTime: Number.NEGATIVE_INFINITY });
+      continue;
+    }
+    if (options.reenters(row, persistedTime)) {
+      kept.push({ sessionId, persistedTime });
+    }
+  }
+  if (kept.length > MAX_EMITTED_CURSOR_SESSION_IDS) {
+    kept.sort((a, b) => a.persistedTime - b.persistedTime);
+    kept.length = MAX_EMITTED_CURSOR_SESSION_IDS;
+  }
+  return kept.map((entry) => entry.sessionId);
+}
+
 function applyOrganization(
   session: BridgeSessionSummary,
   organization:
@@ -476,12 +724,14 @@ async function listOrganizedWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
-  readOptions: ListWorkspaceSessionsReadOptions,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
   const organizationService = createSessionOrganizationService(workspaceCwd);
+  readOptions.signal?.throwIfAborted();
   const snapshot = await organizationService.readSnapshot();
+  readOptions.signal?.throwIfAborted();
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
   if (
@@ -496,7 +746,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       'group',
     );
   }
-  const cursorKey =
+  const cursor =
     options.cursor !== undefined
       ? parseOrganizedCursor(options.cursor, {
           group,
@@ -505,34 +755,51 @@ async function listOrganizedWorkspaceSessionsForResponse(
           sourceId: options.sourceId,
         })
       : undefined;
+  const cursorKey = cursor?.last;
+  const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const isFirstPage = cursorKey === undefined;
   let liveMergeFailed = false;
 
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
+    workspaceCwd,
     archiveState,
+    readOptions.runtimeBaseDir,
+    'organized',
+    readOptions.signal,
   );
+  readOptions.signal?.throwIfAborted();
   for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
-      applyOrganization(session, snapshot.sessions.get(session.sessionId)),
+      applyOrganization(
+        clonePersistedSummary(session),
+        snapshot.sessions.get(session.sessionId),
+      ),
     );
   }
+  // Activity floors: the key a row falls back to once its live entry is gone.
+  const persistedTimeById = new Map(
+    persisted.sessions.map((session) => [
+      session.sessionId,
+      getSummaryActivityTime(session),
+    ]),
+  );
+  const liveSessionIds = new Set<string>();
 
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
-
-  if (
-    readOptions.mergeLive !== false &&
-    archiveState !== 'archived' &&
-    isFirstPage
-  ) {
+  if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
+        liveSessionIds.add(live.sessionId);
         const existing = bySessionId.get(live.sessionId);
         const organization = snapshot.sessions.get(live.sessionId);
         if (existing) {
+          // Merged on every page, not just the first: the page-1 cursor is
+          // encoded from merged activity keys, so a later page that keyed the
+          // same row by its persisted mtime alone would re-admit a row whose
+          // watermark leads storage and return it twice.
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -541,6 +808,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
             ),
           );
         } else if (
+          // A live-only row has no persisted key to page by, so it stays a
+          // first-page-only insertion as before.
+          isFirstPage &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -549,8 +819,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
           // above and this point: `existing` stayed undefined but
           // `sessionExists` flipped to true, silently dropping the live
           // session from the response instead of merging it.
-          !persisted.truncated ||
-          !(await sessionService.sessionExists(live.sessionId))
+          (!persisted.truncated ||
+            !(await (readOptions.signal
+              ? sessionService.sessionExists(live.sessionId, {
+                  signal: readOptions.signal,
+                })
+              : sessionService.sessionExists(live.sessionId))))
         ) {
           bySessionId.set(
             live.sessionId,
@@ -568,6 +842,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
         }
       }
     } catch (error) {
+      readOptions.signal?.throwIfAborted();
       liveMergeFailed = true;
       writeStderrLine(
         `qwen serve: organized session list live merge failed; using persisted sessions only: ${
@@ -589,6 +864,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     // both fields even though the UI keeps them mutually exclusive).
     return session.color == null && session.groupId === group;
   });
+  readOptions.signal?.throwIfAborted();
   const activityTimeById = new Map(
     filtered.map((session) => [
       session.sessionId,
@@ -596,27 +872,59 @@ async function listOrganizedWorkspaceSessionsForResponse(
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
+  readOptions.signal?.throwIfAborted();
   const afterCursor =
     cursorKey === undefined
       ? filtered
       : filtered.filter(
           (session) =>
+            // A row already emitted at a live-derived key stays excluded even
+            // if its key regressed behind the cursor (live retirement, or a
+            // live-only row that persisted mid-pass).
+            !emittedBeforePage.has(session.sessionId) &&
             compareOrganizedCursorKeys(
               cursorKey,
               getOrganizedCursorKey(activityTimeById, session),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
-  const nextCursor =
-    page.length < afterCursor.length
-      ? encodeOrganizedCursor(
-          getOrganizedCursorKey(activityTimeById, page[page.length - 1]!),
-          group,
-          archiveState,
-          options.sourceType,
-          options.sourceId,
-        )
-      : undefined;
+  let nextCursor: string | undefined;
+  if (page.length < afterCursor.length) {
+    const boundary = getOrganizedCursorKey(
+      activityTimeById,
+      page[page.length - 1]!,
+    );
+    const emitted = nextEmittedSessionIds({
+      carried: emittedBeforePage,
+      page,
+      liveSessionIds,
+      listedById: new Map(
+        filtered.map((session) => [session.sessionId, session]),
+      ),
+      persistedTimeById,
+      // `isPinned` is re-read from the organization snapshot on every page
+      // request, so a pin flip between fetches can move the persisted key
+      // across the pinned/unpinned blocks. Keep the identity while the key
+      // could re-enter under either state.
+      reenters: (row, persistedTime) =>
+        [true, false].some(
+          (isPinned) =>
+            compareOrganizedCursorKeys(boundary, {
+              isPinned,
+              activityTime: persistedTime,
+              sessionId: row.sessionId,
+            }) < 0,
+        ),
+    });
+    nextCursor = encodeOrganizedCursor(
+      boundary,
+      group,
+      archiveState,
+      options.sourceType,
+      options.sourceId,
+      emitted,
+    );
+  }
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
@@ -635,25 +943,37 @@ async function listWorkspaceSessionsByMetadataForResponse(
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
   filter: SessionMetadataFilter,
-  readOptions: ListWorkspaceSessionsReadOptions,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
+    workspaceCwd,
     archiveState,
+    readOptions.runtimeBaseDir,
+    'metadata',
+    readOptions.signal,
   );
+  readOptions.signal?.throwIfAborted();
   for (const session of persisted.sessions) {
-    bySessionId.set(session.sessionId, session);
+    bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
-
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+  // Activity floors: the key a row falls back to once its live entry is gone.
+  const persistedTimeById = new Map(
+    persisted.sessions.map((session) => [
+      session.sessionId,
+      getSummaryActivityTime(session),
+    ]),
+  );
+  const liveSessionIds = new Set<string>();
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+        liveSessionIds.add(live.sessionId);
         const existing = bySessionId.get(live.sessionId);
         if (existing) {
           bySessionId.set(
@@ -666,7 +986,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
           // already covers every persisted session, so skip the racy
           // re-check when nothing was truncated.
           !persisted.truncated ||
-          !(await sessionService.sessionExists(live.sessionId))
+          !(await (readOptions.signal
+            ? sessionService.sessionExists(live.sessionId, {
+                signal: readOptions.signal,
+              })
+            : sessionService.sessionExists(live.sessionId)))
         ) {
           bySessionId.set(live.sessionId, {
             ...live,
@@ -678,6 +1002,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
         }
       }
     } catch (error) {
+      readOptions.signal?.throwIfAborted();
       liveMergeFailed = true;
       writeStderrLine(
         `qwen serve: session metadata filter live merge failed; using persisted sessions only: ${
@@ -700,32 +1025,54 @@ async function listWorkspaceSessionsByMetadataForResponse(
         getLiveSessionCursorKey(b),
       ),
     );
-  const cursorKey =
+  readOptions.signal?.throwIfAborted();
+  const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
           ...filter,
           archiveState,
         })
       : undefined;
+  const cursorKey = cursor?.last;
+  const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
     cursorKey === undefined
       ? matches
       : matches.filter(
           (session) =>
+            // See the organized path: exclude rows already emitted at a
+            // live-derived key whose key regressed behind the cursor.
+            !emittedBeforePage.has(session.sessionId) &&
             compareLiveSessionCursorKeys(
               cursorKey,
               getLiveSessionCursorKey(session),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
-  const nextCursor =
-    page.length < afterCursor.length
-      ? encodeMetadataSessionCursor(
-          getLiveSessionCursorKey(page[page.length - 1]!),
-          filter,
-          archiveState,
-        )
-      : undefined;
+  let nextCursor: string | undefined;
+  if (page.length < afterCursor.length) {
+    const boundary = getLiveSessionCursorKey(page[page.length - 1]!);
+    const emitted = nextEmittedSessionIds({
+      carried: emittedBeforePage,
+      page,
+      liveSessionIds,
+      listedById: new Map(
+        matches.map((session) => [session.sessionId, session]),
+      ),
+      persistedTimeById,
+      reenters: (row, persistedTime) =>
+        compareLiveSessionCursorKeys(boundary, {
+          activityTime: persistedTime,
+          sessionId: row.sessionId,
+        }) < 0,
+    });
+    nextCursor = encodeMetadataSessionCursor(
+      boundary,
+      filter,
+      archiveState,
+      emitted,
+    );
+  }
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
@@ -740,6 +1087,35 @@ export async function listWorkspaceSessionsForResponse(
   options?: ListWorkspaceSessionsOptions,
   readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  const result = await Storage.runWithResolvedRuntimeBaseDir(
+    runtimeBaseDir,
+    () =>
+      listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
+        ...(readOptions.mergeLive !== undefined
+          ? { mergeLive: readOptions.mergeLive }
+          : {}),
+        ...(readOptions.signal !== undefined
+          ? { signal: readOptions.signal }
+          : {}),
+        runtimeBaseDir,
+      }),
+  );
+  readOptions.signal?.throwIfAborted();
+  return result;
+}
+
+async function listWorkspaceSessionsForResponseInRuntime(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: ListWorkspaceSessionsOptions | undefined,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
+): Promise<ListWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
   const rawSize = options?.size;
   const requestedSize =
     typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
@@ -793,14 +1169,22 @@ export async function listWorkspaceSessionsForResponse(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
+    ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
+  readOptions.signal?.throwIfAborted();
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
   for (const item of persisted.items) {
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+  await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
@@ -824,7 +1208,11 @@ export async function listWorkspaceSessionsForResponse(
       // silently dropping the live session from the response instead of
       // merging it.
       (persisted.nextCursor == null ||
-        !(await sessionService.sessionExists(live.sessionId)))
+        !(await (readOptions.signal
+          ? sessionService.sessionExists(live.sessionId, {
+              signal: readOptions.signal,
+            })
+          : sessionService.sessionExists(live.sessionId))))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,
@@ -841,6 +1229,7 @@ export async function listWorkspaceSessionsForResponse(
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
+  readOptions.signal?.throwIfAborted();
 
   const nextCursor =
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;

@@ -9,9 +9,16 @@
 // sessions: 81% waited with `sleep`, 74% captured one screenful with no way to
 // know the command had finished, 87% cleaned up by hand.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -20,9 +27,28 @@ import {
   sentinelExitCode,
   trimCapture,
   shellQuote,
+  driveCommand,
   DRIVE_SENTINEL,
   type ExecResult,
 } from './drive.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
+import {
+  FOREIGN_DIGEST,
+  makeStaleBundleFixture,
+  stampDigest,
+} from './lib/test-utils.js';
+
+// The handler's output goes through the same helpers the parse-args suite
+// mocks; the wiring tests below intercept them so no real terminal is touched.
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
 
 const ok = (stdout = ''): ExecResult => ({ status: 0, stdout, stderr: '' });
 const fail = (stderr = ''): ExecResult => ({ status: 1, stdout: '', stderr });
@@ -96,77 +122,80 @@ describe('the sentinel', () => {
   });
 });
 
-describe('the wrapper, driven for real', () => {
-  // Four ways a script can leave, all of which a reviewer's drive script uses.
-  // These run real bash — the harness tests above cannot see a shell semantic —
-  // and read the verdict from the sentinel FILE, the channel that has to
-  // survive a bounded log.
-  const realExit = (script: string): number | null => {
-    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-    spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
-    return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
-  };
+describe.skipIf(process.platform === 'win32')(
+  'the wrapper, driven for real',
+  () => {
+    // Four ways a script can leave, all of which a reviewer's drive script uses.
+    // These run real bash — the harness tests above cannot see a shell semantic —
+    // and read the verdict from the sentinel FILE, the channel that has to
+    // survive a bounded log.
+    const realExit = (script: string): number | null => {
+      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+      spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
+      return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
+    };
 
-  it('reports the code for every exit path', () => {
-    expect(realExit('echo ok')).toBe(0);
-    expect(realExit('echo failing; exit 17')).toBe(17);
-    expect(realExit('set -e; false; echo unreachable')).toBe(1);
-    expect(realExit('exit 0')).toBe(0);
-  });
-
-  it('keeps the script output on stdout and the verdict in its own file', () => {
-    // Two channels on purpose. The log is bounded; the verdict must not be
-    // bounded with it, and the next test shows what happens when it is.
-    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-    const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
-      encoding: 'utf8',
+    it('reports the code for every exit path', () => {
+      expect(realExit('echo ok')).toBe(0);
+      expect(realExit('echo failing; exit 17')).toBe(17);
+      expect(realExit('set -e; false; echo unreachable')).toBe(1);
+      expect(realExit('exit 0')).toBe(0);
     });
-    expect(r.stdout).toContain('hello-there');
-    expect(r.stdout).not.toContain(DRIVE_SENTINEL);
-    expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
-  });
 
-  it('capping the STREAM never yields the true exit code — measured, not assumed', () => {
-    // Why the log is bounded by watching its size rather than by `head -c`.
-    // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
-    // and what survives is bash-version-dependent — measured, per version:
-    //   - bash 5.2 (CI's ubuntu): the EXIT trap fires with `$?` from the last
-    //     successful echo — rc=0, a FABRICATED clean pass;
-    //   - bash 5.3 (homebrew macOS): the trap's redirect creates the sentinel
-    //     file but the write is LOST — an empty file, no verdict;
-    //   - bash 3.2 (stock macOS): the trap records the echo's EPIPE write
-    //     error — rc=1, a fabricated FAILURE code, with a stray padding line
-    //     leaked into the sentinel file for good measure.
-    // Three shells, three different wrong answers — which is why the
-    // assertion pins the one invariant they share instead of any version's
-    // flavor of wrong: the script's real `exit 5` NEVER survives the cap.
-    // (The first draft of this fix enumerated the wrong answers and was
-    // immediately falsified by running it on a fourth shell; the enumeration
-    // is a moving target, the invariant is not.)
-    const dir = mkdtempSync(join(tmpdir(), 'drv-'));
-    const rc = join(dir, 'drive.rc');
-    const sh = join(dir, 's.sh');
-    writeFileSync(
-      sh,
-      wrapScript(
-        'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
-        rc,
-      ),
-    );
-    spawnSync(
-      'bash',
-      ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
-      { encoding: 'utf8' },
-    );
-    const reported = existsSync(rc)
-      ? sentinelExitCode(readFileSync(rc, 'utf8'))
-      : null;
-    // Fabricated (0, 1, …) or lost (null) — any of them is an untrustworthy
-    // verdict, and all prove the design point. What must never appear is the
-    // truth.
-    expect(reported).not.toBe(5);
-  });
-});
+    it('keeps the script output on stdout and the verdict in its own file', () => {
+      // Two channels on purpose. The log is bounded; the verdict must not be
+      // bounded with it, and the next test shows what happens when it is.
+      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+      const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
+        encoding: 'utf8',
+      });
+      expect(r.stdout).toContain('hello-there');
+      expect(r.stdout).not.toContain(DRIVE_SENTINEL);
+      expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
+    });
+
+    it('capping the STREAM never yields the true exit code — measured, not assumed', () => {
+      // Why the log is bounded by watching its size rather than by `head -c`.
+      // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
+      // and what survives is bash-version-dependent — measured, per version:
+      //   - bash 5.2 (CI's ubuntu): the EXIT trap fires with `$?` from the last
+      //     successful echo — rc=0, a FABRICATED clean pass;
+      //   - bash 5.3 (homebrew macOS): the trap's redirect creates the sentinel
+      //     file but the write is LOST — an empty file, no verdict;
+      //   - bash 3.2 (stock macOS): the trap records the echo's EPIPE write
+      //     error — rc=1, a fabricated FAILURE code, with a stray padding line
+      //     leaked into the sentinel file for good measure.
+      // Three shells, three different wrong answers — which is why the
+      // assertion pins the one invariant they share instead of any version's
+      // flavor of wrong: the script's real `exit 5` NEVER survives the cap.
+      // (The first draft of this fix enumerated the wrong answers and was
+      // immediately falsified by running it on a fourth shell; the enumeration
+      // is a moving target, the invariant is not.)
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const sh = join(dir, 's.sh');
+      writeFileSync(
+        sh,
+        wrapScript(
+          'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
+          rc,
+        ),
+      );
+      spawnSync(
+        'bash',
+        ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
+        { encoding: 'utf8' },
+      );
+      const reported = existsSync(rc)
+        ? sentinelExitCode(readFileSync(rc, 'utf8'))
+        : null;
+      // Fabricated (0, 1, …) or lost (null) — any of them is an untrustworthy
+      // verdict, and all prove the design point. What must never appear is the
+      // truth.
+      expect(reported).not.toBe(5);
+    });
+  },
+);
 
 describe('the capture', () => {
   it('keeps the TAIL when it must trim, and says that it trimmed', () => {
@@ -491,5 +520,99 @@ describe('a partial observation is never presented as a whole one', () => {
     expect(r.exitCode).toBeNull();
     expect(r.note).toContain('PARTIAL');
     expect(r.note).toContain('not evidence that the run produced nothing');
+  });
+});
+
+describe('drive warns when the bundle is not built from these sources', () => {
+  // The wiring is what is under test: the notice derives from
+  // `process.argv[1]` and leaves through `writeStderrLineSafe` BEFORE
+  // `runDrive` runs — a missing seam there would ship while every `runDrive`
+  // test above stayed green. tmux is gated off through the exec seam, so the
+  // drive itself goes nowhere and nothing real is spawned.
+  let repo: string;
+  let argv1: string;
+
+  const exec = (cmd: string, args: string[]): ExecResult =>
+    cmd === 'tmux' && args[0] === '-V'
+      ? { status: 1, stdout: '', stderr: '' }
+      : { status: 0, stdout: '', stderr: '' };
+
+  // Real bindings by construction: this file never mocks `node:fs`.
+  const realFs = { mkdtempSync, mkdirSync, writeFileSync };
+
+  beforeEach(() => {
+    ({ repo, argv1 } = makeStaleBundleFixture(realFs, 'drive-stale-'));
+    vi.mocked(writeStderrLineSafe).mockClear();
+    vi.mocked(writeStdoutLine).mockClear();
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  const stamp = (digest: string) => stampDigest(realFs, repo, digest);
+  const run = () => {
+    const originalArgv = process.argv[1];
+    const originalExit = process.exitCode;
+    process.argv[1] = argv1;
+    try {
+      (driveCommand.handler as (a: unknown) => void)({
+        script: 'true',
+        cwd: repo,
+        readyTimeout: 1,
+        timeout: 1,
+        server: 'wiring',
+        exec,
+        _: ['review', 'drive'],
+      });
+    } finally {
+      process.argv[1] = originalArgv;
+      process.exitCode = originalExit;
+    }
+  };
+
+  it('warns when the stamp does not match the sources', () => {
+    stamp(FOREIGN_DIGEST);
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+    // …and BEFORE the first result: relocating the loop below `runDrive`
+    // keeps every substring assertion green while the warning lands only once
+    // the reviewer has already consumed results measured from the stale
+    // bundle — the failure mode this check exists to prevent.
+    expect(
+      vi.mocked(writeStderrLineSafe).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(writeStdoutLine).mock.invocationCallOrder[0]);
+  });
+
+  it('says nothing when the stamp matches', () => {
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('says it could not check when sources exist but the stamp does not', () => {
+    // The brief unmeasured form: the state of every existing checkout the
+    // day this ships — sources on disk, no stamp beside the bundle yet.
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('could not check whether the bundle is current');
+    expect(line).toContain('Rebuild with `npm run bundle` to record one.');
+  });
+
+  it('prints the one-line form — the full paragraph belongs to parse-args', () => {
+    // One review can invoke `drive` many times, and each invocation prints
+    // into an agent's tool output; the repeat keeps the trigger and the
+    // remedy and drops the explanation.
+    stamp(FOREIGN_DIGEST);
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('NOT built from the review sources');
+    expect(line).toContain('npm run bundle');
+    expect(line).not.toContain('runs the BUILT bundle, not the working tree');
+  });
+
+  it('still drives — the notice is a diagnostic, not a gate', () => {
+    stamp(FOREIGN_DIGEST);
+    run();
+    expect(writeStdoutLine).toHaveBeenCalled();
   });
 });

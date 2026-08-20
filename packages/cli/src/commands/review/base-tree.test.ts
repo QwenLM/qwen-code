@@ -175,6 +175,34 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true); // built through the corpse
   });
 
+  it('a budget-TRUNCATED build is unavailable but NOT settled — no marker either way', () => {
+    // A rerun against packages the budget left unbuilt manufactures
+    // "fails on base too" — but truncation says nothing about the SHA, so
+    // neither marker is written and a later shard may repay and succeed.
+    const truncatedBuild = {
+      ...okBuild,
+      notBuilt: ['packages/a', 'packages/b'],
+    } as unknown as BuildTestReport;
+    const builds: string[] = [];
+    const build = (w: string) => {
+      builds.push(w);
+      return truncatedBuild;
+    };
+    const first = run({}, build);
+    expect(first.available).toBe(false);
+    expect(first.note).toContain('not built');
+    expect(first.note).toContain('packages/a');
+    // No success marker and no failed marker: the next shard repays the build.
+    expect(existsSync(join(first.path!, '.qwen-review-base-ok'))).toBe(false);
+    expect(existsSync(join(first.path!, '.qwen-review-base-failed'))).toBe(
+      false,
+    );
+    const second = run({}, build);
+    expect(second.available).toBe(false);
+    expect(second.note).not.toContain('already failed');
+    expect(builds).toHaveLength(2);
+  });
+
   it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
     const builds: string[] = [];
     const build = (w: string) => {

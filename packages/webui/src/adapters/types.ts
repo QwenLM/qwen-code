@@ -57,6 +57,7 @@ export interface JSONLMessage {
     parts?: Array<{ text: string }>; // Qwen format
     content?: string | unknown[]; // Claude format
   };
+  systemPayload?: unknown;
   model?: string;
   toolCall?: ToolCallData;
 }

@@ -54,6 +54,8 @@ interface CreateServeFeaturesDeps {
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
+  realtimeVoiceEnabled: () => boolean;
+  acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
@@ -86,6 +88,8 @@ export function createServeFeatures(
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
+    realtimeVoiceEnabled,
+    acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
@@ -110,6 +114,8 @@ export function createServeFeatures(
     invalidateServeFeaturesCache,
     currentServeFeatures: () => {
       const env = getEnv();
+      const currentAcpHttpEnabled =
+        acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
       return getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
@@ -138,7 +144,8 @@ export function createServeFeatures(
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         workspaceTrustHotReloadAvailable,
-        acpHttpEnabled: resolveAcpHttpEnabled(),
+        acpHttpEnabled: currentAcpHttpEnabled,
+        realtimeVoiceEnabled: realtimeVoiceEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
@@ -150,7 +157,7 @@ export function createServeFeatures(
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: resolveAcpHttpEnabled(env),
+        voiceWsAvailable: currentAcpHttpEnabled,
       });
     },
   };

@@ -44,6 +44,23 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     DISCONNECTED: 'DISCONNECTED',
   },
   ExtensionManager: vi.fn(),
+  runWithTimeout: <T>(task: Promise<T>, timeoutMs: number, _label: string) =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+      task.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    }),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   isGatedMcpScope: (scope: string | undefined) =>
     scope === 'project' || scope === 'workspace',
@@ -185,6 +202,57 @@ describe('mcp list command', () => {
         'test-server: /test/server  (stdio) - Disconnected',
       ),
     );
+  });
+
+  it('should disconnect when transport startup exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'slow-server': { url: 'https://example.com/sse' },
+          },
+        },
+      });
+      mockClient.connect.mockImplementation(() => new Promise(() => {}));
+
+      const listPromise = listMcpServers();
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(mockTransport.close).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await listPromise;
+
+      expect(mockTransport.close).toHaveBeenCalledOnce();
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'slow-server: https://example.com/sse (sse) - Disconnected (timed out after 5000ms)',
+        ),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the connection timeout after a successful connection', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'healthy-server': { url: 'https://example.com/sse' },
+          },
+        },
+      });
+      mockClient.connect.mockResolvedValue(undefined);
+      mockClient.ping.mockResolvedValue(undefined);
+
+      await listMcpServers();
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('should merge extension servers with config servers', async () => {

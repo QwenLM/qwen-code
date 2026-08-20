@@ -9,11 +9,45 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
+import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { safeTarget } from '../../../utils/paths.js';
+
+/**
+ * Classify a `--out` target BEFORE the command fetches anything: an empty /
+ * whitespace-only path, or a path that resolves to an existing directory, is
+ * a usage error. A directory target otherwise survives to `writeFileSync`,
+ * dies EISDIR there — AFTER the fetches — and exit-codes as a runtime
+ * failure instead of the repairable-invocation class the caller keys on.
+ */
+export function assertWritableOutPath(out: string): void {
+  if (out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
+  // A trailing separator is the POSIX spelling of "this is a directory" —
+  // `resolve` normalizes it away, so check the RAW value: otherwise a
+  // not-yet-existing `--out /tmp/diffs/` slips past and gets written as a
+  // FILE after the fetches (every POSIX peer refuses that argument).
+  if (/[/\\]$/.test(out.trim())) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+  const resolved = resolve(out);
+  if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+}
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+/**
+ * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.
+ * Lives here, not in `review-worktree-lease.ts`, because the review
+ * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
+ * the lease writer must share one definition (the cleanup spec pins both).
+ */
+export const LEASE_PREFIX = 'qwen-review-lease-';
 
 /**
  * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
@@ -65,23 +99,6 @@ export function baseWorktreePath(worktree: string): string {
 /** Local branch ref name for a fetched PR head. */
 export function reviewBranch(prNumber: string | number): string {
   return `qwen-review/pr-${prNumber}`;
-}
-
-/**
- * A `target` reduced to a single safe filename component.
- *
- * `target` is a file-path review's own path — `src/foo.ts` — or a PR/local
- * label. Interpolated raw, `src/foo.ts` becomes `qwen-review-src/foo.ts-diff.txt`,
- * a nested path whose parent nobody created (ENOENT), and a crafted `../../evil`
- * escapes `.qwen/tmp` and lets `writeFileSync` land anywhere. Flatten every
- * separator and dot-segment to a single component so the file always sits
- * directly in the temp dir.
- */
-function safeTarget(target: string): string {
-  const flat = target
-    .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
-    .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  return flat.replace(/^[._]+/, '') || 'target';
 }
 
 /**

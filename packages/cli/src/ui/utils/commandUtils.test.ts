@@ -5,7 +5,7 @@
  */
 
 import type { Mock } from 'vitest';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
@@ -14,11 +14,15 @@ import {
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
   findMidInputSlashCommand,
   findSlashCommandTokens,
   getBestSlashCommandMatch,
+  isContextFilesAnnouncement,
 } from './commandUtils.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { CommandKind, type SlashCommand } from '../commands/types.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -43,6 +47,15 @@ interface MockChildProcess extends EventEmitter {
   stderr: EventEmitter;
 }
 
+const createMockChild = (): MockChildProcess =>
+  Object.assign(new EventEmitter(), {
+    stdin: Object.assign(new EventEmitter(), {
+      write: vi.fn(),
+      end: vi.fn(),
+    }),
+    stderr: new EventEmitter(),
+  }) as MockChildProcess;
+
 describe('commandUtils', () => {
   let mockSpawn: Mock;
   let mockChild: MockChildProcess;
@@ -54,15 +67,13 @@ describe('commandUtils', () => {
     mockSpawn = spawn as Mock;
 
     // Create mock child process with stdout/stderr emitters
-    mockChild = Object.assign(new EventEmitter(), {
-      stdin: Object.assign(new EventEmitter(), {
-        write: vi.fn(),
-        end: vi.fn(),
-      }),
-      stderr: new EventEmitter(),
-    }) as MockChildProcess;
+    mockChild = createMockChild();
 
     mockSpawn.mockReturnValue(mockChild as unknown as ReturnType<typeof spawn>);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   describe('isAtCommand', () => {
@@ -214,6 +225,249 @@ describe('commandUtils', () => {
     describe('on Linux', () => {
       beforeEach(() => {
         mockProcess.platform = 'linux';
+        vi.stubEnv('XDG_SESSION_TYPE', 'x11');
+        vi.stubEnv('WAYLAND_DISPLAY', '');
+      });
+
+      it('should prefer wl-copy in a Wayland session', async () => {
+        const testText = 'GIF89a selected source text 🧪';
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard(testText);
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockChild.stdin.write).toHaveBeenCalledWith(testText);
+        expect(mockChild.stdin.end).toHaveBeenCalled();
+      });
+
+      it('should detect a case-insensitive Wayland session type', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+      });
+
+      it('should detect Wayland from WAYLAND_DISPLAY when the session type is unset', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        delete process.env['XDG_SESSION_TYPE'];
+        vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('WSL Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+      });
+
+      it('should fall back to xclip when wl-copy is unavailable', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            if (callCount++ === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+            } else {
+              child.emit('close', 0);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
+      });
+
+      it('should fall back to xclip when wl-copy exits non-zero', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            child.emit('close', callCount++ === 0 ? 1 : 0);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
+      });
+
+      it('should include the wl-copy failure when all fallbacks fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+              return;
+            }
+            const error = new Error(
+              `spawn ${currentCall === 1 ? 'xclip' : 'xsel'} ENOENT`,
+            );
+            (error as NodeJS.ErrnoException).code = 'ENOENT';
+            child.emit('error', error);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("wl-copy not found"\); xclip\/xsel not found/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
+      });
+
+      it('should preserve wl-copy diagnostics when X11 fallbacks also fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              child.emit('close', 1);
+              return;
+            }
+            child.stderr.emit('data', "Error: Can't open display:");
+            child.emit('close', 1);
+          }, 0);
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("'wl-copy' exited with code 1"\); xclip\/xsel failed \(/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
       });
 
       it('should successfully copy text to clipboard using xclip', async () => {
@@ -245,13 +499,7 @@ describe('commandUtils', () => {
         };
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -301,13 +549,7 @@ describe('commandUtils', () => {
         });
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -368,13 +610,7 @@ describe('commandUtils', () => {
           .mockReturnValue(true);
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -419,13 +655,7 @@ describe('commandUtils', () => {
         const exitCode = 1;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             // e.g., cannot connect to X server
@@ -483,13 +713,7 @@ describe('commandUtils', () => {
         const exitCode = 1;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             // e.g., cannot connect to X server
@@ -1037,5 +1261,118 @@ describe('getBestSlashCommandMatch', () => {
     const result = getBestSlashCommandMatch('review', withHint);
     expect(result).not.toBeNull();
     expect(result!.suffix).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// consumesContextAnnouncementLatch
+// ---------------------------------------------------------------------------
+describe('consumesContextAnnouncementLatch', () => {
+  const makeCommand = (name: string, modelInvocable: boolean): SlashCommand =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: modelInvocable ? CommandKind.SKILL : CommandKind.BUILT_IN,
+      modelInvocable,
+      action: vi.fn(),
+    }) as SlashCommand;
+
+  const slashCommands = [
+    makeCommand('feat-dev', true),
+    makeCommand('help', false),
+  ];
+  const options = (shellModeActive: boolean) => ({
+    shellModeActive,
+    slashCommands,
+  });
+
+  it('admits a plain prompt', () => {
+    expect(consumesContextAnnouncementLatch('hello', options(false))).toBe(
+      true,
+    );
+  });
+
+  it('rejects blank input (dropped by the queue)', () => {
+    expect(consumesContextAnnouncementLatch('', options(false))).toBe(false);
+  });
+
+  it('rejects /btw side-questions (fork via runForkedAgent, no main turn)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/btw side note', options(false)),
+    ).toBe(false);
+  });
+
+  it('consumes ?btw (not a slash command, goes to the main model)', () => {
+    expect(
+      consumesContextAnnouncementLatch('?btw side note', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands (no model turn)', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(false))).toBe(
+      false,
+    );
+  });
+
+  it('rejects unknown slash commands', () => {
+    expect(
+      consumesContextAnnouncementLatch('/no-such-command x', options(false)),
+    ).toBe(false);
+  });
+
+  it('admits model-invocable slash commands (expanded to submit_prompt)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects plain input while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('ls -la', options(true))).toBe(
+      false,
+    );
+  });
+
+  it('admits model-invocable slash commands even while shell mode is active', () => {
+    // Slash commands are routed before the shell-mode intercept.
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(true)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(true))).toBe(
+      false,
+    );
+  });
+});
+
+describe('isContextFilesAnnouncement', () => {
+  it('matches an INFO item with the announcement prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a non-INFO item even when text starts with the prefix', () => {
+    // A user prompt literally starting with "Read context files:" must
+    // not be treated as the announcement after a rewind.
+    expect(
+      isContextFilesAnnouncement({
+        type: 'user',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} please`,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects an INFO item without the prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: 'Memory refreshed successfully.',
+      }),
+    ).toBe(false);
   });
 });

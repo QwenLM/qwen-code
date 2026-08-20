@@ -207,6 +207,7 @@ type HistoryCollector = {
 type SlashCommandInvocation = {
   rawCommand: string;
   timestamp: number;
+  hidden: boolean;
 };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
@@ -961,6 +962,53 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+// Keep these in sync with USER_PROMPT_SUBMIT_CONTEXT_OPEN/CLOSE in Qwen core.
+const QWEN_USER_PROMPT_CONTEXT_OPEN = '<qwen:user-prompt-submit-context>';
+const QWEN_USER_PROMPT_CONTEXT_CLOSE = '</qwen:user-prompt-submit-context>';
+
+function isQwenUserPromptContextPart(part: unknown): boolean {
+  if (!isRecord(part) || typeof part.text !== 'string') return false;
+  const text = part.text.trim();
+  const prefix = `${QWEN_USER_PROMPT_CONTEXT_OPEN}\n`;
+  const suffix = `\n${QWEN_USER_PROMPT_CONTEXT_CLOSE}`;
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) {
+    return false;
+  }
+  const body = text.slice(prefix.length, -suffix.length);
+  return (
+    !body.includes(QWEN_USER_PROMPT_CONTEXT_OPEN) &&
+    !body.includes(QWEN_USER_PROMPT_CONTEXT_CLOSE)
+  );
+}
+
+function projectQwenUserRecordText(record: JsonRecord): string {
+  const message = toRecord(record.message);
+  const parts = Array.isArray(message.parts)
+    ? message.parts.filter(isRecord)
+    : [];
+  const hasFinalHookContextPart =
+    parts.length > 1 &&
+    isQwenUserPromptContextPart(parts[parts.length - 1]);
+  const payload = isRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  const displayText =
+    payload &&
+    (asString(payload.hookContext) !== undefined || hasFinalHookContextPart)
+      ? asString(payload.displayText)
+      : undefined;
+  if (displayText !== undefined) return displayText;
+
+  const visibleParts =
+    payload === undefined && hasFinalHookContextPart
+      ? parts.slice(0, -1)
+      : parts;
+  return visibleParts
+    .map((part) => asString(part.text))
+    .filter((text): text is string => !!text)
+    .join('\n\n');
 }
 
 export function extractQwenParentToolUseId(
@@ -3398,6 +3446,9 @@ export class QwenAgent extends BaseAgent {
   }
 
   private extractQwenRecordText(record: JsonRecord): string {
+    if (record.type === 'user') {
+      return projectQwenUserRecordText(record);
+    }
     const message = toRecord(record.message);
     const parts = Array.isArray(message.parts)
       ? message.parts.filter(isRecord)
@@ -3426,7 +3477,8 @@ export class QwenAgent extends BaseAgent {
     if (record.type === 'user') return true;
     if (record.type !== 'system' || record.subtype !== 'slash_command')
       return false;
-    return toRecord(record.systemPayload).phase === 'invocation';
+    const payload = toRecord(record.systemPayload);
+    return payload.phase === 'invocation' && payload.hiddenInvocation !== true;
   }
 
   private async persistQwenTranscriptTextElements(
@@ -4547,8 +4599,13 @@ export class QwenAgent extends BaseAgent {
     const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
     if (!existsSync(transcriptPath)) return [];
 
+    const parentUuidByUuid = new Map<string, string>();
+    const userRecordUuids = new Set<string>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
+    // An invocation pairs with at most one result, so a later same-name
+    // orphan result cannot re-emit an already-paired invocation's user row.
+    const consumedInvocations = new Set<string>();
     const messages: Message[] = [];
     let idCounter = 0;
 
@@ -4565,6 +4622,13 @@ export class QwenAgent extends BaseAgent {
           continue;
         }
 
+        const uuid = asString(record.uuid);
+        if (uuid) {
+          if (record.type === 'user') userRecordUuids.add(uuid);
+          const parentUuidValue = asString(record.parentUuid);
+          if (parentUuidValue) parentUuidByUuid.set(uuid, parentUuidValue);
+        }
+
         if (record.type !== 'system' || record.subtype !== 'slash_command')
           continue;
 
@@ -4575,8 +4639,13 @@ export class QwenAgent extends BaseAgent {
         const phase = asString(payload.phase);
         const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
         if (phase === 'invocation') {
-          const uuid = asString(record.uuid);
-          if (uuid) invocations.set(uuid, { rawCommand, timestamp });
+          if (uuid) {
+            invocations.set(uuid, {
+              rawCommand,
+              timestamp,
+              hidden: payload.hiddenInvocation === true,
+            });
+          }
           continue;
         }
 
@@ -4596,14 +4665,38 @@ export class QwenAgent extends BaseAgent {
         if (seenResults.has(resultKey)) continue;
         seenResults.add(resultKey);
 
-        const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
-        const userContent = invocation?.rawCommand || rawCommand;
-        messages.push({
-          id: `qwen-${sessionId}-slash-${++idCounter}`,
-          role: 'user',
-          content: userContent,
-          timestamp: invocation?.timestamp ?? timestamp,
-        });
+        let ancestorUuid = parentUuid;
+        const visited = new Set<string>();
+        let invocation: SlashCommandInvocation | undefined;
+        let invocationUuid: string | undefined;
+        const resultCommandName = rawCommand.split(/\s+/, 1)[0];
+        while (ancestorUuid && !visited.has(ancestorUuid)) {
+          visited.add(ancestorUuid);
+          if (userRecordUuids.has(ancestorUuid)) break;
+          const candidate = invocations.get(ancestorUuid);
+          if (candidate) {
+            if (
+              candidate.rawCommand.split(/\s+/, 1)[0] === resultCommandName &&
+              !consumedInvocations.has(ancestorUuid)
+            ) {
+              invocation = candidate;
+              invocationUuid = ancestorUuid;
+            }
+            break;
+          }
+          ancestorUuid = parentUuidByUuid.get(ancestorUuid);
+        }
+        if (invocation && invocationUuid) {
+          consumedInvocations.add(invocationUuid);
+          if (!invocation.hidden) {
+            messages.push({
+              id: `qwen-${sessionId}-slash-${++idCounter}`,
+              role: 'user',
+              content: invocation.rawCommand,
+              timestamp: invocation.timestamp,
+            });
+          }
+        }
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'assistant',

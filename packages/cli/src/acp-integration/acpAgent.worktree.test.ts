@@ -49,7 +49,8 @@ const { mockConnectionState } = vi.hoisted(() => {
   return { mockConnectionState: state };
 });
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
       return mockConnectionState.promise;
@@ -88,11 +89,21 @@ vi.mock('node:stream', async (importOriginal) => {
 });
 
 // Core mock — includes restoreWorktreeContext controllable per-test.
-const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
-  mockRestoreWorktreeContext: vi
-    .fn()
-    .mockResolvedValue({ contextMessage: null, session: null }),
-}));
+const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
+  const daemonSpan = { setAttribute: vi.fn() };
+  return {
+    mockRestoreWorktreeContext: vi
+      .fn()
+      .mockResolvedValue({ contextMessage: null, session: null }),
+    mockWithDaemonSpan: vi.fn(
+      async (
+        _name: string,
+        _attributes: Record<string, unknown>,
+        fn: (span: typeof daemonSpan | undefined) => Promise<unknown>,
+      ) => await fn(daemonSpan),
+    ),
+  };
+});
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -101,6 +112,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  extractDaemonTraceContext: vi.fn(),
+  withDaemonSpan: mockWithDaemonSpan,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
@@ -113,6 +126,17 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  applyReasoningEffort: (
+    config: {
+      setReasoningEffort(effort: string | undefined): void;
+      getReasoningEffort(): string | undefined;
+    },
+    effort: string | undefined,
+  ) => {
+    config.setReasoningEffort(effort);
+    return config.getReasoningEffort() === effort;
+  },
+  REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -149,6 +173,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SessionIdCaseConflictError: class SessionIdCaseConflictError extends Error {
+    override readonly name = 'SessionIdCaseConflictError';
+  },
   Storage: {
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
   },
@@ -301,6 +328,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   function makeInnerConfig() {
     const mockSessionService = {
       sessionExists: vi.fn().mockResolvedValue(true),
+      findSessionIdIgnoringCase: vi.fn().mockResolvedValue(SESSION_ID),
       getWorktreeSessionPath: vi.fn().mockReturnValue(SIDECAR_PATH),
     };
     vi.mocked(SessionService).mockImplementation(

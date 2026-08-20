@@ -18,6 +18,9 @@
 # Review local changes and apply the findings to your working tree
 /review --fix
 
+# Continue a review of the same PR that was interrupted, instead of starting over
+/review 123 --resume
+
 # Review a specific file
 /review src/utils/auth.ts
 
@@ -83,7 +86,7 @@ Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+5..7+3H calls]
 Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
            --> Aggregate                    [ceil(F/8) calls, F=findings]
 Step 5:  Iterative reverse audit, fanned out per chunk;
-           stop after 2 consecutive dry rounds (cap 5)
+           stop after 2 consecutive dry rounds (cap 10/5/3 by topology)
 Step 6:  Present findings + verdict (high; low pass: findings only)
          Canonicalize findings -> .qwen/tmp/...-findings.json
 Step 6B: Apply findings + record per-finding outcomes  (--fix only)
@@ -124,7 +127,7 @@ A **source** file that is largely rewritten (an existing file of 300+ lines that
 
 The checklist is split three ways on purpose. Handing one agent all eight checks over a 2 400-line file gets one of them done properly; three agents with two or three checks each get all of them done. Chunk agents do not substitute for this — on PR #6457 they held every one of these defects inside their assigned territory and reported none. What they lacked was not the lines but the question.
 
-Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or 5 rounds, hard cap — reported as such rather than as convergence). One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
+Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or at the plan's round cap — reported as such rather than as convergence). That cap follows the diff's topology: **10** on a small diff, where a round is a single auditor; **5** on a chunked one, where it is one auditor per chunk; and **3** on a huge diff (≥ 3000 effective lines) _when the run has a deadline_, because five ~90-minute rounds do not fit a six-hour CI ceiling and a review killed mid-flight posts nothing — with no deadline a huge diff keeps the chunked cap of 5. An operator can lower whichever cap applies for every review with the `review.reverseAuditRounds` setting; it can never raise one. One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
 
 ## Severity Levels
 
@@ -145,7 +148,8 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
-- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
+- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh. If the interrupted session still leaves its lease behind — a hard kill that skips this, or a multi-prompt review interrupted during a later prompt — `/review` refuses and names the lease file to delete. Clean stops release it: a finished review and the early stops (empty diff, no new changes since the last review) all run `cleanup`, which releases the lease
+- The worktree is leased to its session: a second `/review` of a PR that is already under review refuses to start (naming the holder) rather than tear down the running review's worktree
 - Review reports and cache are saved to the main project directory (not the worktree)
 
 ## Cross-repo PR Review
@@ -183,7 +187,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_)
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — comments and body lists then also lose the `**[Critical]**`/`**[Suggestion]**` severity markers, and the model is withheld from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
 
 **What stays terminal-only:**
 
@@ -221,9 +225,25 @@ A finding is skipped when its fix would change intended behavior, would need cha
 
 **Every finding gets an outcome, and this is enforced rather than requested.** The ledger goes through `qwen review findings --outcomes`, which refuses a set that does not cover all of them — a fixer that applies six of nine findings and reports six has not lied about any one of them, it has silently shortened the list, and you would have no way to see the three that fell off.
 
+## Resuming an interrupted review (`--resume`)
+
+A long review that dies part-way — a dropped connection, a timeout, a killed terminal — leaves everything it had done on disk: the worktree, the captured diff, and the harness's own record of every agent that ran. `--resume` continues from there instead of starting over:
+
+```bash
+/review 123 --resume
+```
+
+It applies to **PR targets only** (a local review's diff comes from a live working tree, which has no stable interrupted state to continue), and it is safe to pass whenever you are unsure: the review rules on the on-disk state itself — the worktree still at the fetched commit and clean, the captured diff unchanged byte for byte, the PR head unmoved, the resume limit unspent — and silently starts fresh whenever anything no longer matches, telling you which check refused. A continuation reuses the earlier attempt's certified agent results, so the report says how many were recovered; it is disclosed, never a coverage gap.
+
+Two things to know. A continuation keeps the interrupted run's **effort**: passing a different `--effort` refuses the resume and runs fresh at the level you asked for, because different effort is different work. And if the PR head moved while the review was down, the resume refuses (`head-moved`) and the fresh run reviews the new commits — which is what you want, and it counts as this review's one restart.
+
 ## Findings as Data
 
 Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findings.json` before anything else consumes them — the terminal report, the saved Markdown report, and the PR review JSON all read that one artifact instead of re-typing the list. Each finding carries a unique `id` (what outcomes and resolved anchors join on), `severity`, `confidence`, `source`, `summary`, a `shortSummary` capped at 60 characters for list rendering, `failureScenario`, and one or more `locations` — a pattern-aggregated finding keeps **one location per occurrence**, so each still gets its own inline comment.
+
+**Before anything else, the review checks that it is running your code.** Every `qwen review …` step runs the built bundle, not the working tree, so a review command edited since the last build takes no effect and the run measures the old behaviour. The build records a digest of the review sources it bundled; `parse-args` re-derives it and compares, and `drive` checks again, because the verifier brief sends agents straight there without a step 1. On a mismatch it says on stderr that the bundle was not built from these sources, and what to rebuild. The check runs when the CLI resolves to the bundled `dist/cli.js` (the `qwen` binary, or `node dist/cli.js`); launchers that run unbundled output, such as `npm start` and `npm run dev`, skip it. Two cases it cannot compare are treated differently: a checkout whose build predates the recording is told the check could not run and why, and an installed package — which has no sources to differ from — is left silent. The digest covers the review commands, the file that registers them, the review-only lease they import from outside their directory, and the bundled review skill; it does not follow those into the shared helpers they import, so a quiet run means the review code matches the bundle rather than that the whole tree does.
+
+**A Critical the base tree already failed is held back, not filed.** When a test command failed and the merge base could be built, `test-delta` records which failing files also fail without the pull request. Canonicalization reads that measurement back (`qwen review findings --test-delta`, beside `--outcomes`): a Critical whose own text names one of those files is lowered to a Suggestion, keeps its evidence, gains the measurement that demoted it and a `heldByMeasurement` field, and the demotion is announced. A test that was already red is not a test this pull request turns red — and if it now fails for a _new_ reason, say which test, quote both sides, and file it at Critical again: a finding that already carries the measurement and is raised anyway is left where you put it.
 
 The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
 
@@ -238,7 +258,9 @@ export QWEN_REVIEW_ASSETS_REPO=your-org/your-repo   # a repo you can push to
 
 Maintainers typically point it at the repo under review; anyone else can use a fork or a scratch repo. Images land on the `pr-assets/<pr>-review` branch with content-hashed names, and comments reference them by **commit-pinned** URL — immutable even if the branch later moves, and working unchanged on GitHub Enterprise.
 
-The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and a manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
+For GitHub-triggered reviews (the PR-review workflow), the same variable is wired from a **repository variable** of the same name: with the variable unset the workflow passes an empty value and publishing refuses — nothing changes. A maintainer who sets `QWEN_REVIEW_ASSETS_REPO` in the repository's Actions variables (typically to the repository itself) enables review comments to embed capture PNGs; the branches it writes are cleaned up by the visuals cleanup workflow when the variable points at the same repository, while a fork or scratch destination manages its own retention.
+
+The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and each file's bytes must match the format its extension claims — mislabeled or unrecognized content is refused. A manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
 
 ## Follow-up Actions
 
@@ -264,11 +286,38 @@ You can customize review criteria per project. `/review` reads rules from these 
 
 Rules are injected into the LLM review agents (0-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
 
+## Repository Context
+
+Repositories can hand the reviewers bounded, repository-specific guidance by committing a strict JSON manifest to `.qwen/review-context.json`. At medium or high effort, `/review` reads the manifest after capturing the plan and attaches the matching guidance before any agent launches:
+
+```json
+{
+  "version": 1,
+  "label": "Example repository",
+  "rules": [
+    {
+      "paths": ["packages/*/src/**"],
+      "domains": ["runtime"],
+      "relatedPaths": ["packages/runtime/src/**"],
+      "recommendedTests": ["npm run test:runtime"],
+      "requiredConfigurations": ["debug"],
+      "requiredAgents": ["test-matrix"],
+      "unverifiedDimensions": ["Alternate runtime was not exercised"],
+      "verificationNotes": ["Use the repository native test runner"]
+    }
+  ]
+}
+```
+
+A rule applies when any changed file matches one of its `paths` globs (`*`, `?`, and `**` segments; case-sensitive). All matching rules merge their guidance: domains and related files for the review agents, recommended tests and required configurations for the build-and-test agent, extra reviewer roles (honoured only when the chosen effort and topology run them), and proof boundaries the final review discloses as unverified dimensions. Arrays may be written in any order; duplicate entries are rejected.
+
+For PR reviews the manifest is read from the merge base, so the PR under review cannot opt itself into or out of guidance; local reviews read it from the current worktree. Low-effort and cross-repository reviews skip repository context. The full contract and trust model live in the [design doc](../../design/review-repository-context.md).
+
 ## Issue Fidelity
 
-For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <issue_owner>/<issue_repo> --json title,body,comments` for the original report and discussion — the `--json` form includes the issue **body** (the reporter's original repro), which `--comments` alone omits, and the issue's own repository is read from each reference (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
+For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It runs the `qwen review issue-context <pr> --repo <owner/repo> --out <file>` subcommand, which resolves GitHub's strong closing-issue metadata and then fetches each referenced issue's title, **body** (the reporter's original repro), and full comment thread — each from the issue's own repository (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
 
-`closingIssuesReferences` is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance. Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
+The closing-issue set is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance (re-running with `--issue <n>`; a bare number resolves in the PR's repo, while `--issue <owner>/<repo>#<n>` fetches a cross-repo reference from its own repo). Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
 
 If the issue evidence shows an upstream service or provider returned malformed data outside the client contract, client-side parser or sanitizer changes are not treated as a valid root-cause fix unless a maintainer explicitly requested a defensive workaround. A test that replays malformed upstream output proves only that the workaround handles that shape; it does not prove the workaround is architecturally appropriate.
 
@@ -311,6 +360,8 @@ If you switch models (via `/model`) and re-review the same PR, `/review` detects
 # → "Previous review used qwen3-coder. Running full review with gpt-4o for a second opinion."
 ```
 
+The model match also gates incremental scoping, not just the skip: "clean up to the cached commit" is the previous model's verdict, so when new commits have landed since the cached review, a model mismatch never scopes to `lastCommitSha..HEAD` — the range is the full diff, noting "Previous round was reviewed by qwen3-coder. Running full review with gpt-4o." — unless an anchor certified by the model now running is recovered from the last posted review (below), which scopes the range instead. The previous round's findings still carry over to be re-ruled; only the anchor does not. The same gate binds the anchor recovered from the last posted review's machine-ledger marker when the cache is absent or its anchor is unusable (CI, another clone): it scopes the incremental range only if the model now running certified it — a marker certified by a different model, or carrying no model (a review posted with `review.attribution` off, or one from before the field), falls back to the full diff.
+
 Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and model ID. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review. Only high-effort reviews consult or write the cache — a `--effort low|medium` quick pass never counts as "already reviewed".
 
 ## Review Reports
@@ -328,7 +379,9 @@ Medium- and high-effort reviews also save a structured JSON companion with the s
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
-**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`fetch-pr`, `pr-context`, `comment-status`, `presubmit`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
+**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`match-remote`, `meta`, `fetch-pr`, `pr-context`, `comment-status`, `issue-context`, `fetch-diff`, `comment-body`, `plan-diff`, `test-plan`, `presubmit`, `compose-review`, `submit`, `publish-assets`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
+
+**Aone Code:** for a clone whose origin is on `gitlab.alibaba-inc.com`, run `/review` from inside that clone — the platform is detected from the remote and the read subcommands work, backed by the `a1` CLI — the target number is the global MR id. `fetch-pr` fetches `refs/merge-requests/<id>/head` and builds the worktree + diff, so the agent review of the worktree is unchanged. In this phase every Aone run is context-unavailable and several flows are skipped (rather than hitting github.com's same-named repo): `pr-context`/`comment-status`/`presubmit` have no Aone backing (verdict caps at `COMMENT`), `test-plan` is unbacked, Agent 0 is skipped, and the `publish-assets` write is skipped — with `--comment` also refused, an Aone run is read-only toward the platform in this phase; findings land in the terminal output and the saved report. See `docs/design/2026-08-15-review-aone-provider.md`.
 
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
 
@@ -337,7 +390,7 @@ Every run ends with one machine-readable line (`Review complete: <target> — <d
 `/review` is interactive. When a script or CI job needs to run a review and act on its outcome, use the headless wrapper:
 
 ```bash
-qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--quiet]
+qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--resume] [--quiet]
 ```
 
 `target` is a PR number, a PR URL, or a file path; omit it to review the local working tree. The command runs this build's own CLI non-interactively (with stdin closed, so slash-command detection survives), streams the child's progress to **stderr**, and prints the verdict to **stdout** — or, with `--json`, the full result object. The verdict is read from the artifact `compose-review` writes (the same JSON the skill treats as the verdict authority), never parsed from the model's prose.
@@ -352,7 +405,11 @@ The exit code is the contract a gate should read:
 
 `3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
 
+`--resume` continues an interrupted review of the same PR instead of starting over — when a long local run dies part-way (a dropped connection, a timeout, a killed terminal), the retry would otherwise re-fetch, re-chunk and re-launch agents whose work is already on disk. It is safe to pass unconditionally on a retry: `fetch-pr` rules on the on-disk state itself (worktree still at the fetched SHA and clean, diff bytes unchanged, PR head unmoved, resume cap unspent) and silently falls back to a fresh review whenever anything no longer matches, so the flag never fails a run that could start over. A continuation is pinned to the interrupted run's recorded effort — an explicitly different `--effort` refuses the resume and runs fresh at the requested level. PR targets only (a local review's diff is captured from a live working tree, which has no stable interrupted state to continue). Resume is a **local convenience**: the repository's own CI review workflow does **not** resume — each retry re-runs fresh, because a CI attempt runs no-sandbox and its worktree is deleted on exit, leaving no interrupted state to continue.
+
 A time-budgeted run can also export a **soft** deadline so the review stops its open-ended reverse-audit loop while there is still time to verify, compose and post: `QWEN_REVIEW_DEADLINE_EPOCH` is the Unix-seconds moment the run will be killed, and `QWEN_REVIEW_DEADLINE_RESERVE_SECONDS` (default 3600; `0` keeps only the round estimate) is the tail that must remain for the last round's verification, `compose-review` and submission. When the remaining budget no longer fits another round plus that tail, the round builder refuses to build it, and the composed verdict discloses the truncated audit (an otherwise-Approve verdict is capped at Comment). A missing or malformed deadline leaves the review ungated — the outer timeout still bounds the run.
+
+Nested inside that reserve is a smaller **compose floor**, `QWEN_REVIEW_DEADLINE_COMPOSE_FLOOR_SECONDS` (default 1200; `0` disables this gate entirely, at every point including past the deadline). The reserve is one number covering "verify the last round **plus** compose **plus** submit", which fits a normal per-finding re-trace but not a security review whose verification re-runs real filesystem/git workloads without bound. So the verifier — not the round builder — is gated on this floor: once the floor or less remains, `agent-prompt --role verify` refuses to build (a `VERIFY BUDGET:` line, exit **4**), the findings in hand keep their unverified tag (which caps the verdict), and `compose-review` and submission run. The floor is strictly below the reserve, so a healthy run hits the reverse-audit gate first and never reaches it; it is the cover for the one span the reserve cannot bound.
 
 ## Cross-file Impact Analysis
 
@@ -386,12 +443,12 @@ Why the floors are where they are: on a nine-line typo fix, six inline walks are
 
 The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
-| Stage                            | LLM calls                      | Notes                                                                                                          |
-| -------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 14 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                          |
-| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                                              |
-| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round                        |
-| **Total**                        | **~17-23 (~15-22)**            | 3A same-repo: ~17-23 (typical ~17-19); cross-repo or local/file: ~15-22; 3B scales with chunks (see DESIGN.md) |
+| Stage                            | LLM calls                       | Notes                                                                                                                                                                                               |
+| -------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Review agents (Step 3)           | 14 (+0-2)                       | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                                                                                                               |
+| Sharded verification (Step 4)    | ceil(F/8)                       | F = findings; at most 8 per verification agent, launched together                                                                                                                                   |
+| Iterative reverse audit (Step 5) | 2-10 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop; the cap follows the topology — 10 on a small diff, 5 on a chunked one, 3 on a huge one when the run has a deadline. 3B fans out one auditor per chunk per round |
+| **Total**                        | **~17-28 (~15-27)**             | 3A same-repo: ~17-28 (typical ~17-19); cross-repo or local/file: ~15-27; 3B scales with chunks (see DESIGN.md)                                                                                      |
 
 Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low` the review runs entirely inline — **0 subagent calls** — walking the diff once per angle instead of once in total.
 

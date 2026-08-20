@@ -191,6 +191,71 @@ describe('serve-bridge', () => {
     });
 
     describe('session_create', () => {
+      it('exposes session_id and forwards it after capability gating', async () => {
+        const requested = '550e8400-e29b-41d4-a716-446655440000';
+        const { state, calls } = makeMockState({
+          fetchReply: (req) => {
+            if (req.url.endsWith('/capabilities')) {
+              return jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: ['session_id_override'],
+              });
+            }
+            if (req.url.endsWith('/session') && req.method === 'POST') {
+              return jsonResponse(200, {
+                sessionId: requested,
+                workspaceCwd: '/tmp',
+                attached: false,
+              });
+            }
+            return jsonResponse(404, {});
+          },
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === 'session_create',
+        );
+
+        await createTool.handler({ session_id: requested }, {});
+
+        const mutation = calls.find(
+          (call) => call.url.endsWith('/session') && call.method === 'POST',
+        );
+        expect(JSON.parse(mutation!.body!)).toMatchObject({
+          sessionId: requested,
+        });
+      });
+
+      it('does not mutate when session_id_override is unavailable', async () => {
+        const { state, calls } = makeMockState({
+          fetchReply: () =>
+            jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: [],
+            }),
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === 'session_create',
+        );
+
+        const result = await createTool.handler(
+          { session_id: '550e8400-e29b-41d4-a716-446655440000' },
+          {},
+        );
+
+        expect(result.isError).toBe(true);
+        expect(calls.map((call) => call.url)).toEqual([
+          'http://127.0.0.1:4170/capabilities',
+        ]);
+      });
+
       it('should set defaultSessionId after successful creation', async () => {
         const { state } = makeMockState({
           fetchReply: (req) => {
