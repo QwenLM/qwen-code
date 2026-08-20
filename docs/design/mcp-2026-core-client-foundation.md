@@ -126,9 +126,6 @@ advertise privileged App capabilities.
 ## Demo
 
 The external stdio demo used for verification advertises one
-`show_revenue_dashboard` tool and its `ui://revenue-dashboard` resource. The
-screenshot below was captured from a real daemon-backed WebShell session after
-the model called that tool with the APAC region. Its reference implementation
-and daemon configuration are included in the PR description.
-
-![MCP App rendered in a WebShell transcript](../images/mcp-app-webshell.png)
+`show_revenue_dashboard` tool and its `ui://revenue-dashboard` resource. Its
+reference implementation and daemon configuration are included in the PR
+description.

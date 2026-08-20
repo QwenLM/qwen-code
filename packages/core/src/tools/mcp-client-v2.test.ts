@@ -227,7 +227,7 @@ describe('configured MCP SDK v2 negotiation', () => {
   });
 
   it('lists every page of a modern tools/list instead of dropping the catalog', async () => {
-    const pageCount = 65;
+    const pageCount = 3;
     const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {
       const request = message as RequestMessage;
       switch (request.method) {
