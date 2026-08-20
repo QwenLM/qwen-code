@@ -30,6 +30,7 @@ import {
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
+  SessionIdCaseConflictError,
   SessionService,
   sessionIdContext,
   SESSION_WRITER_RPC_CODES,
@@ -99,8 +100,14 @@ import {
   extractDaemonTraceContext,
   withDaemonSpan,
   emptyGoalSnapshot,
+  GoalConflictError,
+  GoalInvalidTransitionError,
   GoalPersistenceUnavailableError,
+  parseGoalControlRequest,
+  type GoalControlRequest,
+  type GoalRuntime,
   type GoalSnapshotV2,
+  type GoalStateResponse,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -423,6 +430,68 @@ const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function currentGoalSnapshot(
+  config: Config,
+  runtime?: GoalRuntime,
+): GoalSnapshotV2 {
+  try {
+    return (runtime ?? config.getGoalRuntime()).getSnapshot();
+  } catch {
+    return emptyGoalSnapshot();
+  }
+}
+
+function mapGoalControlError(
+  error: unknown,
+  config: Config,
+  runtime?: GoalRuntime,
+): RequestError {
+  if (error instanceof GoalConflictError) {
+    return new RequestError(-32009, error.message, {
+      errorKind: 'goal_conflict',
+      current: error.current,
+    });
+  }
+  if (error instanceof GoalInvalidTransitionError) {
+    return new RequestError(-32009, error.message, {
+      errorKind: 'goal_invalid_transition',
+      current: error.current,
+    });
+  }
+  return new RequestError(
+    -32603,
+    error instanceof Error ? error.message : 'Goal persistence failed',
+    {
+      errorKind: 'goal_persist_failed',
+      current: currentGoalSnapshot(config, runtime),
+    },
+  );
+}
+
+async function dispatchGoalControl(
+  config: Config,
+  request: GoalControlRequest,
+): Promise<GoalStateResponse> {
+  const requiresTrustedWorkspace =
+    request.action === 'create' ||
+    request.action === 'replace' ||
+    request.action === 'edit' ||
+    request.action === 'resume';
+  if (requiresTrustedWorkspace && !config.isTrustedFolder()) {
+    throw new RequestError(-32003, 'Workspace is not trusted.', {
+      errorKind: 'untrusted_workspace',
+      httpStatus: 403,
+    });
+  }
+  let runtime: GoalRuntime | undefined;
+  try {
+    runtime = await config.getGoalRuntimeReady();
+    return await runtime.dispatch(request);
+  } catch (error) {
+    throw mapGoalControlError(error, config, runtime);
+  }
+}
 
 const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
 const TURN_STATUS_SCAN_MAX_PAGES = 10;
@@ -5180,7 +5249,9 @@ class QwenAgent implements Agent {
           } catch (error) {
             return this.cleanupAfterRequestFailure(error, async () => {
               if (
-                this.sessions.get(config.getSessionId())?.getConfig() !== config
+                this.sessions
+                  .get(normalizeSessionIdForLookup(config.getSessionId()))
+                  ?.getConfig() !== config
               ) {
                 await this.cleanupUnstoredConfig(config);
               }
@@ -5341,10 +5412,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5577,7 +5659,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
@@ -5657,10 +5741,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5732,7 +5827,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
@@ -5885,19 +5982,32 @@ class QwenAgent implements Agent {
           session.getConfig(),
         );
         if (modelReasoning) {
+          const effortValues = modelReasoning.toggleOnly
+            ? undefined
+            : modelReasoning.efforts;
           const selected =
             value === ACP_REASONING_EFFORT_NONE
               ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.efforts.find((effort) => effort === value);
+              : modelReasoning.toggleOnly
+                ? value === ACP_REASONING_EFFORT_DEFAULT
+                  ? ACP_REASONING_EFFORT_DEFAULT
+                  : undefined
+                : effortValues?.find((effort) => effort === value);
           if (!selected) {
+            const choices = [
+              ACP_REASONING_EFFORT_NONE,
+              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+            ];
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_NONE}, ${modelReasoning.efforts.join(', ')}`,
+              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
             );
           }
           const generation = session.getConfig().getContentGeneratorConfig();
           if (selected === ACP_REASONING_EFFORT_NONE) {
             generation.reasoning = false;
+          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+            generation.reasoning = undefined;
           } else {
             const current = generation.reasoning;
             generation.reasoning = {
@@ -8368,18 +8478,17 @@ class QwenAgent implements Agent {
         );
       }
       const sessionId = normalizedParams['sessionId'];
-      if (
-        typeof sessionId === 'string' &&
-        sessionId.length > 0 &&
-        this.sessions.has(sessionId)
-      ) {
+      const session =
+        typeof sessionId === 'string' && sessionId.length > 0
+          ? this.sessions.get(sessionId)
+          : undefined;
+      if (session) {
         // Bind the owning session to this async context so that debug logs,
         // shell env vars, and any other session-scoped diagnostics route to
         // session A even if a Config for session B was created afterwards.
-        // Only bind ids the agent already knows about; caller-supplied strings
-        // are otherwise unsanitized and can reach filesystem paths and child
-        // process env vars.
-        return await sessionIdContext.run(sessionId, () =>
+        // Use the session's own id spelling (not the lowercased lookup form)
+        // so the context matches the binding in Session.ts.
+        return await sessionIdContext.run(session.getId(), () =>
           this.extMethodInternal(method, normalizedParams),
         );
       }
@@ -11090,6 +11199,28 @@ class QwenAgent implements Agent {
           snapshot: response.snapshot,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalControl: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const request = parseGoalControlRequest(params['request']);
+        if (!request) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Goal control request',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const response = await dispatchGoalControl(
+          session.getConfig(),
+          request,
+        );
+        return { snapshot: response.snapshot };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -13107,24 +13238,36 @@ class QwenAgent implements Agent {
           currentValue:
             config.getContentGeneratorConfig().reasoning === false
               ? ACP_REASONING_EFFORT_NONE
-              : (modelReasoning.efforts.find(
-                  (effort) => effort === currentModelEffort,
-                ) ?? modelReasoning.defaultEffort),
+              : modelReasoning.toggleOnly
+                ? ACP_REASONING_EFFORT_DEFAULT
+                : (modelReasoning.efforts.find(
+                    (effort) => effort === currentModelEffort,
+                  ) ?? modelReasoning.defaultEffort),
           options: [
             {
               value: ACP_REASONING_EFFORT_NONE,
               name: 'Thinking off',
               description: 'Disable thinking for this session',
             },
-            ...modelReasoning.efforts.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description: 'Apply this effort to the next request',
-            })),
+            ...(modelReasoning.toggleOnly
+              ? [
+                  {
+                    value: ACP_REASONING_EFFORT_DEFAULT,
+                    name: 'Thinking on',
+                    description: 'Use the model or provider thinking default',
+                  },
+                ]
+              : modelReasoning.efforts.map((effort) => ({
+                  value: effort,
+                  name: ACP_REASONING_EFFORT_NAMES[effort],
+                  description: 'Apply this effort to the next request',
+                }))),
           ],
           _meta: {
             'qwenCode/reasoning': {
-              defaultEffort: modelReasoning.defaultEffort,
+              ...(modelReasoning.toggleOnly
+                ? { toggleOnly: true }
+                : { defaultEffort: modelReasoning.defaultEffort }),
             },
           },
         }
@@ -13166,7 +13309,9 @@ class QwenAgent implements Agent {
     const reasoning = getModelConfiguration(config.getModel())?.reasoning;
     const currentEffort = config.getReasoningEffort?.();
     return reasoning?.thinking &&
-      (!currentEffort || reasoning.efforts.includes(currentEffort))
+      (reasoning.toggleOnly ||
+        !currentEffort ||
+        reasoning.efforts.includes(currentEffort))
       ? reasoning
       : undefined;
   }
