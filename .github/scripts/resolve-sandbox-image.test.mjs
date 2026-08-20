@@ -558,6 +558,59 @@ test('the resolver refuses to export when the pull reports no Digest line', () =
   assert.equal(existsSync(outFile), false, 'GITHUB_OUTPUT must stay untouched');
 });
 
+test('the resolver exports the digest-bound reference on the success path', () => {
+  // Success-path companion to the refusal pin above: with a genuine Digest
+  // line and matching RepoDigests, BOTH step files must carry the
+  // `<repo>@<digest>` reference, never the mutable tag. A regression to
+  // exporting the requested tag ships the exact vulnerability class this
+  // PR closes and must fail here — the suite stayed green for that mutant
+  // until this test existed (#9527 review).
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-main-ok-'));
+  const stub = join(dir, 'docker-stub');
+  const envFile = join(dir, 'env');
+  const outFile = join(dir, 'out');
+  writeFileSync(
+    stub,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "pull" ]; then',
+      `  printf '%s\\n' 'Status: Downloaded newer image' 'Digest: ${GENUINE}'`,
+      '  exit 0',
+      'fi',
+      `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const scriptPath = fileURLToPath(
+    new URL('./resolve-sandbox-image.mjs', import.meta.url),
+  );
+  const expected = `ghcr.io/qwenlm/qwen-code@${GENUINE}`;
+  let envContent;
+  let outContent;
+  try {
+    execFileSync(
+      process.execPath,
+      [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
+      {
+        env: {
+          ...process.env,
+          SANDBOX_COMMAND: stub,
+          GITHUB_ENV: envFile,
+          GITHUB_OUTPUT: outFile,
+        },
+        timeout: 15_000,
+        stdio: 'pipe',
+      },
+    );
+    envContent = readFileSync(envFile, 'utf8');
+    outContent = readFileSync(outFile, 'utf8');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(envContent, `QWEN_SANDBOX_IMAGE=${expected}\n`);
+  assert.equal(outContent, `image=${expected}\n`);
+});
+
 // Workflow contract: the resolver's step OUTPUT is the value every agent and
 // gate must consume — $GITHUB_ENV is appendable by later steps, so a consumer
 // that inherits QWEN_SANDBOX_IMAGE from it can be steered after resolution.
@@ -576,6 +629,7 @@ test('every sandbox-image consumer binds the resolver step output', () => {
   );
   for (const name of SANDBOX_WORKFLOWS) {
     const doc = parse(readFileSync(join(workflowsDir, name), 'utf8'));
+    let totalConsumers = 0;
     for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
       const steps = job.steps ?? [];
       const consumers = steps.filter(
@@ -586,6 +640,7 @@ test('every sandbox-image consumer binds the resolver step output', () => {
             step.env.SETTINGS_JSON.includes('"sandbox": "docker"')),
       );
       if (consumers.length === 0) continue;
+      totalConsumers += consumers.length;
       const resolvers = steps.filter(
         (step) =>
           typeof step.run === 'string' &&
@@ -609,7 +664,26 @@ test('every sandbox-image consumer binds the resolver step output', () => {
           bindings.includes(step.env?.QWEN_SANDBOX_IMAGE),
           `${name} job '${jobName}' step '${step.name}': bind QWEN_SANDBOX_IMAGE to the resolver step output, not the appendable $GITHUB_ENV value`,
         );
+        // The digest-bound reference is only as strong as the daemon that
+        // resolves it: a DOCKER_HOST appended to $GITHUB_ENV (or a rewritten
+        // currentContext in the pool-shared $DOCKER_CONFIG/config.json)
+        // steers the sandbox this step spawns unless the step env pins the
+        // endpoint the same way the resolver's own spawns do (#9527 review).
+        assert.equal(
+          step.env?.DOCKER_HOST,
+          '',
+          `${name} job '${jobName}' step '${step.name}': set DOCKER_HOST to '' so step env outranks an appended value (the docker CLI skips an empty value)`,
+        );
+        assert.equal(
+          step.env?.DOCKER_CONTEXT,
+          'default',
+          `${name} job '${jobName}' step '${step.name}': pin DOCKER_CONTEXT so the pool-shared currentContext cannot steer the docker endpoint`,
+        );
       }
     }
+    assert.ok(
+      totalConsumers > 0,
+      `${name}: no sandbox consumers detected — the contract test would pass vacuously`,
+    );
   }
 });

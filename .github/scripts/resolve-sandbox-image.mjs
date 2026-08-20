@@ -137,50 +137,63 @@ export function parsePullDigest(pullOutput) {
   return pullOutput.match(/^Digest: (sha256:[0-9a-f]{64})\s*$/m)?.[1] ?? '';
 }
 
-export function pullImage(command, image, timeoutMs = PULL_TIMEOUT_MS) {
+// The spawn guard lives in ONE place: the endpoint pin, the settle-once
+// finish, the SIGKILL timer, the stdout accumulation, and the error/close
+// wiring. The pull and the inspect used to carry near-verbatim copies that
+// had already drifted (#9527 review) — a fix to any of those paths must
+// reach every docker invocation, and no future caller can drop the pin.
+function spawnDockerCapture(command, args, { timeoutMs, label, onChunk }) {
   return new Promise((resolve) => {
-    const child = spawn(command, ['pull', image], {
+    const child = spawn(command, args, {
       stdio: ['ignore', 'pipe', 'inherit'],
       env: sandboxSpawnEnv(),
     });
     let stdout = '';
     let settled = false;
     let timer;
-    const finish = (result) => {
+    const finish = (exitCode) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(result);
+      resolve({ exitCode, stdout });
     };
     timer = setTimeout(() => {
-      console.error(
-        `::error::Timed out pulling ${image} after ${timeoutMs / 1000}s.`,
-      );
+      console.error(`::error::Timed out ${label} after ${timeoutMs / 1000}s.`);
       child.kill('SIGKILL');
-      finish({ ok: false, digest: '' });
+      finish(null);
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
-      process.stdout.write(chunk);
+      onChunk?.(chunk);
     });
     child.on('error', (error) => {
       console.error(
-        `::error::Failed to start '${command} pull ${image}': ${error.message}`,
+        `::error::Failed to start '${command} ${args.join(' ')}': ${error.message}`,
       );
-      finish({ ok: false, digest: '' });
+      finish(null);
     });
     child.on('close', (code) => {
       if (code !== 0) {
         console.error(
-          `::error::'${command} pull ${image}' exited with code ${code}.`,
+          `::error::'${command} ${args.join(' ')}' exited with code ${code}.`,
         );
-        finish({ ok: false, digest: '' });
-        return;
       }
-      finish({ ok: true, digest: parsePullDigest(stdout) });
+      finish(code);
     });
   });
+}
+
+export function pullImage(command, image, timeoutMs = PULL_TIMEOUT_MS) {
+  return spawnDockerCapture(command, ['pull', image], {
+    timeoutMs,
+    label: `pulling ${image}`,
+    onChunk: (chunk) => process.stdout.write(chunk),
+  }).then(({ exitCode, stdout }) =>
+    exitCode === 0
+      ? { ok: true, digest: parsePullDigest(stdout) }
+      : { ok: false, digest: '' },
+  );
 }
 
 // The repository part of an image reference: everything before the :tag /
@@ -213,78 +226,44 @@ export function repoDigestOf(
   expectedDigest,
   timeoutMs = FETCH_TIMEOUT_MS,
 ) {
-  return new Promise((resolve) => {
-    const child = spawn(
-      command,
-      ['image', 'inspect', '--format', '{{json .RepoDigests}}', image],
-      { stdio: ['ignore', 'pipe', 'inherit'], env: sandboxSpawnEnv() },
-    );
-    let stdout = '';
-    let settled = false;
-    let timer;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    timer = setTimeout(() => {
-      console.error(
-        `::error::Timed out inspecting ${image} after ${timeoutMs / 1000}s.`,
-      );
-      child.kill('SIGKILL');
-      finish('');
-    }, timeoutMs);
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-    });
-    child.on('error', (error) => {
-      console.error(
-        `::error::Failed to start '${command} image inspect ${image}': ${error.message}`,
-      );
-      finish('');
-    });
-    child.on('close', (code) => {
-      if (code !== 0) {
-        console.error(
-          `::error::'${command} image inspect ${image}' exited with code ${code}.`,
+  return spawnDockerCapture(
+    command,
+    ['image', 'inspect', '--format', '{{json .RepoDigests}}', image],
+    { timeoutMs, label: `inspecting ${image}` },
+  )
+    .then(({ exitCode, stdout }) => (exitCode === 0 ? stdout.trim() : ''))
+    .then((raw) => {
+      // `null`/`[]` (no RepoDigests, a locally built image), `<no value>` and
+      // empty (the inspect failed) all mean there is no repository digest —
+      // the mutable tag is exactly what must not be exported.
+      let digests = [];
+      try {
+        const parsed = JSON.parse(raw.trim());
+        if (Array.isArray(parsed)) {
+          digests = parsed.filter((entry) => typeof entry === 'string');
+        }
+      } catch {
+        // Non-JSON output carries no digests.
+      }
+      // Docker records Hub repos in canonical short form in RepoDigests —
+      // `docker.io/library/busybox` is stored as `busybox@sha256:…` — so fold
+      // those prefixes before matching, or a fully-qualified Hub reference
+      // fails closed on its own correct digest.
+      const repo = repoOfImage(image).replace(/^docker\.io\/(library\/)?/, '');
+      const digest =
+        digests.find((entry) => entry === `${repo}@${expectedDigest}`) ?? '';
+      if (digest.includes('@sha256:')) {
+        return digest;
+      }
+      if (digests.length > 0) {
+        throw new Error(
+          `Pulled image ${image} resolved to digests none of which is '${repo}@${expectedDigest}' (${digests.join(', ')}); refusing to export a foreign or mutable reference.`,
         );
       }
-      finish(code === 0 ? stdout.trim() : '');
-    });
-  }).then((raw) => {
-    // `null`/`[]` (no RepoDigests, a locally built image), `<no value>` and
-    // empty (the inspect failed) all mean there is no repository digest —
-    // the mutable tag is exactly what must not be exported.
-    let digests = [];
-    try {
-      const parsed = JSON.parse(raw.trim());
-      if (Array.isArray(parsed)) {
-        digests = parsed.filter((entry) => typeof entry === 'string');
-      }
-    } catch {
-      // Non-JSON output carries no digests.
-    }
-    // Docker records Hub repos in canonical short form in RepoDigests —
-    // `docker.io/library/busybox` is stored as `busybox@sha256:…` — so fold
-    // those prefixes before matching, or a fully-qualified Hub reference
-    // fails closed on its own correct digest.
-    const repo = repoOfImage(image).replace(/^docker\.io\/(library\/)?/, '');
-    const digest =
-      digests.find((entry) => entry === `${repo}@${expectedDigest}`) ?? '';
-    if (digest.includes('@sha256:')) {
-      return digest;
-    }
-    if (digests.length > 0) {
       throw new Error(
-        `Pulled image ${image} resolved to digests none of which is '${repo}@${expectedDigest}' (${digests.join(', ')}); refusing to export a foreign or mutable reference.`,
+        `Pulled image ${image} resolved to no repository digest ('${raw.trim()}'); refusing to export a mutable tag.`,
       );
-    }
-    throw new Error(
-      `Pulled image ${image} resolved to no repository digest ('${raw.trim()}'); refusing to export a mutable tag.`,
-    );
-  });
+    });
 }
 
 export function exportImage(image) {
