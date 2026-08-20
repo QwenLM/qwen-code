@@ -993,7 +993,9 @@ describe('fetch-pr report assembly', () => {
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
         ['branch', '-D', 'qwen-review/pr-42'],
-        { stdio: 'pipe' },
+        // Sanitized env: a delete must land in the repository the caller
+        // named, not the one an exported `GIT_DIR` points at.
+        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
       );
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),

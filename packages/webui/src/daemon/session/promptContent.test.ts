@@ -6,9 +6,18 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  attachmentUriForName,
   daemonPromptImageToBlob,
   toDaemonPromptContent,
 } from './promptContent.js';
+
+describe('attachmentUriForName', () => {
+  it('uses the encoded file name as the attachment id', () => {
+    expect(attachmentUriForName('my file (1).json')).toBe(
+      'attachment:///my%20file%20(1).json',
+    );
+  });
+});
 
 describe('daemonPromptImageToBlob', () => {
   it('decodes raw base64 image data', async () => {
@@ -41,6 +50,16 @@ describe('toDaemonPromptContent', () => {
     expect(toDaemonPromptContent('hello')).toEqual([
       { type: 'text', text: 'hello' },
     ]);
+  });
+
+  it('rejects file resources whose content is unavailable', () => {
+    expect(() =>
+      toDaemonPromptContent(
+        'check',
+        [],
+        [{ name: 'report.pdf', data: new Blob(['pdf']) }],
+      ),
+    ).toThrow('File attachment content is unavailable: report.pdf');
   });
 
   it('normalizes image aliases into daemon image content blocks', () => {

@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import semver from 'semver';
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  getHomebrewLatestVersion,
   getInstallationInfo,
   PackageManager,
   resolveUpdateCommand,
@@ -28,12 +30,12 @@ const UPDATE_SUCCESS_MESSAGE =
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 
-export function handleAutoUpdate(
+export async function handleAutoUpdate(
   info: UpdateObject | null,
   settings: LoadedSettings,
   projectRoot: string,
   spawnFn: typeof spawn = spawnWrapper,
-) {
+): Promise<boolean | undefined> {
   if (!info) {
     return;
   }
@@ -48,9 +50,30 @@ export function handleAutoUpdate(
     isAutoUpdateEnabled,
   );
 
+  if (installationInfo.packageManager === PackageManager.HOMEBREW) {
+    const installedVersion = semver.coerce(info.update.current)?.version;
+    const brewLatestVersion = semver.coerce(
+      (await getHomebrewLatestVersion()) ?? undefined,
+    )?.version;
+    // The startup check resolves "latest" from the npm registry regardless of
+    // installation type, but a Homebrew install can only be updated through
+    // Homebrew. While the formula lags npm `latest`, `brew upgrade` is a
+    // no-op and this notification would repeat on every startup with no way
+    // to clear it (#9493) — notify only when local Homebrew metadata reports
+    // something newer than the installed version. When the Homebrew version
+    // cannot be determined, fall through and keep the previous behavior.
+    if (
+      installedVersion &&
+      brewLatestVersion &&
+      !semver.gt(brewLatestVersion, installedVersion)
+    ) {
+      return;
+    }
+  }
+
   let combinedMessage = info.message;
   if (installationInfo.updateMessage) {
-    combinedMessage += `\n${installationInfo.updateMessage}`;
+    combinedMessage += `\n${t(installationInfo.updateMessage)}`;
   }
 
   updateEventEmitter.emit('update-received', {
