@@ -415,6 +415,7 @@ describe('package scripts', () => {
       expect(installStep).toContain('npm run postinstall');
       expect(installStep).toContain('npm run generate');
       expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
+      expect(installStep).not.toContain('CI_BOT_PAT');
     }
 
     for (const jobName of ['integration_none', 'integration_docker']) {
@@ -424,6 +425,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(
+      publishJob.slice(0, publishJob.indexOf('steps:')),
+    ).not.toContain('CI_BOT_PAT');
     const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
     const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
     const commitStep = getWorkflowStep(
