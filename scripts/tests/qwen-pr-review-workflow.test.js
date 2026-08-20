@@ -3244,7 +3244,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
-      expectedHead = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3358,7 +3357,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               GITHUB_STEP_SUMMARY: summary,
               PR_NUMBER: '42',
               RUN_URL: 'https://github.com/QwenLM/qwen-code/actions/runs/12345',
-              EXPECTED_HEAD_SHA: expectedHead,
+              EXPECTED_HEAD_SHA: '',
               FAILURE_KIND: '',
               FAILURE_REASON:
                 'Run review failed. See workflow logs for details.',
@@ -3479,7 +3478,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.posted).not.toBe('');
     // Pinned on the head lookup itself, not on `gh run view` as a whole:
     // the already-posted guard below asks the same command for this run's
-    // startedAt on every event, and a blanket "no run view" assertion would
+    // createdAt on every event, and a blanket "no run view" assertion would
     // read that as a head comparison it never makes.
     expect(r.calls).not.toContain('headSha');
     expect(r.calls).not.toContain('--json headRefOid');
@@ -3519,7 +3518,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   // instruction attached. Measured on PR #9342: review posted 11:56:34Z,
   // review-pr failed 12:00:53Z, the comment landed 12:01:00Z asking for a
   // fresh ~3-hour review; the autofix takeover loop reads the same feed a
-  // human does. The guard is a FILTER (author scope, head, submission
+  // human does. The guard is a FILTER (author scope and submission
   // time), so these run the step's real bash over review fixtures.
   // The run was CREATED at 09:08:38Z; a re-run of its failed job later moved
   // run-level startedAt to 11:30:00Z. Attempt 1's review sits between them —

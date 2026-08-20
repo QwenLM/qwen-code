@@ -1783,11 +1783,6 @@ jobs:
           # review of this PR a reader can see, which is exactly the state that
           # makes this comment's claim false. What the bot-author and
           # creation-time clauses rule out is silence with NO review at all.
-          # The anchor is the run's CREATION, never its start. Re-running a
-          # failed job keeps the run id — the dedup above relies on exactly
-          # that — but moves run-level `startedAt` to the re-executed attempt:
-          # measured on this repo's runs 32219268680 (created 05:23:57Z,
-          # startedAt 05:51:26Z) and 32218596441 (05:13:04Z → 05:22:05Z).
           run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
           posted_reviews=""
           # Three outcomes, and the guard must not be silent about the third:
