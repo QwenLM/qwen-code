@@ -275,6 +275,59 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   ).toBeVisible();
 });
 
+test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.7-plus',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Thinking on' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { toggleOnly: true },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  await expect(controls).toBeVisible();
+  await expect(thinking).toBeChecked();
+  await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(0);
+  await expect(modelButton).toContainText('Thinking');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'none' });
+  await expect(thinking).not.toBeChecked();
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Thinking');
+});
+
 test('uploads an Extension archive from the manager @smoke', async ({
   page,
 }, testInfo) => {
@@ -1042,7 +1095,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 }
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
-  test(`bounds shared attachments and long text at ${viewportHeight}px @smoke`, async ({
+  test(`bounds attachments and long text at ${viewportHeight}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: viewportHeight });
@@ -1058,7 +1111,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 
     await pasteComposerImages(page, 8);
     const images = page.locator(
-      '[data-web-shell-composer-attachments] img[src^="data:image/png;base64,"]',
+      '[data-web-shell-composer-images] img[src^="data:image/png;base64,"]',
     );
     await expect(images).toHaveCount(8);
     await expectImagesDecoded(images);
@@ -1116,15 +1169,15 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     });
     await expect
       .poll(async () => {
-        const [attachmentsBox, imageBox] = await Promise.all([
+        const [attachmentsBox, tagBox] = await Promise.all([
           attachments.boundingBox(),
-          images.last().boundingBox(),
+          tags.last().boundingBox(),
         ]);
-        if (!attachmentsBox || !imageBox) return false;
+        if (!attachmentsBox || !tagBox) return false;
         const tolerance = 1;
         return (
-          imageBox.y >= attachmentsBox.y - tolerance &&
-          imageBox.y + imageBox.height <=
+          tagBox.y >= attachmentsBox.y - tolerance &&
+          tagBox.y + tagBox.height <=
             attachmentsBox.y + attachmentsBox.height + tolerance
         );
       })
@@ -1177,7 +1230,7 @@ test('drops ordered PNG and BMP images and submits them without text @smoke', as
   await expect(surface).not.toHaveAttribute('data-image-drag-active');
   await expect(surface).not.toHaveAttribute('aria-busy');
   const images = surface.locator(
-    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+    '[data-web-shell-composer-images] img[src^="data:image/"]',
   );
   await expect(images).toHaveCount(2);
   await expectImagesDecoded(images);
