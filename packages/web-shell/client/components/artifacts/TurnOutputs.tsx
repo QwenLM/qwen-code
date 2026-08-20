@@ -87,6 +87,17 @@ export type TurnOutputOpenRequest = (
     }
   | {
       id: string;
+      kind: 'attachment';
+      title: string;
+      turnId: string;
+      mimeType?: string;
+      data?: Blob;
+      text?: string;
+      workspacePath?: string;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
       kind: 'artifact';
       title: string;
       turnId: string;

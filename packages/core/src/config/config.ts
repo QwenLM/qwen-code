@@ -1950,6 +1950,7 @@ export class Config {
   private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
@@ -3478,29 +3479,35 @@ export class Config {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
+      this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
         this.getWorkingDir(),
       );
       return;
     }
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
-        this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        {
-          explicitOnly: this.getBareMode(),
-          loadReason,
-          onInstructionsLoaded: createInstructionsLoadedCallback(
-            () => this.hookSystem,
-          ),
-        },
-      );
+    const {
+      memoryContent,
+      fileCount,
+      contextFilePaths,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
+        ),
+      },
+    );
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -3629,6 +3636,7 @@ export class Config {
       this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
+    this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
@@ -6232,6 +6240,15 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  /** Display paths of the currently loaded context (memory) files. */
+  getContextFilePaths(): string[] {
+    return this.loadedContextFilePaths;
+  }
+
+  setContextFilePaths(paths: string[]): void {
+    this.loadedContextFilePaths = paths;
   }
 
   getArenaManager(): ArenaManager | null {
