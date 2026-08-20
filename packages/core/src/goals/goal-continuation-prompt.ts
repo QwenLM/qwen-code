@@ -10,18 +10,6 @@
  * -- lands in one place instead of drifting across the hosts that assemble it.
  */
 
-/**
- * Which continuation is being announced to the model.
- *
- * - `guarded-synthetic-turn`: the turn carries no real user input, so the
- *   prompt states that and warns against reading its own wording as evidence.
- * - `runtime-context`: the runtime supplies the reason this turn was
- *   scheduled, and the model is told what that reason was.
- */
-export type GoalContinuationVariant =
-  | 'guarded-synthetic-turn'
-  | 'runtime-context';
-
 export type GoalContinuationPromptInput =
   | {
       variant: 'guarded-synthetic-turn';

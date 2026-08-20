@@ -17693,6 +17693,11 @@ describe('Session', () => {
                   'Continue working on the active Goal.',
                 ),
               }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Runtime continuation context: check weather',
+                ),
+              }),
             ]),
           }),
           expect.any(String),
