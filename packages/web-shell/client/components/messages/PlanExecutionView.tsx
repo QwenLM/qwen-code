@@ -810,26 +810,30 @@ export function PlanExecutionView({
 
   return (
     <section className={styles.section} aria-label={t('planExecution.title')}>
-      <div
-        className={styles.heading}
-        data-title-hidden={hideTitle || undefined}
-      >
-        {!hideTitle && (
-          <span>
-            {t('planExecution.title')}{' '}
-            <span className={styles.count}>({todos.length})</span>
-          </span>
-        )}
-        {hasDependencies && (
-          <button
-            type="button"
-            className={styles.locateButton}
-            onClick={() => locateFocusTodo('smooth')}
-          >
-            {t('planExecution.locateCurrent')}
-          </button>
-        )}
-      </div>
+      {/* With the caption suppressed and nothing to locate there is no row
+          left to draw, and an empty one still costs the section's row gap. */}
+      {(!hideTitle || hasDependencies) && (
+        <div
+          className={styles.heading}
+          data-title-hidden={hideTitle || undefined}
+        >
+          {!hideTitle && (
+            <span>
+              {t('planExecution.title')}{' '}
+              <span className={styles.count}>({todos.length})</span>
+            </span>
+          )}
+          {hasDependencies && (
+            <button
+              type="button"
+              className={styles.locateButton}
+              onClick={() => locateFocusTodo('smooth')}
+            >
+              {t('planExecution.locateCurrent')}
+            </button>
+          )}
+        </div>
+      )}
       <div className={styles.overview} aria-label={t('planExecution.overview')}>
         <div className={styles.progressCard}>
           <div className={styles.progressHeading}>
@@ -864,6 +868,14 @@ export function PlanExecutionView({
           <span>{t('planExecution.needsAttention')}</span>
         </div>
       </div>
+      {/* Past the edge budget the SVG is skipped entirely. The nodes still
+          list what they depend on, but the lines vanishing with no explanation
+          reads as a rendering failure, so say what happened. */}
+      {hasDependencies && !drawsDependencyEdges && (
+        <p className={styles.edgeNotice} role="status">
+          {t('planExecution.edgesHidden', { count: dependencyCount })}
+        </p>
+      )}
       <div
         className={hasDependencies ? styles.dagViewport : styles.flatList}
         ref={hasDependencies ? viewportRef : undefined}
@@ -951,6 +963,14 @@ export function PlanExecutionView({
                     data-status={state.status}
                     onPointerEnter={() => setHoveredTodoId(todo.id)}
                     onPointerLeave={() =>
+                      setHoveredTodoId((current) =>
+                        current === todo.id ? undefined : current,
+                      )
+                    }
+                    // Tabbing through the graph traces the same chain a pointer
+                    // does, so the highlight is not mouse-only.
+                    onFocus={() => setHoveredTodoId(todo.id)}
+                    onBlur={() =>
                       setHoveredTodoId((current) =>
                         current === todo.id ? undefined : current,
                       )

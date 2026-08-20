@@ -604,3 +604,13 @@ button.nestedExecution:not(:disabled):focus-visible {
     animation: none;
   }
 }
+
+.edgeNotice {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}

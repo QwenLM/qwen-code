@@ -1098,6 +1098,9 @@ describe('PlanExecutionView', () => {
       container.querySelectorAll('[data-plan-input], [data-plan-output]'),
     ).toHaveLength(0);
     expect(container.textContent).toContain('Dense 32');
+    // Lines disappearing with no explanation reads as a broken render, so the
+    // skip is stated rather than silent.
+    expect(container.textContent).toContain('Too many dependencies to draw');
 
     act(() => root.unmount());
     container.remove();

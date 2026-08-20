@@ -2420,6 +2420,8 @@ const EN: Messages = {
   'planExecution.status.blocked': 'Blocked',
   'planExecution.status.in_progress': 'In progress',
   'planExecution.status.ready': 'Ready',
+  'planExecution.edgesHidden': (v) =>
+    `Too many dependencies to draw (${v?.count ?? 0}). Each step lists what it depends on instead.`,
   'workflow.chatTitle': 'Chat',
   'workflow.viewSwitcherLabel': 'Session view',
   'workflow.title': 'Workflow',
@@ -5352,6 +5354,8 @@ const ZH: Messages = {
   'planExecution.status.blocked': '被阻塞',
   'planExecution.status.in_progress': '进行中',
   'planExecution.status.ready': '就绪',
+  'planExecution.edgesHidden': (v) =>
+    `依赖过多（${v?.count ?? 0} 条），无法绘制连线，已改为在每个步骤上列出。`,
   'workflow.chatTitle': '对话',
   'workflow.viewSwitcherLabel': '会话视图',
   'workflow.title': '工作流',
