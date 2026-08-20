@@ -4,6 +4,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from './composerTag';
@@ -138,6 +139,27 @@ describe('getComposerTagViewModel', () => {
   });
 });
 
+describe('isPreviewableFileComposerTag', () => {
+  it('accepts files and rejects directories', () => {
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@notes.txt',
+        kind: 'file',
+        value: 'notes.txt',
+        metadata: { fileKind: 'file' },
+      }),
+    ).toBe(true);
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+      }),
+    ).toBe(false);
+  });
+});
+
 describe('parseUserMessageContentSafely', () => {
   it('rejects an empty parser result', () => {
     expect(
@@ -198,6 +220,31 @@ describe('parseUserMessageContentSafely', () => {
 });
 
 describe('composer tag input annotations', () => {
+  it('preserves file kinds for replayed tags', () => {
+    const content = '@docs/';
+    const annotations = createInputAnnotationsFromComposerTags(content, [
+      {
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+        serialized: content,
+      },
+    ]);
+
+    expect(annotations[0]?.reference.metadata).toEqual({
+      fileKind: 'directory',
+    });
+    expect(splitComposerTagContentByAnnotations(content, annotations)).toEqual([
+      {
+        type: 'reference',
+        tag: expect.objectContaining({
+          metadata: { fileKind: 'directory' },
+        }),
+      },
+    ]);
+  });
+
   it('creates reference annotations using ranges from final prompt text', () => {
     expect(
       createInputAnnotationsFromComposerTags('@dataset:users\n\nshow rows', [
