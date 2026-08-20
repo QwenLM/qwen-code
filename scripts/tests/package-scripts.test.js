@@ -402,6 +402,9 @@ describe('package scripts', () => {
 
   it('skips release install-time prepare and builds before publish bundling', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
+    expect(workflow.slice(0, workflow.indexOf('jobs:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
     const installSteps =
       workflow.match(
         / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,

@@ -71,6 +71,11 @@ describe('stable release notes workflow', () => {
     const update = getStep(finalizeWorkflow, 'Update GitHub Release notes');
     const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
 
+    expect(
+      finalizeWorkflow.slice(0, finalizeWorkflow.indexOf('jobs:')),
+    ).not.toContain('CI_BOT_PAT');
+    expect(install).not.toContain('CI_BOT_PAT');
+
     expect(finalizeWorkflow).toContain("types: ['published']");
     expect(finalizeWorkflow).toContain(
       'github.event.release.prerelease == false',
