@@ -15,6 +15,10 @@ import {
   getCompressionPrompt,
   resolveInteractionMode,
 } from './prompts.js';
+import {
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+} from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
@@ -573,6 +577,78 @@ describe('Core System Prompt (prompts.ts)', () => {
         path.resolve(expectedPath),
         expect.any(String),
       );
+    });
+  });
+
+  describe('outputStyle parameter', () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+
+    it('leaves the prompt untouched when no style is active', () => {
+      const prompt = getCoreSystemPrompt();
+      for (const style of BUILT_IN_OUTPUT_STYLES) {
+        expect(prompt).not.toContain(`# ${style.name} Style Active`);
+      }
+    });
+
+    it('appends the style section to the end of the base prompt', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('# Concise Style Active');
+      // The style refines the mandates, so it has to land after them...
+      expect(prompt.indexOf('# Concise Style Active')).toBeGreaterThan(
+        prompt.indexOf('# Core Mandates'),
+      );
+      // ...and the base prompt must still be intact.
+      expect(prompt).toContain('# Core Mandates');
+    });
+
+    it('keeps the style ahead of the context and volatile layers', () => {
+      const prompt = getCoreSystemPrompt(
+        'MEMORY_MARKER',
+        undefined,
+        'APPEND_MARKER',
+        'interactive',
+        concise,
+      );
+      const styleIndex = prompt.indexOf('# Concise Style Active');
+      expect(styleIndex).toBeGreaterThan(-1);
+      expect(styleIndex).toBeLessThan(prompt.indexOf('MEMORY_MARKER'));
+      expect(styleIndex).toBeLessThan(prompt.indexOf('APPEND_MARKER'));
+    });
+
+    it('is ignored when QWEN_SYSTEM_MD replaces the base prompt', () => {
+      vi.stubEnv('QWEN_SYSTEM_MD', '/custom/path/system.md');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('custom system prompt');
+      expect(prompt).not.toContain('# Concise Style Active');
+    });
+
+    it('does not bake the style into the QWEN_WRITE_SYSTEM_MD dump', () => {
+      // The dump is meant to be reusable as a QWEN_SYSTEM_MD base; baking the
+      // style in would apply it twice when that file is fed back.
+      vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
+      getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      const [, written] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect(written).not.toContain('# Concise Style Active');
     });
   });
 });

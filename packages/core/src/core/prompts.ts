@@ -14,6 +14,8 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { applyOutputStyle } from './output-styles.js';
+import type { OutputStyleDefinition } from './output-styles.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
@@ -248,12 +250,15 @@ export function getCustomSystemPrompt(
  * @param appendInstruction - Back-compat convenience slot for the append prompt.
  *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
  * @param interactionMode - Interactive vs. headless prompt variant.
+ * @param outputStyle - Active output style, layered onto the base prompt.
+ *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
  */
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
+  outputStyle?: OutputStyleDefinition | null,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
@@ -285,8 +290,9 @@ export function getCoreSystemPrompt(
   // awareness (e.g. not instructing the model to ask questions in headless
   // runs). `appendInstruction` below still applies in both branches.
   //
-  // `QWEN_SYSTEM_IDENTITY_MD` only applies on the default-prompt branch and is
-  // ignored whenever `QWEN_SYSTEM_MD` is in effect (including empty-file clear).
+  // `QWEN_SYSTEM_IDENTITY_MD` and the active output style only apply on the
+  // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
+  // effect (including empty-file clear).
   let basePrompt: string;
   if (systemMdEnabled) {
     basePrompt = fs.readFileSync(systemMdPath, 'utf8');
@@ -464,8 +470,14 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
+  // Layer the output style on after the QWEN_WRITE_SYSTEM_MD dump above, so
+  // that dump stays a pure base prompt: a style is meant to sit on top of a
+  // base, and baking it in would apply it twice once the dumped file is fed
+  // back through QWEN_SYSTEM_MD.
   return assembleSystemPrompt({
-    base: basePrompt,
+    base: systemMdEnabled
+      ? basePrompt
+      : applyOutputStyle(basePrompt, outputStyle),
     contextFiles: userMemory,
     appendPrompt: appendInstruction,
   });

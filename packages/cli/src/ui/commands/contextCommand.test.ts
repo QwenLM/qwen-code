@@ -50,6 +50,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getOutputStyle: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
@@ -83,6 +84,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -207,6 +209,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -254,6 +257,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -280,6 +284,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi
         .fn()
         .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
@@ -306,6 +311,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getWorkingDir: vi.fn().mockReturnValue(workingDir),
     } as unknown as Config;
@@ -331,6 +337,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getWorkingDir: vi.fn().mockReturnValue(workingDir),
     } as unknown as Config;

@@ -79,6 +79,7 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
+import { getBuiltInOutputStyle } from './output-styles.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -602,6 +603,7 @@ describe('Gemini Client (client.ts)', () => {
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -13260,6 +13262,7 @@ Other open files:
         'test-model',
         undefined,
         'headless',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -13268,6 +13271,30 @@ Other open files:
           }),
         }),
         'test-session-id',
+      );
+    });
+
+    it('passes the active output style to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      const concise = getBuiltInOutputStyle('Concise');
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getOutputStyle').mockReturnValue(concise);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        concise,
       );
     });
 
@@ -13299,6 +13326,7 @@ Other open files:
           'test-model',
           undefined,
           mode,
+          undefined,
         );
       },
     );

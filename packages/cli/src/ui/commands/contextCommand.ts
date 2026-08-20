@@ -144,6 +144,7 @@ export async function collectContextData(
     modelName,
     undefined,
     resolveInteractionMode(config),
+    config.getOutputStyle(),
   );
   const systemPromptTokens = estimateTokens(systemPromptText);
 
