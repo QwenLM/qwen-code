@@ -7189,6 +7189,7 @@ export class Session implements SessionContext {
     }
     const audioCheckedMessages: Array<{
       parts: Part[];
+      originalParts: Part[];
       displayText: string;
       message: DrainedMidTurnMessage;
     }> = [];
@@ -7207,6 +7208,10 @@ export class Session implements SessionContext {
           : resolved.parts;
       audioCheckedMessages.push({
         parts: audioChecked,
+        // Keep the untouched parts: an abort arriving DURING the awaited
+        // bridge makes `audioChecked` marker-substituted, and the abort
+        // fallback below must restore the pristine media, not the markers.
+        originalParts: resolved.parts,
         displayText: resolved.displayText,
         message: resolved.message,
       });
@@ -7222,10 +7227,10 @@ export class Session implements SessionContext {
               abortSignal,
             )
           : resolved.parts;
-      // Abort arriving during the awaited conversion: fall back to the
-      // untouched parts so no marker text is recorded or sent.
+      // Abort arriving during the awaited bridge/conversion: fall back to
+      // the untouched parts so no marker text is recorded or sent.
       if (abortSignal.aborted) {
-        finalized = resolved.parts;
+        finalized = resolved.originalParts;
       }
       const recorder = this.config.getChatRecordingService();
       if (
@@ -12131,6 +12136,12 @@ export class Session implements SessionContext {
         targetSupportsImage = supportsImage;
       },
     );
+    // Abort arriving during the audio bridge: runAudioBridge returns
+    // marker-substituted parts on cancellation. Return the untouched media
+    // so cancellation markers never persist into session history.
+    if (abortSignal.aborted) {
+      return originalParts;
+    }
     if (targetSupportsImage && hasImageParts(parts)) {
       return parts.map((part) =>
         hasImageParts([part]) ? clampInlineMediaPart(part) : part,

@@ -1493,15 +1493,17 @@ export const useGeminiStream = (
       }
       // An active inline override keeps images raw (the vision bridge is skipped
       // for it), so the size clamp has to run here regardless of whether the
-      // turn also carried audio. The resolution-failed term covers the probe
-      // throwing: the inline latch was cleared fail-closed and
-      // targetSupportsImage was never assigned, but the images were still
-      // destined for the override route and must not be forwarded raw.
+      // turn also carried audio. Note: modelOverrideResolutionFailed is NOT a
+      // reason to clamp-and-return here. A fail-closed resolution failure
+      // clears the inline override, so the images are now destined for the
+      // default session model — not the override route — and must flow
+      // through applyVisionBridgeIfNeeded, which never forwards images to a
+      // text-only model. Clamping and early-returning would skip the bridge
+      // and forward under-limit images raw (the headless and ACP twins both
+      // fall through to the vision bridge in this state).
       if (
         nextParts !== null &&
-        (targetSupportsImage ||
-          inlineModelOverrideActiveRef.current ||
-          modelOverrideResolutionFailed)
+        (targetSupportsImage || inlineModelOverrideActiveRef.current)
       ) {
         const clampedParts = (
           Array.isArray(nextParts) ? nextParts : [nextParts]
@@ -3767,9 +3769,14 @@ export const useGeminiStream = (
                       query,
                       userMessageTimestamp,
                       abortSignal,
-                    ).then(({ parts, shouldProceed }) => ({
+                    ).then(({ parts, shouldProceed, preOverrideParts }) => ({
                       queryToSend: parts,
                       shouldProceed,
+                      // Carry the fresh pre-override parts so a retry whose
+                      // re-bridge fails again stores the original audio in
+                      // lastPromptRef (not the marker text), keeping the
+                      // recording retryable instead of stranded.
+                      preOverrideParts,
                     }))
                   : { queryToSend: query, shouldProceed: true }
                 : await prepareQueryForGemini(
