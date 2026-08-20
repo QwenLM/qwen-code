@@ -580,6 +580,86 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
+  it('re-engages auto-follow when a scrolled-away collapse to a fitting banner grows', async () => {
+    // Scrolled-away counterpart of the post-clear re-follow test above:
+    // sticking was already released before the collapse re-anchors, but the
+    // fitting banner must not get a clamp mark through the released arm
+    // either — while content fits, nothing can move the anchor off a mark,
+    // so one installed here reads as `clampParked` on every later growth
+    // and suppresses the auto-follow branch, leaving the first post-clear
+    // reply below the fold (#9305 review R10-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items: Item[] = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Scrolled-away rest state: sticking released, viewport five rows up.
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+      'item-12',
+      'item-13',
+      'item-14',
+    ]);
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(12)];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+    ]);
+  });
+
   it('does not re-stick a scrolled-away list that shrinks to fit in two steps', async () => {
     // The first shrink re-anchors a scrolled-away viewport, parking it
     // exactly at the new bottom; the re-stick gate must not read that

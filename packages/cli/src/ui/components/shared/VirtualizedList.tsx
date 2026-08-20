@@ -500,13 +500,17 @@ function VirtualizedList<T>(
         // stale render-time flag (the drop only queued its update), and
         // without the mark the next effect trigger re-sticks from the parked
         // position before the release is visible here (#9305 review R6-1).
-        // Only when the clamp moved the anchor, and on the drop path only
-        // while the remnant still overflows: while content fits, nothing
-        // can move the anchor off a mark, so one installed at rest reads as
-        // clampParked forever and suppresses growth auto-follow, defending
-        // nothing — the re-stick gate is already blocked by
-        // `!contentPreviouslyFit` (#9305 review R8-1).
-        if (!isStickingToBottom || (droppingSticking && newScrollTop > 0)) {
+        // While the remnant overflows, always install it — a scroll can move
+        // the anchor off the mark and end the suppression. A fitting remnant
+        // keeps it only through the released arm and only when real content
+        // remains: that park must not re-stick on the next trigger (#9305
+        // review R5-3). A fitting banner-only remnant gets no mark on either
+        // arm: while content fits, nothing can move the anchor off a mark,
+        // so one installed at rest reads as clampParked forever and kills
+        // growth auto-follow, defending nothing — the re-stick gate is
+        // already blocked by `!contentPreviouslyFit` (#9305 reviews R8-1,
+        // R10-1).
+        if (newScrollTop > 0 || (!isStickingToBottom && data.length > 1)) {
           reAnchorClampMark.current = newAnchor;
         }
         setScrollAnchor(newAnchor);
