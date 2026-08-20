@@ -284,6 +284,7 @@ describe('<VirtualizedList />', () => {
       () => listRef!.scrollBy(1),
       () => listRef!.scrollBy(-1),
       () => listRef!.scrollTo(0),
+      () => listRef!.scrollToEnd(),
     ]) {
       act(scroll);
       rerender(<Wrapper />);
@@ -328,6 +329,143 @@ describe('<VirtualizedList />', () => {
     await act(async () => {});
 
     expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+  });
+
+  it('keeps sticking released when an overflowing banner-only list is resized', async () => {
+    // The collapse drop queues setIsStickingToBottom(false), but the
+    // mark-install still reads the stale render-time flag on that render.
+    // When the single remaining item overflows the container (a tall
+    // banner in a small terminal), the missing clamp mark lets the next
+    // effect trigger — here a terminal resize — read the parked position
+    // as the user being at the bottom and re-engage sticking,
+    // bottom-pinning the top-anchored banner (#9305 review R6-1). The
+    // banner sits at index 0 like AppHeader so its height is cached
+    // before the collapse, as in the real /clear lifecycle.
+    const banner = Array.from({ length: 15 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+    let height = 10;
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={height}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: banner }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // Collapse parks the viewport at the banner's bottom (top clipped).
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+      'b13',
+      'b14',
+    ]);
+
+    height = 8;
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // The resize must not re-engage sticking from the parked position:
+    // the anchor holds and the frame is not bottom-pinned to b7..b14.
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+    ]);
+  });
+
+  it('does not yank the viewport to the first post-clear message', async () => {
+    // Combined R6-1 + R6-2: after the /clear-style collapse drops
+    // sticking and parks the viewport inside an overflowing banner, the
+    // first new message must not read that parked position as the user
+    // being at the bottom: the growth branch would snap the anchor to
+    // the end and latch auto-follow back on (#9305 reviews R6-1, R6-2).
+    // The banner sits at index 0 like AppHeader so its height is cached
+    // before the collapse, as in the real /clear lifecycle.
+    const banner = Array.from({ length: 12 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: banner }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+    ]);
+
+    items = [
+      { id: 999, label: banner },
+      { id: 0, label: 'message' },
+    ];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+    ]);
   });
 
   it('does not re-stick a scrolled-away list that shrinks to fit in two steps', async () => {
@@ -386,6 +524,26 @@ describe('<VirtualizedList />', () => {
       'item-5',
       'item-6',
       'item-7',
+    ]);
+
+    // The parked position must not read as the user being at the bottom
+    // when the list grows either: the next message arriving must not yank
+    // the anchor to the end and re-engage sticking (#9305 review R6-2).
+    items = makeItems(9);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
     ]);
   });
 

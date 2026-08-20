@@ -458,7 +458,10 @@ function VirtualizedList<T>(
 
     if (
       shouldAutoScroll &&
-      ((listGrew && (isStickingToBottom || wasAtBottom)) ||
+      // The clamp-parked position is content-driven, not the user being at
+      // the bottom, so growth must not auto-follow from it either (#9305
+      // review R6-2).
+      ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
         (isStickingToBottom && containerChanged))
     ) {
       const newIndex = data.length > 0 ? data.length - 1 : 0;
@@ -479,7 +482,8 @@ function VirtualizedList<T>(
         actualScrollTop > totalHeight - scrollableContainerHeight) &&
       data.length > 0
     ) {
-      if (data.length <= 1 && isStickingToBottom) {
+      const droppingSticking = data.length <= 1 && isStickingToBottom;
+      if (droppingSticking) {
         // Collapse to the host's non-end-anchored state (MainContent mounts
         // banner-only data with initialScrollIndex 0, e.g. after /clear):
         // the followed conversation is gone, so drop the carried sticking
@@ -488,7 +492,11 @@ function VirtualizedList<T>(
       }
       const newScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
       const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
-      if (!isStickingToBottom) {
+      // Install the mark on the drop render too: isStickingToBottom is the
+      // stale render-time flag (the drop only queued its update), and
+      // without the mark the next effect trigger re-sticks from the parked
+      // position before the release is visible here (#9305 review R6-1).
+      if (!isStickingToBottom || droppingSticking) {
         reAnchorClampMark.current = newAnchor;
       }
       if (
@@ -840,6 +848,12 @@ function VirtualizedList<T>(
         }
       },
       scrollToEnd: () => {
+        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Same no-op rule as scrollBy/scrollTo: a scroll attempt on
+          // fitting content must not flip sticking either way.
+          return;
+        }
         setIsStickingToBottom(true);
         setPendingScrollTop(Number.MAX_SAFE_INTEGER);
         if (data.length > 0) {
