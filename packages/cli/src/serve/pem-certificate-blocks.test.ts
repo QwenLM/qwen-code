@@ -177,6 +177,27 @@ describe('extractCertificateBlocks', () => {
       .join('\n');
     expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
   });
+
+  it.each([
+    ['a space', ' '],
+    ['a tab', '\t'],
+  ])('takes nothing from a file whose markers carry %s', (_label, indent) => {
+    // R2-21 entrance P1. Oracle: authorized=FALSE — the one shape in the
+    // padding family the loader does not tolerate. Measured on Node v22.23.0 /
+    // OpenSSL 3.0.13: with this file as NODE_EXTRA_CA_CERTS the handshake
+    // fails DEPTH_ZERO_SELF_SIGNED_CERT with no `Ignoring extra certs`
+    // warning and `openssl storeutl -certs` reports `Total found: 0`, while
+    // the same file un-indented authorizes. `normalizePemLine` stripped
+    // leading whitespace before the marker match, so this module counted the
+    // block as an anchor the workers never received.
+    const indented = ROOT_PEM.trim()
+      .split('\n')
+      .map((line) => (line.startsWith('-----') ? `${indent}${line}` : line))
+      .join('\n');
+    expect(extractCertificateBlocks(indented)).toBeUndefined();
+    // The un-indented control, so this pins the indent and not the fixture.
+    expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
+  });
 });
 
 describe('loadableCertificates', () => {

@@ -777,16 +777,32 @@ export function describeWorkerTlsTrustGaps(opts: {
   // `createSecureContext` accepts shapes the loader's framing rejects, so the
   // "it would have thrown at boot" premise this fallback used to carry was
   // false.)
+  //
+  // R2-21 entrance C1: this gap used to fire only when an operator CA was ALSO
+  // configured, on the reasoning that the merge is what a bad serving file
+  // breaks. But the workers' NODE_EXTRA_CA_CERTS is that same serving file
+  // when there is no operator CA, so an unloadable one anchors nothing either
+  // way. Measured: a `TRUSTED CERTIFICATE`-labelled PEM (a shape
+  // `createSecureContext` serves and the loader takes nothing from — a DER
+  // file, by contrast, fails loud at boot) booted with zero gaps while the
+  // worker handshake failed DEPTH_ZERO_SELF_SIGNED_CERT and the plain-PEM twin
+  // authorized. The file is what is broken; who else is configured is not part
+  // of the question.
   const servingBlocks = loadableCertificates(opts.cert.toString('utf8'));
-  if (!servingBlocks && operatorChain) {
+  if (!servingBlocks) {
     gaps.push(
       `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
-        `loader can read, so the channel workers' bundle cannot be merged: ` +
-        `they receive that file alone and NODE_EXTRA_CA_CERTS ` +
-        `"${opts.operatorCaCertPath}" is discarded. Every worker handshake ` +
-        `to the daemon will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export ` +
-        `--tls-cert as PEM with every -----BEGIN/END CERTIFICATE----- marker ` +
-        `alone on its own line and restart.`,
+        `loader can read, so the channel workers anchor nothing through it` +
+        (operatorChain
+          ? `: their bundle cannot be merged, they receive that file alone ` +
+            `and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" is ` +
+            `discarded. Every worker handshake to the daemon will fail ` +
+            `UNABLE_TO_VERIFY_LEAF_SIGNATURE.`
+          : `. Every worker handshake to the daemon will fail ` +
+            `DEPTH_ZERO_SELF_SIGNED_CERT.`) +
+        ` Re-export --tls-cert as PEM with every ` +
+        `-----BEGIN/END CERTIFICATE----- marker alone on its own line and ` +
+        `restart.`,
     );
   }
   // The fallback keeps a leaf to reason about rather than reporting phantom
@@ -936,8 +952,105 @@ export function describeWorkerTlsTrustGaps(opts: {
   return gaps;
 }
 
-/** DER for the basicConstraints OBJECT IDENTIFIER, 2.5.29.19. */
-const BASIC_CONSTRAINTS_OID_DER = Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]);
+/** basicConstraints, 2.5.29.19, as the contents of its OBJECT IDENTIFIER. */
+const BASIC_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x13]);
+/** `[3] EXPLICIT Extensions OPTIONAL` — the last TBSCertificate member. */
+const EXTENSIONS_TAG = 0xa3;
+const SEQUENCE_TAG = 0x30;
+const BOOLEAN_TAG = 0x01;
+const OCTET_STRING_TAG = 0x04;
+const BIT_STRING_TAG = 0x03;
+const INTEGER_TAG = 0x02;
+
+/** The tag of the DER element at `at`, and the `[start, end)` of its contents. */
+function derElementAt(
+  der: Buffer,
+  at: number,
+): { tag: number; start: number; end: number } | undefined {
+  const tag = der[at];
+  const header = der[at + 1];
+  if (tag === undefined || header === undefined) return undefined;
+  let start = at + 2;
+  let length = header & 0x7f;
+  if ((header & 0x80) !== 0) {
+    // Long form: the low bits count the length's own bytes. Certificates use
+    // neither the indefinite form (zero bytes) nor more than four.
+    if (length === 0 || length > 4) return undefined;
+    let value = 0;
+    for (let index = 0; index < length; index += 1) {
+      const byte = der[start + index];
+      if (byte === undefined) return undefined;
+      value = value * 0x100 + byte;
+    }
+    start += length;
+    length = value;
+  }
+  const end = start + length;
+  return end <= der.length ? { tag, start, end } : undefined;
+}
+
+/** The TBSCertificate of `cert`: the first member of the outer SEQUENCE. */
+function tbsCertificateOf(
+  cert: X509Certificate,
+): { tag: number; start: number; end: number } | undefined {
+  const certificate = derElementAt(cert.raw, 0);
+  if (certificate?.tag !== SEQUENCE_TAG) return undefined;
+  const tbs = derElementAt(cert.raw, certificate.start);
+  return tbs?.tag === SEQUENCE_TAG ? tbs : undefined;
+}
+
+/**
+ * The value bytes of `cert`'s `oid` extension, or `undefined` when it carries
+ * none.
+ *
+ * R2-21 entrances S1/K1/D1: the three readers below each located their
+ * extension by `cert.raw.indexOf(oidBytes)` — an unanchored first-match scan
+ * of the WHOLE DER, signature and serial number included. Measured both ways:
+ * a decoy extension carrying the basicConstraints OID earlier in the DER
+ * swallowed a real PATH_LENGTH_EXCEEDED gap, and a v1 root whose serial number
+ * happens to contain the OID bytes raised a pathlen alarm on a chain that
+ * authorizes. One structural walk of the TBSCertificate extensions SEQUENCE,
+ * shared by all three, can match neither.
+ */
+function certificateExtension(
+  cert: X509Certificate,
+  oid: Buffer,
+): Buffer | undefined {
+  const der = cert.raw;
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  let at = tbs.start;
+  while (at < tbs.end) {
+    const member = derElementAt(der, at);
+    if (!member) return undefined;
+    if (member.tag !== EXTENSIONS_TAG) {
+      at = member.end;
+      continue;
+    }
+    const list = derElementAt(der, member.start);
+    if (list?.tag !== SEQUENCE_TAG) return undefined;
+    let entry = list.start;
+    while (entry < list.end) {
+      // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+      // extnValue OCTET STRING }.
+      const extension = derElementAt(der, entry);
+      if (extension?.tag !== SEQUENCE_TAG) return undefined;
+      const id = derElementAt(der, extension.start);
+      if (!id) return undefined;
+      let valueAt = id.end;
+      const critical = derElementAt(der, valueAt);
+      if (critical?.tag === BOOLEAN_TAG) valueAt = critical.end;
+      const value = derElementAt(der, valueAt);
+      if (value?.tag !== OCTET_STRING_TAG) return undefined;
+      if (der.subarray(id.start, id.end).equals(oid)) {
+        return der.subarray(value.start, value.end);
+      }
+      entry = extension.end;
+    }
+    return undefined;
+  }
+  return undefined;
+}
 
 /**
  * Whether `cert` says, in the extension itself, that it is not a CA.
@@ -955,11 +1068,13 @@ const BASIC_CONSTRAINTS_OID_DER = Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]);
  * extension's presence is what separates the two shapes.
  */
 function declaresNotACa(cert: X509Certificate): boolean {
-  return !cert.ca && cert.raw.includes(BASIC_CONSTRAINTS_OID_DER);
+  return (
+    !cert.ca && certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined
+  );
 }
 
-/** DER for the keyUsage OBJECT IDENTIFIER, 2.5.29.15. */
-const KEY_USAGE_OID_DER = Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x0f]);
+/** keyUsage, 2.5.29.15, as the contents of its OBJECT IDENTIFIER. */
+const KEY_USAGE_OID = Buffer.from([0x55, 0x1d, 0x0f]);
 
 /** RFC 5280 keyUsage bit positions. */
 const KEY_USAGE_DIGITAL_SIGNATURE = 0;
@@ -968,39 +1083,33 @@ const KEY_USAGE_KEY_AGREEMENT = 4;
 const KEY_USAGE_KEY_CERT_SIGN = 5;
 
 const EKU_SERVER_AUTH = '1.3.6.1.5.5.7.3.1';
-const EKU_ANY = '2.5.29.37.0';
 
 /**
  * The keyUsage bits `cert` asserts, or undefined when it carries no keyUsage
  * extension (which RFC 5280 reads as "no restriction").
  *
  * Node exposes `X509Certificate.keyUsage` as the EXTENDED key usage OIDs, not
- * these bits, and `toLegacyObject()` adds nothing — so read the DER the way
- * `declaresNotACa` already does. The extension is a BIT STRING inside the
- * extnValue OCTET STRING, and it is always short enough for definite short-
- * form lengths.
+ * these bits, and `toLegacyObject()` adds nothing — so read the DER through
+ * `certificateExtension`. The extension's value is a BIT STRING.
  */
 function keyUsageBits(cert: X509Certificate): readonly number[] | undefined {
-  const raw = cert.raw;
-  const at = raw.indexOf(KEY_USAGE_OID_DER);
-  if (at === -1) return undefined;
-  let i = at + KEY_USAGE_OID_DER.length;
-  // Optional `critical` BOOLEAN before the extnValue.
-  if (raw[i] === 0x01) i += 2 + (raw[i + 1] ?? 0);
-  if (raw[i] !== 0x04) return undefined;
-  i += 2;
-  if (raw[i] !== 0x03) return undefined;
-  const length = raw[i + 1];
-  const unused = raw[i + 2];
-  if (length === undefined || unused === undefined || length < 1)
-    return undefined;
-  const bytes = raw.subarray(i + 3, i + 3 + length - 1);
+  const value = certificateExtension(cert, KEY_USAGE_OID);
+  if (value === undefined) return undefined;
+  const bitString = derElementAt(value, 0);
+  if (bitString?.tag !== BIT_STRING_TAG) return undefined;
+  const unused = value[bitString.start];
+  if (unused === undefined) return undefined;
+  const bytes = value.subarray(bitString.start + 1, bitString.end);
   const bits: number[] = [];
   for (let bit = 0; bit < bytes.length * 8 - unused; bit++) {
     const byte = bytes[bit >> 3];
     if (byte !== undefined && (byte & (0x80 >> (bit & 7))) !== 0)
       bits.push(bit);
   }
+  // An EMPTY array is not the same answer as `undefined`: it is a keyUsage
+  // that is present and grants nothing. R2-21 entrance E1 — the callers below
+  // read both as "unrestricted", while OpenSSL treats a zero-bit keyUsage as
+  // an invalid certificate for every purpose.
   return bits;
 }
 
@@ -1014,20 +1123,22 @@ function keyUsageBits(cert: X509Certificate): readonly number[] | undefined {
  * INVALID_PURPOSE while the daemon boots green and `/health` answers.
  *
  * Absent extensions mean "unrestricted" — only an extension that is present
- * and excludes server use is a gap.
+ * and excludes server use is a gap. Two shapes used to slip through that rule
+ * and are now gaps (R2-21 entrances EA and E1, both probe-verified on Node
+ * v22.23.0 / OpenSSL 3.0.13 as real handshakes):
+ *
+ * - anyExtendedKeyUsage alone is not serverAuth. OpenSSL's server-purpose
+ *   check requires the serverAuth OID itself, and an `EKU_ANY` exception here
+ *   reported zero gaps for a leaf whose handshake fails INVALID_PURPOSE while
+ *   its serverAuth twin authorizes.
+ * - a keyUsage that is PRESENT with no bits set is not an absent one. OpenSSL
+ *   reads it as granting nothing; reading it as unrestricted booted green.
  */
 function servesTlsClients(cert: X509Certificate): boolean {
   const eku = cert.keyUsage;
-  if (
-    eku &&
-    eku.length > 0 &&
-    !eku.includes(EKU_SERVER_AUTH) &&
-    !eku.includes(EKU_ANY)
-  ) {
-    return false;
-  }
+  if (eku && eku.length > 0 && !eku.includes(EKU_SERVER_AUTH)) return false;
   const bits = keyUsageBits(cert);
-  if (!bits || bits.length === 0) return true;
+  if (!bits) return true;
   return (
     bits.includes(KEY_USAGE_DIGITAL_SIGNATURE) ||
     bits.includes(KEY_USAGE_KEY_ENCIPHERMENT) ||
@@ -1043,11 +1154,15 @@ function servesTlsClients(cert: X509Certificate): boolean {
  * INVALID_PURPOSE, and the same chain re-issued without the EKU authorizes —
  * EKU the only variable. The issuer-capability check read basicConstraints
  * and keyCertSign but never this.
+ *
+ * anyExtendedKeyUsage does not satisfy it either (R2-21 entrance EA): a leaf
+ * issued by an anyEKU-only CA fails INVALID_PURPOSE against the fullchain as
+ * its trust store, measured this round, while this function used to accept it.
  */
 function issuerServesTlsChain(cert: X509Certificate): boolean {
   const eku = cert.keyUsage;
   if (!eku || eku.length === 0) return true;
-  return eku.includes(EKU_SERVER_AUTH) || eku.includes(EKU_ANY);
+  return eku.includes(EKU_SERVER_AUTH);
 }
 
 /**
@@ -1060,24 +1175,22 @@ function issuerServesTlsChain(cert: X509Certificate): boolean {
  * PATH_LENGTH_EXCEEDED (measured).
  */
 function pathLenConstraint(cert: X509Certificate): number | undefined {
-  const raw = cert.raw;
-  const at = raw.indexOf(BASIC_CONSTRAINTS_OID_DER);
-  if (at === -1) return undefined;
-  let i = at + BASIC_CONSTRAINTS_OID_DER.length;
-  if (raw[i] === 0x01) i += 2 + (raw[i + 1] ?? 0);
-  if (raw[i] !== 0x04) return undefined;
-  i += 2;
-  if (raw[i] !== 0x30) return undefined;
-  const seqEnd = i + 2 + (raw[i + 1] ?? 0);
-  i += 2;
+  const value = certificateExtension(cert, BASIC_CONSTRAINTS_OID);
+  if (value === undefined) return undefined;
+  const sequence = derElementAt(value, 0);
+  if (sequence?.tag !== SEQUENCE_TAG) return undefined;
+  let at = sequence.start;
   // Skip the optional cA BOOLEAN; the INTEGER is what we want.
-  if (raw[i] === 0x01) i += 2 + (raw[i + 1] ?? 0);
-  if (i >= seqEnd || raw[i] !== 0x02) return undefined;
-  const length = raw[i + 1] ?? 0;
-  let value = 0;
-  for (let byte = 0; byte < length; byte++)
-    value = value * 256 + (raw[i + 2 + byte] ?? 0);
-  return value;
+  const ca = derElementAt(value, at);
+  if (ca?.tag === BOOLEAN_TAG) at = ca.end;
+  if (at >= sequence.end) return undefined;
+  const limit = derElementAt(value, at);
+  if (limit?.tag !== INTEGER_TAG) return undefined;
+  let result = 0;
+  for (let index = limit.start; index < limit.end; index += 1) {
+    result = result * 0x100 + (value[index] ?? 0);
+  }
+  return result;
 }
 
 /** Whether `cert`'s validity window contains `now`. */
@@ -1239,7 +1352,7 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
  */
 function cannotSignCertificates(cert: X509Certificate): boolean {
   const bits = keyUsageBits(cert);
-  if (!bits || bits.length === 0) return false;
+  if (!bits) return false;
   return !bits.includes(KEY_USAGE_KEY_CERT_SIGN);
 }
 

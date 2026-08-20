@@ -42,14 +42,24 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
  * UTF-8 BOM at the start of ANY line (Windows tooling writes one, and
  * concatenating operator files puts one mid-file, in front of a later block —
  * a file-start-anchored strip left that block unmatched and lost it), CRLF
- * terminators, and leading/trailing whitespace on marker and body lines
- * alike. Measured on Node 22 through real
+ * terminators, and trailing whitespace. Measured on Node 22 through real
  * `NODE_EXTRA_CA_CERTS` handshakes: every one of those shapes loads and
  * verifies, so rejecting any of them drops an operator CA the workers would
  * have trusted and blames a file that was never the problem.
+ *
+ * LEADING whitespace is deliberately NOT stripped (R2-21 entrance P1). It is
+ * the one shape in this family the loader does not tolerate on a marker line:
+ * measured on Node v22.23.0 / OpenSSL 3.0.13, a file whose
+ * `-----BEGIN/END CERTIFICATE-----` markers carry a leading space or tab loads
+ * NOTHING — the handshake fails UNABLE_TO_VERIFY_LEAF_SIGNATURE with no
+ * `Ignoring extra certs` warning, and `openssl storeutl -certs` reports 0 —
+ * while the same file un-indented loads and verifies. Stripping it here made
+ * this module count such a block as an anchor the workers never got. Body
+ * lines are unaffected: their leading whitespace is dropped when the base64 is
+ * joined below, which is what the decoder does too.
  */
 function normalizePemLine(line: string): string {
-  return line.replace(/^\uFEFF/, '').replace(/^[ \t\r]+|[ \t\r]+$/g, '');
+  return line.replace(/^\uFEFF/, '').replace(/[ \t\r]+$/, '');
 }
 
 /**
