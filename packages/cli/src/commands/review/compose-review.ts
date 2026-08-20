@@ -1336,6 +1336,7 @@ export function composeReview(
         ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
         findings: prevFacts.findings,
         truncated: prevFacts.truncated,
+        complete: prevRound > 0 && !prevFacts.truncated,
         foreign: prevFacts.foreign,
         merged: prevFacts.merged,
         ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
@@ -1345,9 +1346,7 @@ export function composeReview(
       // the one predicate both share — so the advice cannot recommend a floor
       // the enforcement above already applied, nor name it a way the
       // enforcement note in the same body contradicts.
-      ...(severityFloorKnown(input.severityFloor)
-        ? { floor: floorKind === undefined ? ('o' as const) : ('c' as const) }
-        : {}),
+      floor: floorKind === undefined ? ('o' as const) : ('c' as const),
       ...(floorKind === undefined ? {} : { criticalFloorKind: floorKind }),
     },
   );
@@ -1493,7 +1492,12 @@ function prevLedgerFacts(planPath: string | undefined): {
     // verbatim in a body this account posts. Normalised for the same reason
     // — the caps are the serializer's contract and this file is not bound by
     // it, while the other side of the recurrence join IS capped.
-    const rawFindings = Array.isArray(prev.findings) ? prev.findings : [];
+    // A `findings` field that is not a list at all leaves this read knowing
+    // nothing about what the round held — which is not the same as a round
+    // that held nothing. Counted as a complete empty list, every claimed id
+    // would read as a stray.
+    const listUsable = Array.isArray(prev.findings);
+    const rawFindings = listUsable ? prev.findings : [];
     const findings = rawFindings
       .filter((f): f is LedgerFinding => isLedgerFinding(f, round))
       .map(normalizeLedgerFinding);
@@ -1521,7 +1525,8 @@ function prevLedgerFacts(planPath: string | undefined): {
       // discloses the undercount instead of presenting a partial list whole.
       truncated:
         round !== 0 &&
-        (rejected > 0 ||
+        (!listUsable ||
+          rejected > 0 ||
           (typeof prev.dropped === 'number' && prev.dropped > 0)),
       // Whoever posted the marker that won recovery. `pr-context` adopts the
       // highest-round marker on the PR — bounded, but not restricted to this
@@ -1708,11 +1713,17 @@ function ledgerMarkerFor(
       // round measures a FLOOR change as loop divergence: the volume under a
       // critical floor and the volume under an open one are not two points
       // on one trend. Decides nothing, sheds with the volume it qualifies.
-      // Recorded only when the state NAMED a floor. `Ledger.floor` reserves
-      // absence for "not recorded", and stamping `'o'` over a posture this
-      // module had to guess at turns an unknown into a durable positive
-      // claim that a later round compares against.
-      ...(floorKnown ? { floor: floorKind === undefined ? 'o' : 'c' } : {}),
+      // The RESOLVED posture, folded the way every consumer folds it: an
+      // absent or unrecognisable floor reads as `auto` throughout this
+      // module, and `auto` resolves determinately from the round number and
+      // the context state. Recording it only when the state NAMED a floor
+      // left the guard blind under the DEFAULT configuration — where the
+      // posture genuinely transitions at round 6 and again on a transient
+      // context failure — so a real posture change read as loop divergence,
+      // which is the misreading the field exists to prevent. What must not
+      // be invented is a posture nobody can derive; this one is derived from
+      // the same fold the advice and the enforcement backstop already use.
+      floor: floorKind === undefined ? 'o' : 'c',
       // The part of that volume the trend is about — see `Ledger.fresh`.
       fresh: freshInline,
     });
@@ -1855,7 +1866,12 @@ function composeReviewBody(
   const postedFresh =
     volumeOf(
       draftedFindingsOf(input.draftedComments).filter((d) =>
-        isFreshDraft(d, Math.min(prevRound + 1, LEDGER_MAX_ROUND), carriedIds),
+        isFreshDraft(
+          d,
+          Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+          carriedIds,
+          convergence?.prev.complete === true,
+        ),
       ).length,
     ) ?? 0;
   const convergenceNote = diagnosis
@@ -4865,7 +4881,15 @@ export function buildLedger(
       ...(typeof c.path === 'string' && isStandInName(c.path)
         ? { k: 1 as const }
         : {}),
-      ...(typeof c.line === 'number' ? { line: c.line } : {}),
+      // Integer, like the admission test demands: a model-written `12.5`
+      // emitted here is refused by the serializer's own filter, which counts
+      // the WHOLE entry into `dropped` — retiring a posted finding with no
+      // ruling, mislabelling the round as budget-truncated, and withholding
+      // the anchor so the next round re-scopes the full diff. Dropping the
+      // line alone keeps the finding and costs it only its anchor line.
+      ...(typeof c.line === 'number' && Number.isInteger(c.line)
+        ? { line: c.line }
+        : {}),
       title: locatable(
         title,
         `${file}${typeof c.line === 'number' ? `:${c.line}` : ''}`,

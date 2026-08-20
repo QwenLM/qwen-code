@@ -33,6 +33,7 @@ import {
   LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   parseLedger,
+  serializeLedger,
 } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
@@ -9350,11 +9351,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(parseLedger(open.body)?.floor).toBe('o');
 
-    // A state that named no floor records none: `Ledger.floor` reserves
-    // absence for "not recorded", and stamping a positive claim over a
-    // posture this module had to guess at makes it a durable comparison
-    // point a later round measures against.
-    const unknown = composeReview({
+    // A state that named NO floor still records the resolved posture, folded
+    // the way every consumer folds it (absent reads as `auto`, which
+    // resolves determinately from the round and the context state).
+    // Recording only a named floor left the guard blind under the default
+    // configuration — where the posture genuinely transitions at round 6 —
+    // so a real change read as loop divergence.
+    const unknownEarly = composeReview({
       planPath: plan(),
       modelId: 'm',
       criticalsInline: 0,
@@ -9363,7 +9366,17 @@ describe('convergence diagnosis reaches the POSTED body', () => {
         { path: 'a.ts', line: 1, body: '**[Suggestion]** one' },
       ],
     });
-    expect(parseLedger(unknown.body)?.floor).toBeUndefined();
+    expect(parseLedger(unknownEarly.body)?.floor).toBe('o');
+
+    sideFile({ round: 6, posted: 1, fresh: 1, floor: 'o', findings: [] });
+    const unknownLate = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(unknownLate.body)?.floor).toBe('c');
 
     const critical = composeReview({
       planPath: plan(),
@@ -9634,6 +9647,46 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(parseLedger(shortened.body)?.findings.map((x) => x.id)).toEqual([
       'R2-99',
     ]);
+  });
+
+  it('keeps a finding whose line number is not an integer', () => {
+    // `draftedComments` is raw model-written JSON. Emitted with a `12.5`
+    // line, the entry is refused by the serializer's own admission filter,
+    // which counts the WHOLE finding into `dropped` — retiring a posted
+    // finding with no ruling, mislabelling the round as budget-truncated,
+    // and withholding the anchor so the next round re-scopes the full diff.
+    const l = buildLedger(
+      2,
+      [{ path: 'a.ts', line: 12.5, body: '**[Critical]** boom' }],
+      [],
+    );
+    expect(l.findings).toEqual([
+      { id: 'R2-1', sev: 'C', file: 'a.ts', title: 'boom' },
+    ]);
+    const marker = serializeLedger({ ...l, sha: 'deadbeef00112233' });
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.dropped).toBeUndefined();
+    expect(parsed.sha).toBe('deadbeef00112233');
+  });
+
+  it('reads an unusable findings field as unknown, not as an empty list', () => {
+    // A `findings` field that is not a list leaves the read knowing nothing
+    // about what the round held — which is not the same as a round that held
+    // nothing. Counted as a complete empty list, every claimed id reads as a
+    // stray and every re-post counts as first-time work.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: 'garbage' });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Critical]** R2-1: still open' },
+      ],
+    });
+    expect(r.postedFresh).toBe(0);
+    expect(parseLedger(r.body)?.findings.map((x) => x.id)).toEqual(['R2-1']);
   });
 
   it('names an auto-resolved floor the way the enforcement note does', () => {

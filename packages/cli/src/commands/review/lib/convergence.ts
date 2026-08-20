@@ -105,6 +105,12 @@ export interface PrevRound {
    */
   foreign?: boolean;
   /**
+   * The work list is WHOLE — nothing was shed by the marker's byte budget,
+   * nothing was refused by the admission test, and it really was recovered.
+   * Absence of an id from an incomplete list proves nothing.
+   */
+  complete?: boolean;
+  /**
    * That foreign marker was MERGED over this account's own findings, which
    * survive the union under their own ids. It changes what the disclosure
    * can honestly claim: "may not be this account's own" over a work list
@@ -184,6 +190,7 @@ export function isFreshDraft(
   d: DraftedFinding,
   round: number,
   carried: ReadonlySet<string> = EVERY_ID,
+  carriedComplete = true,
 ): boolean {
   const minted = birthRound(d?.carriedId);
   if (minted === undefined) return true;
@@ -193,7 +200,21 @@ export function isFreshDraft(
   // finding written in that shape would otherwise vanish from both signals:
   // out of its file's cluster, and out of the activity guard, leaving a
   // round of real new work reading as the steady state.
-  if (d.carriedId !== undefined && !carried.has(d.carriedId)) return true;
+  //
+  // Only over a list known to be WHOLE, and for the same reason `buildLedger`
+  // keeps such an id over a shortened one: a non-member there may be an entry
+  // the byte budget shed, which Step 6 re-voices under its original id. Read
+  // as first-time work it would post "the rate of new findings is not
+  // falling" every round on a loop doing no new work — and one marker would
+  // say two things about the same comment, since the work list keeps the id
+  // the fresh count calls new.
+  if (
+    carriedComplete &&
+    d.carriedId !== undefined &&
+    !carried.has(d.carriedId)
+  ) {
+    return true;
+  }
   if (round >= LEDGER_MAX_ROUND && minted >= LEDGER_MAX_ROUND) return false;
   return minted >= round;
 }
@@ -291,7 +312,7 @@ export function diagnoseConvergence(input: {
       .filter((id): id is string => typeof id === 'string'),
   );
   const fresh = input.drafts.filter((d) =>
-    isFreshDraft(d, input.round, carriedIds),
+    isFreshDraft(d, input.round, carriedIds, input.prev.complete === true),
   );
 
   // Keyed by the REAL path, never by a truncated one. The ledger caps `file`
@@ -523,21 +544,21 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // work list IS the carried-id set that defines freshness, so a re-post of
   // a shed entry takes the stray-id branch and counts as first-time work.
   // The gate that named it a work-list-only concern was mechanically false.
-  if ((citesWorkList || citesPrevVolume) && d.truncatedEvidence) {
+  if (d.truncatedEvidence) {
+    // The overcount clause is unconditional, because the facts clause cites
+    // this round's fresh count unconditionally — and a shortened carried
+    // list inflates exactly that number through the stray-id branch. Only
+    // the undercount half depends on rounds being named.
+    const overstated = {
+      en: `re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
+      zh: `被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
+    };
     const what = citesWorkList
-      ? citesPrevVolume
-        ? {
-            en: `the rounds named above may be an undercount, and re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
-            zh: `上述轮次可能少计；被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
-          }
-        : {
-            en: `the rounds named above may be an undercount`,
-            zh: `上述轮次可能少计`,
-          }
-      : {
-          en: `re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
-          zh: `被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
-        };
+      ? {
+          en: `the rounds named above may be an undercount, and ${overstated.en}`,
+          zh: `上述轮次可能少计；${overstated.zh}`,
+        }
+      : overstated;
     caveatsEn.push(
       `the previous round's work list was truncated to fit the marker, so ${what.en}`,
     );

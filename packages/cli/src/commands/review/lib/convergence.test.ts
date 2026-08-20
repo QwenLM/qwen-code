@@ -240,7 +240,12 @@ describe('diagnoseConvergence — the trigger table', () => {
     const r = diagnoseConvergence({
       round: 4,
       posted: 1,
-      prev: { posted: 1, fresh: 1, findings: [f('R2-1', 'src/a.ts')] },
+      prev: {
+        posted: 1,
+        fresh: 1,
+        complete: true,
+        findings: [f('R2-1', 'src/a.ts')],
+      },
       drafts: [d('src/a.ts', 'R2-99')],
       floor: 'o',
     })!;
@@ -248,6 +253,30 @@ describe('diagnoseConvergence — the trigger table', () => {
       { file: 'src/a.ts', priorRounds: [2], thisRound: 1 },
     ]);
     expect(r.fresh).toBe(1);
+  });
+
+  it('will not call a re-post fresh over a list that may have shed it', () => {
+    // The work list keeps the id when the list is shortened (continuity
+    // wins), so reading the same comment as first-time work makes one marker
+    // say two things — and posts "the rate of new findings is not falling"
+    // every round on a loop doing no new work.
+    const shed = diagnoseConvergence({
+      round: 4,
+      posted: 2,
+      prev: { posted: 2, fresh: 2, findings: [], truncated: true },
+      drafts: [d('src/a.ts', 'R3-7'), d('src/b.ts', 'R3-8')],
+      floor: 'o',
+    });
+    expect(shed).toBeNull();
+    // Over a list known WHOLE, the same ids are strays and count as new.
+    const whole = diagnoseConvergence({
+      round: 4,
+      posted: 2,
+      prev: { posted: 2, fresh: 2, complete: true, findings: [] },
+      drafts: [d('src/a.ts', 'R3-7'), d('src/b.ts', 'R3-8')],
+      floor: 'o',
+    })!;
+    expect(whole.fresh).toBe(2);
   });
 
   it('still clusters a genuinely new finding in a re-posted file', () => {
@@ -674,6 +703,11 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('splitting an independent cluster');
     // The claim it must never make: how the code should be rewritten.
     expect(r.en).not.toMatch(/refactor|rewrite|extract .* class|redesign/i);
+    // Same claim, same direction, other language — an en-only negative
+    // catches en regressions only.
+    expect(r.zh).toContain('根因');
+    expect(r.zh).toContain('拆成单独的 PR');
+    expect(r.zh).not.toMatch(/重构|重写|重新设计/);
   });
 
   it('falls back to the volume reading when nothing recurs', () => {
@@ -698,8 +732,11 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('already at `--severity-floor critical`');
     expect(r.zh).not.toContain('降到');
     expect(r.zh).toContain('已处于');
-    // The actionable half survives — the advice narrows, it does not vanish.
+    // The actionable half survives — the advice narrows, it does not vanish
+    // — in both languages. The `把剩余修复攒成一批` assertions elsewhere sit on
+    // the OTHER branch of the same ternary and do not cover this one.
     expect(r.en).toContain('Batching the remaining fixes');
+    expect(r.zh).toContain('把剩余修复攒成一批');
   });
 
   it('neutralises a PR-controlled path instead of splicing it raw', () => {
@@ -761,9 +798,11 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(volumeOnly.en).toContain('a marker this account did not post');
     expect(volumeOnly.zh).toContain('该计数');
 
-    // With no previous volume recovered and no cluster evidence in play,
-    // there is nothing for provenance to qualify.
-    const nothingCited = renderConvergenceDiagnosis({
+    // Truncation still qualifies: the facts clause cites this round's fresh
+    // count unconditionally, and a shortened carried list inflates exactly
+    // that number. Provenance has nothing to qualify here — no rounds are
+    // named and no previous count is cited.
+    const noCitations = renderConvergenceDiagnosis({
       round: 4,
       posted: 3,
       fresh: 3,
@@ -773,7 +812,20 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       foreignEvidence: true,
       mergedEvidence: false,
     });
-    expect(nothingCited.zh).not.toContain('证据说明');
+    expect(noCitations.en).toContain('may be overstated');
+    expect(noCitations.en).not.toContain('this account did not post');
+
+    const nothingAtAll = renderConvergenceDiagnosis({
+      round: 4,
+      posted: 3,
+      fresh: 3,
+      clusters: [],
+      volumeNotShrinking: false,
+      truncatedEvidence: false,
+      foreignEvidence: true,
+      mergedEvidence: false,
+    });
+    expect(nothingAtAll.zh).not.toContain('证据说明');
   });
 
   it('names an auto-resolved floor as resolved, not as a flag nobody passed', () => {
