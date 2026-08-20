@@ -15,6 +15,7 @@ import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
+import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
@@ -589,9 +590,8 @@ export type ClientMcpMessageSender = (
   | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
- * separate process, so this is a trust boundary — mirrors the scheduled-task
- * REST route's `MAX_PROMPT_LENGTH` and the core tool's own client-side check. */
-export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+ * separate process, so this trust boundary keeps its own enforcement. */
+export { MAX_SUB_SESSION_PROMPT_CHARS };
 
 /** Ceiling on the sub-session display name. It is a label — the launcher
  * truncates it to 60 chars for display anyway. */

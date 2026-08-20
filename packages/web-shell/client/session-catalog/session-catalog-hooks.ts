@@ -82,10 +82,13 @@ export function useSessionCatalogQuery(
     getSnapshot,
     getServerSnapshot,
   );
-  const reload = useCallback(() => {
-    if (!enabled || !stableQuery) return Promise.resolve(undefined);
-    return store.refresh(stableQuery);
-  }, [enabled, stableQuery, store]);
+  const reload = useCallback(
+    (options: { interactive?: boolean } = {}) => {
+      if (!enabled || !stableQuery) return Promise.resolve(undefined);
+      return store.refresh(stableQuery, options);
+    },
+    [enabled, stableQuery, store],
+  );
 
   return {
     ...snapshot,
@@ -187,6 +190,11 @@ export function useSessionCatalogController(client: DaemonClient) {
       },
       invalidateWorkspace(workspaceCwd: string) {
         update(() => store.invalidateWorkspace(workspaceCwd));
+      },
+      refreshWorkspace(workspaceCwd: string) {
+        update(() =>
+          store.invalidateWorkspace(workspaceCwd, { interactive: true }),
+        );
       },
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
@@ -304,15 +312,18 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const reloadPage = result.reload;
-  const reload = useCallback(async () => {
-    try {
-      return (await reloadPage())?.sessions;
-    } catch {
-      return undefined;
-    }
-  }, [reloadPage]);
+  const reload = useCallback(
+    async (reloadOptions: { interactive?: boolean } = {}) => {
+      try {
+        return (await reloadPage(reloadOptions))?.sessions;
+      } catch {
+        return undefined;
+      }
+    },
+    [reloadPage],
+  );
   const invalidate = useCallback(() => {
-    if (workspaceCwd) controller.invalidateWorkspace(workspaceCwd);
+    if (workspaceCwd) controller.refreshWorkspace(workspaceCwd);
   }, [controller, workspaceCwd]);
   const deleteSession = useCallback(
     async (sessionId: string) => {
