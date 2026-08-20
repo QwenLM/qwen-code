@@ -100,6 +100,7 @@ interface HarnessOptions {
   canQueryMidTurn?: boolean;
   canInjectMidTurnMedia?: boolean;
   streamingState?: DaemonStreamingState;
+  holdQueuedPromptsLocally?: boolean;
 }
 
 function createHarness() {
@@ -154,6 +155,7 @@ function createHarness() {
       canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
       workspaceFileActions: stableWorkspaceFileActions as never,
       streamingState: opts.streamingState ?? 'responding',
+      holdQueuedPromptsLocally: opts.holdQueuedPromptsLocally ?? false,
       sessionActions: sdkMock.actions as never,
       store: stableStore as never,
       editorRef: stableEditorRef,
@@ -487,7 +489,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('never queries when the daemon lacks the capability (degraded)', async () => {
+  it('does not resubmit an accepted message without query capability', async () => {
     const harness = createHarness();
     try {
       await harness.render({
@@ -501,18 +503,15 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         streamingState: 'idle',
         canQueryMidTurn: false,
       });
-      // Legacy path: resend directly, no reconciliation round-trip.
       expect(sdkMock.actions.getMidTurnMessages).not.toHaveBeenCalled();
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'note',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
   });
 
-  it('falls back when a legacy admission response reaches an idle turn', async () => {
+  it('does not resubmit when a legacy admission is accepted at idle', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
       | undefined;
@@ -538,10 +537,40 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         resolveAdmission?.({ accepted: true, messageId: 'legacy-late' });
       });
 
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('falls back when a query admission is rejected after the turn settles', async () => {
+    let resolveAdmission:
+      | ((value: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+        new Promise((resolve) => {
+          opts?.onAdmissionStarted?.();
+          resolveAdmission = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('query late response');
+      });
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        resolveAdmission?.({ accepted: false });
+      });
+
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'legacy late response',
+        'query late response',
         expect.objectContaining({ sessionId: 'session-a' }),
       );
+      expect(harness.reportError).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
@@ -1048,6 +1077,269 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.render({ streamingState: 'responding', connected: false });
       await harness.render({ streamingState: 'responding', connected: true });
       expect(harness.result().queuedPrompts).toHaveLength(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not explicitly insert a locally held Goal prompt while idle', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('insert into active Goal');
+      });
+
+      const queuedPromptId = harness.result().queuedPrompts[0]?.id;
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(queuedPromptId!);
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('reconciles a committed explicit insert after its response is lost', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('explicitly inserted');
+      });
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      const queuedPromptId = harness.result().queuedPrompts[0]?.id;
+      expect(queuedPromptId).toEqual(expect.any(Number));
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+        const messageId =
+          sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+        return {
+          messages: [{ messageId, text: 'explicitly inserted' }],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        };
+      });
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(queuedPromptId!);
+      });
+
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      expect(messageId).toEqual(expect.any(String));
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'explicitly inserted',
+          midTurnMessageId: messageId,
+          midTurnState: 'queued',
+        }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('returns an unreconciled explicit insert to the local hold', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue(undefined);
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('do not lose me');
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(1);
+      });
+      // The daemon could not confirm the insert, so the row goes back to the
+      // local Goal hold instead of lingering as a half-owned mid-turn row.
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'do not lose me',
+          isInserting: false,
+        }),
+      ]);
+      expect(harness.result().queuedPrompts[0]?.midTurnState).toBeUndefined();
+      expect(
+        harness.result().queuedPrompts[0]?.midTurnMessageId,
+      ).toBeUndefined();
+      expect(harness.reportError).toHaveBeenCalled();
+
+      await harness.render({
+        sessionId: 'session-b',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'do not lose me' }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('retains held prompts when a session learns its workspace while away', async () => {
+    // The foreground variant below only covers a cwd that resolves while the
+    // session is displayed. Resolving it while the user is on another session
+    // leaves the stash under the old key, which nothing looks up again — the
+    // typed text is gone for good, reload included.
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: undefined,
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('typed while away');
+      });
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'typed while away' }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('hands a held prompt to the new owner key exactly once', async () => {
+    // The relocation has to release the old key: if both keys keep the same
+    // array, a later transition through the stale key re-transfers prompts that
+    // were already handed off and the queue shows them twice.
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: undefined,
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('exactly once');
+      });
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+
+      // Stop the Goal: the held prompt drains through the ordinary path.
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: false,
+      });
+      await act(async () => {
+        harness.result().removeQueuedPrompt(1);
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+
+      await harness.render({
+        sessionId: 'session-b',
+        workspaceCwd: '/workspace-b',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      // The stash it came from must have been released, or the prompt the user
+      // already dealt with comes back from the stale key.
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('retains held prompts when the same session learns a new workspace', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-before',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('typed never-sent text');
+      });
+
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-after',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'typed never-sent text' }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
@@ -1600,6 +1892,57 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('does not resubmit a query-capable insert accepted at turn settle', async () => {
+    let resolveAdmission:
+      | ((result: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    let admissionSignal: AbortSignal | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string; signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          resolveAdmission = resolve;
+          admissionSignal = opts?.signal;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('query settle');
+      });
+      let insertion!: Promise<void>;
+      act(() => {
+        insertion = harness.result().insertQueuedPrompt(1);
+      });
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: false,
+      });
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: [messageId!],
+      });
+      await act(async () => {
+        resolveAdmission?.({ accepted: true, messageId });
+        await insertion;
+      });
+
+      // An explicit insert is issued without an abort signal by design.
+      expect(admissionSignal).toBeUndefined();
+      expect(harness.reportError).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('settles a callback from the settled ring exactly once', async () => {
     const onComplete = vi.fn();
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
@@ -1836,15 +2179,23 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('aborts a pending legacy enqueue at the idle transition', async () => {
+  it('settles after a pending legacy enqueue is accepted at idle', async () => {
     let admissionSignal: AbortSignal | undefined;
+    let resolveAdmission:
+      | ((value: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    const admission = new Promise<{ accepted: boolean; messageId?: string }>(
+      (resolve) => {
+        resolveAdmission = resolve;
+      },
+    );
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
       (
         _message: string,
         opts?: { signal?: AbortSignal; messageId?: string },
       ) => {
         admissionSignal = opts?.signal;
-        return new Promise(() => {});
+        return admission;
       },
     );
     const harness = createHarness();
@@ -1860,8 +2211,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(admissionSignal?.aborted).toBe(false);
 
       await harness.render({ streamingState: 'idle', canQueryMidTurn: false });
-      // Without the abort the in-flight admission would land in the next turn.
-      expect(admissionSignal?.aborted).toBe(true);
+      expect(admissionSignal?.aborted).toBe(false);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveAdmission?.({ accepted: true, messageId: 'mid-late' });
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }

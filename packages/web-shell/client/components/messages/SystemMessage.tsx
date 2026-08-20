@@ -42,7 +42,6 @@ interface SystemMessageProps {
     mimeType?: string;
     attachmentId?: string;
   }) => void;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
 }
@@ -57,7 +56,6 @@ export const SystemMessage = memo(function SystemMessage({
   onShowContextDetail,
   onImagePreview,
   onAttachmentPreview,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
@@ -141,7 +139,7 @@ export const SystemMessage = memo(function SystemMessage({
   if (goalStatus) {
     return (
       <div className={styles.flushMessage}>
-        <GoalStatusMessage status={goalStatus} activateFooter={isLatest} />
+        <GoalStatusMessage status={goalStatus} />
       </div>
     );
   }

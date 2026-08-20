@@ -138,6 +138,16 @@ dispositions, changed files, checks actually run, and remaining blocker.
   just moves the rejection later and wastes the round. Record the exact
   commands you ran and their results in your summary (see the per-mode
   outcomes); a bare "verified" without them is not acceptable.
+- Every guard, branch, or behavior a round's commits add needs its OWN witness
+  in the tests the round commits. Verify with a mutation probe before
+  committing: temporarily remove or negate the new guard or branch, re-run the
+  focused tests that should catch it, and confirm they FAIL; then restore it
+  and re-run to green. If the suite stays green with your guard deleted, the
+  guard has no coverage — write a test that pins it (or drop the guard)
+  instead of shipping it: the deterministic gate re-runs only the tests that
+  exist, so an unwitnessed guard passes every gate and its hole resurfaces as
+  a new finding in a later round. Record each probe and its result in your
+  summary alongside the verification commands.
 - Regenerate committed generated artifacts when you change their source. If you
   edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
