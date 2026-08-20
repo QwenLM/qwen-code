@@ -1928,6 +1928,43 @@ export class ChatRecordingService {
    * @param data.contextWindowSize Context window size of the model
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
+  /**
+   * Tokens billed to the Goal turn that is currently open.
+   *
+   * One entry, not a map: the Goal runtime holds a single permit at a time, so
+   * a record stamped with a different turn id means the previous turn is over
+   * and its total was either already taken or is no longer wanted.
+   */
+  private goalTurnSpend?: { turnId: string; tokens: number };
+
+  private accumulateGoalTurnTokens(
+    turnId: string,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    const total = usage.totalTokenCount;
+    if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
+      return;
+    }
+    if (this.goalTurnSpend?.turnId !== turnId) {
+      this.goalTurnSpend = { turnId, tokens: 0 };
+    }
+    this.goalTurnSpend.tokens += total;
+  }
+
+  /**
+   * The tokens billed to `turnId`, consuming them so a turn is counted once.
+   *
+   * Answers zero for a turn that spent nothing, that was never opened, or
+   * whose total has already been taken — a Goal with no model calls in a turn
+   * bills nothing rather than guessing.
+   */
+  takeGoalTurnTokens(turnId: string): number {
+    if (this.goalTurnSpend?.turnId !== turnId) return 0;
+    const { tokens } = this.goalTurnSpend;
+    this.goalTurnSpend = undefined;
+    return tokens;
+  }
+
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
@@ -1950,6 +1987,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.goalContext) {
+          this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
+        }
       }
 
       if (data.contextWindowSize !== undefined) {
