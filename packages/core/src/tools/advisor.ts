@@ -12,6 +12,7 @@ import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
+import { SchemaValidator } from '../utils/schemaValidator.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { mapAdvisorError, type AdvisorErrorCode } from './advisor-error.js';
 import { ToolErrorType } from './tool-error.js';
@@ -340,25 +341,15 @@ function parseAdvisorReview(value: unknown): AdvisorReview {
     throw new Error('Advisor returned invalid structured output.');
   }
 
-  const review = {
-    verdict: value['verdict'],
-    risks: value['risks'],
-    missingEvidence: value['missingEvidence'],
-    recommendation: value['recommendation'],
-  };
-  if (
-    typeof review.verdict !== 'string' ||
-    typeof review.risks !== 'string' ||
-    typeof review.missingEvidence !== 'string' ||
-    typeof review.recommendation !== 'string'
-  ) {
+  const schemaError = SchemaValidator.validate(ADVISOR_REVIEW_SCHEMA, value);
+  if (schemaError) {
     throw new Error('Advisor returned invalid structured output.');
   }
 
-  const parsed = review as AdvisorReview;
-  const schemaError = validateAdvisorReview(parsed);
-  if (schemaError) throw new Error(schemaError);
-  return parsed;
+  const review = value as unknown as AdvisorReview;
+  const reviewError = validateAdvisorReview(review);
+  if (reviewError) throw new Error(reviewError);
+  return review;
 }
 
 async function getOutputLanguageInstruction(

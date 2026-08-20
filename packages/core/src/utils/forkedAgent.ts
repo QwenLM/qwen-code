@@ -11,10 +11,11 @@
  *
  *   WITH cacheSafeParams  → GeminiChat single-turn, shares parent prompt
  *                            cache (systemInstruction + history). Tools are
- *                            stripped by default (NO_TOOLS) to prevent
- *                            function calls; pass preserveTools: true to
- *                            keep the parent's tools prefix for Anthropic
- *                            prompt-cache hits.
+ *                            stripped by default (NO_TOOLS); pass
+ *                            preserveTools: true to keep the parent's tools
+ *                            prefix for Anthropic prompt-cache hits. jsonSchema
+ *                            adds only the internal respond_in_schema
+ *                            formatter.
  *                            Use for: /btw, suggestions, pipelined suggestions.
  *
  *   WITHOUT cacheSafeParams → AgentHeadless multi-turn, full tool access,
@@ -22,7 +23,9 @@
  *                              Use for: memory extract, dream consolidation.
  *
  * Tool-deny for forked queries is enforced at the per-request level (NO_TOOLS)
- * unless the caller opts out via preserveTools to share the cache prefix.
+ * unless the caller opts out via preserveTools to share the cache prefix. A
+ * jsonSchema request may add the internal respond_in_schema formatter, but not
+ * parent session tools.
  *
  * Callers (extractScheduler, dreamScheduler) own concurrency control.
  * runSideQuery() remains a separate primitive for structured-JSON calls that
@@ -31,9 +34,12 @@
 
 import type {
   Content,
+  FunctionDeclaration,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
   Part,
+  Schema,
+  Tool,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -44,6 +50,7 @@ import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from './debugLogger.js';
+import { parseLooseJsonObject } from './json-parsing.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -66,6 +73,10 @@ import { getFunctionResponseParts } from '../services/compactionInputSlimming.js
 import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -184,14 +195,23 @@ export function clearCacheSafeParams(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Per-request config that strips tools so the model never produces function
- * calls. Applied by default in the cache path; skipped when preserveTools
- * is true (to share the Anthropic prompt-cache prefix).
+ * Per-request config that strips parent tools. Applied by default in the cache
+ * path; skipped when preserveTools is true (to share the Anthropic prompt-cache
+ * prefix).
  */
 const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
   GenerateContentConfig,
   'tools'
 >;
+
+function createJsonResponseTools(schema: Record<string, unknown>): Tool[] {
+  const functionDeclaration: FunctionDeclaration = {
+    name: 'respond_in_schema',
+    description: 'Provide the response in provided schema',
+    parameters: schema as Schema,
+  };
+  return [{ functionDeclarations: [functionDeclaration] }];
+}
 
 /**
  * Create an isolated GeminiChat that shares the main conversation's
@@ -523,6 +543,7 @@ export async function runForkedAgent(
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
       if (jsonSchema) {
+        requestConfig.tools = createJsonResponseTools(jsonSchema);
         requestConfig.responseMimeType = 'application/json';
         requestConfig.responseJsonSchema = jsonSchema;
       }
@@ -543,11 +564,18 @@ export async function runForkedAgent(
         outputTokens: 0,
         cacheHitTokens: 0,
       };
+      let jsonResult: Record<string, unknown> | undefined;
 
       for await (const event of stream) {
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
+        const functionCall = parts.find(
+          (part) => part.functionCall?.name === 'respond_in_schema',
+        )?.functionCall;
+        if (functionCall?.args && isObject(functionCall.args)) {
+          jsonResult = functionCall.args;
+        }
 
         // Defensive: when preserveTools is true the model could produce
         // functionCall parts instead of text. Log and discard them.
@@ -571,13 +599,8 @@ export async function runForkedAgent(
       }
 
       const trimmed = fullText.trim() || null;
-      let jsonResult: Record<string, unknown> | undefined;
-      if (jsonSchema && trimmed) {
-        try {
-          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
-        } catch {
-          // non-JSON response despite schema constraint — treat as text
-        }
+      if (!jsonResult && jsonSchema && trimmed) {
+        jsonResult = parseLooseJsonObject(trimmed) ?? undefined;
       }
 
       return { text: trimmed, jsonResult, usage, model };
