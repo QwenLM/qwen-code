@@ -150,8 +150,8 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
-  /** The creating repository's common dir, recorded at fetch time. */
-  worktreeCommonDir?: unknown;
+  /** The worktree's own admin entry, recorded at fetch time. */
+  worktreeAdminDir?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   incremental?: unknown;
@@ -1051,17 +1051,18 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
- * The common dir of the repository the review worktree was added from, as
- * fetch-pr recorded it at creation. Handed to the residue probe as its
- * out-of-band identity: a gitfile swapped after creation resolves elsewhere,
- * and the probe refuses the tree instead of measuring the foreign repository
- * as this one. Undefined when the plan carries no record — a local or legacy
- * plan — and the probe falls back to the checks its own reads provide.
+ * The worktree's own admin entry, as fetch-pr recorded it at creation.
+ * Handed to the residue probe as its out-of-band identity: a gitfile swapped
+ * after creation names some OTHER entry — a foreign repository's, or a forge
+ * registered under the same common dir — and the probe refuses the tree
+ * instead of measuring it. Undefined when the plan carries no record — a
+ * local or legacy plan — and the probe falls back to the checks its own
+ * reads provide.
  */
-function creatingCommonDirOf(report: PlanReport): string | undefined {
-  return typeof report.worktreeCommonDir === 'string' &&
-    report.worktreeCommonDir.length > 0
-    ? report.worktreeCommonDir
+function recordedAdminDirOf(report: PlanReport): string | undefined {
+  return typeof report.worktreeAdminDir === 'string' &&
+    report.worktreeAdminDir.length > 0
+    ? report.worktreeAdminDir
     : undefined;
 }
 
@@ -1074,7 +1075,7 @@ function creatingCommonDirOf(report: PlanReport): string | undefined {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt), 12, creatingCommonDirOf(report));
+  return worktreeResidue(resolve(wt), 12, recordedAdminDirOf(report));
 }
 
 /**
@@ -1398,7 +1399,7 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
-      const commonDir = creatingCommonDirOf(report);
+      const adminDir = recordedAdminDirOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1417,10 +1418,10 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}${commonDir === undefined ? '' : ' \\'}`,
-        ...(commonDir === undefined
+        `  --label ${label}${adminDir === undefined ? '' : ' \\'}`,
+        ...(adminDir === undefined
           ? []
-          : [`  --common-dir ${shellQuotePath(commonDir)}`]),
+          : [`  --admin-dir ${shellQuotePath(adminDir)}`]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +

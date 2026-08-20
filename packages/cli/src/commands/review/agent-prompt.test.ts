@@ -1538,14 +1538,14 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
-  it('says UNMEASURED instead of clean when the plan records another creating repository', () => {
-    // fetch-pr records the common dir of the repository it added the worktree
-    // from, and the probe refuses a tree whose gitfile resolves anywhere else
-    // — a gitfile swapped during the review names a foreign repository, and a
-    // probe that measured it would certify the forge instead of the tree. The
-    // plan field is the out-of-band half of that gate, and this is its
-    // wiring: a plan naming the wrong repository turns a dirty tree's verdict
-    // from dirty into unmeasured, never clean.
+  it('says UNMEASURED instead of clean when the plan records another admin entry', () => {
+    // fetch-pr records the tree's own admin entry, and the probe refuses a
+    // tree whose gitfile names any other — a gitfile swapped during the
+    // review names a foreign repository or a forge under the same common
+    // dir, and a probe that measured it would certify the forge instead of
+    // the tree. The plan field is the out-of-band half of that gate, and
+    // this is its wiring: a plan recording the wrong entry turns a dirty
+    // tree's verdict from dirty into unmeasured, never clean.
     const dir = mkdtempSync(join(tmpdir(), 'ap-anchor-'));
     const gitIsolation = isolateHostGitConfig();
     try {
@@ -1560,8 +1560,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
       git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
       writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
-      // A second repository — the shape a swapped gitfile's common dir
-      // resolves to.
+      // A second repository — the shape a swapped gitfile resolves to.
       const foreign = join(dir, 'foreign');
       mkdirSync(foreign);
       execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: foreign });
@@ -1572,7 +1571,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         JSON.stringify({
           ...PLAN,
           worktreePath: wt,
-          worktreeCommonDir: join(foreign, '.git'),
+          worktreeAdminDir: join(foreign, '.git'),
           prNumber: '9207',
           ownerRepo: 'QwenLM/qwen-code',
         }),
@@ -1584,7 +1583,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
       expect(brief).toContain('Whether it is clean could not be measured');
-      expect(brief).toContain('other than the one this tree was created from');
+      expect(brief).toContain('other than the one recorded');
       expect(brief).not.toContain('And right now it is not clean');
       expect(writeStderrLine).toHaveBeenCalledWith(
         expect.stringContaining('could not measure'),
@@ -2725,6 +2724,34 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(
       buildRoleBrief(PR_PLAN, 'verify', { key: 'verify; rm -rf /' }),
     ).toContain('--label verify__rm_-rf__');
+    // The residue anchor is welded in the same shape when the plan carries
+    // one — quoted like --worktree — and absent when it records none. A
+    // mutation dropping the spread here would hand every shard an unanchored
+    // scratch-tree call, and the forge this gate refuses would be reachable
+    // again through the shard invocation path, silently.
+    expect(p).not.toContain('--admin-dir');
+    expect(
+      buildRoleBrief(
+        {
+          ...PR_PLAN,
+          worktreeAdminDir: '/repo/.git/worktrees/review-pr-6766',
+        },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain("--admin-dir '/repo/.git/worktrees/review-pr-6766'");
+    // And the ESCAPE on this operand too: the recorded path rides the plan
+    // from fetch time and can carry a workspace's spaces and quotes.
+    expect(
+      buildRoleBrief(
+        {
+          ...PR_PLAN,
+          worktreeAdminDir: "/repo/.git/worktrees/John's PR",
+        },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(`--admin-dir '/repo/.git/worktrees/John'\\''s PR'`);
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');

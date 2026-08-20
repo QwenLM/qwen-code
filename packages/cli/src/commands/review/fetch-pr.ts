@@ -172,15 +172,17 @@ type FetchPrResult = PlanReport & {
   host: string | null;
   worktreePath: string;
   /**
-   * The common dir of the repository this command added the worktree to,
-   * resolved through the creating side's own discovery at fetch time and
-   * never through the worktree's gitfile. The residue probe's identity gate
-   * compares what that gitfile resolves to against THIS recorded value, so a
-   * gitfile swapped during the review cannot certify a foreign repository as
-   * the tree (#9557). Null when git could not answer at fetch time; the probe
-   * then falls back to the checks its own reads provide.
+   * The worktree's own admin entry (`<common>/worktrees/<id>`), resolved
+   * through the worktree's gitfile at fetch time — the one `worktree add`
+   * wrote moments earlier — and recorded before any PR content runs. The
+   * residue probe's identity gate compares the admin entry the tree's
+   * gitfile resolves to against THIS recorded value, so a gitfile swapped
+   * during the review is refused whether it names a foreign repository or a
+   * forge registered under the same common dir (#9557). Null when git could
+   * not answer at fetch time; the probe then falls back to the checks its
+   * own reads provide.
    */
-  worktreeCommonDir: string | null;
+  worktreeAdminDir: string | null;
   baseRefName: string;
   headRefName: string;
   isCrossRepository: boolean;
@@ -1637,14 +1639,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // a padded host silently drops to github.com anchor links.
       host: args.host?.trim() || null,
       worktreePath: wt,
-      // Resolved from the SAME discovery the `worktree add` above ran under
-      // — the creating repository — and recorded now, before any PR content
-      // runs: the residue probe refuses a tree whose gitfile resolves
-      // anywhere else (see `worktreeResidue`'s identity gate).
-      worktreeCommonDir: gitOpt(
+      // The tree's own admin entry, resolved through the gitfile
+      // `worktree add` wrote moments ago and recorded now, before any PR
+      // content runs: the residue probe refuses a tree whose gitfile names
+      // any OTHER entry (see `worktreeResidue`'s identity gate). `-C wt`
+      // because the process cwd is the creating repository, whose own
+      // `--git-dir` is the wrong directory entirely; absolute, because a
+      // relative answer would later resolve against whichever cwd reads it.
+      worktreeAdminDir: gitOpt(
+        '-C',
+        wt,
         'rev-parse',
         '--path-format=absolute',
-        '--git-common-dir',
+        '--git-dir',
       ),
       baseRefName: meta.baseRefName,
       headRefName: meta.headRefName,

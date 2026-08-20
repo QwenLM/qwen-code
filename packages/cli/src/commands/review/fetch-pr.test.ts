@@ -526,17 +526,24 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
-  it('records the creating repository common dir for the residue anchor', async () => {
-    // The residue probe refuses a review tree whose gitfile resolves anywhere
-    // other than the repository fetch-pr added it from; the expected common
-    // dir is recorded HERE, at creation, and rides the plan (#9557). Off the
-    // default mock (gitOpt answers null) the field degrades to null — readers
-    // treat that as "no anchor recorded".
-    expect((await reportFor({})).worktreeCommonDir).toBeNull();
+  it('records the worktree admin dir for the residue anchor', async () => {
+    // The residue probe refuses a review tree whose gitfile names any admin
+    // entry other than the one recorded HERE, at creation, riding the plan
+    // (#9557). The recording spawn carries `--path-format=absolute`: without
+    // it git answers a RELATIVE dir from a top-level checkout, and nothing
+    // downstream pins the recorded value to an absolute path — a shard
+    // resolving it against its own cwd would refuse every healthy tree as
+    // unmeasured. Off the default mock (gitOpt answers null) the field
+    // degrades to null — readers treat that as "no anchor recorded".
+    expect((await reportFor({})).worktreeAdminDir).toBeNull();
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args.includes('--git-common-dir') ? '/repo/.git' : null,
+      args.includes('--git-dir') && args.includes('--path-format=absolute')
+        ? '/repo/.git/worktrees/review-pr-42'
+        : null,
     );
-    expect((await reportFor({})).worktreeCommonDir).toBe('/repo/.git');
+    expect((await reportFor({})).worktreeAdminDir).toBe(
+      '/repo/.git/worktrees/review-pr-42',
+    );
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {

@@ -89,32 +89,37 @@ describe('runScratchTree', () => {
     );
   });
 
-  it('anchors the shared-tree residue at the creating repository the caller names', () => {
-    // The --common-dir the pipeline welds into this call is the residue
-    // probe's out-of-band identity: a shared tree whose gitfile resolves
-    // anywhere else fails closed as unmeasured instead of being measured
-    // against the foreign repository. The correct common dir measures the
-    // residue normally.
+  it('anchors the shared-tree residue at the admin entry the caller names', () => {
+    // The --admin-dir the pipeline welds into this call is the residue
+    // probe's out-of-band identity: a shared tree whose gitfile names any
+    // other entry — a foreign repository or a forge under the same common
+    // dir — fails closed as unmeasured instead of being measured against
+    // it. The tree's own recorded admin entry measures the residue normally.
     writeFileSync(join(worktree, '__probe__.test.ts'), 'probe');
     const foreign = join(repo, 'foreign');
     mkdirSync(foreign);
     git(foreign, 'init', '-q', '-b', 'main');
+    const own = execFileSync(
+      'git',
+      ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-dir'],
+      { encoding: 'utf8' },
+    ).trim();
 
     const refused = runScratchTree({
       worktree,
       label: 'verify--round-1--abc123',
-      commonDir: join(foreign, '.git'),
+      adminDir: join(foreign, '.git'),
     });
     expect(refused.available).toBe(true);
     expect(refused.sharedTreeResidue).toEqual([]);
     expect(refused.sharedTreeUnmeasured).toContain(
-      'other than the one this tree was created from',
+      'other than the one recorded',
     );
 
     const measured = runScratchTree({
       worktree,
       label: 'verify--round-1--abc123',
-      commonDir: join(repo, '.git'),
+      adminDir: own,
     });
     expect(measured.available).toBe(true);
     expect(measured.sharedTreeResidue).toEqual(['__probe__.test.ts']);

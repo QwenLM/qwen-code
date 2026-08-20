@@ -120,13 +120,12 @@ export interface ScratchTreeArgs {
   worktree: string;
   label: string;
   /**
-   * The common dir of the repository the review worktree was added from, as
-   * fetch-pr recorded it at creation. Handed to the residue probe so a
-   * gitfile swapped after creation is refused instead of measured; omitted
-   * when the caller has no record, and the probe falls back to the checks
-   * its own reads provide.
+   * The worktree's own admin entry, as fetch-pr recorded it at creation.
+   * Handed to the residue probe so a gitfile swapped after creation is
+   * refused instead of measured; omitted when the caller has no record, and
+   * the probe falls back to the checks its own reads provide.
    */
-  commonDir?: string;
+  adminDir?: string;
   out?: string;
 }
 
@@ -479,7 +478,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did.
-  const residue = worktreeResidue(worktree, 12, args.commonDir);
+  const residue = worktreeResidue(worktree, 12, args.adminDir);
   const sharedTreeResidue = residue.paths;
   const residueNote = residue.unmeasured
     ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
@@ -676,12 +675,12 @@ export const scratchTreeCommand: CommandModule = {
           'block. Two agents sharing a label share a tree, which is the race ' +
           'this command exists to remove.',
       })
-      .option('common-dir', {
+      .option('admin-dir', {
         type: 'string',
         describe:
-          "The creating repository's common dir, as the pipeline recorded " +
-          'it at fetch time: the residue probe refuses a shared tree whose ' +
-          '.git resolves anywhere else',
+          "The worktree's own admin entry, as the pipeline recorded it at " +
+          'fetch time: the residue probe refuses a shared tree whose .git ' +
+          'names any other entry',
       })
       .option('out', {
         type: 'string',

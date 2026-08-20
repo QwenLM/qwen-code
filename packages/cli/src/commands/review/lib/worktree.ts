@@ -621,10 +621,13 @@ function trackedIgnoreSources(
  * planted repo from the tree it replaced: a genuine review worktree holds its
  * `.git` as a gitFILE naming its admin entry, and anything else is refused as
  * unmeasured rather than certified clean. When the caller also hands in the
- * common dir of the repository that CREATED the tree, the gitfile's target
- * must resolve to exactly that repository: a forge that writes its own admin
- * backpointer round-trips self-consistently, so the round-trip alone cannot
- * refuse it — the out-of-band anchor is the check that does.
+ * tree's OWN admin entry, recorded out-of-band at creation, the gitfile's
+ * target must resolve to exactly that entry: a forge that writes its own
+ * admin backpointer round-trips self-consistently — whether it registers
+ * inside the creating repository's common dir or stands outside it — so the
+ * round-trip alone cannot refuse it. The anchor names the one entry a forge
+ * cannot share: the creating repository registered it before any PR content
+ * ran.
  *
  * One blind spot the identity checks cannot close: `git status` never looks
  * INSIDE a committed gitlink (mode 160000), and untracked content there does
@@ -643,7 +646,7 @@ function trackedIgnoreSources(
 export function worktreeResidue(
   cwd: string,
   cap = 12,
-  expectedCommonDir?: string,
+  expectedAdminDir?: string,
 ): WorktreeResidue {
   // A genuine review worktree carries its `.git` as a FILE naming its admin
   // entry. A `.git` DIRECTORY at this path is a repository planted over the
@@ -674,19 +677,13 @@ export function worktreeResidue(
   // one's. Fail closed the way a loud git failure below does.
   const top = spawnSync(
     'git',
-    [
-      'rev-parse',
-      '--path-format=absolute',
-      '--show-toplevel',
-      '--git-dir',
-      '--git-common-dir',
-    ],
+    ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir'],
     { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   let isWorktree = false;
   let anchor: string[] = [];
   try {
-    const [toplevel, gitDir, commonDir] = (top.stdout ?? '').trim().split('\n');
+    const [toplevel, gitDir] = (top.stdout ?? '').trim().split('\n');
     isWorktree =
       !top.error &&
       top.status === 0 &&
@@ -694,45 +691,66 @@ export function worktreeResidue(
       realpathSync(toplevel) === realpathSync(cwd);
     if (isWorktree) {
       // The identity this tree was CREATED under, handed in out-of-band by
-      // the pipeline that added it. A round-trip through the gitfile alone
-      // proves only that two files the swapper controls agree with each
-      // other: a forge holding the contamination as committed content can
-      // write its own admin `gitdir` backpointer naming this tree, read
-      // self-consistent, and have every measurement below locked to it by
-      // the pin. The gitfile's target must resolve inside the creating
-      // repository instead — a mismatch is the swap itself. `scratch-tree`
-      // escapes the same class by cross-checking two trees against each
-      // other; this probe measures one tree, so the reference arrives from
-      // its caller.
-      if (expectedCommonDir !== undefined) {
+      // the pipeline that added it: the tree's own admin entry, recorded at
+      // fetch time. A round-trip through the gitfile alone proves only that
+      // two files the swapper controls agree with each other — a forge
+      // holding the contamination as committed content writes its own admin
+      // `gitdir` backpointer naming this tree and reads self-consistent,
+      // whether that entry registers inside the creating repository's
+      // common dir or stands entirely outside it. The anchor names the one
+      // entry a forge cannot share; any other target — a fabricated entry,
+      // a tampered sibling's, a foreign repository — is the swap itself.
+      // `scratch-tree` escapes the same class by cross-checking two trees
+      // against each other; this probe measures one tree, so the reference
+      // arrives from its caller. The two sides resolve SEPARATELY: a
+      // swapped gitfile can name a path `realpathSync` cannot follow (an
+      // invalid UTF-8 byte is the limit this function's own doc comment
+      // acknowledges), and the refusal must say which side failed — the
+      // recorded side first, because a broken record cannot re-derive.
+      if (expectedAdminDir !== undefined) {
+        let recordedAdminDir: string;
         try {
-          if (realpathSync(commonDir) !== realpathSync(expectedCommonDir)) {
-            return {
-              paths: [],
-              total: 0,
-              unmeasured:
-                'the .git gitfile resolves to a repository other than the ' +
-                'one this tree was created from — the commands below would ' +
-                'measure whichever repository it does name',
-            };
-          }
+          recordedAdminDir = realpathSync(expectedAdminDir);
         } catch {
-          // An expected common dir that does not resolve is a broken
+          // A recorded admin entry that does not resolve is a broken
           // anchor, not a reason to measure unanchored.
           return {
             paths: [],
             total: 0,
             unmeasured:
-              'the creating repository recorded for this tree does not ' +
-              'resolve on disk, so its identity cannot be checked',
+              'the admin entry recorded for this tree does not resolve on ' +
+              'disk, so its identity cannot be checked',
+          };
+        }
+        let discoveredAdminDir: string;
+        try {
+          discoveredAdminDir = realpathSync(gitDir);
+        } catch {
+          return {
+            paths: [],
+            total: 0,
+            unmeasured:
+              'the .git gitfile names an admin entry that does not ' +
+              'resolve on disk, so the identity check cannot run',
+          };
+        }
+        if (discoveredAdminDir !== recordedAdminDir) {
+          return {
+            paths: [],
+            total: 0,
+            unmeasured:
+              'the .git gitfile names an admin entry other than the one ' +
+              'recorded for this tree — the commands below would measure ' +
+              'whichever repository it does name',
           };
         }
       }
       // And the gitfile must name an admin entry that names this tree BACK:
-      // a gitfile naming a SIBLING worktree's admin entry — inside the same
-      // common dir, so the anchor above admits it — otherwise measures the
-      // sibling's state as this one's, and a plant with no admin entry at
-      // all has nothing to round-trip and fails here too. Its own try: a
+      // a plant with no admin entry at all has nothing to round-trip and
+      // fails here, and for a caller that handed in no anchor this is the
+      // only check binding the gitfile to the tree it claims — an anchored
+      // caller's entry was already pinned to the tree's own above. Its own
+      // try: a
       // plant has no `gitdir` file to read, and letting that ENOENT fall
       // into the outer catch reported it as "not a git worktree", which is
       // a different and much vaguer thing than what was found. The pin

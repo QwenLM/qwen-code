@@ -186,14 +186,14 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(tree).unmeasured).toBeUndefined();
   });
 
-  it('measures the same residue when the caller anchors the creating repository', () => {
-    // The anchor is an OPT-IN third check: callers that know the common dir of
-    // the repository the tree was created from hand it in, and healthy trees
-    // measure byte-identically with and without it — a wrong pin would be
-    // worse than none, so the healthy path is the one that must not move.
+  it('measures the same residue when the caller anchors the recorded admin entry', () => {
+    // The anchor is an OPT-IN third check: callers that hold the admin entry
+    // the tree was created under hand it in, and healthy trees measure
+    // byte-identically with and without it — a wrong pin would be worse than
+    // none, so the healthy path is the one that must not move.
     writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
     writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
-    const expected = realpathSync(join(repo, '.git'));
+    const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
     const got = worktreeResidue(tree, 12, expected);
     expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
     expect(got.unmeasured).toBeUndefined();
@@ -257,11 +257,11 @@ describe('worktreeResidue', () => {
     // backpointer names it back, and the pin then locks every measurement to
     // the forge. Measured at the pre-fix gate: the probe answers
     // `{paths: [], total: 0}` — certified clean — with the mutant on disk.
-    // The out-of-band anchor is the check a forge cannot pass: it resolves
-    // outside the repository the tree was created from.
+    // The out-of-band anchor is the check a forge cannot pass: the gitfile
+    // names an entry other than the one recorded for this tree.
     writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
-    const expected = realpathSync(join(repo, '.git'));
+    const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
     // Genuine first, anchored, so the fixture is known to measure at all.
     expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
       '__probe__.test.ts',
@@ -303,11 +303,113 @@ describe('worktreeResidue', () => {
     const got = worktreeResidue(tree, 12, expected);
 
     expect(got.paths).toEqual([]);
-    expect(got.unmeasured).toContain('other than the one this tree was');
+    expect(got.unmeasured).toContain('other than the one recorded');
     // The mutant is still on disk: the refusal withholds the certificate, it
     // does not touch the tree.
     expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
   });
+
+  it('says UNMEASURED for a forge whose admin entry lives INSIDE the creating repository', () => {
+    // The fabricated-backpointer forge's sibling, one step closer to home:
+    // the admin entry the swapped gitfile names is a REAL registration under
+    // the creating repository's own common dir — a second worktree added
+    // there, holding the contamination as committed content, its `gitdir`
+    // backpointer rewritten to name this tree. A common-dir anchor admits it
+    // (it resolves inside the creating repository), the round-trip reads
+    // self-consistent (one writer authored both sides), and the pin then
+    // locks every measurement to the forge's committed-clean index. Measured
+    // at the pre-fix gate: `{paths: [], total: 0}` — certified clean — with
+    // the mutant on disk. The anchor must name the tree's OWN admin entry,
+    // not the common dir that contains it.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
+    // Genuine first, anchored, so the fixture is known to measure at all.
+    expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const forge = join(repo, 'forge');
+    gitRepo('worktree', 'add', '--detach', '-q', forge, 'HEAD');
+    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+    gitRepo('-C', forge, 'add', '-A');
+    gitRepo(
+      '-C',
+      forge,
+      'commit',
+      '-qm',
+      'the mutant, as if it were the commit',
+    );
+    const forgeAdmin = gitRepo(
+      '-C',
+      forge,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    // The swap: the forge entry's backpointer names this tree, and this
+    // tree's gitfile names the forge entry. Both files, one writer.
+    writeFileSync(join(forgeAdmin, 'gitdir'), `${join(tree, '.git')}\n`);
+    writeFileSync(join(tree, '.git'), `gitdir: ${forgeAdmin}\n`);
+
+    const got = worktreeResidue(tree, 12, expected);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('other than the one recorded');
+    expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
+  });
+
+  it('says UNMEASURED when the recorded admin entry does not resolve on disk', () => {
+    // The anchor is a record, and records go stale — a plan surviving a
+    // cleanup, a tampered one. Measuring unanchored after the anchor failed
+    // to resolve would be exactly the probe the anchor exists to prevent, so
+    // the refusal names the recorded side specifically: an operator following
+    // the message knows to inspect the fetch record.
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const got = worktreeResidue(tree, 12, join(repo, 'nonexistent', 'wt-id'));
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain(
+      'the admin entry recorded for this tree does not resolve',
+    );
+  });
+
+  // Invalid-UTF-8 filenames cannot be created on Windows; the shape pinned
+  // here (git resolving a byte path Node's fs APIs cannot follow) needs one.
+  it.skipIf(process.platform === 'win32')(
+    'names the GITFILE side when that operand does not resolve',
+    () => {
+      // The two anchor operands resolve separately because they fail for
+      // different reasons: the recorded side is the fetch record, the
+      // discovered side is whatever the gitfile names. A swapped gitfile can
+      // name a path Node's fs APIs cannot follow — an invalid UTF-8 byte is
+      // the limit this function's own doc comment acknowledges: git resolves
+      // it byte-wise and prints it, `encoding: 'utf8'` renders U+FFFD, and
+      // no string spelling of the name resolves. The refusal must say WHICH
+      // side failed; blaming the record sends the operator inspecting a
+      // fetch record that is fine while the gitfile side goes unnamed.
+      const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
+      writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+      execFileSync('sh', [
+        '-c',
+        `set -e
+bad="$(printf '${repo}/forge\\377')"
+mkdir -p "$bad"
+git init -q -b main --template= "$bad"
+git -C "$bad" config core.worktree '${tree}'
+printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
+      ]);
+
+      const got = worktreeResidue(tree, 12, expected);
+
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toContain(
+        'the .git gitfile names an admin entry that does not',
+      );
+      expect(got.unmeasured).not.toContain('recorded for this tree');
+    },
+  );
 
   it('says UNMEASURED, not clean, when a repository is planted at the path', () => {
     // The concealment: `rm .git && git init && git add -A && git commit` over
@@ -638,10 +740,29 @@ describe('worktreeResidue', () => {
       // strictly AFTER the gate, no race — and every anchored spawn ignores
       // the swap because it names the verified admin entry outright. Drop the
       // anchor spreads and the plant answers a clean status for this dirty
-      // tree: the mutant certified clean, deterministically.
+      // tree: the mutant certified clean, deterministically. The shim also
+      // RECORDS every argv: the residue verdict alone discriminates only the
+      // two spawns whose answers change the result (`status`, `ls-files
+      // --others` — the plant mirrors the disk), so the recorded argv is what
+      // proves the pin rides the other four as well. Measured by mutation:
+      // dropping any one of the six anchor spreads fails an assertion here.
+      //
+      // One ignore rule the COMMIT carries, and the file it hides: that is
+      // what makes the reconciliation spawns run at all — `check-ignore` and
+      // the tracked-source `ls-files` fire only when `status` hides something
+      // the raw listing shows, and an anchored probe must still come back
+      // with exactly the two residue paths.
+      writeFileSync(
+        join(repo, '.gitignore'),
+        'node_modules\ndist\nhidden.txt\n',
+      );
+      gitRepo('add', '-A');
+      gitRepo('commit', '-qm', 'ignore the hidden file');
+      git('checkout', '--detach', 'main');
       writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
       writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
-      const expected = realpathSync(join(repo, '.git'));
+      writeFileSync(join(tree, 'hidden.txt'), 'the file the commit hides');
+      const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
 
       // The plant: the contamination committed, `core.worktree` answering for
       // this tree — a clean `status` for the dirty tree, if a spawn ever
@@ -675,7 +796,7 @@ describe('worktreeResidue', () => {
       }).trim();
       writeFileSync(
         join(shim, 'git'),
-        `#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = status ]; then\n    printf 'gitdir: ${plant}/.git\\n' > '${tree}/.git'\n    break\n  fi\ndone\nexec ${realGit} "$@"\n`,
+        `#!/bin/sh\nsep=$(printf '\\037')\nout=""\ns=""\nfor a in "$@"; do\n  out="$out$s$a"\n  s="$sep"\ndone\nprintf '%s\\n' "$out" >> '${shim}/calls.log'\nfor a in "$@"; do\n  if [ "$a" = status ]; then\n    printf 'gitdir: ${plant}/.git\\n' > '${tree}/.git'\n    break\n  fi\ndone\nexec ${realGit} "$@"\n`,
         { mode: 0o755 },
       );
       process.env['PATH'] = `${shim}:${realPath}`;
@@ -689,6 +810,26 @@ describe('worktreeResidue', () => {
       );
       expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
       expect(got.unmeasured).toBeUndefined();
+
+      // The pin rides EVERY measurement spawn — status, ls-files --others,
+      // check-ignore, the tracked-source ls-files, ls-files -s and ls-files
+      // -v. A future edit that loses one of the anchor spreads (a helper
+      // refactor, a new spawn added without the prefix) fails here even when
+      // the plant cannot tell the answers apart.
+      const calls = readFileSync(join(shim, 'calls.log'), 'utf8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => line.split('\u001f'));
+      const measurements = calls.filter((argv) =>
+        ['status', 'ls-files', 'check-ignore'].some((sub) =>
+          argv.includes(sub),
+        ),
+      );
+      expect(measurements.length).toBeGreaterThanOrEqual(6);
+      for (const argv of measurements) {
+        expect(argv).toContain(`--git-dir=${realpathSync(expected)}`);
+        expect(argv).toContain(`--work-tree=${realpathSync(tree)}`);
+      }
     },
   );
 });
