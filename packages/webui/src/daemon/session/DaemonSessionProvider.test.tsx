@@ -17,6 +17,7 @@ import type {
   DaemonTranscriptStore,
   DaemonUiSessionActions,
   DaemonUnrecognizedDiagnostic,
+  GoalStateResponse,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -82,6 +83,8 @@ interface MockSession {
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
   shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
+  goal: () => Promise<GoalStateResponse>;
+  controlGoal: (request: unknown) => Promise<GoalStateResponse>;
   context: () => Promise<{
     v: 1;
     sessionId: string;
@@ -1454,6 +1457,21 @@ describe('DaemonSessionProvider', () => {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: '' },
               _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'running',
+                  goal: {
+                    goalId: 'goal-sync',
+                    revision: 1,
+                    objective: 'ship goal sync',
+                    status: 'active',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 0,
+                    activeTimeMs: 0,
+                    createdAt: 1234,
+                    updatedAt: 1234,
+                  },
+                },
                 goalStatus: {
                   kind: 'set',
                   condition: 'ship goal sync',
@@ -1485,9 +1503,11 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -1521,6 +1541,290 @@ describe('DaemonSessionProvider', () => {
         },
       }),
     ]);
+    expect(connection?.goalState).toMatchObject({
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-sync',
+        revision: 1,
+        objective: 'ship goal sync',
+      },
+    });
+  });
+
+  it('does not overwrite a streamed goal update with the session-load snapshot', async () => {
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const streamedGoal: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-sync',
+        revision: 2,
+        objective: 'newer objective',
+        status: 'paused',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: streamedGoal })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'pause',
+        expectedGoalId: 'goal-sync',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(streamedGoal);
+
+    pendingGoal.resolve({
+      snapshot: {
+        ...streamedGoal,
+        activity: 'running',
+        goal: { ...streamedGoal.goal!, revision: 1, status: 'active' },
+      },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(streamedGoal);
+  });
+
+  it('applies a cleared session-load Goal snapshot over a stale active one', async () => {
+    // The load-time `goal()` is issued before the state below is installed, so
+    // a reference-equality guard would discard its authoritative cleared
+    // snapshot — and install no tombstone, leaving the stale goal to come back.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const staleActive: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-stale',
+        revision: 1,
+        objective: 'stale objective',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: staleActive })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'pause',
+        expectedGoalId: 'goal-stale',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(staleActive);
+
+    pendingGoal.resolve({
+      snapshot: {
+        v: 2,
+        goal: null,
+        activity: 'idle',
+        clearedGoal: { goalId: 'goal-stale', revision: 3, updatedAt: 4567 },
+      },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState?.goal).toBeNull();
+  });
+
+  it('does not let a stale bare-null session-load Goal read wipe a Goal created meanwhile', async () => {
+    // Mirrors actions.test.ts's `getGoal` case for the OTHER `goal()` reader.
+    // The load issues its read while the session is goal-less, so the response
+    // carries no `clearedGoal` tombstone; a goal created inside the load window
+    // (Web Shell allocates the session, then creates the goal on it) would
+    // otherwise be accepted as the clear target — wiping it AND tombstoning its
+    // identity, after which its own frames at the same revision are rejected as
+    // superseded and the composer stops holding prompts for the Goal queue.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const created: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({ goal: vi.fn(() => pendingGoal.promise) }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const sessionId = connection?.sessionId;
+    expect(sessionId).toBeDefined();
+    await act(async () => {
+      actions?.applyGoalSnapshot(sessionId!, created);
+    });
+    expect(connection?.goalState).toBe(created);
+
+    pendingGoal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(created);
+  });
+
+  it('keeps a known Goal state when the session-load Goal request fails', async () => {
+    // Only the fresh-connection branch synthesizes an idle snapshot; once a
+    // state is known, a transient `goal()` failure must not replace a live goal
+    // with idle — that would drop the strip and the composer gating while the
+    // daemon still considers the goal live.
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const knownGoal: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-known',
+        revision: 2,
+        objective: 'keep me',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: knownGoal })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'resume',
+        expectedGoalId: 'goal-known',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(knownGoal);
+
+    pendingGoal.reject(new Error('goal route unavailable'));
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(knownGoal);
+  });
+
+  it('releases unknown Goal state when the session-load Goal request fails', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn().mockRejectedValue(new Error('goal route unavailable')),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
   });
 
   it('routes mid_turn_message_injected frames to the sidechannel and transcript', async () => {
@@ -11720,6 +12024,33 @@ describe('DaemonSessionProvider', () => {
         yield {
           id: 1,
           v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'running',
+                  goal: {
+                    goalId: 'goal-before-close',
+                    revision: 1,
+                    objective: 'must disappear',
+                    status: 'active',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 0,
+                    activeTimeMs: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                  },
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 2,
+          v: 1,
           type: 'session_closed',
           data: { reason: 'client_close' },
         };
@@ -11767,6 +12098,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
     expect(connection?.status).toBe('disconnected');
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.goalState).toBeUndefined();
     // Teardown set promptStatus to 'idle' — without the explicit
     // setPromptStatus('idle') in the userDeletedSession block, this
     // would remain 'waiting' (sendPrompt's own handler is blocked
@@ -13060,6 +13392,16 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       })),
     heartbeat: opts.heartbeat ?? vi.fn(async () => ({ ok: true })),
     shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),
+    goal:
+      opts.goal ??
+      vi.fn(async () => ({
+        snapshot: { v: 2 as const, goal: null, activity: 'idle' as const },
+      })),
+    controlGoal:
+      opts.controlGoal ??
+      vi.fn(async () => ({
+        snapshot: { v: 2 as const, goal: null, activity: 'idle' as const },
+      })),
     context:
       opts.context ??
       vi.fn(async () => ({

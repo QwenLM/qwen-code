@@ -344,6 +344,14 @@ export type {
   KnownDaemonEvent,
 } from './events.js';
 export type {
+  GoalActivity,
+  GoalControlRequest,
+  GoalLimitKind,
+  GoalRecord,
+  GoalSnapshotV2,
+  GoalStateResponse,
+  GoalStatus,
+  TranscriptCursor,
   DaemonAgentLevel,
   DaemonAgentMutationResult,
   DaemonGeneratedAgentContent,
