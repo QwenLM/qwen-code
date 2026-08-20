@@ -3476,6 +3476,7 @@ describe('Session', () => {
 
     it('clears the active Todo plan revision when restoring history', async () => {
       enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
         entries: [
