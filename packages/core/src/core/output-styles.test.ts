@@ -7,8 +7,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   BUILT_IN_OUTPUT_STYLES,
+  DEFAULT_OUTPUT_STYLE_TURN_REMINDER,
   applyOutputStyle,
   getBuiltInOutputStyle,
+  getOutputStyleTurnReminder,
   renderOutputStyleSection,
   type OutputStyleDefinition,
 } from './output-styles.js';
@@ -53,11 +55,30 @@ describe('built-in output styles', () => {
     }
   });
 
-  it('attaches a turn reminder only to the behaviour-constraining styles', () => {
-    const withReminder = BUILT_IN_OUTPUT_STYLES.filter(
-      (style) => style.turnReminder,
-    ).map((style) => style.name);
-    expect(withReminder).toEqual(['Concise', 'Proactive']);
+  it('gives every style a turn reminder, generic or style-specific', () => {
+    for (const style of BUILT_IN_OUTPUT_STYLES) {
+      const reminder = getOutputStyleTurnReminder(style);
+      expect(reminder.startsWith(`${style.name} output style is active.`)).toBe(
+        true,
+      );
+      expect(reminder.trim()).not.toBe(`${style.name} output style is active.`);
+    }
+  });
+
+  it('uses the style-specific reminder when one is defined', () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+    expect(concise.turnReminder).toBeDefined();
+    expect(getOutputStyleTurnReminder(concise)).toBe(
+      `Concise output style is active. ${concise.turnReminder}`,
+    );
+  });
+
+  it('falls back to the generic reminder for a style without one', () => {
+    const explanatory = getBuiltInOutputStyle('Explanatory')!;
+    expect(explanatory.turnReminder).toBeUndefined();
+    expect(getOutputStyleTurnReminder(explanatory)).toBe(
+      `Explanatory output style is active. ${DEFAULT_OUTPUT_STYLE_TURN_REMINDER}`,
+    );
   });
 
   it('has no duplicate names', () => {
@@ -84,16 +105,16 @@ describe('getBuiltInOutputStyle', () => {
 });
 
 describe('renderOutputStyleSection', () => {
-  it('renders the style under an active-style heading', () => {
+  it('names the style with an Output Style heading', () => {
     expect(renderOutputStyleSection(LAYERED)).toBe(
-      '# Layered Style Active\n\nStyle body.',
+      '# Output Style: Layered\nStyle body.',
     );
   });
 
-  it('trims the prompt so the heading gap stays a single blank line', () => {
+  it('trims the prompt so the heading gap stays a single newline', () => {
     expect(
       renderOutputStyleSection({ ...LAYERED, prompt: '\n\nStyle body.\n\n' }),
-    ).toBe('# Layered Style Active\n\nStyle body.');
+    ).toBe('# Output Style: Layered\nStyle body.');
   });
 });
 
@@ -103,15 +124,17 @@ describe('applyOutputStyle', () => {
     expect(applyOutputStyle('BASE', null)).toBe('BASE');
   });
 
-  it('appends a style that keeps the coding instructions', () => {
+  it('appends the style section to the base prompt', () => {
     expect(applyOutputStyle('BASE', LAYERED)).toBe(
-      'BASE\n\n# Layered Style Active\n\nStyle body.',
+      'BASE\n\n# Output Style: Layered\nStyle body.',
     );
   });
 
-  it('replaces the base prompt for a style that drops them', () => {
+  it('still appends when the style drops the coding instructions', () => {
+    // keepCodingInstructions selects which sections the base was built from;
+    // it never suppresses the style section itself.
     expect(applyOutputStyle('BASE', REPLACING)).toBe(
-      '# Replacing Style Active\n\nStyle body.',
+      'BASE\n\n# Output Style: Replacing\nStyle body.',
     );
   });
 });

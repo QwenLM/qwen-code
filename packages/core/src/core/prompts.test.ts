@@ -586,7 +586,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     it('leaves the prompt untouched when no style is active', () => {
       const prompt = getCoreSystemPrompt();
       for (const style of BUILT_IN_OUTPUT_STYLES) {
-        expect(prompt).not.toContain(`# ${style.name} Style Active`);
+        expect(prompt).not.toContain(`# Output Style: ${style.name}`);
       }
     });
 
@@ -598,9 +598,9 @@ describe('Core System Prompt (prompts.ts)', () => {
         'interactive',
         concise,
       );
-      expect(prompt).toContain('# Concise Style Active');
+      expect(prompt).toContain('# Output Style: Concise');
       // The style refines the mandates, so it has to land after them...
-      expect(prompt.indexOf('# Concise Style Active')).toBeGreaterThan(
+      expect(prompt.indexOf('# Output Style: Concise')).toBeGreaterThan(
         prompt.indexOf('# Core Mandates'),
       );
       // ...and the base prompt must still be intact.
@@ -615,7 +615,7 @@ describe('Core System Prompt (prompts.ts)', () => {
         'interactive',
         concise,
       );
-      const styleIndex = prompt.indexOf('# Concise Style Active');
+      const styleIndex = prompt.indexOf('# Output Style: Concise');
       expect(styleIndex).toBeGreaterThan(-1);
       expect(styleIndex).toBeLessThan(prompt.indexOf('MEMORY_MARKER'));
       expect(styleIndex).toBeLessThan(prompt.indexOf('APPEND_MARKER'));
@@ -633,7 +633,58 @@ describe('Core System Prompt (prompts.ts)', () => {
         concise,
       );
       expect(prompt).toContain('custom system prompt');
-      expect(prompt).not.toContain('# Concise Style Active');
+      expect(prompt).not.toContain('# Output Style: Concise');
+    });
+
+    it('points the identity sentence at the style when one is active', () => {
+      const plain = getCoreSystemPrompt();
+      expect(plain).toContain('specializing in software engineering tasks');
+
+      const styled = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(styled).toContain('responding according to your "Output Style"');
+      expect(styled).not.toContain(
+        'specializing in software engineering tasks',
+      );
+    });
+
+    it('drops only the software-engineering section for keepCodingInstructions: false', () => {
+      const nonCoding = {
+        ...concise,
+        name: 'NonCoding',
+        keepCodingInstructions: false,
+      };
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        nonCoding,
+      );
+      expect(prompt).not.toContain('## Software Engineering Tasks');
+      // Everything else the base prompt carries must survive — dropping the
+      // safety rules along with the workflow guidance would be a regression.
+      expect(prompt).toContain('# Core Mandates');
+      expect(prompt).toContain('# Executing actions with care');
+      expect(prompt).toContain('## Using Your Tools');
+      expect(prompt).toContain('## Tone and Style (CLI Interaction)');
+      expect(prompt).toContain('# Output Style: NonCoding');
+    });
+
+    it('keeps the software-engineering section under a normal style', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('## Software Engineering Tasks');
     });
 
     it('does not bake the style into the QWEN_WRITE_SYSTEM_MD dump', () => {
@@ -648,7 +699,9 @@ describe('Core System Prompt (prompts.ts)', () => {
         concise,
       );
       const [, written] = vi.mocked(fs.writeFileSync).mock.calls[0];
-      expect(written).not.toContain('# Concise Style Active');
+      expect(written).not.toContain('# Output Style: Concise');
+      // ...and the dumped identity sentence is the unstyled one.
+      expect(written).toContain('specializing in software engineering tasks');
     });
   });
 });

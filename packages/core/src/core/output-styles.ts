@@ -18,22 +18,25 @@ export interface OutputStyleDefinition {
   /** One line shown in the style picker. */
   description: string;
   /**
-   * `true` layers `prompt` onto the default coding prompt, so the mandates,
-   * workflows and tool guidance all stay in force. `false` replaces the base
-   * prompt outright, for styles that are not about software engineering at
-   * all; such a style is responsible for its own identity and safety wording.
+   * `false` omits exactly one section of the base prompt — the
+   * software-engineering workflow guidance — for a style whose work is not
+   * coding. Identity, mandates, safety rules, tool guidance and tone are kept
+   * either way; a style never switches those off.
    */
   keepCodingInstructions: boolean;
   /** The style section itself, rendered under a `# <Name> Style Active` heading. */
   prompt: string;
   /**
-   * Optional one-line restatement injected as a `<system-reminder>` on user
-   * turns. Styles that constrain *behaviour* drift over a long session and
-   * need it; styles that only add output (an explanation, a practice prompt)
-   * do not, and paying for a reminder every turn would be waste.
+   * Overrides the generic wording of the per-turn reminder. Every active style
+   * is reminded each turn; this only replaces
+   * `DEFAULT_OUTPUT_STYLE_TURN_REMINDER` with something style-specific.
    */
   turnReminder?: string;
 }
+
+/** Generic reminder wording for a style that does not supply its own. */
+export const DEFAULT_OUTPUT_STYLE_TURN_REMINDER =
+  'Remember to follow the specific guidelines for this style.';
 
 const CONCISE: OutputStyleDefinition = {
   name: 'Concise',
@@ -137,18 +140,40 @@ export function getBuiltInOutputStyle(
   );
 }
 
-/** Renders the style section as it appears in the system prompt. */
+/**
+ * Renders the style section as it appears in the system prompt.
+ *
+ * The `# Output Style: <name>` wrapper is the contract a custom style file
+ * relies on: the file's body becomes `prompt` verbatim and this heading is
+ * what names it in the prompt.
+ */
 export function renderOutputStyleSection(style: OutputStyleDefinition): string {
-  return `# ${style.name} Style Active\n\n${style.prompt.trim()}`;
+  return `# Output Style: ${style.name}\n${style.prompt.trim()}`;
 }
 
 /**
- * Layers an output style onto a base system prompt.
+ * The per-turn reminder line for an active style.
  *
- * Styles that keep the coding instructions are appended to the base, which
- * puts them last in the stable layer — after the mandates they are meant to
- * refine, and still ahead of every context/volatile layer, so the prompt
- * prefix stays cacheable for the whole session.
+ * Every non-default style gets one; `turnReminder` only replaces the generic
+ * wording. Styles drift over a long session — a style that only adds output
+ * drifts just as readily as one that constrains behaviour.
+ */
+export function getOutputStyleTurnReminder(
+  style: OutputStyleDefinition,
+): string {
+  return `${style.name} output style is active. ${
+    style.turnReminder ?? DEFAULT_OUTPUT_STYLE_TURN_REMINDER
+  }`;
+}
+
+/**
+ * Appends an output style's section to a base system prompt.
+ *
+ * The section lands last in the stable layer — after the mandates it refines,
+ * and ahead of every context/volatile layer, so a session's prompt prefix
+ * stays stable for its whole life. `keepCodingInstructions` is not consulted
+ * here: it selects which sections the base prompt was built from, not whether
+ * the style is appended.
  */
 export function applyOutputStyle(
   basePrompt: string,
@@ -157,6 +182,5 @@ export function applyOutputStyle(
   if (!style) {
     return basePrompt;
   }
-  const section = renderOutputStyleSection(style);
-  return style.keepCodingInstructions ? `${basePrompt}\n\n${section}` : section;
+  return `${basePrompt}\n\n${renderOutputStyleSection(style)}`;
 }
