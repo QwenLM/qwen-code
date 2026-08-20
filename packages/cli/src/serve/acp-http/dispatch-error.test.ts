@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import {
   BridgeChannelQuarantinedError,
@@ -100,6 +101,21 @@ describe('toRpcError', () => {
         reason: 'restore_settlement_overdue',
         retryAfterSeconds: 90,
         httpStatus: 503,
+      },
+    });
+  });
+
+  it('maps persisted case conflicts to the session_conflict contract', () => {
+    const error = new SessionIdCaseConflictError(
+      '550e8400-e29b-41d4-a716-446655440149',
+      '550E8400-E29B-41D4-A716-446655440149',
+    );
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        errorKind: 'session_conflict',
+        sessionId: '550e8400-e29b-41d4-a716-446655440149',
       },
     });
   });
