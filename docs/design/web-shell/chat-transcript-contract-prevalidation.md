@@ -1,8 +1,10 @@
 # Web Shell、VS Code、Desktop 与 HTML Export 统一 Chat Transcript 总体设计
 
-> 文档地位：本方案的唯一规范性设计文档  
-> 实施方式：两个 MR 按顺序合入  
-> 当前状态：MR1 契约预验证已在当前分支准备；MR2 生产迁移尚未进入当前分支  
+> 文档地位：本方案的唯一规范性设计文档
+>
+> 实施方式：两个 MR 按顺序合入
+>
+> 当前状态：MR1 契约预验证已在当前分支准备；MR2 生产迁移尚未进入当前分支
 > 当前门禁：`overall: "fail"`，`selectedVscodePath: null`
 
 ## 0. 文档治理

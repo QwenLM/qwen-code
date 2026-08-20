@@ -25,7 +25,10 @@ import {
   DAEMON_PLAN_TOOL_CALL_ID,
   isUnrecognizedDiagnosticReason,
 } from './types.js';
-import { createDaemonToolPreview } from './toolPreview.js';
+import {
+  createDaemonToolPreview,
+  createDaemonToolResultPreview,
+} from './toolPreview.js';
 import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
@@ -135,6 +138,9 @@ export function appendLocalUserTranscriptMessage(
     undefined,
     undefined,
     opts.meta,
+    undefined,
+    undefined,
+    undefined,
   );
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
@@ -228,6 +234,7 @@ function userBlockForAttachment(
     event.meta,
     event.sourceRecordIds,
     event.promptId,
+    event.segmentId,
   ) as DaemonTextTranscriptBlock;
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
@@ -737,6 +744,7 @@ function appendTextDelta(
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
     event.promptId,
+    event.segmentId,
   );
   if (kind === 'assistant' && event.branchRecordId) {
     block.branchRecordId = event.branchRecordId;
@@ -921,6 +929,24 @@ function upsertToolBlock(
       }
       existing.rawOutput = rawOutput;
     }
+    const resultPreview =
+      event.resultPreview ??
+      createDaemonToolResultPreview(
+        rawOutput ?? existing.rawOutput,
+        event.content ?? existing.content,
+        {
+          toolName: event.toolName ?? existing.toolName,
+          toolKind: event.toolKind ?? existing.toolKind,
+        },
+      );
+    if (resultPreview) existing.resultPreview = resultPreview;
+    else if (
+      event.resultPreview !== undefined ||
+      rawOutput !== undefined ||
+      event.content !== undefined
+    ) {
+      delete existing.resultPreview;
+    }
     existing.sourceRecordIds = unionStrings(
       existing.sourceRecordIds,
       event.sourceRecordIds,
@@ -961,6 +987,12 @@ function upsertToolBlock(
     state.toolBlockByCallId[event.parentToolCallId] !== TRIMMED_TOOL_BLOCK_ID
       ? state.toolBlockByCallId[event.parentToolCallId]
       : undefined;
+  const resultPreview =
+    event.resultPreview ??
+    createDaemonToolResultPreview(rawOutput, event.content, {
+      toolName: event.toolName,
+      toolKind: event.toolKind,
+    });
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
@@ -972,6 +1004,7 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     }),
+    ...(resultPreview ? { resultPreview } : {}),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -982,6 +1015,7 @@ function upsertToolBlock(
     ...(event.sourceRecordIds
       ? { sourceRecordIds: [...event.sourceRecordIds] }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.details ? { details: event.details } : {}),
     ...(!compactTaskOutput && event.content !== undefined
       ? { content: event.content }
@@ -1160,6 +1194,7 @@ function appendShellBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
   appendBlock(state, block);
@@ -1204,6 +1239,7 @@ function appendUserShellBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
   state.pendingUserShellCommand = undefined;
@@ -1221,11 +1257,15 @@ function upsertPermissionBlock(
   const preview = createDaemonToolPreview(event.toolCall, {
     title: event.title,
   });
+  const toolIdentity = getPermissionToolIdentity(event.toolCall);
   if (existing?.kind === 'permission') {
     existing.title = event.title;
     existing.options = event.options.map((option) => ({ ...option }));
     existing.toolCall = event.toolCall;
     existing.preview = preview;
+    if (toolIdentity.toolCallId) existing.toolCallId = toolIdentity.toolCallId;
+    if (toolIdentity.toolName) existing.toolName = toolIdentity.toolName;
+    if (toolIdentity.toolKind) existing.toolKind = toolIdentity.toolKind;
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     return;
@@ -1238,6 +1278,7 @@ function upsertPermissionBlock(
     title: event.title,
     options: event.options.map((option) => ({ ...option })),
     preview,
+    ...toolIdentity,
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1245,6 +1286,7 @@ function upsertPermissionBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.sessionId ? { sessionId: event.sessionId } : {}),
     ...(event.toolCall !== undefined ? { toolCall: event.toolCall } : {}),
   };
@@ -1300,6 +1342,7 @@ function resolvePermissionBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
   };
   appendBlock(state, block);
   state.permissionBlockByRequestId[event.requestId] = block.id;
@@ -1394,6 +1437,7 @@ function appendStatusBlock(
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event?.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
     ...(event?.type === 'error' && event.promptId
       ? { promptId: event.promptId }
@@ -1449,6 +1493,7 @@ function appendPromptCancelledBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
   };
   appendBlock(state, block);
   clearActiveText(state);
@@ -1463,6 +1508,7 @@ function createTextBlock(
   meta?: Record<string, unknown>,
   sourceRecordIds?: readonly string[],
   promptId?: string,
+  segmentId?: string,
 ): DaemonTextTranscriptBlock {
   const blockId = allocateBlockId(state, kind);
   return {
@@ -1475,6 +1521,7 @@ function createTextBlock(
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(segmentId ? { segmentId } : {}),
     ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
@@ -1771,6 +1818,7 @@ function cloneBlockForWrite(
     return {
       ...block,
       preview: cloneJsonLike(block.preview),
+      resultPreview: cloneJsonLike(block.resultPreview),
       content: cloneJsonLike(block.content),
       locations: cloneJsonLike(block.locations),
       rawInput: cloneJsonLike(block.rawInput),
@@ -1784,6 +1832,33 @@ function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {
   const id = `${prefix}-${state.nextOrdinal}`;
   state.nextOrdinal += 1;
   return id;
+}
+
+function getPermissionToolIdentity(toolCall: unknown): {
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: string;
+} {
+  if (!isRecord(toolCall)) return {};
+  const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+  const read = (
+    record: Record<string, unknown> | undefined,
+    ...keys: string[]
+  ): string | undefined => {
+    for (const key of keys) {
+      const value = record?.[key];
+      if (typeof value === 'string' && value.length > 0) return value;
+    }
+    return undefined;
+  };
+  const toolCallId = read(toolCall, 'toolCallId', 'id');
+  const toolName = read(meta, 'toolName') ?? read(toolCall, 'toolName', 'name');
+  const toolKind = read(toolCall, 'kind');
+  return {
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(toolName ? { toolName } : {}),
+    ...(toolKind ? { toolKind } : {}),
+  };
 }
 
 function clearActiveText(

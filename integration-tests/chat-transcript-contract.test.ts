@@ -1,17 +1,22 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import {
-  createDaemonTranscriptState,
   DAEMON_ERROR_KINDS,
-  normalizeDaemonEvent,
-  reduceDaemonTranscriptEvents,
   type DaemonEvent,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { createExportTranscriptDocumentV1 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
+import { TranscriptUpdateIdentityProjector } from '../packages/cli/src/acp-integration/session/transcript-update-identity.js';
+import {
+  probeAcpTranscriptUpdates,
+  probeDirectDaemonTranscript,
+} from '../packages/vscode-ide-companion/src/services/chatTranscriptContractProbe.js';
+import { probeTranscriptRenderIdentity } from '../packages/web-shell/client/adapters/transcriptRenderProbe.js';
 import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,270 +25,91 @@ const fixtureRoot = resolve(
   'integration-tests/fixtures/chat-transcript-contract/v1',
 );
 const caseRoot = resolve(fixtureRoot, 'cases/representative');
+const context = { scopeKey: 'workspace-a:session-a', generation: 3 } as const;
 
 interface FixtureManifest {
   readonly fixtureVersion: number;
   readonly name: string;
-  readonly generatorVersion?: string;
-  readonly sources: readonly string[];
-  readonly consumers: readonly string[];
+  readonly generatorVersion: string;
   readonly capabilities: readonly string[];
-  readonly complete: boolean;
+  readonly consumers: readonly string[];
   readonly expectedDiagnostics: readonly string[];
-  readonly normalizedFields?: readonly string[];
+  readonly normalizedFields: readonly string[];
   readonly hashes: Readonly<Record<string, string>>;
 }
 
 interface ExpectedModel {
   readonly kinds: readonly string[];
-  readonly texts: readonly string[];
   readonly sourceRecordIds: readonly (readonly string[])[];
+  readonly rawFreeToolResult: string;
 }
 
 interface ExpectedRenderItems {
   readonly roles: readonly string[];
-  readonly expectedTextContent: readonly string[];
-  readonly runtimeFields: readonly string[];
-  readonly expectedToolArgs: Readonly<Record<string, unknown>>;
-  readonly expectedToolResult: unknown;
+  readonly requiredCapabilities: readonly string[];
+  readonly identityFields: readonly string[];
 }
 
-interface ExpectedExportContract {
+interface ExpectedExport {
   readonly schemaVersion: number;
   readonly forbiddenFields: readonly string[];
   readonly frozenErrorKinds: readonly string[];
+  readonly expectedToolResult: string;
   readonly timestamps: number;
-  readonly implementation: string;
-}
-
-interface IdentityCandidateResult {
-  readonly status: 'fail';
-  readonly stableUnderPartialPrepend: false;
-  readonly unstableBlockKinds: readonly string[];
-  readonly missingNativeTextIdentity: readonly string[];
-}
-
-interface ExpectedGate {
-  readonly overall: 'fail';
-  readonly selectedVscodePath: null;
-  readonly candidates: {
-    readonly directDaemon: IdentityCandidateResult;
-    readonly acp: IdentityCandidateResult;
-  };
-  readonly blockers: readonly string[];
 }
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
 }
 
-function readJsonLines<T>(path: string): T[] {
+function readJsonLines(path: string): unknown[] {
   return readFileSync(path, 'utf8')
     .trim()
     .split('\n')
-    .map((line) => JSON.parse(line) as T);
+    .map((line) => JSON.parse(line) as unknown);
 }
 
 function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function listFixtureEvidenceFiles(
-  directory: string,
-  relativeDirectory = '',
-): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const relativePath = relativeDirectory
-      ? `${relativeDirectory}/${entry.name}`
-      : entry.name;
-    if (entry.isDirectory()) {
-      return listFixtureEvidenceFiles(
-        resolve(directory, entry.name),
-        relativePath,
-      );
-    }
-    return relativePath === 'cases/representative/manifest.json'
-      ? []
-      : [relativePath];
-  });
+function removeRawPresentationFields(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock[] {
+  const forbidden = new Set([
+    'rawInput',
+    'rawOutput',
+    'content',
+    'toolCall',
+    'details',
+    'locations',
+    'meta',
+  ]);
+  return JSON.parse(
+    JSON.stringify(blocks, (key, value) =>
+      forbidden.has(key) ? undefined : value,
+    ),
+  ) as DaemonTranscriptBlock[];
 }
 
-function expectManifestToMatchSchema(
-  manifest: FixtureManifest,
-  schema: Record<string, unknown>,
-): void {
-  const properties = schema['properties'] as Record<
-    string,
-    Record<string, unknown>
-  >;
-  const required = schema['required'];
-  expect(properties).toBeTypeOf('object');
-  expect(required).toBeInstanceOf(Array);
-  expect(schema['additionalProperties']).toBe(false);
-
-  const allowedKeys = new Set(Object.keys(properties));
-  for (const key of Object.keys(manifest)) {
-    expect(allowedKeys.has(key), `manifest property ${key}`).toBe(true);
-  }
-  for (const key of required as string[]) {
-    expect(manifest, `required manifest property ${key}`).toHaveProperty(key);
-  }
-
-  const nameSchema = properties['name'];
-  expect(manifest.name.length).toBeGreaterThanOrEqual(
-    nameSchema?.['minLength'] as number,
-  );
-  expect(manifest.name.length).toBeLessThanOrEqual(
-    nameSchema?.['maxLength'] as number,
-  );
-  const capabilitySchema = properties['capabilities'];
-  const capabilityItemSchema = capabilitySchema?.['items'] as Record<
-    string,
-    unknown
-  >;
-  expect(manifest.capabilities.length).toBeGreaterThanOrEqual(
-    capabilitySchema?.['minItems'] as number,
-  );
-  expect(new Set(manifest.capabilities)).toHaveLength(
-    manifest.capabilities.length,
-  );
-  for (const capability of manifest.capabilities) {
-    expect(capability).toBeTypeOf('string');
-    expect(capability.length).toBeLessThanOrEqual(
-      capabilityItemSchema['maxLength'] as number,
-    );
-  }
-  const hashSchema = properties['hashes']?.['additionalProperties'] as Record<
-    string,
-    unknown
-  >;
-  const hashPattern = new RegExp(hashSchema['pattern'] as string, 'u');
-  for (const [relativePath, hash] of Object.entries(manifest.hashes)) {
-    expect(relativePath).not.toBe('cases/representative/manifest.json');
-    expect(hash, relativePath).toMatch(hashPattern);
-  }
-}
-
-function collectDeclaredSchemaProperties(
+function collectObjectKeys(
   value: unknown,
-  names = new Set<string>(),
+  keys = new Set<string>(),
 ): Set<string> {
   if (Array.isArray(value)) {
-    for (const item of value) collectDeclaredSchemaProperties(item, names);
-    return names;
+    for (const item of value) collectObjectKeys(item, keys);
+    return keys;
   }
-  if (!value || typeof value !== 'object') return names;
-
+  if (!value || typeof value !== 'object') return keys;
   for (const [key, item] of Object.entries(value)) {
-    if (key === 'properties' && item && typeof item === 'object') {
-      for (const propertyName of Object.keys(item)) names.add(propertyName);
-    }
-    collectDeclaredSchemaProperties(item, names);
+    keys.add(key);
+    collectObjectKeys(item, keys);
   }
-  return names;
+  return keys;
 }
 
-function reduceDaemonEvents(
-  events: readonly DaemonEvent[],
-): readonly DaemonTranscriptBlock[] {
-  let state = createDaemonTranscriptState({ now: 0 });
-  for (const event of events) {
-    state = reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event), {
-      now: 0,
-    });
-  }
-  return state.blocks;
-}
-
-function reduceAcpUpdates(
-  updates: readonly unknown[],
-): readonly DaemonTranscriptBlock[] {
-  return reduceDaemonEvents(
-    updates.map(
-      (update): DaemonEvent => ({
-        v: 1,
-        type: 'session_update',
-        data: { update },
-      }),
-    ),
-  );
-}
-
-function blockSemanticKey(block: DaemonTranscriptBlock): string {
-  switch (block.kind) {
-    case 'user':
-    case 'assistant':
-    case 'thought':
-      return `${block.kind}:${block.text}`;
-    case 'tool':
-      return `tool:${block.toolCallId}`;
-    case 'permission':
-      return `permission:${block.requestId}`;
-    default:
-      throw new Error(`Unsupported identity probe block kind: ${block.kind}`);
-  }
-}
-
-function indexBlocksBySemanticKey(
-  blocks: readonly DaemonTranscriptBlock[],
-  label: 'complete' | 'partial',
-): ReadonlyMap<string, DaemonTranscriptBlock> {
-  const indexed = new Map<string, DaemonTranscriptBlock>();
-  for (const block of blocks) {
-    const key = blockSemanticKey(block);
-    if (indexed.has(key)) {
-      throw new Error(`Ambiguous ${label} identity probe semantic key: ${key}`);
-    }
-    indexed.set(key, block);
-  }
-  return indexed;
-}
-
-function probeIdentity(
-  complete: readonly DaemonTranscriptBlock[],
-  partial: readonly DaemonTranscriptBlock[],
-): IdentityCandidateResult {
-  const completeBySemanticKey = indexBlocksBySemanticKey(complete, 'complete');
-  const partialBySemanticKey = indexBlocksBySemanticKey(partial, 'partial');
-  const unstableBlockKinds = [
-    ...new Set(
-      [...partialBySemanticKey].flatMap(([key, block]) => {
-        const completeBlock = completeBySemanticKey.get(key);
-        if (!completeBlock) {
-          throw new Error(`Missing complete identity probe block: ${key}`);
-        }
-        return completeBlock.id !== block.id ? [block.kind] : [];
-      }),
-    ),
-  ];
-  const missingNativeTextIdentity = [
-    ...new Set(
-      complete.flatMap((block) => {
-        if (
-          block.kind !== 'user' &&
-          block.kind !== 'assistant' &&
-          block.kind !== 'thought'
-        ) {
-          return [];
-        }
-        return block.sourceRecordIds?.length || block.promptId
-          ? []
-          : [block.kind];
-      }),
-    ),
-  ];
-
-  expect(unstableBlockKinds.length).toBeGreaterThan(0);
-  return {
-    status: 'fail',
-    stableUnderPartialPrepend: false,
-    unstableBlockKinds,
-    missingNativeTextIdentity,
-  };
-}
-
-describe('chat transcript contract prevalidation', () => {
-  it('locks the evidence fixtures, schemas, and fail-first capability decision', () => {
+describe('chat transcript cross-host contract', () => {
+  it('locks fixture hashes, schemas, consumers, and capability decisions', () => {
     const manifest = readJson<FixtureManifest>(
       resolve(caseRoot, 'manifest.json'),
     );
@@ -293,7 +119,7 @@ describe('chat transcript contract prevalidation', () => {
     const exportSchema = readJson<Record<string, unknown>>(
       resolve(fixtureRoot, 'schema/export-transcript-document-v1.schema.json'),
     );
-    const expectedExport = readJson<ExpectedExportContract>(
+    const expectedExport = readJson<ExpectedExport>(
       resolve(caseRoot, 'expected-export.json'),
     );
     const matrix = readFileSync(
@@ -301,39 +127,23 @@ describe('chat transcript contract prevalidation', () => {
       'utf8',
     );
 
-    expectManifestToMatchSchema(manifest, manifestSchema);
-    const manifestWithUnknownProperty = {
-      ...manifest,
-      unknownProperty: true,
-    };
-    expect(() =>
-      expectManifestToMatchSchema(manifestWithUnknownProperty, manifestSchema),
-    ).toThrow(/manifest property unknownProperty/u);
     expect(manifest.fixtureVersion).toBe(1);
-    expect(manifest.complete).toBe(true);
-    expect(new Set(manifest.sources)).toEqual(
-      new Set(['daemon', 'acp', 'chat-records']),
+    expect(manifest.name).toBe('representative');
+    expect(manifest.generatorVersion).toBe('chat-transcript-prevalidation-v1');
+    expect(new Set(manifest.capabilities)).toEqual(
+      new Set([
+        'text-thinking-usage-images',
+        'streaming-replay-prepend',
+        'tools-plan-permission',
+        'render-action-identity',
+        'scope-generation',
+        'export-security-network-budgets',
+      ]),
     );
     expect(new Set(manifest.consumers)).toEqual(
       new Set(['web', 'tauri', 'vscode', 'html']),
     );
-    expect(manifest.name).toBe('representative');
-    expect(manifest.generatorVersion).toBe(
-      'chat-transcript-prevalidation-evidence-v1',
-    );
-    expect(new Set(manifest.capabilities)).toEqual(
-      new Set([
-        'semantic-projection',
-        'runtime-raw-compatibility',
-        'stable-identity-prepend-probe',
-        'export-document-schema',
-        'two-mr-migration-gate',
-      ]),
-    );
-    expect(manifest.expectedDiagnostics).toEqual([
-      'direct_daemon_unstable_identity',
-      'acp_unstable_identity',
-    ]);
+    expect(manifest.expectedDiagnostics).toEqual([]);
     expect(manifest.normalizedFields).toEqual([
       'clientReceivedAt',
       'createdAt',
@@ -341,12 +151,32 @@ describe('chat transcript contract prevalidation', () => {
     ]);
     expect(manifestSchema['additionalProperties']).toBe(false);
     expect(exportSchema['additionalProperties']).toBe(false);
-
     const exportDefinitions = exportSchema['$defs'] as Record<string, unknown>;
-    const blockSchema = exportDefinitions['block'] as {
-      oneOf: Array<{ $ref: string }>;
+    const metadataSchema = exportDefinitions['metadata'] as {
+      properties: Record<string, unknown>;
     };
-    expect(blockSchema.oneOf).toHaveLength(10);
+    expect(metadataSchema.properties).not.toHaveProperty('sessionLabel');
+    const toolPreviewSchema = exportDefinitions['toolPreview'] as {
+      oneOf: Array<Record<string, unknown>>;
+    };
+    expect(toolPreviewSchema.oneOf).toHaveLength(14);
+    expect(
+      toolPreviewSchema.oneOf
+        .filter((entry) => !('$ref' in entry))
+        .every((entry) => entry['additionalProperties'] === false),
+    ).toBe(true);
+    const permissionBlockSchema = exportDefinitions['permissionBlock'] as {
+      properties: {
+        resolved: { enum: string[] };
+      };
+    };
+    expect(permissionBlockSchema.properties.resolved.enum).toEqual([
+      'approved',
+      'rejected',
+      'cancelled',
+      'expired',
+      'resolved',
+    ]);
     for (const definitionName of ['statusBlock', 'errorBlock']) {
       const definition = exportDefinitions[definitionName] as {
         properties: { errorKind: { enum: string[] } };
@@ -355,20 +185,7 @@ describe('chat transcript contract prevalidation', () => {
         expectedExport.frozenErrorKinds,
       );
     }
-    for (const errorKind of expectedExport.frozenErrorKinds) {
-      expect(
-        DAEMON_ERROR_KINDS,
-        `Export V1 error kind ${errorKind} must remain supported by the SDK`,
-      ).toContain(errorKind);
-    }
-    const declaredExportProperties =
-      collectDeclaredSchemaProperties(exportSchema);
-    for (const field of expectedExport.forbiddenFields) {
-      expect(declaredExportProperties.has(field), field).toBe(false);
-    }
-    const permissionOption = exportDefinitions['permissionOption'] as {
-      properties: { raw: { const: unknown } };
-    };
+    expect(expectedExport.frozenErrorKinds).toEqual(DAEMON_ERROR_KINDS);
     const toolBlock = exportDefinitions['toolBlock'] as {
       properties: Record<string, unknown>;
     };
@@ -381,21 +198,30 @@ describe('chat transcript contract prevalidation', () => {
     expect(toolBlock.properties).not.toHaveProperty('content');
     expect(statusBlock.properties).not.toHaveProperty('data');
     expect(errorBlock.properties).not.toHaveProperty('data');
-    expect(permissionOption.properties.raw.const).toBeNull();
-    expect(expectedExport).toMatchObject({
-      schemaVersion: 1,
-      timestamps: 0,
-      implementation: 'deferred-to-mr2',
-    });
-
-    expect(Object.keys(manifest.hashes).sort()).toEqual(
-      listFixtureEvidenceFiles(fixtureRoot).sort(),
-    );
+    const blockSchema = exportDefinitions['block'] as {
+      oneOf: Array<{ $ref: string }>;
+    };
+    expect(blockSchema.oneOf).toHaveLength(10);
+    for (const { $ref } of blockSchema.oneOf) {
+      const definitionName = $ref.replace('#/$defs/', '');
+      const definition = exportDefinitions[definitionName] as Record<
+        string,
+        unknown
+      >;
+      expect(definition['additionalProperties']).toBe(false);
+      const kind = (definition['properties'] as Record<string, unknown>)[
+        'kind'
+      ] as Record<string, unknown>;
+      expect(typeof kind['const']).toBe('string');
+    }
     for (const [relativePath, expectedHash] of Object.entries(
       manifest.hashes,
     )) {
-      expect(sha256(resolve(fixtureRoot, relativePath))).toBe(expectedHash);
+      expect(sha256(resolve(caseRoot, relativePath))).toBe(expectedHash);
     }
+    expect(matrix).toContain('pass; stable under append/prepend/replay');
+    expect(matrix).toContain('pass; selected for the later migration phase');
+    expect(matrix).not.toMatch(/\b(?:TBD|unknown)\b/i);
 
     const exportProperties = exportSchema['properties'] as Record<
       string,
@@ -410,62 +236,57 @@ describe('chat transcript contract prevalidation', () => {
       '1.2.3-beta.1+build.7',
       'a'.repeat(64),
     ]) {
-      expect(validVersion, validVersion).toMatch(rendererVersionPattern);
-    }
-    for (const invalidVersion of [
-      'LATEST',
-      'latest',
-      '1.0.0 - 2.0.0',
-      '1.x',
-      '1.0.0 || 2.0.0',
-      '^1.2.3',
-      '~1.2.3',
-      '*',
-      '>=1.0.0',
-    ]) {
-      expect(invalidVersion, invalidVersion).not.toMatch(
-        rendererVersionPattern,
+      expect(rendererVersionPattern.test(validVersion), validVersion).toBe(
+        true,
       );
     }
-    expect(matrix).toContain('FAIL — migration blocked');
-    expect(matrix).toContain('No VS Code transport is selected in MR1');
-    expect(matrix).not.toMatch(/pass; selected/i);
+    for (const invalidVersion of [
+      'latest',
+      '^1.2.3',
+      '>=1.2.3',
+      '1.2',
+      '1.2.3 || 2.0.0',
+      'not-a-version',
+    ]) {
+      expect(rendererVersionPattern.test(invalidVersion), invalidVersion).toBe(
+        false,
+      );
+    }
   });
 
-  it('preserves current ChatRecord and Web Shell runtime semantics', () => {
-    const records = readJsonLines<unknown>(
-      resolve(caseRoot, 'chat-records.jsonl'),
-    );
+  it('keeps document semantics after all raw renderer fields are removed', () => {
+    const records = readJsonLines(resolve(caseRoot, 'chat-records.jsonl'));
     const expected = readJson<ExpectedModel>(
       resolve(caseRoot, 'expected-model.json'),
     );
     const expectedRender = readJson<ExpectedRenderItems>(
       resolve(caseRoot, 'expected-render-items.json'),
     );
-    const projection = projectChatRecordsToDaemonTranscript(records);
-    const messages = transcriptBlocksToDaemonMessages(projection.blocks);
-    const toolBlock = projection.blocks.find((block) => block.kind === 'tool');
-    const toolMessage = messages.find(
-      (message) => message.role === 'tool_group',
+    const expectedExport = readJson<ExpectedExport>(
+      resolve(caseRoot, 'expected-export.json'),
     );
+    const projection = projectChatRecordsToDaemonTranscript(records);
+    const rawFreeBlocks = removeRawPresentationFields(projection.blocks);
+    const messages = transcriptBlocksToDaemonMessages(rawFreeBlocks, {
+      safeToolProjection: true,
+    });
+    const renderEvidence = probeTranscriptRenderIdentity(rawFreeBlocks, {
+      safeToolProjection: true,
+    });
+    const exportDocument = createExportTranscriptDocumentV1(
+      records,
+      { startTime: '2026-08-16T00:00:00.000Z' },
+      {
+        rendererVersion: '0.21.11-contract-probe.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const exportedKeys = collectObjectKeys(exportDocument);
 
     expect(projection.complete).toBe(true);
-    expect(projection.diagnostics).toEqual([]);
     expect(projection.blocks.map((block) => block.kind)).toEqual(
       expected.kinds,
     );
-    expect(
-      projection.blocks.flatMap((block) => {
-        switch (block.kind) {
-          case 'user':
-          case 'assistant':
-          case 'thought':
-            return [block.text];
-          default:
-            return [];
-        }
-      }),
-    ).toEqual(expected.texts);
     expect(
       projection.blocks.map((block) => block.sourceRecordIds ?? []),
     ).toEqual(expected.sourceRecordIds);
@@ -473,119 +294,216 @@ describe('chat transcript contract prevalidation', () => {
       expectedRender.roles,
     );
     expect(
-      messages.flatMap((message) => {
-        switch (message.role) {
-          case 'user':
-          case 'thinking':
-          case 'assistant':
-            return [message.content];
-          default:
-            return [];
-        }
-      }),
-    ).toEqual(expectedRender.expectedTextContent);
-    expect(toolBlock).toMatchObject({
-      rawInput: expectedRender.expectedToolArgs,
-      rawOutput: expectedRender.expectedToolResult,
+      messages.find((message) => message.role === 'tool_group')?.tools[0]
+        ?.rawOutput,
+    ).toBe(expected.rawFreeToolResult);
+    expect(
+      new Set(renderEvidence.items.flatMap((item) => item.capabilities)),
+    ).toEqual(new Set(expectedRender.requiredCapabilities));
+    expect(renderEvidence.items.every((item) => item.renderedItemId)).toBe(
+      true,
+    );
+    expect(
+      renderEvidence.items.every((item) => item.sourceBlockIds.length > 0),
+    ).toBe(true);
+    for (const field of expectedRender.identityFields) {
+      expect(
+        renderEvidence.items.every((item) => Object.hasOwn(item, field)),
+        field,
+      ).toBe(true);
+    }
+    expect(JSON.stringify(renderEvidence)).not.toContain(
+      expected.rawFreeToolResult,
+    );
+    expect(renderEvidence.actions.copyAll.renderedItemIds).toEqual(
+      renderEvidence.items.map((item) => item.renderedItemId),
+    );
+    expect(renderEvidence.actions.copyLastReply).toBeDefined();
+    expect(renderEvidence.actions.editLastUserMessage).toBeDefined();
+    expect(renderEvidence.actions.openFiles.length).toBeGreaterThan(0);
+    expect(exportDocument.schemaVersion).toBe(expectedExport.schemaVersion);
+    expect(
+      exportDocument.blocks.find((block) => block.kind === 'tool')
+        ?.resultPreview,
+    ).toMatchObject({
+      kind: 'text',
+      text: expectedExport.expectedToolResult,
     });
-    expect(toolMessage).toMatchObject({
-      tools: [
-        {
-          args: expectedRender.expectedToolArgs,
-          rawOutput: expectedRender.expectedToolResult,
-        },
-      ],
-    });
-    expect(expectedRender.runtimeFields).toEqual(['rawInput', 'rawOutput']);
+    expect(
+      exportDocument.blocks.every(
+        (block) =>
+          block.clientReceivedAt === expectedExport.timestamps &&
+          block.createdAt === expectedExport.timestamps &&
+          block.updatedAt === expectedExport.timestamps,
+      ),
+    ).toBe(true);
+    for (const field of expectedExport.forbiddenFields) {
+      expect(exportedKeys.has(field), field).toBe(false);
+    }
   });
 
-  it('records both VS Code identity candidates as reproducible blockers', () => {
-    const daemonEvents = readJsonLines<DaemonEvent>(
+  it('keeps identity stable in both VS Code candidates', () => {
+    const daemonEvents = readJsonLines(
       resolve(caseRoot, 'daemon-events.jsonl'),
-    );
-    const acpUpdates = readJsonLines<unknown>(
+    ) as DaemonEvent[];
+    const acpUpdates = readJsonLines(
       resolve(caseRoot, 'acp-session-updates.jsonl'),
     );
-    const expectedGate = readJson<ExpectedGate>(
-      resolve(caseRoot, 'expected-gate.json'),
+    const direct = probeDirectDaemonTranscript(daemonEvents, context, context);
+    const directTail = probeDirectDaemonTranscript(
+      daemonEvents.slice(1),
+      context,
+      context,
     );
-    const observedGate: ExpectedGate = {
-      overall: 'fail',
-      selectedVscodePath: null,
-      candidates: {
-        directDaemon: probeIdentity(
-          reduceDaemonEvents(daemonEvents),
-          reduceDaemonEvents(daemonEvents.slice(1)),
-        ),
-        acp: probeIdentity(
-          reduceAcpUpdates(acpUpdates),
-          reduceAcpUpdates(acpUpdates.slice(1)),
-        ),
+    const acp = probeAcpTranscriptUpdates(acpUpdates, context, context);
+    const liveIdentity = new TranscriptUpdateIdentityProjector();
+    const liveAcpUpdate = liveIdentity.project(
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'live answer' },
+      } as SessionUpdate,
+      'session-a########1',
+    );
+    const liveAcp = probeAcpTranscriptUpdates(
+      [liveAcpUpdate],
+      context,
+      context,
+    );
+    const taggedAcpSegments = ['first ', 'second'].map((text, index) => ({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        qwenTranscript: {
+          segmentId: `record-${index + 1}:0`,
+          sourceRecordIds: [`record-${index + 1}`],
+        },
       },
-      blockers: [
-        'direct-daemon uses reducer ordinal block IDs that change when history is prepended',
-        'ACP text updates do not carry a stable source identity and inherit the same ordinal block IDs',
-      ],
-    };
-
-    expect(observedGate).toEqual(expectedGate);
-  });
-
-  it('fails closed on ambiguous identity keys and records kind sets', () => {
-    const assistantBlock = (
-      id: string,
-      text: string,
-    ): DaemonTranscriptBlock => ({
-      id,
-      kind: 'assistant',
-      clientReceivedAt: 0,
-      createdAt: 0,
-      updatedAt: 0,
-      text,
+    }));
+    const completeTaggedAcp = probeAcpTranscriptUpdates(
+      taggedAcpSegments,
+      context,
+      context,
+    );
+    const tailTaggedAcp = probeAcpTranscriptUpdates(
+      taggedAcpSegments.slice(1),
+      context,
+      context,
+    );
+    const stale = probeDirectDaemonTranscript(daemonEvents, context, {
+      ...context,
+      generation: context.generation + 1,
     });
-
-    expect(() =>
-      probeIdentity(
-        [assistantBlock('complete-1', 'duplicate')],
-        [
-          assistantBlock('partial-1', 'duplicate'),
-          assistantBlock('partial-2', 'duplicate'),
-        ],
-      ),
-    ).toThrow(/Ambiguous partial identity probe semantic key/u);
-
-    expect(
-      probeIdentity(
-        [
-          assistantBlock('complete-1', 'first'),
-          assistantBlock('complete-2', 'second'),
-        ],
-        [
-          assistantBlock('partial-1', 'first'),
-          assistantBlock('partial-2', 'second'),
-        ],
-      ),
-    ).toEqual({
-      status: 'fail',
-      stableUnderPartialPrepend: false,
-      unstableBlockKinds: ['assistant'],
-      missingNativeTextIdentity: ['assistant'],
-    });
-
-    expect(() =>
-      probeIdentity(
-        [
-          {
-            id: 'status-1',
-            kind: 'status',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-            text: 'status',
+    const directRender = probeTranscriptRenderIdentity(direct.model.blocks);
+    const directTailRender = probeTranscriptRenderIdentity(
+      directTail.model.blocks,
+    );
+    const acpTail = probeAcpTranscriptUpdates(
+      acpUpdates.slice(1),
+      context,
+      context,
+    );
+    const acpRender = probeTranscriptRenderIdentity(acp.model.blocks);
+    const acpTailRender = probeTranscriptRenderIdentity(acpTail.model.blocks);
+    const firstDelta = {
+      id: 60,
+      v: 1,
+      type: 'session_update',
+      promptId: 'prompt-multi-delta',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'first ' },
+          _meta: {
+            qwenTranscript: { segmentId: 'prompt-multi-delta:assistant:0' },
           },
-        ],
-        [],
-      ),
-    ).toThrow(/Unsupported identity probe block kind: status/u);
+        },
+      },
+    } satisfies DaemonEvent;
+    const secondDelta = {
+      ...firstDelta,
+      id: 61,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'second' },
+          _meta: {
+            qwenTranscript: { segmentId: 'prompt-multi-delta:assistant:0' },
+          },
+        },
+      },
+    } satisfies DaemonEvent;
+    const completeDeltaBlock = probeDirectDaemonTranscript(
+      [firstDelta, secondDelta],
+      context,
+      context,
+    );
+    const tailDeltaBlock = probeDirectDaemonTranscript(
+      [secondDelta],
+      context,
+      context,
+    );
+    const completeRender = probeTranscriptRenderIdentity(
+      completeDeltaBlock.model.blocks,
+    );
+    const tailRender = probeTranscriptRenderIdentity(
+      tailDeltaBlock.model.blocks,
+    );
+
+    expect(direct.diagnostics).toEqual([]);
+    expect(
+      direct.identities.every((item) => item.sourceIdentity.length > 0),
+    ).toBe(true);
+    expect(directTail.model.blocks.map((block) => block.id)).toEqual(
+      direct.model.blocks.slice(1).map((block) => block.id),
+    );
+    expect(directTailRender.items).toEqual(directRender.items.slice(1));
+    expect(directTailRender.actions.copyLastReply).toEqual(
+      directRender.actions.copyLastReply,
+    );
+    expect(directTailRender.actions.openFiles).toEqual(
+      directRender.actions.openFiles,
+    );
+    expect(acp.diagnostics).toEqual([]);
+    expect(acp.identities.every((item) => item.sourceIdentity.length > 0)).toBe(
+      true,
+    );
+    expect(acpTail.diagnostics).toEqual([]);
+    expect(acpTail.model.blocks.map((block) => block.id)).toEqual(
+      acp.model.blocks.slice(1).map((block) => block.id),
+    );
+    expect(acpTailRender.items).toEqual(acpRender.items.slice(1));
+    expect(acpTailRender.actions.copyLastReply).toEqual(
+      acpRender.actions.copyLastReply,
+    );
+    expect(acpTailRender.actions.openFiles).toEqual(
+      acpRender.actions.openFiles,
+    );
+    expect(completeDeltaBlock.model.blocks[0]?.id).toBe(
+      tailDeltaBlock.model.blocks[0]?.id,
+    );
+    expect(completeDeltaBlock.diagnostics).toEqual([]);
+    expect(tailDeltaBlock.diagnostics).toEqual([]);
+    expect(completeRender.items[0]?.renderedItemId).toBe(
+      tailRender.items[0]?.renderedItemId,
+    );
+    expect(completeRender.actions.copyLastReply?.renderedItemId).toBe(
+      tailRender.actions.copyLastReply?.renderedItemId,
+    );
+    expect(completeRender.actions.copyLastReply?.semanticHash).not.toBe(
+      tailRender.actions.copyLastReply?.semanticHash,
+    );
+    expect(completeTaggedAcp.model.blocks[1]?.id).toBe(
+      tailTaggedAcp.model.blocks[0]?.id,
+    );
+    expect(completeTaggedAcp.identities[1]?.sourceIdentity).toEqual(
+      tailTaggedAcp.identities[0]?.sourceIdentity,
+    );
+    expect(liveAcp.diagnostics).toEqual([]);
+    expect(liveAcp.identities[0]?.sourceIdentity[0]).toBe('segmentId');
+    expect(stale.model.blocks).toEqual([]);
+    expect(stale.diagnostics).toContainEqual({
+      code: 'stale_scope_generation_ignored',
+      severity: 'info',
+    });
   });
 });

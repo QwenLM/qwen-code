@@ -1,0 +1,2586 @@
+import {
+  DAEMON_ERROR_KINDS,
+  type DaemonErrorKind,
+  type DaemonPermissionTranscriptBlock,
+  type DaemonShellTranscriptBlock,
+  type DaemonStatusTranscriptBlock,
+  type DaemonTextTranscriptBlock,
+  type DaemonToolPreview,
+  type DaemonToolResultPreview,
+  type DaemonToolTranscriptBlock,
+  type DaemonTodoListPreview,
+  type DaemonTranscriptBlock,
+  type DaemonUiPermissionOption,
+  type DaemonUserShellTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import type { ExportSessionData } from './types.js';
+
+export const EXPORT_TRANSCRIPT_LIMITS_V1 = Object.freeze({
+  maxBlocks: 1_000,
+  maxTextBytes: 400 * 1024,
+  maxVisibleTextBytes: 8 * 1024 * 1024,
+  maxRasterBytes: 8 * 1024 * 1024,
+  maxTotalRasterBytes: 16 * 1024 * 1024,
+  maxEnvelopeBytes: 32 * 1024 * 1024,
+  maxObjectDepth: 16,
+  maxObjectProperties: 1_000,
+  maxArrayLength: 1_000,
+  maxRichRenderTasks: 100,
+});
+
+export interface ExportTranscriptDiagnosticV1 {
+  readonly code: string;
+  readonly severity: 'info' | 'warning' | 'error';
+  readonly count: number;
+}
+
+export interface ExportMetadataPresentationV1 {
+  readonly title?: string;
+  readonly startedAt?: string;
+  readonly exportedAt: string;
+  readonly complete: boolean;
+  readonly truncated: boolean;
+  readonly projectName?: string;
+  readonly repository?: string;
+  readonly gitBranch?: string;
+  readonly model?: string;
+  readonly channel?: string;
+  readonly promptCount?: number;
+  readonly contextUsagePercent?: number;
+  readonly contextWindowSize?: number;
+  readonly totalTokens?: number;
+  readonly filesWritten?: number;
+  readonly linesAdded?: number;
+  readonly linesRemoved?: number;
+}
+
+type DaemonPromptCancelledTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'prompt_cancelled' }
+>;
+
+type ExportBlockBaseKeys =
+  | 'id'
+  | 'kind'
+  | 'clientReceivedAt'
+  | 'createdAt'
+  | 'updatedAt';
+
+type ExportPermissionOptionV1 = Pick<
+  DaemonUiPermissionOption,
+  'optionId' | 'label' | 'description'
+> & { raw: null };
+
+interface ExportTranscriptQuestionOptionV1 {
+  label: string;
+  description?: string;
+  raw: null;
+}
+
+interface ExportTranscriptQuestionV1 {
+  header?: string;
+  question: string;
+  options: ExportTranscriptQuestionOptionV1[];
+  raw: null;
+}
+
+type ToolPreviewOf<K extends DaemonToolPreview['kind']> = Extract<
+  DaemonToolPreview,
+  { kind: K }
+>;
+type ToolPreviewPick<
+  K extends DaemonToolPreview['kind'],
+  P extends keyof ToolPreviewOf<K>,
+> = Pick<ToolPreviewOf<K>, 'kind' | P>;
+type ExportTodoListPreviewV1 = ToolPreviewPick<
+  'todo_list',
+  'entries' | 'truncated' | 'planId' | 'revision'
+>;
+type ExportToolPreviewV1 =
+  | { kind: 'ask_user_question'; questions: ExportTranscriptQuestionV1[] }
+  | ToolPreviewPick<'command', 'command' | 'cwd'>
+  | ToolPreviewPick<'file_diff', 'path' | 'oldText' | 'newText' | 'patch'>
+  | ToolPreviewPick<'file_read', 'path' | 'range'>
+  | ToolPreviewPick<'web_fetch', 'url' | 'method'>
+  | ToolPreviewPick<'mcp_invocation', 'serverId' | 'toolName' | 'argsSummary'>
+  | ToolPreviewPick<'code_block', 'language' | 'code' | 'origin'>
+  | ToolPreviewPick<'search', 'query' | 'resultCount' | 'top'>
+  | ToolPreviewPick<'tabular', 'columns' | 'rows' | 'totalRows'>
+  | ToolPreviewPick<'image_generation', 'prompt' | 'thumbnailUrl' | 'model'>
+  | ToolPreviewPick<
+      'subagent_delegation',
+      'agentName' | 'task' | 'parentDelegationId'
+    >
+  | ToolPreviewPick<'key_value', 'rows'>
+  | ExportTodoListPreviewV1
+  | ToolPreviewPick<'generic', 'summary'>;
+type ExportToolResultPreviewV1 =
+  | ExportTodoListPreviewV1
+  | { kind: 'text'; text: string }
+  | { kind: 'generic'; summary: string };
+
+export type ExportPermissionResolutionV1 =
+  | 'approved'
+  | 'rejected'
+  | 'cancelled'
+  | 'expired'
+  | 'resolved';
+
+type ExportTextTranscriptBlockBaseV1 = Pick<
+  DaemonTextTranscriptBlock,
+  | Exclude<ExportBlockBaseKeys, 'kind'>
+  | 'text'
+  | 'images'
+  | 'collapsed'
+  | 'parentToolCallId'
+> & { streaming?: false };
+type ExportTextTranscriptBlockV1 =
+  | (ExportTextTranscriptBlockBaseV1 & { kind: 'user' | 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & {
+      kind: 'assistant';
+      usage?: DaemonTextTranscriptBlock['usage'];
+    });
+type ExportToolTranscriptBlockV1 = Pick<
+  DaemonToolTranscriptBlock,
+  | ExportBlockBaseKeys
+  | 'toolCallId'
+  | 'title'
+  | 'toolName'
+  | 'toolKind'
+  | 'parentToolCallId'
+  | 'parentBlockId'
+  | 'subagentType'
+> & {
+  status: 'completed' | 'failed' | 'cancelled' | 'canceled';
+  preview: ExportToolPreviewV1;
+  resultPreview?: ExportToolResultPreviewV1;
+};
+type ExportShellTranscriptBlockV1 = Pick<
+  DaemonShellTranscriptBlock,
+  ExportBlockBaseKeys | 'text' | 'stream'
+>;
+type ExportUserShellTranscriptBlockV1 = Pick<
+  DaemonUserShellTranscriptBlock,
+  ExportBlockBaseKeys | 'text' | 'command' | 'cwd' | 'stream'
+>;
+type ExportPermissionTranscriptBlockV1 = Pick<
+  DaemonPermissionTranscriptBlock,
+  | ExportBlockBaseKeys
+  | 'requestId'
+  | 'title'
+  | 'toolCallId'
+  | 'toolName'
+  | 'toolKind'
+> & {
+  options: ExportPermissionOptionV1[];
+  preview: ExportToolPreviewV1;
+  resolved?: ExportPermissionResolutionV1;
+};
+type ExportStatusTranscriptBlockV1 = Pick<
+  DaemonStatusTranscriptBlock,
+  | Exclude<ExportBlockBaseKeys, 'kind'>
+  | 'text'
+  | 'code'
+  | 'errorKind'
+  | 'source'
+> & {
+  kind: 'status' | 'error';
+};
+type ExportPromptCancelledTranscriptBlockV1 = Pick<
+  DaemonPromptCancelledTranscriptBlock,
+  ExportBlockBaseKeys | 'reason'
+>;
+
+export type ExportTranscriptBlockV1 =
+  | ExportTextTranscriptBlockV1
+  | ExportToolTranscriptBlockV1
+  | ExportShellTranscriptBlockV1
+  | ExportUserShellTranscriptBlockV1
+  | ExportPermissionTranscriptBlockV1
+  | ExportStatusTranscriptBlockV1
+  | ExportPromptCancelledTranscriptBlockV1;
+
+export interface ExportTranscriptDocumentV1 {
+  readonly schemaVersion: 1;
+  readonly rendererVersion: string;
+  readonly blocks: readonly ExportTranscriptBlockV1[];
+  readonly diagnostics: readonly ExportTranscriptDiagnosticV1[];
+  readonly metadata: ExportMetadataPresentationV1;
+}
+
+export interface CreateExportTranscriptDocumentOptions {
+  readonly rendererVersion: string;
+  readonly exportedAt: string;
+  readonly title?: string;
+}
+
+export class ExportTranscriptDocumentError extends Error {
+  constructor(readonly code: string) {
+    super(`Cannot create export transcript document: ${code}.`);
+    this.name = 'ExportTranscriptDocumentError';
+  }
+}
+
+export function createExportTranscriptDocumentV1(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+): ExportTranscriptDocumentV1 {
+  if (!isSafeRendererVersion(options.rendererVersion)) {
+    throw new ExportTranscriptDocumentError('invalid_renderer_version');
+  }
+  if (!isIsoDate(options.exportedAt)) {
+    throw new ExportTranscriptDocumentError('invalid_exported_at');
+  }
+
+  const diagnostics = new DiagnosticCounter();
+  const policy = applyRecordExportPolicy(records, diagnostics);
+  const projection = projectChatRecordsToDaemonTranscript(policy.records, {
+    maxBlocks: EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
+  });
+  for (const item of projection.diagnostics) {
+    diagnostics.add(item.code, item.severity, 1, item.affectsCompleteness);
+  }
+  const budget = new ExportBudget(diagnostics);
+  const ids = new OpaqueDocumentIds();
+  const blocks = projection.blocks.flatMap((block) => {
+    const safe = sanitizeBlock(block, budget, ids, diagnostics);
+    return safe ? [safe] : [];
+  });
+  const initialTruncated = projection.truncated || budget.truncated;
+  const metadataPresentation = createMetadataPresentation(
+    sessionData,
+    options,
+    false,
+    initialTruncated,
+    diagnostics,
+    budget,
+  );
+  const truncated = initialTruncated || budget.truncated;
+  const degraded =
+    !policy.complete ||
+    !projection.complete ||
+    budget.truncated ||
+    diagnostics.hasErrors ||
+    diagnostics.hasCompletenessLoss;
+  const metadata = {
+    ...metadataPresentation,
+    complete: !degraded,
+    truncated,
+  };
+  const document: ExportTranscriptDocumentV1 = {
+    schemaVersion: 1,
+    rendererVersion: options.rendererVersion,
+    blocks,
+    diagnostics: diagnostics.toArray(),
+    metadata,
+  };
+  assertExportTranscriptDocumentV1(document);
+  return document;
+}
+
+export function assertExportTranscriptDocumentV1(
+  value: unknown,
+): asserts value is ExportTranscriptDocumentV1 {
+  if (!isRecord(value) || value['schemaVersion'] !== 1) {
+    throw new ExportTranscriptDocumentError('unsupported_schema_version');
+  }
+  assertOnlyKeys(value, [
+    'schemaVersion',
+    'rendererVersion',
+    'blocks',
+    'diagnostics',
+    'metadata',
+  ]);
+  assertDepthAndArrayBudgets(value);
+  const bytes = serializedEnvelopeBytes(value);
+  if (bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes) {
+    throw new ExportTranscriptDocumentError('envelope_budget_exceeded');
+  }
+  if (!isSafeRendererVersion(value['rendererVersion'])) {
+    throw new ExportTranscriptDocumentError('invalid_renderer_version');
+  }
+  if (!Array.isArray(value['blocks'])) {
+    throw new ExportTranscriptDocumentError('invalid_blocks');
+  }
+  if (value['blocks'].length > EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks) {
+    throw new ExportTranscriptDocumentError('block_budget_exceeded');
+  }
+  for (const block of value['blocks']) assertExportBlock(block);
+  if (!Array.isArray(value['diagnostics'])) {
+    throw new ExportTranscriptDocumentError('invalid_diagnostics');
+  }
+  for (const diagnostic of value['diagnostics']) {
+    if (!isRecord(diagnostic)) {
+      throw new ExportTranscriptDocumentError('invalid_diagnostic');
+    }
+    assertOnlyKeys(diagnostic, ['code', 'severity', 'count']);
+    if (
+      !isSafeLabel(diagnostic['code'], 128) ||
+      !['info', 'warning', 'error'].includes(String(diagnostic['severity'])) ||
+      !isSafeCount(diagnostic['count'])
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_diagnostic');
+    }
+  }
+  assertMetadata(value['metadata']);
+  assertDocumentConsistency(value);
+  assertNoForbiddenFields(value);
+  assertResourceBudgets(value);
+}
+
+export function exportDocumentToTranscriptBlocks(
+  value: unknown,
+): readonly DaemonTranscriptBlock[] {
+  assertExportTranscriptDocumentV1(value);
+  return value.blocks;
+}
+
+function applyRecordExportPolicy(
+  records: readonly unknown[],
+  diagnostics: DiagnosticCounter,
+): { records: unknown[]; complete: boolean } {
+  const accepted: unknown[] = [];
+  const rejectedIds = new Set<string>();
+  let complete = true;
+  for (const record of records) {
+    if (!isRecord(record)) {
+      diagnostics.add('record_invalid', 'error');
+      complete = false;
+      continue;
+    }
+    const type = record['type'];
+    const subtype = record['subtype'];
+    const acceptedSystemSubtype =
+      type === 'system' &&
+      typeof subtype === 'string' &&
+      VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
+    if (
+      type === 'user' ||
+      type === 'assistant' ||
+      type === 'tool_result' ||
+      acceptedSystemSubtype
+    ) {
+      accepted.push(record);
+      continue;
+    }
+    const uuid = record['uuid'];
+    if (typeof uuid === 'string') rejectedIds.add(uuid);
+    diagnostics.add(
+      type === 'system'
+        ? 'record_internal_excluded'
+        : 'record_unknown_excluded',
+      type === 'system' ? 'info' : 'error',
+    );
+    if (type !== 'system') complete = false;
+  }
+  for (const record of accepted) {
+    if (!isRecord(record)) continue;
+    const parentUuid = record['parentUuid'];
+    if (typeof parentUuid === 'string' && rejectedIds.has(parentUuid)) {
+      diagnostics.add('causal_record_excluded', 'error');
+      complete = false;
+    }
+  }
+  return { records: accepted, complete };
+}
+
+const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
+  'notification',
+  'cron',
+  'mid_turn_user_message',
+  'realtime_message',
+  'goal_state',
+  'goal_runtime',
+]);
+
+function sanitizeBlock(
+  block: DaemonTranscriptBlock,
+  budget: ExportBudget,
+  ids: OpaqueDocumentIds,
+  diagnostics: DiagnosticCounter,
+): ExportTranscriptBlockV1 | undefined {
+  const common = {
+    id: ids.get('block', block.id),
+    kind: block.kind,
+    clientReceivedAt: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  switch (block.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thought': {
+      const text = budget.text(block.text);
+      const images = block.images
+        ? budget.array(block.images).flatMap((image) => {
+            const safe = budget.image(image);
+            return safe ? [safe] : [];
+          })
+        : undefined;
+      return {
+        ...common,
+        kind: block.kind,
+        text,
+        streaming: false,
+        ...(block.collapsed ? { collapsed: true } : {}),
+        ...(block.parentToolCallId
+          ? {
+              parentToolCallId: ids.get('tool-call', block.parentToolCallId),
+            }
+          : {}),
+        ...(images && images.length > 0 ? { images } : {}),
+        ...(block.kind === 'assistant' && block.usage
+          ? {
+              usage: {
+                inputTokens: safeCount(block.usage.inputTokens),
+                outputTokens: safeCount(block.usage.outputTokens),
+                ...(block.usage.cachedTokens !== undefined
+                  ? { cachedTokens: safeCount(block.usage.cachedTokens) }
+                  : {}),
+              },
+            }
+          : {}),
+      };
+    }
+    case 'tool': {
+      const status = terminalToolStatus(block.status, diagnostics, budget);
+      const toolName = budget.optionalLabel(block.toolName, 128);
+      const toolKind = budget.optionalLabel(block.toolKind, 128);
+      const subagentType = budget.optionalLabel(block.subagentType, 128);
+      let resultPreview = block.resultPreview
+        ? sanitizeResultPreview(block.resultPreview, budget, diagnostics, ids)
+        : undefined;
+      if (!resultPreview && (status === 'completed' || status === 'failed')) {
+        diagnostics.add('tool_result_presentation_missing', 'error');
+        budget.markContentLoss();
+        resultPreview = {
+          kind: 'text',
+          text: budget.plainText('[tool result omitted from export]'),
+        };
+      }
+      return {
+        ...common,
+        kind: 'tool',
+        toolCallId: ids.get('tool-call', block.toolCallId),
+        title: budget.plainText(block.title),
+        status,
+        preview: sanitizeToolPreview(block.preview, budget, diagnostics, ids),
+        ...(resultPreview ? { resultPreview } : {}),
+        ...(toolName ? { toolName } : {}),
+        ...(toolKind ? { toolKind } : {}),
+        ...(block.parentToolCallId
+          ? {
+              parentToolCallId: ids.get('tool-call', block.parentToolCallId),
+            }
+          : {}),
+        ...(block.parentBlockId
+          ? { parentBlockId: ids.get('block', block.parentBlockId) }
+          : {}),
+        ...(subagentType ? { subagentType } : {}),
+      };
+    }
+    case 'shell':
+      return {
+        ...common,
+        kind: 'shell',
+        text: budget.plainText(redactHomePaths(block.text)),
+        ...(block.stream ? { stream: block.stream } : {}),
+      };
+    case 'user_shell':
+      return {
+        ...common,
+        kind: 'user_shell',
+        text: budget.plainText(redactHomePaths(block.text)),
+        command: budget.plainText(redactHomePaths(block.command)),
+        ...(block.cwd ? { cwd: budget.label(safePath(block.cwd), 400) } : {}),
+        ...(block.stream ? { stream: block.stream } : {}),
+      };
+    case 'permission': {
+      const toolName = budget.optionalLabel(block.toolName, 128);
+      const toolKind = budget.optionalLabel(block.toolKind, 128);
+      const resolution = block.resolved
+        ? classifyPermissionResolutionForExport(block.resolved, block.options)
+        : undefined;
+      if (resolution?.lossy) {
+        diagnostics.add('permission_resolution_sanitized', 'warning', 1, true);
+        budget.markContentLoss();
+      }
+      return {
+        ...common,
+        kind: 'permission',
+        requestId: ids.get('permission', block.requestId),
+        title: budget.plainText(block.title),
+        options: budget.array(block.options).map((option) => ({
+          optionId: ids.get('permission-option', option.optionId),
+          label: budget.plainText(option.label),
+          ...(option.description
+            ? { description: budget.plainText(option.description) }
+            : {}),
+          raw: null,
+        })),
+        preview: sanitizeToolPreview(block.preview, budget, diagnostics, ids),
+        ...(block.toolCallId
+          ? { toolCallId: ids.get('tool-call', block.toolCallId) }
+          : {}),
+        ...(toolName ? { toolName } : {}),
+        ...(toolKind ? { toolKind } : {}),
+        ...(resolution ? { resolved: resolution.value } : {}),
+      };
+    }
+    case 'status':
+    case 'error': {
+      const code = budget.optionalLabel(block.code, 128);
+      const errorKind = safeExportErrorKind(block.errorKind);
+      const source = budget.optionalLabel(block.source, 128);
+      return {
+        ...common,
+        kind: block.kind,
+        text: budget.text(block.text),
+        ...(code ? { code } : {}),
+        ...(errorKind ? { errorKind } : {}),
+        ...(source ? { source } : {}),
+      };
+    }
+    case 'prompt_cancelled':
+      return {
+        ...common,
+        kind: 'prompt_cancelled',
+        ...(block.reason ? { reason: budget.plainText(block.reason) } : {}),
+      };
+    case 'debug':
+      diagnostics.add('debug_block_excluded', 'info');
+      return undefined;
+    default:
+      return assertNever(block);
+  }
+}
+
+function sanitizeToolPreview(
+  preview: DaemonToolPreview,
+  budget: ExportBudget,
+  diagnostics: DiagnosticCounter,
+  ids: OpaqueDocumentIds,
+): ExportToolPreviewV1 {
+  switch (preview.kind) {
+    case 'ask_user_question':
+      return {
+        kind: preview.kind,
+        questions: budget.array(preview.questions).map((question) => ({
+          ...(question.header
+            ? { header: budget.label(question.header, 200) }
+            : {}),
+          question: budget.plainText(question.question),
+          options: budget.array(question.options).map((option) => ({
+            label: budget.plainText(option.label),
+            ...(option.description
+              ? { description: budget.plainText(option.description) }
+              : {}),
+            raw: null,
+          })),
+          raw: null,
+        })),
+      };
+    case 'command':
+      return {
+        kind: preview.kind,
+        command: budget.plainText(redactHomePaths(preview.command)),
+        ...(preview.cwd
+          ? { cwd: budget.label(safePath(preview.cwd), 400) }
+          : {}),
+      };
+    case 'file_diff':
+      return {
+        kind: preview.kind,
+        path: budget.label(safePath(preview.path), 400),
+        ...(preview.oldText !== undefined
+          ? { oldText: budget.plainText(preview.oldText) }
+          : {}),
+        ...(preview.newText !== undefined
+          ? { newText: budget.plainText(preview.newText) }
+          : {}),
+        ...(preview.patch !== undefined
+          ? { patch: budget.plainText(preview.patch) }
+          : {}),
+      };
+    case 'file_read':
+      return {
+        kind: preview.kind,
+        path: budget.label(safePath(preview.path), 400),
+        ...(preview.range ? { range: preview.range } : {}),
+      };
+    case 'web_fetch': {
+      const method = budget.optionalLabel(preview.method, 16);
+      return {
+        kind: preview.kind,
+        url: budget.plainText(
+          safeDisplayUrl(preview.url, diagnostics, () =>
+            budget.markContentLoss(),
+          ),
+        ),
+        ...(method ? { method } : {}),
+      };
+    }
+    case 'mcp_invocation':
+      return {
+        kind: preview.kind,
+        serverId: budget.label(preview.serverId, 128),
+        toolName: budget.label(preview.toolName, 128),
+        ...(preview.argsSummary
+          ? { argsSummary: budget.plainText(preview.argsSummary) }
+          : {}),
+      };
+    case 'code_block': {
+      const language = budget.optionalLabel(preview.language, 64);
+      return {
+        kind: preview.kind,
+        code: budget.plainText(preview.code),
+        ...(language ? { language } : {}),
+        ...(preview.origin
+          ? { origin: budget.label(safePath(preview.origin), 400) }
+          : {}),
+      };
+    }
+    case 'search':
+      return {
+        kind: preview.kind,
+        query: budget.plainText(preview.query),
+        ...(preview.resultCount !== undefined
+          ? { resultCount: safeCount(preview.resultCount) }
+          : {}),
+        ...(preview.top
+          ? {
+              top: budget
+                .array(preview.top)
+                .map((item) => budget.plainText(redactHomePaths(item))),
+            }
+          : {}),
+      };
+    case 'tabular':
+      return {
+        kind: preview.kind,
+        columns: budget
+          .array(preview.columns)
+          .map((item) => budget.plainText(item)),
+        rows: budget
+          .array(preview.rows)
+          .map((row) =>
+            budget.array(row).map((item) => budget.plainText(item)),
+          ),
+        ...(preview.totalRows !== undefined
+          ? { totalRows: safeCount(preview.totalRows) }
+          : {}),
+      };
+    case 'image_generation': {
+      const model = budget.optionalLabel(preview.model, 128);
+      const thumbnailUrl =
+        preview.thumbnailUrl !== undefined
+          ? budget.dataImageUrl(preview.thumbnailUrl)
+          : undefined;
+      return {
+        kind: preview.kind,
+        prompt: budget.plainText(preview.prompt),
+        ...(thumbnailUrl ? { thumbnailUrl } : {}),
+        ...(model ? { model } : {}),
+      };
+    }
+    case 'subagent_delegation':
+      return {
+        kind: preview.kind,
+        agentName: budget.label(preview.agentName, 128),
+        task: budget.plainText(preview.task),
+        ...(preview.parentDelegationId
+          ? {
+              parentDelegationId: ids.get(
+                'tool-call',
+                preview.parentDelegationId,
+              ),
+            }
+          : {}),
+      };
+    case 'key_value':
+      return {
+        kind: preview.kind,
+        rows: budget.array(preview.rows).map((row) => ({
+          label: budget.plainText(row.label),
+          value: budget.plainText(redactHomePaths(row.value)),
+        })),
+      };
+    case 'todo_list':
+      return sanitizeTodoPreview(preview, budget, ids);
+    case 'generic':
+      return {
+        kind: preview.kind,
+        ...(preview.summary
+          ? { summary: budget.plainText(preview.summary) }
+          : {}),
+      };
+    default:
+      return assertNever(preview);
+  }
+}
+
+function sanitizeResultPreview(
+  preview: DaemonToolResultPreview,
+  budget: ExportBudget,
+  _diagnostics: DiagnosticCounter,
+  ids: OpaqueDocumentIds,
+): ExportToolResultPreviewV1 | undefined {
+  if (preview.kind === 'todo_list') {
+    return sanitizeTodoPreview(preview, budget, ids);
+  }
+  if (preview.kind === 'text') {
+    return { kind: 'text', text: budget.text(redactHomePaths(preview.text)) };
+  }
+  if (!preview.summary?.trim()) return undefined;
+  const summary = budget.text(redactHomePaths(preview.summary));
+  return summary.trim()
+    ? { kind: 'generic', summary }
+    : { kind: 'text', text: summary };
+}
+
+function sanitizeTodoPreview(
+  preview: DaemonTodoListPreview,
+  budget: ExportBudget,
+  ids: OpaqueDocumentIds,
+): ExportTodoListPreviewV1 {
+  if (preview.truncated) budget.markTruncated('todo_preview_truncated');
+  return {
+    kind: 'todo_list',
+    entries: budget.array(preview.entries).map((entry) => ({
+      id: ids.get('todo', entry.id),
+      content: budget.plainText(entry.content),
+      status: entry.status,
+      ...(entry.priority ? { priority: entry.priority } : {}),
+      ...(entry.blockedBy
+        ? {
+            blockedBy: budget
+              .array(entry.blockedBy)
+              .map((item) => ids.get('todo', item)),
+          }
+        : {}),
+    })),
+    ...(preview.truncated ? { truncated: true } : {}),
+    ...(preview.planId ? { planId: ids.get('plan', preview.planId) } : {}),
+    ...(preview.revision !== undefined
+      ? { revision: safeCount(preview.revision) }
+      : {}),
+  };
+}
+
+function terminalToolStatus(
+  status: string,
+  diagnostics: DiagnosticCounter,
+  budget: ExportBudget,
+): ExportToolTranscriptBlockV1['status'] {
+  if (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  ) {
+    return status;
+  }
+  diagnostics.add('tool_status_frozen', 'warning', 1, true);
+  budget.markContentLoss();
+  return 'cancelled';
+}
+
+function createMetadataPresentation(
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  complete: boolean,
+  truncated: boolean,
+  diagnostics: DiagnosticCounter,
+  budget: ExportBudget,
+): ExportMetadataPresentationV1 {
+  const metadata = sessionData.metadata;
+  const title = safeMetadataLabel(
+    options.title,
+    200,
+    'title',
+    diagnostics,
+    budget,
+  );
+  const gitBranch = safeMetadataLabel(
+    metadata?.gitBranch,
+    200,
+    'git_branch',
+    diagnostics,
+    budget,
+  );
+  const model = safeMetadataLabel(
+    metadata?.model,
+    200,
+    'model',
+    diagnostics,
+    budget,
+  );
+  const channel = safeMetadataLabel(
+    metadata?.channel,
+    100,
+    'channel',
+    diagnostics,
+    budget,
+  );
+  const projectName = metadata?.cwd
+    ? safeMetadataLabel(
+        safePath(metadata.cwd),
+        400,
+        'project_name',
+        diagnostics,
+        budget,
+      )
+    : undefined;
+  const repository = metadata?.gitRepo
+    ? safeRepository(metadata.gitRepo, diagnostics, budget)
+    : undefined;
+  return {
+    ...(title ? { title } : {}),
+    ...(isIsoDate(sessionData.startTime)
+      ? { startedAt: sessionData.startTime }
+      : {}),
+    exportedAt: options.exportedAt,
+    complete,
+    truncated,
+    ...(projectName ? { projectName } : {}),
+    ...(repository ? { repository } : {}),
+    ...(gitBranch ? { gitBranch } : {}),
+    ...(model ? { model } : {}),
+    ...(channel ? { channel } : {}),
+    ...(metadata ? { promptCount: safeCount(metadata.promptCount) } : {}),
+    ...(metadata?.contextUsagePercent !== undefined
+      ? {
+          contextUsagePercent: Math.min(
+            100,
+            safeCount(metadata.contextUsagePercent),
+          ),
+        }
+      : {}),
+    ...(metadata?.contextWindowSize !== undefined
+      ? { contextWindowSize: safeCount(metadata.contextWindowSize) }
+      : {}),
+    ...(metadata?.totalTokens !== undefined
+      ? { totalTokens: safeCount(metadata.totalTokens) }
+      : {}),
+    ...(metadata?.filesWritten !== undefined
+      ? { filesWritten: safeCount(metadata.filesWritten) }
+      : {}),
+    ...(metadata?.linesAdded !== undefined
+      ? { linesAdded: safeCount(metadata.linesAdded) }
+      : {}),
+    ...(metadata?.linesRemoved !== undefined
+      ? { linesRemoved: safeCount(metadata.linesRemoved) }
+      : {}),
+  };
+}
+
+class ExportBudget {
+  visibleTextBytes = 0;
+  totalRasterBytes = 0;
+  richRenderTasks = 0;
+  truncated = false;
+
+  constructor(private readonly diagnostics: DiagnosticCounter) {}
+
+  array<T>(value: readonly T[]): T[] {
+    if (value.length > EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength) {
+      this.truncated = true;
+      this.diagnostics.add('array_budget_exceeded', 'warning');
+    }
+    return value.slice(0, EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength);
+  }
+
+  markTruncated(code: string): void {
+    this.truncated = true;
+    this.diagnostics.add(code, 'warning');
+  }
+
+  markContentLoss(): void {
+    this.truncated = true;
+  }
+
+  label(value: unknown, maxLength: number): string {
+    const safe = safeLabel(value, maxLength);
+    if (safe !== value) this.markTruncated('label_sanitized');
+    return this.plainText(safe);
+  }
+
+  optionalLabel(value: unknown, maxLength: number): string | undefined {
+    if (value === undefined || value === '') return undefined;
+    return this.label(value, maxLength);
+  }
+
+  plainText(value: string): string {
+    return this.applyTextBudget(redactHomePaths(value));
+  }
+
+  text(value: string): string {
+    value = redactHomePaths(value);
+    const definitions = new Map<string, string>();
+    const markdownSegments = splitMarkdownFenceSegments(value);
+    for (const segment of markdownSegments) {
+      if (!segment.prose) continue;
+      transformMarkdownProse(segment.value, (prose) => {
+        for (const match of prose.matchAll(
+          /^\s*\[([^\]]+)\]:\s*(?:<([^>]+)>|([^\s]+))(?:\s+.*)?$/gm,
+        )) {
+          const label = match[1]?.trim().toLowerCase();
+          const source = match[2] ?? match[3];
+          if (label && source) definitions.set(label, source);
+        }
+        return prose;
+      });
+    }
+    const replaceImage = (alt: string, source: string | undefined): string => {
+      const parsed = source ? parseApprovedImageDataUrl(source) : undefined;
+      if (parsed && this.image(parsed)) {
+        return `![${alt}](${formatApprovedImageDataUrl(parsed)})`;
+      }
+      this.truncated = true;
+      this.diagnostics.add('markdown_image_rejected', 'warning');
+      return `[image omitted${alt ? `: ${alt}` : ''}]`;
+    };
+    const replaceReferenceImage = (
+      alt: string,
+      source: string | undefined,
+    ): string =>
+      source && parseApprovedImageDataUrl(source)
+        ? `![${alt}](${source})`
+        : replaceImage(alt, undefined);
+    const resourceSafeValue = markdownSegments
+      .map((segment) => {
+        if (!segment.prose) return segment.value;
+        return transformMarkdownProse(segment.value, (prose) => {
+          let safe = replaceActiveMarkdownSyntax(
+            prose,
+            /!\[([^\]]*)\]\[([^\]]*)\]/g,
+            (match) =>
+              replaceReferenceImage(
+                match[1] ?? '',
+                definitions.get(
+                  (match[2] || match[1] || '').trim().toLowerCase(),
+                ),
+              ),
+          );
+          safe = replaceActiveMarkdownSyntax(
+            safe,
+            /!\[([^\]]+)\](?![([])/g,
+            (match) =>
+              replaceReferenceImage(
+                match[1] ?? '',
+                definitions.get((match[1] ?? '').trim().toLowerCase()),
+              ),
+          );
+          safe = replaceActiveMarkdownSyntax(safe, /<img\b[^>]*>/gi, () =>
+            replaceImage('', undefined),
+          );
+          safe = replaceActiveMarkdownSyntax(
+            safe,
+            /!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^)]*["'])?\)/g,
+            (match) => replaceImage(match[1] ?? '', match[2]),
+          );
+          return sanitizeMarkdownNavigableUrls(safe, (code) => {
+            this.truncated = true;
+            this.diagnostics.add(code, 'warning', 1, true);
+          });
+        });
+      })
+      .join('');
+    const richTaskSafeValue = resourceSafeValue.replace(
+      /^(\s*)(```|~~~)([^\s`~]+)(.*)$/gm,
+      (
+        match,
+        indent: string,
+        fence: string,
+        language: string,
+        rest: string,
+      ) => {
+        this.richRenderTasks += 1;
+        if (
+          this.richRenderTasks <= EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks
+        ) {
+          return match;
+        }
+        this.diagnostics.add('rich_render_budget_exceeded', 'warning');
+        return `${indent}${fence}text${rest} [source fallback: ${safeLabel(language, 32)}]`;
+      },
+    );
+    return this.applyTextBudget(richTaskSafeValue);
+  }
+
+  private applyTextBudget(value: string): string {
+    const bytes = utf8Bytes(value);
+    if (
+      bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes ||
+      this.visibleTextBytes + bytes >
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes
+    ) {
+      this.truncated = true;
+      this.diagnostics.add('text_budget_exceeded', 'warning');
+      const fallback = '[content omitted: export text budget exceeded]';
+      const fallbackBytes = utf8Bytes(fallback);
+      if (
+        this.visibleTextBytes + fallbackBytes <=
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes
+      ) {
+        this.visibleTextBytes += fallbackBytes;
+        return fallback;
+      }
+      return '';
+    }
+    this.visibleTextBytes += bytes;
+    return value;
+  }
+
+  image(image: {
+    data: string;
+    mimeType: string;
+  }): { data: string; mimeType: string } | undefined {
+    if (!SAFE_RASTER_MIME_TYPES.has(image.mimeType)) {
+      this.truncated = true;
+      this.diagnostics.add('image_type_rejected', 'warning');
+      return undefined;
+    }
+    const bytes = decodedBase64Bytes(image.data);
+    if (
+      bytes === undefined ||
+      bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+      this.totalRasterBytes + bytes >
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxTotalRasterBytes ||
+      (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+    ) {
+      this.truncated = true;
+      this.diagnostics.add('image_budget_or_animation_rejected', 'warning');
+      return undefined;
+    }
+    this.totalRasterBytes += bytes;
+    return { data: image.data, mimeType: image.mimeType };
+  }
+
+  dataImageUrl(value: string): string | undefined {
+    const image = parseApprovedImageDataUrl(value);
+    if (!image) {
+      this.truncated = true;
+      this.diagnostics.add('image_type_rejected', 'warning');
+      return undefined;
+    }
+    return this.image(image) ? formatApprovedImageDataUrl(image) : undefined;
+  }
+}
+
+const SAFE_RASTER_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+function parseApprovedImageDataUrl(
+  value: string,
+): { data: string; mimeType: string } | undefined {
+  const match =
+    /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$/i.exec(
+      value,
+    );
+  if (!match?.[1] || match[2] === undefined) return undefined;
+  return { mimeType: match[1].toLowerCase(), data: match[2] };
+}
+
+function formatApprovedImageDataUrl(image: {
+  data: string;
+  mimeType: string;
+}): string {
+  return `data:${image.mimeType};base64,${image.data}`;
+}
+
+class DiagnosticCounter {
+  private readonly entries = new Map<
+    string,
+    { severity: 'info' | 'warning' | 'error'; count: number }
+  >();
+  private completenessLost = false;
+
+  add(
+    code: string,
+    severity: 'info' | 'warning' | 'error',
+    count = 1,
+    affectsCompleteness = false,
+  ): void {
+    if (affectsCompleteness) this.completenessLost = true;
+    const current = this.entries.get(code);
+    if (current) {
+      current.count += Math.max(1, count);
+      if (severityRank(severity) > severityRank(current.severity)) {
+        current.severity = severity;
+      }
+      return;
+    }
+    this.entries.set(code, { severity, count: Math.max(1, count) });
+  }
+
+  get hasErrors(): boolean {
+    return [...this.entries.values()].some((item) => item.severity === 'error');
+  }
+
+  get hasCompletenessLoss(): boolean {
+    return this.completenessLost;
+  }
+
+  toArray(): ExportTranscriptDiagnosticV1[] {
+    return [...this.entries.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([code, item]) => ({ code, ...item }));
+  }
+}
+
+class OpaqueDocumentIds {
+  private readonly ids = new Map<string, string>();
+  private nextOrdinal = 0;
+
+  get(kind: string, nativeId: string): string {
+    const key = `${kind}\u0000${nativeId}`;
+    let id = this.ids.get(key);
+    if (!id) {
+      id = `${kind}-${this.nextOrdinal}`;
+      this.nextOrdinal += 1;
+      this.ids.set(key, id);
+    }
+    return id;
+  }
+}
+
+const APPROVED_PERMISSION_TOKENS = new Set([
+  'accept',
+  'accepted',
+  'allow',
+  'allow_always',
+  'allow_once',
+  'allowed',
+  'approve',
+  'approved',
+  'confirm',
+  'confirmed',
+  'proceed',
+  'proceed_always_project',
+  'proceed_always_user',
+  'proceed_once',
+  'proceed_once_and_switch_to_default',
+  'succeeded',
+  'success',
+]);
+
+const REJECTED_PERMISSION_TOKENS = new Set([
+  'deny',
+  'denied',
+  'reject',
+  'reject_always',
+  'reject_once',
+  'rejected',
+]);
+
+const CANCELLED_PERMISSION_TOKENS = new Set([
+  'cancel',
+  'canceled',
+  'cancelled',
+]);
+
+const EXPIRED_PERMISSION_TOKENS = new Set([
+  'expired',
+  'session_closed',
+  'timed_out',
+  'timeout',
+]);
+
+export function classifyPermissionResolutionForExport(
+  resolved: string,
+  options: readonly DaemonUiPermissionOption[],
+): { value: ExportPermissionResolutionV1; lossy: boolean } {
+  const separator = resolved.indexOf(':');
+  const primary = (separator === -1 ? resolved : resolved.slice(0, separator))
+    .trim()
+    .toLowerCase();
+  let token = primary;
+  if (primary === 'selected' && separator !== -1) {
+    const optionId = resolved.slice(separator + 1).trim();
+    const option = options.find((candidate) => candidate.optionId === optionId);
+    if (!option) return { value: 'resolved', lossy: true };
+    const raw = isRecord(option.raw) ? option.raw : undefined;
+    token =
+      (typeof raw?.['kind'] === 'string'
+        ? raw['kind'].trim().toLowerCase()
+        : '') || option.optionId.trim().toLowerCase();
+  }
+  if (APPROVED_PERMISSION_TOKENS.has(token)) {
+    return { value: 'approved', lossy: false };
+  }
+  if (REJECTED_PERMISSION_TOKENS.has(token)) {
+    return { value: 'rejected', lossy: false };
+  }
+  if (CANCELLED_PERMISSION_TOKENS.has(token)) {
+    return { value: 'cancelled', lossy: false };
+  }
+  if (EXPIRED_PERMISSION_TOKENS.has(token)) {
+    return { value: 'expired', lossy: false };
+  }
+  if (token === 'resolved') return { value: 'resolved', lossy: false };
+  return { value: 'resolved', lossy: true };
+}
+
+function assertExportBlock(value: unknown): void {
+  if (!isRecord(value) || !isSafeLabel(value['id'], 200)) {
+    throw new ExportTranscriptDocumentError('invalid_block');
+  }
+  const kind = value['kind'];
+  const common = ['id', 'kind', 'clientReceivedAt', 'createdAt', 'updatedAt'];
+  const keysByKind: Record<string, string[]> = {
+    user: [
+      ...common,
+      'text',
+      'streaming',
+      'collapsed',
+      'parentToolCallId',
+      'images',
+    ],
+    assistant: [
+      ...common,
+      'text',
+      'streaming',
+      'collapsed',
+      'parentToolCallId',
+      'images',
+      'usage',
+    ],
+    thought: [
+      ...common,
+      'text',
+      'streaming',
+      'collapsed',
+      'parentToolCallId',
+      'images',
+    ],
+    tool: [
+      ...common,
+      'toolCallId',
+      'title',
+      'status',
+      'toolName',
+      'toolKind',
+      'preview',
+      'resultPreview',
+      'parentToolCallId',
+      'parentBlockId',
+      'subagentType',
+    ],
+    shell: [...common, 'text', 'stream'],
+    user_shell: [...common, 'text', 'command', 'cwd', 'stream'],
+    permission: [
+      ...common,
+      'requestId',
+      'title',
+      'options',
+      'preview',
+      'toolCallId',
+      'toolName',
+      'toolKind',
+      'resolved',
+    ],
+    status: [...common, 'text', 'code', 'errorKind', 'source'],
+    error: [...common, 'text', 'code', 'errorKind', 'source'],
+    prompt_cancelled: [...common, 'reason'],
+  };
+  if (typeof kind !== 'string' || !keysByKind[kind]) {
+    throw new ExportTranscriptDocumentError('unsupported_block_kind');
+  }
+  assertOnlyKeys(value, keysByKind[kind]);
+  if (
+    value['clientReceivedAt'] !== 0 ||
+    value['createdAt'] !== 0 ||
+    value['updatedAt'] !== 0
+  ) {
+    throw new ExportTranscriptDocumentError('nonzero_block_timestamp');
+  }
+  switch (kind) {
+    case 'user':
+    case 'assistant':
+    case 'thought':
+      assertText(value['text']);
+      if (value['streaming'] !== undefined && value['streaming'] !== false) {
+        invalidBlock();
+      }
+      assertOptionalBoolean(value['collapsed']);
+      assertOptionalLabel(value['parentToolCallId'], 200);
+      if (value['images'] !== undefined) {
+        if (!Array.isArray(value['images'])) invalidBlock();
+        for (const image of value['images']) assertRasterImage(image);
+      }
+      if (value['usage'] !== undefined) {
+        if (kind !== 'assistant') invalidBlock();
+        assertUsage(value['usage']);
+      }
+      return;
+    case 'tool':
+      assertLabel(value['toolCallId'], 200);
+      assertText(value['title']);
+      if (
+        !['completed', 'failed', 'cancelled', 'canceled'].includes(
+          String(value['status']),
+        )
+      ) {
+        invalidBlock();
+      }
+      assertToolPreview(value['preview']);
+      if (value['resultPreview'] !== undefined) {
+        assertToolResultPreview(value['resultPreview']);
+      }
+      if (
+        (value['status'] === 'completed' || value['status'] === 'failed') &&
+        value['resultPreview'] === undefined
+      ) {
+        invalidBlock();
+      }
+      for (const key of [
+        'toolName',
+        'toolKind',
+        'parentToolCallId',
+        'parentBlockId',
+        'subagentType',
+      ]) {
+        assertOptionalLabel(value[key], 200);
+      }
+      return;
+    case 'shell':
+      assertText(value['text']);
+      assertOptionalStream(value['stream']);
+      return;
+    case 'user_shell':
+      assertText(value['text']);
+      assertText(value['command']);
+      assertOptionalPresentationLabel(value['cwd'], 400);
+      if (value['cwd'] !== undefined && !isSafeExportPath(value['cwd'])) {
+        invalidBlock();
+      }
+      assertOptionalStream(value['stream']);
+      return;
+    case 'permission':
+      assertLabel(value['requestId'], 200);
+      assertText(value['title']);
+      if (!Array.isArray(value['options'])) invalidBlock();
+      for (const option of value['options']) assertPermissionOption(option);
+      assertToolPreview(value['preview']);
+      assertOptionalLabel(value['toolCallId'], 200);
+      assertOptionalLabel(value['toolName'], 200);
+      assertOptionalLabel(value['toolKind'], 200);
+      if (
+        value['resolved'] !== undefined &&
+        !['approved', 'rejected', 'cancelled', 'expired', 'resolved'].includes(
+          String(value['resolved']),
+        )
+      ) {
+        invalidBlock();
+      }
+      return;
+    case 'status':
+    case 'error':
+      assertText(value['text']);
+      assertOptionalLabel(value['code'], 128);
+      if (
+        value['errorKind'] !== undefined &&
+        !SAFE_EXPORT_ERROR_KINDS.has(String(value['errorKind']))
+      ) {
+        invalidBlock();
+      }
+      assertOptionalLabel(value['source'], 128);
+      return;
+    case 'prompt_cancelled':
+      if (value['reason'] !== undefined) assertText(value['reason']);
+      return;
+    default:
+      invalidBlock();
+  }
+}
+
+const SAFE_EXPORT_ERROR_KINDS = new Set<string>(DAEMON_ERROR_KINDS);
+
+function safeExportErrorKind(
+  value: DaemonErrorKind | undefined,
+): DaemonErrorKind | undefined {
+  return value && SAFE_EXPORT_ERROR_KINDS.has(value) ? value : undefined;
+}
+
+function invalidBlock(): never {
+  throw new ExportTranscriptDocumentError('invalid_block');
+}
+
+function assertText(value: unknown): asserts value is string {
+  if (
+    typeof value !== 'string' ||
+    utf8Bytes(value) > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes
+  ) {
+    invalidBlock();
+  }
+}
+
+function assertLabel(
+  value: unknown,
+  maxLength: number,
+): asserts value is string {
+  if (!isSafeLabel(value, maxLength)) invalidBlock();
+}
+
+function assertOptionalLabel(value: unknown, maxLength: number): void {
+  if (value !== undefined) assertLabel(value, maxLength);
+}
+
+function assertPresentationLabel(value: unknown, maxLength: number): void {
+  if (!isSafePresentationLabel(value, maxLength)) invalidBlock();
+}
+
+function assertOptionalPresentationLabel(
+  value: unknown,
+  maxLength: number,
+): void {
+  if (value !== undefined) assertPresentationLabel(value, maxLength);
+}
+
+function assertOptionalBoolean(value: unknown): void {
+  if (value !== undefined && typeof value !== 'boolean') invalidBlock();
+}
+
+function assertOptionalStream(value: unknown): void {
+  if (value !== undefined && value !== 'stdout' && value !== 'stderr') {
+    invalidBlock();
+  }
+}
+
+function assertRasterImage(value: unknown): void {
+  if (!isRecord(value)) invalidBlock();
+  assertOnlyKeys(value, ['data', 'mimeType']);
+  if (
+    typeof value['data'] !== 'string' ||
+    typeof value['mimeType'] !== 'string' ||
+    !SAFE_RASTER_MIME_TYPES.has(value['mimeType']) ||
+    decodedBase64Bytes(value['data']) === undefined ||
+    (value['mimeType'] === 'image/gif' && isAnimatedGif(value['data']))
+  ) {
+    invalidBlock();
+  }
+}
+
+function assertUsage(value: unknown): void {
+  if (!isRecord(value)) invalidBlock();
+  assertOnlyKeys(value, ['inputTokens', 'outputTokens', 'cachedTokens']);
+  if (
+    !isSafeCount(value['inputTokens']) ||
+    !isSafeCount(value['outputTokens']) ||
+    (value['cachedTokens'] !== undefined && !isSafeCount(value['cachedTokens']))
+  ) {
+    invalidBlock();
+  }
+}
+
+function assertPermissionOption(value: unknown): void {
+  if (!isRecord(value)) invalidBlock();
+  assertOnlyKeys(value, ['optionId', 'label', 'description', 'raw']);
+  assertLabel(value['optionId'], 200);
+  assertText(value['label']);
+  if (value['description'] !== undefined) assertText(value['description']);
+  if (value['raw'] !== null) invalidBlock();
+}
+
+function assertToolPreview(value: unknown): void {
+  if (!isRecord(value) || typeof value['kind'] !== 'string') invalidBlock();
+  const kind = value['kind'];
+  const keysByKind: Record<string, readonly string[]> = {
+    ask_user_question: ['kind', 'questions'],
+    command: ['kind', 'command', 'cwd'],
+    file_diff: ['kind', 'path', 'oldText', 'newText', 'patch'],
+    file_read: ['kind', 'path', 'range'],
+    web_fetch: ['kind', 'url', 'method'],
+    mcp_invocation: ['kind', 'serverId', 'toolName', 'argsSummary'],
+    code_block: ['kind', 'language', 'code', 'origin'],
+    search: ['kind', 'query', 'resultCount', 'top'],
+    tabular: ['kind', 'columns', 'rows', 'totalRows'],
+    image_generation: ['kind', 'prompt', 'thumbnailUrl', 'model'],
+    subagent_delegation: ['kind', 'agentName', 'task', 'parentDelegationId'],
+    key_value: ['kind', 'rows'],
+    todo_list: ['kind', 'entries', 'truncated', 'planId', 'revision'],
+    generic: ['kind', 'summary'],
+  };
+  const keys = keysByKind[kind];
+  if (!keys) invalidBlock();
+  assertOnlyKeys(value, keys);
+  switch (kind) {
+    case 'ask_user_question':
+      if (!Array.isArray(value['questions'])) invalidBlock();
+      for (const question of value['questions']) assertQuestion(question);
+      return;
+    case 'command':
+      assertText(value['command']);
+      assertOptionalPresentationLabel(value['cwd'], 400);
+      if (value['cwd'] !== undefined && !isSafeExportPath(value['cwd'])) {
+        invalidBlock();
+      }
+      return;
+    case 'file_diff':
+      assertPresentationLabel(value['path'], 400);
+      if (!isSafeExportPath(value['path'])) invalidBlock();
+      for (const key of ['oldText', 'newText', 'patch']) {
+        if (value[key] !== undefined) assertText(value[key]);
+      }
+      return;
+    case 'file_read':
+      assertPresentationLabel(value['path'], 400);
+      if (!isSafeExportPath(value['path'])) invalidBlock();
+      if (value['range'] !== undefined) {
+        if (
+          !Array.isArray(value['range']) ||
+          value['range'].length !== 2 ||
+          !value['range'].every(isSafeCount)
+        ) {
+          invalidBlock();
+        }
+      }
+      return;
+    case 'web_fetch':
+      assertText(value['url']);
+      if (!isSafeDisplayUrl(value['url'])) invalidBlock();
+      assertOptionalLabel(value['method'], 16);
+      return;
+    case 'mcp_invocation':
+      assertPresentationLabel(value['serverId'], 128);
+      assertPresentationLabel(value['toolName'], 128);
+      if (value['argsSummary'] !== undefined) assertText(value['argsSummary']);
+      return;
+    case 'code_block':
+      assertText(value['code']);
+      assertOptionalLabel(value['language'], 64);
+      assertOptionalLabel(value['origin'], 400);
+      if (value['origin'] !== undefined && !isSafeExportPath(value['origin'])) {
+        invalidBlock();
+      }
+      return;
+    case 'search':
+      assertText(value['query']);
+      if (
+        value['resultCount'] !== undefined &&
+        !isSafeCount(value['resultCount'])
+      ) {
+        invalidBlock();
+      }
+      assertOptionalTextArray(value['top']);
+      return;
+    case 'tabular':
+      assertTextArray(value['columns']);
+      if (!Array.isArray(value['rows'])) invalidBlock();
+      for (const row of value['rows']) assertTextArray(row);
+      if (
+        value['totalRows'] !== undefined &&
+        !isSafeCount(value['totalRows'])
+      ) {
+        invalidBlock();
+      }
+      return;
+    case 'image_generation':
+      assertText(value['prompt']);
+      if (value['thumbnailUrl'] !== undefined) {
+        if (typeof value['thumbnailUrl'] !== 'string') invalidBlock();
+        const image = parseApprovedImageDataUrl(value['thumbnailUrl']);
+        const bytes = image ? decodedBase64Bytes(image.data) : undefined;
+        const canonical = image ? formatApprovedImageDataUrl(image) : undefined;
+        if (
+          bytes === undefined ||
+          bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+          value['thumbnailUrl'] !== canonical ||
+          (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
+        ) {
+          invalidBlock();
+        }
+      }
+      assertOptionalLabel(value['model'], 128);
+      return;
+    case 'subagent_delegation':
+      assertPresentationLabel(value['agentName'], 128);
+      assertText(value['task']);
+      assertOptionalLabel(value['parentDelegationId'], 128);
+      return;
+    case 'key_value':
+      if (!Array.isArray(value['rows'])) invalidBlock();
+      for (const row of value['rows']) {
+        if (!isRecord(row)) invalidBlock();
+        assertOnlyKeys(row, ['label', 'value']);
+        assertText(row['label']);
+        assertText(row['value']);
+      }
+      return;
+    case 'todo_list':
+      assertTodoPreview(value);
+      return;
+    case 'generic':
+      if (value['summary'] !== undefined) assertText(value['summary']);
+      return;
+    default:
+      invalidBlock();
+  }
+}
+
+function assertToolResultPreview(value: unknown): void {
+  if (!isRecord(value)) invalidBlock();
+  if (value['kind'] === 'todo_list') {
+    assertTodoPreview(value);
+    return;
+  }
+  if (value['kind'] === 'text') {
+    assertOnlyKeys(value, ['kind', 'text']);
+    assertText(value['text']);
+    return;
+  }
+  if (value['kind'] === 'generic') {
+    assertOnlyKeys(value, ['kind', 'summary']);
+    assertText(value['summary']);
+    if (value['summary'].trim().length === 0) invalidBlock();
+    return;
+  }
+  invalidBlock();
+}
+
+function assertQuestion(value: unknown): void {
+  if (!isRecord(value)) invalidBlock();
+  assertOnlyKeys(value, ['header', 'question', 'options', 'raw']);
+  assertOptionalLabel(value['header'], 200);
+  assertText(value['question']);
+  if (!Array.isArray(value['options'])) invalidBlock();
+  for (const option of value['options']) {
+    if (!isRecord(option)) invalidBlock();
+    assertOnlyKeys(option, ['label', 'description', 'raw']);
+    assertText(option['label']);
+    if (option['description'] !== undefined) assertText(option['description']);
+    if (option['raw'] !== null) invalidBlock();
+  }
+  if (value['raw'] !== null) invalidBlock();
+}
+
+function assertTodoPreview(value: Record<string, unknown>): void {
+  assertOnlyKeys(value, ['kind', 'entries', 'truncated', 'planId', 'revision']);
+  if (!Array.isArray(value['entries'])) invalidBlock();
+  for (const entry of value['entries']) {
+    if (!isRecord(entry)) invalidBlock();
+    assertOnlyKeys(entry, ['id', 'content', 'status', 'priority', 'blockedBy']);
+    assertLabel(entry['id'], 128);
+    assertText(entry['content']);
+    if (
+      !['pending', 'in_progress', 'completed'].includes(String(entry['status']))
+    ) {
+      invalidBlock();
+    }
+    if (
+      entry['priority'] !== undefined &&
+      !['high', 'medium', 'low'].includes(String(entry['priority']))
+    ) {
+      invalidBlock();
+    }
+    if (entry['blockedBy'] !== undefined) {
+      if (!Array.isArray(entry['blockedBy'])) invalidBlock();
+      for (const dependency of entry['blockedBy']) assertLabel(dependency, 128);
+    }
+  }
+  assertOptionalBoolean(value['truncated']);
+  assertOptionalLabel(value['planId'], 128);
+  if (value['revision'] !== undefined && !isSafeCount(value['revision'])) {
+    invalidBlock();
+  }
+}
+
+function assertTextArray(value: unknown): void {
+  if (!Array.isArray(value)) invalidBlock();
+  for (const item of value) assertText(item);
+}
+
+function assertOptionalTextArray(value: unknown): void {
+  if (value !== undefined) assertTextArray(value);
+}
+
+function assertMetadata(value: unknown): void {
+  if (!isRecord(value)) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  assertOnlyKeys(value, [
+    'title',
+    'startedAt',
+    'exportedAt',
+    'complete',
+    'truncated',
+    'projectName',
+    'repository',
+    'gitBranch',
+    'model',
+    'channel',
+    'promptCount',
+    'contextUsagePercent',
+    'contextWindowSize',
+    'totalTokens',
+    'filesWritten',
+    'linesAdded',
+    'linesRemoved',
+  ]);
+  if (
+    !isIsoDate(value['exportedAt']) ||
+    typeof value['complete'] !== 'boolean' ||
+    typeof value['truncated'] !== 'boolean'
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  assertOptionalLabel(value['title'], 200);
+  if (value['startedAt'] !== undefined && !isIsoDate(value['startedAt'])) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  assertOptionalLabel(value['projectName'], 400);
+  if (
+    value['projectName'] !== undefined &&
+    !isSafeExportPath(value['projectName'])
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  if (
+    value['repository'] !== undefined &&
+    !isSafeRepository(value['repository'])
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  assertOptionalLabel(value['gitBranch'], 200);
+  assertOptionalLabel(value['model'], 200);
+  assertOptionalLabel(value['channel'], 100);
+  for (const key of [
+    'promptCount',
+    'contextWindowSize',
+    'totalTokens',
+    'filesWritten',
+    'linesAdded',
+    'linesRemoved',
+  ]) {
+    if (value[key] !== undefined && !isSafeCount(value[key])) {
+      throw new ExportTranscriptDocumentError('invalid_metadata');
+    }
+  }
+  if (
+    value['contextUsagePercent'] !== undefined &&
+    (!isSafeCount(value['contextUsagePercent']) ||
+      Number(value['contextUsagePercent']) > 100)
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+}
+
+function assertDocumentConsistency(value: Record<string, unknown>): void {
+  const metadata = value['metadata'] as ExportMetadataPresentationV1;
+  const diagnostics = value['diagnostics'] as ExportTranscriptDiagnosticV1[];
+  const blocks = value['blocks'] as ExportTranscriptBlockV1[];
+  const blockIds = new Set(blocks.map((block) => block.id));
+  if (blockIds.size !== blocks.length) {
+    throw new ExportTranscriptDocumentError('duplicate_block_id');
+  }
+  for (const block of blocks) {
+    if (
+      block.kind === 'tool' &&
+      block.parentBlockId !== undefined &&
+      !blockIds.has(block.parentBlockId)
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block_reference');
+    }
+  }
+  if (metadata.complete && metadata.truncated) {
+    throw new ExportTranscriptDocumentError('invalid_metadata_state');
+  }
+  const hasError = diagnostics.some(
+    (diagnostic) => diagnostic.severity === 'error',
+  );
+  const hasCompletenessDiagnostic = diagnostics.some(
+    (diagnostic) =>
+      diagnostic.severity === 'error' ||
+      (diagnostic.severity === 'warning' &&
+        diagnostic.code !== 'rich_render_budget_exceeded'),
+  );
+  const hasTruncationDiagnostic = diagnostics.some((diagnostic) =>
+    TRUNCATION_DIAGNOSTIC_CODES.has(diagnostic.code),
+  );
+  const hasExplicitContentLoss = blocks.some((block) => {
+    if (
+      block.kind === 'tool' &&
+      (block.status === 'completed' || block.status === 'failed') &&
+      block.resultPreview === undefined
+    ) {
+      return true;
+    }
+    if (block.kind === 'tool') {
+      return (
+        (block.preview.kind === 'todo_list' &&
+          block.preview.truncated === true) ||
+        (block.resultPreview?.kind === 'todo_list' &&
+          block.resultPreview.truncated === true)
+      );
+    }
+    if (block.kind === 'permission') {
+      return (
+        block.preview.kind === 'todo_list' && block.preview.truncated === true
+      );
+    }
+    return false;
+  });
+  if (
+    (hasError || hasCompletenessDiagnostic || hasExplicitContentLoss) &&
+    metadata.complete
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata_state');
+  }
+  if (
+    (hasExplicitContentLoss || hasTruncationDiagnostic) &&
+    !metadata.truncated
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata_state');
+  }
+}
+
+const TRUNCATION_DIAGNOSTIC_CODES = new Set([
+  'array_budget_exceeded',
+  'todo_preview_truncated',
+  'markdown_image_rejected',
+  'text_budget_exceeded',
+  'image_type_rejected',
+  'image_budget_or_animation_rejected',
+  'tool_status_frozen',
+  'url_sanitized',
+  'url_rejected',
+  'repository_url_rejected',
+  'repository_rejected',
+  'title_rejected',
+  'git_branch_rejected',
+  'model_rejected',
+  'channel_rejected',
+  'project_name_rejected',
+  'permission_resolution_sanitized',
+  'tool_result_presentation_missing',
+  'label_sanitized',
+]);
+
+function assertNoForbiddenFields(value: unknown): void {
+  const forbidden = new Set([
+    'rawInput',
+    'rawOutput',
+    'toolCall',
+    'details',
+    'locations',
+    'meta',
+    'sessionId',
+    'sourceRecordIds',
+    'eventId',
+    'serverTimestamp',
+    'promptId',
+    'branchRecordId',
+    'debugReason',
+  ]);
+  const visit = (entry: unknown, key?: string): void => {
+    if (typeof entry === 'string') {
+      if (key !== 'data' && redactHomePaths(entry) !== entry) {
+        throw new ExportTranscriptDocumentError('home_path_forbidden');
+      }
+      return;
+    }
+    if (Array.isArray(entry)) {
+      for (const item of entry) visit(item, key);
+      return;
+    }
+    if (!isRecord(entry)) return;
+    for (const [key, item] of Object.entries(entry)) {
+      if (forbidden.has(key)) {
+        throw new ExportTranscriptDocumentError('forbidden_field');
+      }
+      visit(item, key);
+    }
+  };
+  visit(value);
+}
+
+function assertDepthAndArrayBudgets(
+  value: unknown,
+  depth = 0,
+  ancestors = new WeakSet<object>(),
+): void {
+  if (depth > EXPORT_TRANSCRIPT_LIMITS_V1.maxObjectDepth) {
+    throw new ExportTranscriptDocumentError('object_depth_exceeded');
+  }
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) {
+      throw new ExportTranscriptDocumentError('cyclic_envelope');
+    }
+    if (value.length > EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength) {
+      throw new ExportTranscriptDocumentError('array_budget_exceeded');
+    }
+    ancestors.add(value);
+    for (const item of value) {
+      assertDepthAndArrayBudgets(item, depth + 1, ancestors);
+    }
+    ancestors.delete(value);
+    return;
+  }
+  if (!isRecord(value)) return;
+  if (ancestors.has(value)) {
+    throw new ExportTranscriptDocumentError('cyclic_envelope');
+  }
+  const entries = Object.values(value);
+  if (entries.length > EXPORT_TRANSCRIPT_LIMITS_V1.maxObjectProperties) {
+    throw new ExportTranscriptDocumentError('object_property_budget_exceeded');
+  }
+  ancestors.add(value);
+  for (const item of entries) {
+    assertDepthAndArrayBudgets(item, depth + 1, ancestors);
+  }
+  ancestors.delete(value);
+}
+
+function serializedEnvelopeBytes(value: unknown): number {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      throw new ExportTranscriptDocumentError('invalid_envelope');
+    }
+    return utf8Bytes(serialized);
+  } catch (error) {
+    if (error instanceof ExportTranscriptDocumentError) throw error;
+    throw new ExportTranscriptDocumentError('invalid_envelope');
+  }
+}
+
+function assertResourceBudgets(value: unknown): void {
+  let visibleTextBytes = 0;
+  let totalRasterBytes = 0;
+  let richRenderTasks = 0;
+  const visit = (
+    entry: unknown,
+    key?: string,
+    parent?: Record<string, unknown>,
+    path: readonly string[] = [],
+  ): void => {
+    if (typeof entry === 'string') {
+      if (key === 'data') return;
+      if (key === 'thumbnailUrl') {
+        const image = parseApprovedImageDataUrl(entry);
+        const bytes = image ? decodedBase64Bytes(image.data) : undefined;
+        const canonical = image ? formatApprovedImageDataUrl(image) : undefined;
+        if (
+          bytes === undefined ||
+          bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+          entry !== canonical ||
+          (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
+        ) {
+          throw new ExportTranscriptDocumentError('invalid_thumbnail_image');
+        }
+        totalRasterBytes += bytes;
+        return;
+      }
+      const bytes = utf8Bytes(entry);
+      if (bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes) {
+        throw new ExportTranscriptDocumentError('text_budget_exceeded');
+      }
+      const markdownText = isMarkdownExportText(key, parent, path);
+      if (key && VISIBLE_EXPORT_TEXT_FIELDS.has(key)) {
+        visibleTextBytes += bytes;
+        if (markdownText) {
+          richRenderTasks += [
+            ...entry.matchAll(/^(\s*)(```|~~~)([^\s`~]+)/gm),
+          ].filter(
+            (match) => !['text', 'plain', 'plaintext'].includes(match[3] ?? ''),
+          ).length;
+        }
+      }
+      if (markdownText) {
+        for (const segment of splitMarkdownFenceSegments(entry)) {
+          if (!segment.prose) continue;
+          transformMarkdownProse(segment.value, (prose) => {
+            if (sanitizeMarkdownNavigableUrls(prose, () => {}) !== prose) {
+              throw new ExportTranscriptDocumentError('invalid_markdown_url');
+            }
+            for (const pattern of [
+              /!\[[^\]]*\]\[[^\]]*\]/g,
+              /!\[[^\]]+\](?![([])/g,
+              /<img\b[^>]*>/gi,
+            ]) {
+              replaceActiveMarkdownSyntax(prose, pattern, () => {
+                throw new ExportTranscriptDocumentError(
+                  'invalid_markdown_image',
+                );
+              });
+            }
+            replaceActiveMarkdownSyntax(
+              prose,
+              /!\[[^\]]*\]\(([^\s)]+)(?:\s+["'][^)]*["'])?\)/g,
+              (match) => {
+                const source = match[1];
+                const image = source
+                  ? parseApprovedImageDataUrl(source)
+                  : undefined;
+                const imageBytes = image
+                  ? decodedBase64Bytes(image.data)
+                  : undefined;
+                if (
+                  imageBytes === undefined ||
+                  imageBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+                  (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
+                ) {
+                  throw new ExportTranscriptDocumentError(
+                    'invalid_markdown_image',
+                  );
+                }
+                totalRasterBytes += imageBytes;
+                return match[0];
+              },
+            );
+            return prose;
+          });
+        }
+      }
+      return;
+    }
+    if (Array.isArray(entry)) {
+      for (const item of entry) visit(item, key, parent, path);
+      return;
+    }
+    if (!isRecord(entry)) return;
+    if (
+      typeof entry['data'] === 'string' &&
+      typeof entry['mimeType'] === 'string'
+    ) {
+      const bytes = decodedBase64Bytes(entry['data']);
+      if (
+        bytes === undefined ||
+        bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+        !SAFE_RASTER_MIME_TYPES.has(entry['mimeType']) ||
+        (entry['mimeType'] === 'image/gif' && isAnimatedGif(entry['data']))
+      ) {
+        throw new ExportTranscriptDocumentError('raster_budget_exceeded');
+      }
+      totalRasterBytes += bytes;
+    }
+    for (const [childKey, item] of Object.entries(entry)) {
+      visit(item, childKey, entry, [...path, childKey]);
+    }
+  };
+  visit(value);
+  if (visibleTextBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes) {
+    throw new ExportTranscriptDocumentError('visible_text_budget_exceeded');
+  }
+  if (totalRasterBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTotalRasterBytes) {
+    throw new ExportTranscriptDocumentError('total_raster_budget_exceeded');
+  }
+  if (richRenderTasks > EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks) {
+    throw new ExportTranscriptDocumentError('rich_render_budget_exceeded');
+  }
+}
+
+function isMarkdownExportText(
+  key: string | undefined,
+  parent: Record<string, unknown> | undefined,
+  path: readonly string[],
+): boolean {
+  if (path.at(-2) === 'resultPreview') {
+    return key === 'text' || key === 'summary';
+  }
+  return (
+    key === 'text' &&
+    ['user', 'assistant', 'thought', 'status', 'error'].includes(
+      String(parent?.['kind']),
+    )
+  );
+}
+
+function splitMarkdownFenceSegments(
+  value: string,
+): Array<{ value: string; prose: boolean }> {
+  const segments: Array<{ value: string; prose: boolean }> = [];
+  let fence: { character: string; length: number } | undefined;
+  for (const line of value.match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (line === '') continue;
+    const marker = /^ {0,3}(`{3,}|~{3,})(?:[^\n]*)/.exec(line)?.[1];
+    const isClosing =
+      fence !== undefined &&
+      marker?.[0] === fence.character &&
+      marker.length >= fence.length &&
+      /^ {0,3}(?:`{3,}|~{3,})\s*$/.test(line.replace(/\n$/, ''));
+    const indentedCode =
+      fence === undefined && marker === undefined && /^(?: {4}|\t)/.test(line);
+    const prose = fence === undefined && marker === undefined && !indentedCode;
+    const previous = segments.at(-1);
+    if (previous?.prose === prose) previous.value += line;
+    else segments.push({ value: line, prose });
+    if (fence === undefined && marker) {
+      fence = { character: marker[0] ?? '', length: marker.length };
+    } else if (isClosing) {
+      fence = undefined;
+    }
+  }
+  return segments;
+}
+
+function transformMarkdownProse(
+  value: string,
+  transform: (value: string) => string,
+): string {
+  let result = '';
+  let cursor = 0;
+  for (const match of value.matchAll(/(`+)[\s\S]*?\1/g)) {
+    const index = match.index;
+    result += transform(value.slice(cursor, index));
+    result += match[0];
+    cursor = index + match[0].length;
+  }
+  return result + transform(value.slice(cursor));
+}
+
+function replaceActiveMarkdownSyntax(
+  value: string,
+  pattern: RegExp,
+  replace: (match: RegExpMatchArray) => string,
+): string {
+  let result = '';
+  let cursor = 0;
+  for (const match of value.matchAll(pattern)) {
+    const index = match.index;
+    if (isEscapedMarkdownSyntax(value, index)) continue;
+    result += value.slice(cursor, index);
+    result += replace(match);
+    cursor = index + match[0].length;
+  }
+  return result + value.slice(cursor);
+}
+
+function isEscapedMarkdownSyntax(value: string, index: number): boolean {
+  let backslashes = 0;
+  for (
+    let cursor = index - 1;
+    cursor >= 0 && value[cursor] === '\\';
+    cursor -= 1
+  ) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function sanitizeMarkdownNavigableUrls(
+  value: string,
+  onChange: (code: 'url_rejected' | 'url_sanitized') => void,
+): string {
+  const replaceDestination = (
+    source: string,
+    render: (safe: string) => string,
+    fallback: string,
+    original: string,
+  ): string => {
+    const safe = normalizeNavigableUrl(source);
+    if (safe === source) return original;
+    if (safe === undefined) {
+      onChange('url_rejected');
+      return fallback;
+    }
+    onChange('url_sanitized');
+    return render(safe);
+  };
+  let safe = replaceActiveMarkdownSyntax(
+    value,
+    /(?<!!)\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(\s+["'][^)]*["'])?\)/g,
+    (match) => {
+      const label = match[1] ?? '';
+      const source = match[2] ?? match[3] ?? '';
+      const title = match[4] ?? '';
+      return replaceDestination(
+        source,
+        (destination) => `[${label}](${destination}${title})`,
+        label,
+        match[0],
+      );
+    },
+  );
+  safe = replaceActiveMarkdownSyntax(
+    safe,
+    /^(\s*\[[^\]]+\]:\s*)(?:<([^>]+)>|([^\s]+))(\s+.*)?$/gm,
+    (match) => {
+      const prefix = match[1] ?? '';
+      const source = match[2] ?? match[3] ?? '';
+      const suffix = match[4] ?? '';
+      return replaceDestination(
+        source,
+        (destination) => `${prefix}${destination}${suffix}`,
+        '',
+        match[0],
+      );
+    },
+  );
+  safe = replaceActiveMarkdownSyntax(
+    safe,
+    /<((?:https?|mailto):[^>\s]+)>/gi,
+    (match) => {
+      const source = match[1] ?? '';
+      return replaceDestination(
+        source,
+        (destination) => `<${destination}>`,
+        '[link omitted]',
+        match[0],
+      );
+    },
+  );
+  return replaceActiveMarkdownSyntax(
+    safe,
+    /https?:\/\/[^\s<>"'`)\]]+/gi,
+    (match) => {
+      const source = match[0];
+      return replaceDestination(
+        source,
+        (destination) => destination,
+        '[link omitted]',
+        source,
+      );
+    },
+  );
+}
+
+function normalizeNavigableUrl(value: string): string | undefined {
+  if (value.startsWith('#')) return value;
+  if (value.startsWith('/') && !value.startsWith('//')) {
+    const queryIndex = value.search(/[?#]/);
+    return queryIndex === -1 ? value : value.slice(0, queryIndex);
+  }
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'http:' &&
+      url.protocol !== 'https:' &&
+      url.protocol !== 'mailto:'
+    ) {
+      return undefined;
+    }
+    if (
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === ''
+    ) {
+      return value;
+    }
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+const VISIBLE_EXPORT_TEXT_FIELDS = new Set([
+  'text',
+  'title',
+  'label',
+  'description',
+  'command',
+  'cwd',
+  'question',
+  'path',
+  'oldText',
+  'newText',
+  'patch',
+  'url',
+  'argsSummary',
+  'code',
+  'origin',
+  'query',
+  'top',
+  'columns',
+  'rows',
+  'prompt',
+  'task',
+  'value',
+  'content',
+  'summary',
+  'reason',
+  'projectName',
+  'repository',
+  'gitBranch',
+  'model',
+  'channel',
+]);
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new ExportTranscriptDocumentError('additional_property');
+  }
+}
+
+function safeDisplayUrl(
+  raw: string,
+  diagnostics: DiagnosticCounter,
+  onContentLoss?: () => void,
+): string {
+  try {
+    const safe = normalizeNavigableUrl(raw);
+    if (!safe) throw new Error();
+    const url = new URL(safe);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error();
+    }
+    if (utf8Bytes(safe) > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes) {
+      throw new Error();
+    }
+    if (safe !== raw) {
+      diagnostics.add('url_sanitized', 'warning', 1, true);
+      onContentLoss?.();
+    }
+    return safe;
+  } catch {
+    diagnostics.add('url_rejected', 'warning', 1, true);
+    onContentLoss?.();
+    return '[link omitted]';
+  }
+}
+
+function safeRepository(
+  raw: string,
+  diagnostics: DiagnosticCounter,
+  budget: ExportBudget,
+): string {
+  if (/^https?:/i.test(raw)) {
+    const safe = safeDisplayUrl(raw, diagnostics, () =>
+      budget.markContentLoss(),
+    );
+    if (safe.length <= 200) return budget.plainText(safe);
+    diagnostics.add('repository_url_rejected', 'warning', 1, true);
+    budget.markContentLoss();
+    return budget.plainText('[link omitted]');
+  }
+  const safe = safePath(raw).replace(/\.git$/i, '');
+  if (isSafeLabel(safe, 200)) return budget.plainText(safe);
+  diagnostics.add('repository_rejected', 'warning', 1, true);
+  budget.markContentLoss();
+  return budget.plainText('[link omitted]');
+}
+
+function safeMetadataLabel(
+  value: unknown,
+  maxLength: number,
+  field: string,
+  diagnostics: DiagnosticCounter,
+  budget: ExportBudget,
+): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (isSafeLabel(value, maxLength)) return budget.plainText(value);
+  diagnostics.add(`${field}_rejected`, 'warning', 1, true);
+  budget.markContentLoss();
+  return undefined;
+}
+
+function isSafeDisplayUrl(value: unknown): value is string {
+  if (
+    value === '[link omitted]' ||
+    value === '[content omitted: export text budget exceeded]'
+  ) {
+    return true;
+  }
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      normalizeNavigableUrl(value) === value
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isSafeRepository(value: unknown): value is string {
+  return (
+    (typeof value === 'string' &&
+      !/^https?:/i.test(value) &&
+      isSafeLabel(value, 200) &&
+      !/[\\/]/.test(value)) ||
+    isSafeDisplayUrl(value)
+  );
+}
+
+function safePath(value: string): string {
+  const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
+  return normalized.split('/').filter(Boolean).at(-1) ?? '[path]';
+}
+
+function isSafeExportPath(value: unknown): value is string {
+  return (
+    isSafePresentationLabel(value, 400) &&
+    !/[\\/]/.test(String(value)) &&
+    !/^[A-Za-z]:$/.test(String(value))
+  );
+}
+
+function redactHomePaths(value: string): string {
+  return value
+    .replace(
+      /file:\/\/\/(?:[A-Za-z]:\/)?(?:Users|home)\/[^\s/]+(?=\/|\s|$)/gi,
+      'file://[home]',
+    )
+    .replace(
+      /(?<![A-Za-z0-9+/,=])\/(?:Users|home)\/[^\s/]+(?=\/|\s|$)/g,
+      '[home]',
+    )
+    .replace(
+      /(?<![A-Za-z0-9+/,=])[A-Za-z]:\\Users\\[^\s\\]+(?=\\|\s|$)/gi,
+      '[home]',
+    );
+}
+
+function safeLabel(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '[invalid]';
+  let safe = '';
+  for (const character of value) {
+    if (isControlCharacter(character)) continue;
+    if (safe.length + character.length > maxLength) break;
+    safe += character;
+  }
+  return safe;
+}
+
+function isSafeLabel(value: unknown, maxLength: number): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    ![...value].some(isControlCharacter)
+  );
+}
+
+function isSafePresentationLabel(
+  value: unknown,
+  maxLength: number,
+): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= maxLength &&
+    ![...value].some(isControlCharacter)
+  );
+}
+
+function isControlCharacter(value: string): boolean {
+  const code = value.charCodeAt(0);
+  return code <= 31 || code === 127;
+}
+
+function assertNever(value: never): never {
+  void value;
+  throw new ExportTranscriptDocumentError('unsupported_value');
+}
+
+function safeCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value)))
+    : 0;
+}
+
+function isSafeCount(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function isIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function isSafeRendererVersion(value: unknown): value is string {
+  return (
+    isSafeLabel(value, 128) &&
+    !String(value).includes('latest') &&
+    !/[~^*><=]/.test(String(value))
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function decodedBase64Bytes(value: string): number | undefined {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    return undefined;
+  }
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+function isAnimatedGif(value: string): boolean {
+  try {
+    const binary = atob(value);
+    if (
+      binary.length < 13 ||
+      (binary.slice(0, 6) !== 'GIF87a' && binary.slice(0, 6) !== 'GIF89a')
+    ) {
+      return true;
+    }
+    const logicalScreenPacked = binary.charCodeAt(10);
+    let offset = 13;
+    if ((logicalScreenPacked & 0x80) !== 0) {
+      offset += 3 * 2 ** ((logicalScreenPacked & 0x07) + 1);
+    }
+    let frames = 0;
+    while (offset < binary.length) {
+      const marker = binary.charCodeAt(offset);
+      offset += 1;
+      if (marker === 0x3b) return frames !== 1;
+      if (marker === 0x21) {
+        if (offset >= binary.length) return true;
+        offset += 1;
+        const nextOffset = skipGifSubBlocks(binary, offset);
+        if (nextOffset === undefined) return true;
+        offset = nextOffset;
+        continue;
+      }
+      if (marker !== 0x2c || offset + 9 > binary.length) return true;
+      frames += 1;
+      if (frames > 1) return true;
+      const imagePacked = binary.charCodeAt(offset + 8);
+      offset += 9;
+      if ((imagePacked & 0x80) !== 0) {
+        offset += 3 * 2 ** ((imagePacked & 0x07) + 1);
+      }
+      if (offset >= binary.length) return true;
+      offset += 1;
+      const nextOffset = skipGifSubBlocks(binary, offset);
+      if (nextOffset === undefined) return true;
+      offset = nextOffset;
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function skipGifSubBlocks(
+  binary: string,
+  startOffset: number,
+): number | undefined {
+  let offset = startOffset;
+  while (offset < binary.length) {
+    const size = binary.charCodeAt(offset);
+    offset += 1;
+    if (size === 0) return offset;
+    if (offset + size > binary.length) return undefined;
+    offset += size;
+  }
+  return undefined;
+}
+
+function severityRank(value: 'info' | 'warning' | 'error'): number {
+  return value === 'error' ? 2 : value === 'warning' ? 1 : 0;
+}

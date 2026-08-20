@@ -1,21 +1,31 @@
-# Chat transcript contract prevalidation matrix
+# Chat transcript contract capability matrix
 
-MR1 freezes evidence for the current paths. A green test run means that the
-evidence is reproducible; it does not turn a failed migration gate into a pass.
+| Capability             | Native source                              | Contract mapping                                                                   | Render/action mapping                                         | Consumers                 | Fixture/evidence                                      | Owner              | Gate                                         |
+| ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------- | ----------------------------------------------------- | ------------------ | -------------------------------------------- |
+| user/assistant/thought | prompt-scoped live or persisted segment ID | runtime ordinal ID unchanged; candidate probe projects source-keyed IDs            | stable source IDs and semantic-copy hash                      | Web, Tauri, VS Code, HTML | `representative`, SDK append/prepend matrix           | CLI + SDK UI       | pass; stable under append/prepend/replay     |
+| tools and grouping     | tool call ID                               | runtime keeps raw fields; document/export uses typed input and result preview only | group keeps every block/tool call ID; file target is semantic | Web runtime + document    | raw compatibility and raw-free document tests         | SDK UI + Web Shell | pass                                         |
+| plan/todo              | plan tool call ID and plan ID              | runtime keeps raw fields; document/export uses typed `todo_list` preview/result    | standalone deterministic tool item                            | Web runtime + document    | raw compatibility and raw-free todo document tests    | SDK UI + Web Shell | pass                                         |
+| permission history     | request ID and safe tool identity          | runtime keeps raw tool call; document/export uses safe identity only               | resolved history maps to stable tool target                   | Web runtime + document    | raw compatibility and raw-free permission tests       | SDK UI + Web Shell | pass                                         |
+| replay/prepend         | prompt-scoped live or persisted segment ID | source metadata and persisted record boundaries are preserved                      | probe compares stable block/item IDs and semantic hash        | all                       | SDK, direct-daemon and ACP append/prepend tests       | CLI + SDK UI       | pass                                         |
+| scope isolation        | host scope key + generation                | stale input is rejected before reduction                                           | stale action evidence is absent                               | VS Code                   | VS Code contract probe                                | VS Code            | pass                                         |
+| VS Code direct daemon  | daemon event plus source segment ID        | unchanged SDK reducer plus read-only stable-ID projection                          | shared Web Shell render/action probe                          | VS Code                   | direct-daemon SDK contract probe                      | VS Code            | pass; retained as a validated alternative    |
+| VS Code ACP            | Qwen ACP live/history segment metadata     | thin SDK normalizer/reducer plus read-only stable-ID projection                    | shared Web Shell render/action probe                          | VS Code                   | ACP source + contract probes                          | VS Code            | pass; selected for the later migration phase |
+| Tauri distribution     | packaged qwen runtime                      | same daemon blocks and Web Shell build                                             | same renderer artifact                                        | Tauri                     | existing Desktop runtime smoke outside this matrix    | Desktop            | deferred; installed artifact not certified   |
+| export record policy   | ChatRecord type/subtype and parent chain   | known visible records only                                                         | canonical projector output                                    | HTML                      | export policy unit test                               | CLI                | pass                                         |
+| export block safety    | projected block                            | per-kind allowlist, opaque IDs, zeroed timestamps                                  | direct raw-free renderer input                                | HTML                      | export schema/canary tests                            | CLI                | pass                                         |
+| Markdown/resources     | Markdown image URL and structured raster   | approved data raster only in document mode                                         | no automatic remote image source                              | HTML                      | Markdown document test + browser request interception | Web Shell          | pass                                         |
+| document budgets       | shared V1 constant                         | block/text/image/envelope/depth/array/object-property/rich-task caps               | non-virtualized document probe                                | HTML                      | maximum document browser probe                        | CLI + Web Shell    | pass                                         |
 
-| Capability                      | Current path under test                             | Evidence                                               | MR1 gate                     | Follow-up owner         |
-| ------------------------------- | --------------------------------------------------- | ------------------------------------------------------ | ---------------------------- | ----------------------- |
-| ChatRecord semantic projection  | persisted records → SDK transcript projector        | representative record fixture and semantic snapshot    | PASS                         | existing SDK path       |
-| Web Shell runtime compatibility | SDK blocks → default interactive/read-only adapter  | roles plus unchanged `rawInput`/`rawOutput` assertions | PASS                         | existing Web Shell path |
-| `write_file` Turn Output        | raw tool input → complete file diff                 | focused Web Shell regression                           | PASS                         | existing Web Shell path |
-| direct-daemon identity          | daemon envelopes → current SDK reducer              | full history versus partial-prepend probe              | **FAIL — migration blocked** | MR2                     |
-| ACP identity                    | ACP session updates → current SDK reducer           | full history versus partial-prepend probe              | **FAIL — migration blocked** | MR2                     |
-| Export document contract        | frozen V1 schema and security allowlist             | schema and hash assertions only                        | DEFERRED                     | MR2                     |
-| document-mode rendering         | sanitized export document → Web Shell document mode | no production consumer or browser probe in MR1         | DEFERRED                     | MR2                     |
-| VS Code migration               | selected transport → shared ChatPanel contract      | depends on a passing identity gate                     | BLOCKED                      | MR2                     |
-| Desktop reuse                   | packaged Web Shell artifact                         | no installed-artifact behavior probe in MR1            | DEFERRED                     | existing Desktop path   |
+This matrix does not certify the installed Desktop artifact from source-text
+inspection. The existing Desktop runtime smoke remains the behavioral evidence
+for the packaged Web Shell layout.
 
-No VS Code transport is selected in MR1. Both current candidate paths use
-reducer-ordinal block IDs, and the ACP text updates also lack a native stable
-source identity. MR2 must resolve and verify those facts before selecting a
-transport or wiring a production consumer.
+Both VS Code candidates pass the stable identity matrix without changing the
+default reducer's ordinal runtime IDs. Qwen ACP prompt-bound live text is
+stamped at source with a prompt-scoped deterministic segment ID; persisted
+replay keeps its record-derived segment ID. The candidate probes project those native identities
+to scope-keyed block IDs, while existing persisted record boundaries prevent
+unrelated history segments from merging. ACP text that has neither a stable
+prompt source nor segment identity still fails closed. ACP remains the selected path for the later migration phase
+because it is the current production transport; direct-daemon stays a validated
+alternative, not a production migration in Step 0.

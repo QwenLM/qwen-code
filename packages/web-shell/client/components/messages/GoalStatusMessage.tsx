@@ -151,7 +151,7 @@ export function GoalStatusMessage({
   const renderMode = useTranscriptRenderMode();
 
   useEffect(() => {
-    if (!activateFooter || renderMode === 'readonly') return;
+    if (!activateFooter || renderMode !== 'interactive') return;
     const active = status.kind === 'set' || status.kind === 'checking';
     window.dispatchEvent(
       new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {

@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTranscriptReplayMachine,
+  createTranscriptToolCallResultUpdate,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
@@ -77,6 +78,28 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('keeps raw function responses out of the safe result preview', () => {
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: 'read',
+      callId: 'read-1',
+      success: true,
+      contentPrefix: [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'Visible prefix' },
+        },
+      ],
+      message: [{ text: 'Visible result' }],
+    });
+
+    expect(update._meta).toMatchObject({
+      qwenTranscript: {
+        resultPreviewText: 'Visible prefix',
+      },
+    });
+    expect(JSON.stringify(update._meta)).not.toContain('Visible result');
+  });
+
   it('does not replay internal Goal runtime prompts as user messages', () => {
     expect(
       updates(

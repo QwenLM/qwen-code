@@ -21,6 +21,7 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
   getFirstString,
   getOutputText,
@@ -43,6 +44,7 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'segmentId'
   | 'promptId'
   | 'branchRecordId'
   | 'originatorClientId'
@@ -648,11 +650,13 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const segmentId = extractTranscriptSegmentId(event);
   const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(segmentId ? { segmentId } : {}),
     ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
@@ -662,6 +666,19 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const segmentId = transcript ? getString(transcript, 'segmentId') : undefined;
+  return segmentId && segmentId.length <= 512 ? segmentId : undefined;
 }
 
 function extractBranchRecordId(event: DaemonEvent): string | undefined {
@@ -1054,6 +1071,14 @@ function normalizeToolUpdate(
   base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    metadata && isRecord(metadata['qwenTranscript'])
+      ? metadata['qwenTranscript']
+      : undefined;
+  const resultPreviewText = getString(transcript, 'resultPreviewText');
+  const resultPreview = resultPreviewText
+    ? createDaemonToolResultTextPreview(resultPreviewText)
+    : undefined;
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??
@@ -1137,6 +1162,7 @@ function normalizeToolUpdate(
     ...(subagentType ? { subagentType } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
+    ...(resultPreview ? { resultPreview } : {}),
     ...(rawInput !== undefined
       ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined

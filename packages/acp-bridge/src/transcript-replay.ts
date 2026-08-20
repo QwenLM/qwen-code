@@ -31,6 +31,7 @@ import {
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
   'before this tool completed.';
+const MAX_RESULT_PREVIEW_TEXT_LENGTH = 100_000;
 
 export interface TranscriptReplayEmission {
   readonly sourceRecordId: string;
@@ -96,6 +97,7 @@ interface UpdateMetaOptions {
   readonly sourceRecordIds?: readonly string[];
   readonly planToolCallId?: string;
   readonly todoPlanId?: string;
+  readonly resultPreviewText?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -245,6 +247,9 @@ function buildUpdateMeta(
     ...(options.planToolCallId
       ? { planToolCallId: options.planToolCallId }
       : {}),
+    ...(options.resultPreviewText
+      ? { resultPreviewText: options.resultPreviewText }
+      : {}),
   };
   const meta: Record<string, unknown> = {
     ...(options.extra ?? {}),
@@ -374,6 +379,7 @@ export function createTranscriptToolCallResultUpdate(
     content,
     _meta: buildUpdateMeta({
       ...options,
+      resultPreviewText: getToolContentText(options.contentPrefix),
       extra: {
         toolName: options.toolName,
         provenance: provenance.provenance,
@@ -392,6 +398,24 @@ export function createTranscriptToolCallResultUpdate(
     update['rawOutput'] = options.resultDisplay;
   }
   return update as unknown as SessionUpdate;
+}
+
+function getToolContentText(
+  content: readonly ToolCallContent[] | undefined,
+): string | undefined {
+  let text = '';
+  for (const entry of content ?? []) {
+    if (entry.type !== 'content' || entry.content.type !== 'text') continue;
+    const next = entry.content.text;
+    if (
+      text.length + (text ? 1 : 0) + next.length >
+      MAX_RESULT_PREVIEW_TEXT_LENGTH
+    ) {
+      return undefined;
+    }
+    text += `${text ? '\n' : ''}${next}`;
+  }
+  return text || undefined;
 }
 
 export function createTranscriptPlanUpdate(
@@ -498,12 +522,18 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       );
     }
     let ordinal = 0;
-    const emit = (update: SessionUpdate): TranscriptReplayEmission => ({
-      sourceRecordId: record.uuid,
-      ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
-      emissionOrdinal: ordinal++,
-      update,
-    });
+    const emit = (update: SessionUpdate): TranscriptReplayEmission => {
+      const emissionOrdinal = ordinal++;
+      return {
+        sourceRecordId: record.uuid,
+        ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+        emissionOrdinal,
+        update: withTranscriptSegmentId(
+          update,
+          `${record.uuid}:${emissionOrdinal}`,
+        ),
+      };
+    };
     const meta = {
       timestamp: record.timestamp,
       sourceRecordIds: [record.uuid],
@@ -1119,6 +1149,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ...(path ? { path } : {}),
     });
   }
+}
+
+function withTranscriptSegmentId(
+  update: SessionUpdate,
+  segmentId: string,
+): SessionUpdate {
+  const record = update as unknown as Record<string, unknown>;
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  const transcript =
+    meta && isObjectRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return {
+    ...record,
+    _meta: {
+      ...(meta ?? {}),
+      qwenTranscript: {
+        ...(transcript ?? {}),
+        segmentId,
+      },
+    },
+  } as unknown as SessionUpdate;
 }
 
 function parseTranscriptGoalStatus(

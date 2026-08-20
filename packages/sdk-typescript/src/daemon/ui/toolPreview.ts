@@ -6,8 +6,10 @@
 
 import type {
   DaemonToolPreview,
+  DaemonToolResultPreview,
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
+  DaemonTranscriptTodoItem,
 } from './types.js';
 import {
   getFirstString,
@@ -18,6 +20,9 @@ import {
 } from './utils.js';
 
 const MAX_TOOL_PREVIEW_DEPTH = 8;
+const MAX_TODO_PREVIEW_ENTRIES = 1_000;
+const MAX_TOOL_RESULT_PREVIEW_LENGTH = 100_000;
+const MAX_TODO_ID_LENGTH = 512;
 
 export function createDaemonToolPreview(
   input: unknown,
@@ -50,6 +55,9 @@ export function createDaemonToolPreview(
   if (askUserQuestions.length > 0) {
     return { kind: 'ask_user_question', questions: askUserQuestions };
   }
+
+  const todoList = detectTodoList(input, opts, true);
+  if (todoList) return todoList;
 
   // PR-C / PR-F: try specific tool-shape detectors before falling back to
   // generic command / key_value detection. Detector order matters —
@@ -103,6 +111,175 @@ export function createDaemonToolPreview(
 
   const summary = opts.title ?? opts.toolName ?? opts.toolKind;
   return { kind: 'generic', ...(summary ? { summary } : {}) };
+}
+
+export function createDaemonToolResultPreview(
+  output: unknown,
+  content?: unknown,
+  opts: { toolName?: string; toolKind?: string } = {},
+): DaemonToolResultPreview | undefined {
+  const todoList = detectTodoList(output, opts, false);
+  if (todoList) return todoList;
+
+  const text = extractDisplayContentText(content);
+  return text ? createDaemonToolResultTextPreview(text) : undefined;
+}
+
+export function createDaemonToolResultTextPreview(
+  text: string,
+): Extract<DaemonToolResultPreview, { kind: 'text' }> | undefined {
+  return text.length > 0 && text.length <= MAX_TOOL_RESULT_PREVIEW_LENGTH
+    ? { kind: 'text', text }
+    : undefined;
+}
+
+function detectTodoList(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+  includeLegacySummary: boolean,
+): Extract<DaemonToolPreview, { kind: 'todo_list' }> | undefined {
+  if (!isRecord(input)) return undefined;
+  const toolName = opts.toolName?.toLowerCase();
+  const entries = Array.isArray(input['entries'])
+    ? input['entries']
+    : Array.isArray(input['todos'])
+      ? input['todos']
+      : undefined;
+  if (!entries || (toolName !== 'todo_write' && toolName !== 'todowrite')) {
+    return undefined;
+  }
+
+  const normalized: DaemonTranscriptTodoItem[] = [];
+  let truncated = entries.length > MAX_TODO_PREVIEW_ENTRIES;
+  let remainingText = MAX_TOOL_RESULT_PREVIEW_LENGTH;
+  let remainingDependencyInputs = MAX_TODO_PREVIEW_ENTRIES;
+  entries.slice(0, MAX_TODO_PREVIEW_ENTRIES).forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      truncated = true;
+      return;
+    }
+    const rawContent = getFirstString(entry, ['content', 'text', 'title']);
+    if (!rawContent) {
+      truncated = true;
+      return;
+    }
+    if (remainingText === 0) {
+      truncated = true;
+      return;
+    }
+    const content = rawContent.slice(0, remainingText);
+    if (content.length < rawContent.length) truncated = true;
+    remainingText -= content.length;
+    const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;
+    const qwenTodo =
+      meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
+    const rawId =
+      getFirstString(qwenTodo, ['id']) ??
+      getFirstString(entry, ['id']) ??
+      `plan-${index}`;
+    const id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
+    if (id !== rawId) truncated = true;
+    const rawStatus = getFirstString(entry, ['status']);
+    const status =
+      rawStatus === 'completed' || rawStatus === 'in_progress'
+        ? rawStatus
+        : 'pending';
+    if (
+      rawStatus !== undefined &&
+      rawStatus !== 'pending' &&
+      rawStatus !== 'in_progress' &&
+      rawStatus !== 'completed'
+    ) {
+      truncated = true;
+    }
+    const rawPriority = getFirstString(entry, ['priority']);
+    const priority =
+      rawPriority === 'high' ||
+      rawPriority === 'medium' ||
+      rawPriority === 'low'
+        ? rawPriority
+        : undefined;
+    if (entry['priority'] !== undefined && priority === undefined) {
+      truncated = true;
+    }
+    const blockedBySource = qwenTodo?.['blockedBy'] ?? entry['blockedBy'];
+    const rawBlockedBy = Array.isArray(blockedBySource) ? blockedBySource : [];
+    if (blockedBySource !== undefined && !Array.isArray(blockedBySource)) {
+      truncated = true;
+    }
+    const blockedBy: string[] = [];
+    for (const dependency of rawBlockedBy) {
+      if (remainingDependencyInputs === 0) {
+        truncated = true;
+        break;
+      }
+      remainingDependencyInputs -= 1;
+      if (
+        typeof dependency !== 'string' ||
+        dependency.length === 0 ||
+        dependency.length > MAX_TODO_ID_LENGTH
+      ) {
+        truncated = true;
+        continue;
+      }
+      blockedBy.push(dependency);
+    }
+    normalized.push({
+      id,
+      content,
+      status,
+      ...(priority ? { priority } : {}),
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
+    });
+  });
+  const meta = isRecord(input['_meta']) ? input['_meta'] : undefined;
+  const todoPlan =
+    meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
+  const plan = isRecord(input['plan']) ? input['plan'] : undefined;
+  const rawPlanId =
+    getFirstString(todoPlan, ['id']) ??
+    getFirstString(plan, ['id']) ??
+    getFirstString(input, ['planId']);
+  const planId =
+    rawPlanId && rawPlanId.length <= MAX_TODO_ID_LENGTH ? rawPlanId : undefined;
+  if (rawPlanId && !planId) truncated = true;
+  const rawRevision =
+    todoPlan?.['revision'] ?? plan?.['revision'] ?? input['revision'];
+  const revision =
+    typeof rawRevision === 'number' &&
+    Number.isSafeInteger(rawRevision) &&
+    rawRevision >= 0
+      ? rawRevision
+      : undefined;
+  if (rawRevision !== undefined && revision === undefined) truncated = true;
+  const summary = opts.title ?? opts.toolName ?? opts.toolKind;
+  return {
+    kind: 'todo_list',
+    entries: normalized,
+    ...(includeLegacySummary && summary ? { summary } : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(planId ? { planId } : {}),
+    ...(revision !== undefined ? { revision } : {}),
+  };
+}
+
+function extractDisplayContentText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  let text = '';
+  for (const entry of content) {
+    if (!isRecord(entry) || entry['type'] !== 'content') continue;
+    const body = isRecord(entry['content']) ? entry['content'] : undefined;
+    const next = typeof body?.['text'] === 'string' ? body['text'] : undefined;
+    if (!next) continue;
+    if (
+      text.length + (text ? 1 : 0) + next.length >
+      MAX_TOOL_RESULT_PREVIEW_LENGTH
+    ) {
+      return undefined;
+    }
+    text += `${text ? '\n' : ''}${next}`;
+  }
+  return text || undefined;
 }
 
 /**
@@ -270,7 +447,11 @@ function detectMcpInvocation(
         .filter(([key]) => key !== 'name' && key !== 'toolName')
         .slice(0, 1)
         .map(([key, value]) => {
-          const v = typeof value === 'string' ? value : JSON.stringify(value);
+          const v = isSensitiveKey(key)
+            ? '[redacted]'
+            : typeof value === 'string'
+              ? value
+              : stringifyRedactedJson(value);
           const trimmed = v.length > 60 ? `${v.slice(0, 60)}…` : v;
           return `${key}=${trimmed}`;
         })[0];
