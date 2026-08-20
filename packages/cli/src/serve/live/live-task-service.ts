@@ -26,6 +26,7 @@ import {
   type LiveTaskToolName,
   type LiveTaskToolRequestInfo,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -943,8 +944,8 @@ export class LiveTaskService {
     const prompt = boundedString(args['prompt'], 'prompt');
     localHost(args['hostId']);
     const located = await this.locateTask(threadId);
-    await this.ensureResident(located);
-    await this.dispatchPrompt(located.runtime.bridge, threadId, prompt);
+    const liveSessionId = await this.ensureResident(located);
+    await this.dispatchPrompt(located.runtime.bridge, liveSessionId, prompt);
     return { threadId };
   }
 
@@ -1051,10 +1052,11 @@ export class LiveTaskService {
     if (!admitted) await turn.then(() => undefined);
   }
 
-  private async ensureResident(task: LocatedTask): Promise<void> {
+  private async ensureResident(task: LocatedTask): Promise<string> {
+    const liveSessionId = normalizeSessionIdForLookup(task.summary.sessionId);
     try {
-      task.runtime.bridge.getSessionSummary(task.summary.sessionId);
-      return;
+      task.runtime.bridge.getSessionSummary(liveSessionId);
+      return liveSessionId;
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
@@ -1070,16 +1072,15 @@ export class LiveTaskService {
       throw new SessionNotFoundError(task.summary.sessionId);
     }
     await task.runtime.bridge.resumeSession({
-      sessionId: task.summary.sessionId,
+      sessionId: liveSessionId,
       workspaceCwd: task.runtime.workspaceCwd,
       ...metadata,
     });
     if (task.runtime.provenance === 'live-conversation') {
-      const directory = await this.options.materializeConversationDirectory(
-        task.summary.sessionId,
-      );
+      const directory =
+        await this.options.materializeConversationDirectory(liveSessionId);
       const changed = await task.runtime.bridge.changeSessionCwd(
-        task.summary.sessionId,
+        liveSessionId,
         {
           path: directory,
           allowedRoots: [task.runtime.workspaceCwd],
@@ -1090,6 +1091,7 @@ export class LiveTaskService {
         throw new Error('Projectless task relocation was rejected.');
       }
     }
+    return liveSessionId;
   }
 
   private async rollbackFreshSession(

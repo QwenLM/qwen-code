@@ -12977,6 +12977,52 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
+      'preserves an in-guard %s conflict when its classification recheck fails',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440149';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockRejectedValue(
+            Object.assign(new Error('read failed'), { code: 'EIO' }),
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({
+            code: 'session_conflict',
+            sessionId,
+            error: conflict.message,
+          });
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
       'rejects ordinary %s case conflicts before bridge dispatch',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440141';

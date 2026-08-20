@@ -903,6 +903,97 @@ describe('LiveTaskService', () => {
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });
 
+  it('uses the canonical live-entry key for a mixed-case stored task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const storageSessionId = sessionId.toUpperCase();
+    const summary: BridgeSessionSummary = {
+      sessionId: storageSessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Mixed-case task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set(storageSessionId, summary);
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [summary],
+    });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: storageSessionId,
+        prompt: 'continue this task',
+      },
+    });
+
+    expect(result).toEqual({ threadId: storageSessionId });
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId,
+      workspaceCwd: '/conversations',
+    });
+    expect(harness.materializeConversationDirectory).toHaveBeenCalledWith(
+      sessionId,
+    );
+    expect(harness.bridge.changeSessionCwd).toHaveBeenCalledWith(sessionId, {
+      path: `/conversations/${sessionId}`,
+      allowedRoots: ['/conversations'],
+      managedRelocation: 'live-conversation',
+    });
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+  });
+
+  it('reuses a canonical live entry for a mixed-case stored task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = sessionId.toUpperCase();
+    const storedSummary: BridgeSessionSummary = {
+      sessionId: storageSessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Mixed-case task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set(sessionId, {
+      ...storedSummary,
+      sessionId,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [storedSummary],
+    });
+
+    await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: storageSessionId,
+        prompt: 'continue this task',
+      },
+    });
+
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+    expect(harness.materializeConversationDirectory).not.toHaveBeenCalled();
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+  });
+
   it('restores Live source identity before following a cold Live task', async () => {
     const harness = makeHarness();
     const sourceId = `${LIVE_SESSION_SOURCE_PREFIX}call-2`;

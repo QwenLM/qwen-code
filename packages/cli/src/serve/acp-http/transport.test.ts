@@ -5138,6 +5138,58 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s preserves an in-guard conflict when its classification recheck fails',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-44665544014d'
+            : '550e8400-e29b-41d4-a716-44665544014e';
+        const storageSessionId = sessionId.toUpperCase();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockRejectedValue(
+            Object.assign(new Error('read failed'), { code: 'EIO' }),
+          );
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 233,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 233,
+            error: {
+              message: conflict.message,
+              data: expect.objectContaining({
+                errorKind: 'session_conflict',
+                sessionId,
+              }),
+            },
+          });
+          reader.close();
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      });
+    },
+  );
+
   it('keeps the bridge key canonical while isolating mixed-case storage', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440135';
     const storageSessionId = sessionId.toUpperCase();

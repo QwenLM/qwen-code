@@ -1855,13 +1855,19 @@ export class AcpDispatcher {
                   persistedSessionId =
                     await sessionService.findSessionIdIgnoringCase(sessionId);
                 } catch (error) {
-                  if (
-                    error instanceof SessionIdCaseConflictError &&
-                    (await sessionService.getSessionLocation(
-                      error.candidateSessionId ?? sessionId,
-                    )) === 'conflict'
-                  ) {
-                    throw new SessionConflictError(sessionId);
+                  if (error instanceof SessionIdCaseConflictError) {
+                    let bothStates = false;
+                    try {
+                      bothStates =
+                        (await sessionService.getSessionLocation(
+                          error.candidateSessionId ?? sessionId,
+                        )) === 'conflict';
+                    } catch {
+                      // This recheck only refines the response; preserve the known
+                      // conflict when storage cannot classify it a second time.
+                      throw error;
+                    }
+                    if (bothStates) throw new SessionConflictError(sessionId);
                   }
                   throw error;
                 }
