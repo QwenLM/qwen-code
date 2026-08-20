@@ -845,28 +845,6 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.skills).toEqual(['review']);
   });
 
-  it('reads availableSkills from nested _meta when the flat field is absent', () => {
-    const next = applyEvent(
-      { status: 'connected', workspaceCwd: '/workspace' },
-      {
-        id: 1,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: [
-              { name: 'review', description: 'Review a PR', input: null },
-            ],
-            _meta: { availableSkills: ['review'] },
-          },
-        },
-      } as DaemonEvent,
-    );
-
-    expect(next.skills).toEqual(['review']);
-  });
-
   it('clears stale commands when the update reports an empty list', () => {
     // The daemon snapshot is authoritative: a list that shrank to empty must
     // not leave the previous commands autocompleting. Keying on length would

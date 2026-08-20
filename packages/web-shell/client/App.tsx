@@ -41,7 +41,6 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
-  DaemonSkillToggleMutation,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -510,34 +509,6 @@ function sessionSkillsReflectToggle(
     const enabled = enabledNames.has(skill.name.toLowerCase());
     return skill.enabled === enabled;
   });
-}
-
-function skillMutationsForWorkspace(
-  signals:
-    | {
-        lastSkillMutation?: DaemonSkillToggleMutation;
-        lastSkillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;
-      }
-    | undefined,
-  workspaceCwd?: string,
-): DaemonSkillToggleMutation[] {
-  if (workspaceCwd && signals?.lastSkillMutationsByCwd) {
-    return signals.lastSkillMutationsByCwd[workspaceCwd] ?? [];
-  }
-  return signals?.lastSkillMutation ? [signals.lastSkillMutation] : [];
-}
-
-function mergeSkillToggles(
-  current: ReadonlyArray<{ name: string; enabled: boolean }>,
-  incoming: ReadonlyArray<{ name: string; enabled: boolean }>,
-): Array<{ name: string; enabled: boolean }> {
-  const byName = new Map(
-    current.map((skill) => [skill.name.toLowerCase(), skill] as const),
-  );
-  for (const skill of incoming) {
-    byName.set(skill.name.toLowerCase(), skill);
-  }
-  return [...byName.values()];
 }
 
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
@@ -4669,86 +4640,33 @@ export function App({
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
-  const handledSkillMutationKeysRef = useRef<Set<string>>(new Set());
-  const skillMutationOriginByIdRef = useRef<Map<string, string | undefined>>(
-    new Map(),
-  );
-  const pendingSkillTogglesRef = useRef<
-    Array<{ name: string; enabled: boolean }>
-  >([]);
-  const fallbackWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!connected) return;
+    const mutation = workspaceEventSignals?.lastSkillMutation;
+    if (!mutation || handledSkillMutationIdRef.current === mutation.id) return;
+    handledSkillMutationIdRef.current = mutation.id;
     const sessionId = connection.sessionId;
-    const workspaceCwd = connection.workspaceCwd;
-    const mutations = skillMutationsForWorkspace(
-      workspaceEventSignals,
-      workspaceCwd,
-    );
-    const unhandled: DaemonSkillToggleMutation[] = [];
-    for (const mutation of mutations) {
-      if (!skillMutationOriginByIdRef.current.has(mutation.id)) {
-        skillMutationOriginByIdRef.current.set(mutation.id, workspaceCwd);
-      }
-      if (
-        skillMutationOriginByIdRef.current.get(mutation.id) !== workspaceCwd
-      ) {
-        continue;
-      }
-      const handleKey = `${mutation.id}::${sessionId ?? ''}::${workspaceCwd ?? ''}`;
-      if (handledSkillMutationKeysRef.current.has(handleKey)) continue;
-      unhandled.push(mutation);
-    }
-    if (unhandled.length === 0) return;
-    const markHandled = () => {
-      for (const mutation of unhandled) {
-        handledSkillMutationKeysRef.current.add(
-          `${mutation.id}::${sessionId ?? ''}::${workspaceCwd ?? ''}`,
-        );
-      }
-    };
-    const priorPending = pendingSkillTogglesRef.current;
-    pendingSkillTogglesRef.current = mergeSkillToggles(
-      priorPending,
-      unhandled.flatMap((mutation) => mutation.skills),
-    );
     if (
       sessionId &&
       connection.skills !== undefined &&
-      priorPending.length === 0 &&
-      unhandled.every(
-        (mutation) =>
-          mutation.activation === 'applied' && mutation.sessionsFailed === 0,
-      )
+      mutation.activation === 'applied' &&
+      mutation.sessionsFailed === 0
     ) {
-      markHandled();
-      pendingSkillTogglesRef.current = [];
-      fallbackWorkspaceCwdRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded) return;
-      if (!sessionId) {
-        markHandled();
-        return;
-      }
+    void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded || !sessionId) return;
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(
-          currentSnapshot.skills,
-          pendingSkillTogglesRef.current,
-        )
+        sessionSkillsReflectToggle(currentSnapshot.skills, mutation.skills)
       ) {
-        pendingSkillTogglesRef.current = [];
-        markHandled();
         return;
       }
-      fallbackWorkspaceCwdRef.current = workspaceCwd;
       setLoadedSkillsFallbackSessionId(sessionId);
-      markHandled();
     });
     return () => {
       cancelled = true;
@@ -4767,31 +4685,22 @@ export function App({
   ]);
   useEffect(() => {
     if (!loadedSkillsFallbackSessionId) return;
-    if (
-      connection.sessionId !== loadedSkillsFallbackSessionId ||
-      fallbackWorkspaceCwdRef.current !== connection.workspaceCwd
-    ) {
-      handledSkillMutationKeysRef.current.clear();
-      pendingSkillTogglesRef.current = [];
-      fallbackWorkspaceCwdRef.current = undefined;
+    if (connection.sessionId !== loadedSkillsFallbackSessionId) {
       setLoadedSkillsFallbackSessionId(undefined);
       return;
     }
+    const mutation = workspaceEventSignals?.lastSkillMutation;
     if (
-      pendingSkillTogglesRef.current.length > 0 &&
-      sessionSkillsReflectToggle(
-        connection.skills,
-        pendingSkillTogglesRef.current,
-      )
+      mutation &&
+      sessionSkillsReflectToggle(connection.skills, mutation.skills)
     ) {
-      pendingSkillTogglesRef.current = [];
       setLoadedSkillsFallbackSessionId(undefined);
     }
   }, [
     connection.sessionId,
     connection.skills,
-    connection.workspaceCwd,
     loadedSkillsFallbackSessionId,
+    workspaceEventSignals?.lastSkillMutation,
   ]);
 
   const [modelDialogMode, setModelDialogMode] =

@@ -1770,7 +1770,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
-                activeSession.workspaceCwd,
               );
             }
             if (replayExceededCapacity && historyHasMore) {
@@ -2207,7 +2206,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 uiEvents,
                 setWorkspaceEventSignals,
-                activeSession.workspaceCwd,
               );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
@@ -3975,15 +3973,14 @@ function getNumber(
 function bumpWorkspaceEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
-  workspaceCwd?: string,
 ): void {
   let memory = 0;
   let agents = 0;
   let tools = 0;
   let settings = 0;
-  const skillMutations: Array<NonNullable<
-    DaemonWorkspaceEventSignals['lastSkillMutation']
-  >> = [];
+  let lastSkillMutation:
+    | DaemonWorkspaceEventSignals['lastSkillMutation']
+    | undefined;
   const seenSkillMutationIds = new Set<string>();
   let mcp = 0;
   let extensions = 0;
@@ -4009,7 +4006,7 @@ function bumpWorkspaceEventSignals(
         if (event.mutation?.kind === 'skill_toggle') {
           if (!seenSkillMutationIds.has(event.mutation.id)) {
             seenSkillMutationIds.add(event.mutation.id);
-            skillMutations.push(event.mutation);
+            lastSkillMutation = event.mutation;
           }
         } else {
           settings += 1;
@@ -4052,8 +4049,6 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  const lastSkillMutation = skillMutations[skillMutations.length - 1];
-
   if (
     memory +
       agents +
@@ -4070,15 +4065,9 @@ function bumpWorkspaceEventSignals(
     return;
 
   setSignals((current) => {
-    const existing =
-      workspaceCwd && current.lastSkillMutationsByCwd
-        ? (current.lastSkillMutationsByCwd[workspaceCwd] ?? [])
-        : [];
-    const existingIds = new Set(existing.map((mutation) => mutation.id));
-    const toAppend = skillMutations.filter(
-      (mutation) => !existingIds.has(mutation.id),
-    );
-    const hasNewSkillMutation = toAppend.length > 0;
+    const hasNewSkillMutation =
+      lastSkillMutation !== undefined &&
+      lastSkillMutation.id !== current.lastSkillMutation?.id;
     if (
       memory +
         agents +
@@ -4094,28 +4083,20 @@ function bumpWorkspaceEventSignals(
     ) {
       return current;
     }
-    const lastSkillMutationsByCwd =
-      hasNewSkillMutation && workspaceCwd
-        ? {
-            ...current.lastSkillMutationsByCwd,
-            [workspaceCwd]: [...existing, ...toAppend],
-          }
-        : current.lastSkillMutationsByCwd;
     return {
       memoryVersion: current.memoryVersion + memory,
       agentsVersion: current.agentsVersion + agents,
       toolsVersion: current.toolsVersion + tools,
       settingsVersion: current.settingsVersion + settings,
-      skillsVersion: current.skillsVersion + toAppend.length,
+      skillsVersion: current.skillsVersion + (hasNewSkillMutation ? 1 : 0),
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
-      ...(lastSkillMutation
+      ...(hasNewSkillMutation
         ? { lastSkillMutation }
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }
           : {}),
-      ...(lastSkillMutationsByCwd ? { lastSkillMutationsByCwd } : {}),
       ...(lastExtensionChange ? { lastExtensionChange } : {}),
       initVersion: current.initVersion + init,
       authVersion: current.authVersion + auth,
