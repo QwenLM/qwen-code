@@ -61,6 +61,7 @@ import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
 const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
@@ -78,6 +79,7 @@ interface MessageListProps {
   onShowContextDetail?: () => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -2643,6 +2645,7 @@ export const MessageList = memo(
       pendingApproval,
       onShowContextDetail,
       onImagePreview,
+      onAttachmentPreview,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -4968,6 +4971,7 @@ export const MessageList = memo(
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
+              onAttachmentPreview={onAttachmentPreview}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
               showRetryHint={showRetryHint}
@@ -5028,6 +5032,7 @@ export const MessageList = memo(
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
         onImagePreview,
+        onAttachmentPreview,
         generateContent,
         headerOffset,
         visibleItems,
