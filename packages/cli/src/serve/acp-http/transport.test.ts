@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -39,6 +39,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionOrganizationService,
+  SessionIdCaseConflictError,
   SessionService,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -78,10 +79,15 @@ import {
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
+import { CredentialStore } from '../local-control/credentials.js';
+import { tagListener } from '../local-control/listener-identity.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
 } from '../validation-limits.js';
+import { AcpDispatcher } from './dispatch.js';
+import { ConnectionRegistry } from './connection-registry.js';
+import type { TransportStream } from './transport-stream.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -177,6 +183,17 @@ class FakeBridge {
   cancelled: string[] = [];
   workspaceEvents: BridgeEvent[] = [];
   knownClientIdSet = new Set<string>();
+  catalogRevision = 0;
+  readonly catalogGeneration = 'transport-fake-catalog-generation';
+  getSessionCatalogVersion() {
+    return {
+      generation: this.catalogGeneration,
+      revision: this.catalogRevision,
+    };
+  }
+  markSessionCatalogChanged() {
+    this.catalogRevision += 1;
+  }
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -439,6 +456,7 @@ class FakeBridge {
     if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
+  async deleteSessionAttachments() {}
   detachClient(sessionId: string, clientId?: string): Promise<void> {
     if (this.detachThrowsSynchronously) throw new Error('sync detach failed');
     this.detached.push({ sessionId, clientId });
@@ -1563,6 +1581,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: {
         code: -32602,
         message: expect.stringContaining('reserved'),
+      },
+    });
+  });
+
+  it('session/new rejects standalone before validating sourceId', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 90,
+      method: 'session/new',
+      params: {
+        cwd: '/ws',
+        sourceType: 'standalone',
+        sourceId: 42,
+      },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        message: string;
+        data?: { errorKind?: string };
+      };
+    }>;
+    expect(frame).toMatchObject({
+      id: 90,
+      error: {
+        code: -32602,
+        message: expect.stringContaining('standalone'),
+        data: { errorKind: 'reserved_session_source' },
       },
     });
   });
@@ -4523,6 +4575,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'])(
+    '%s rejects an archived mixed-case transcript restored by its canonical id',
+    async (method) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440124';
+      const storageSessionId = sessionId.toUpperCase();
+      await withRuntimeDir(async () => {
+        await writeStoredSession(storageSessionId, 'archived');
+
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 212,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          error: { code: number; data?: { errorKind?: string } };
+        }>;
+        expect(frame.id).toBe(212);
+        expect(frame.error.code).toBe(-32603);
+        // The resolver-adopted storage spelling must reach
+        // assertSessionLoadable — the request spelling would miss the
+        // archived uppercase file on a case-sensitive filesystem and skip
+        // this error entirely.
+        expect(frame.error.data?.errorKind).toBe('session_archived');
+      });
+    },
+  );
+
   it('session/load rejects active/archive conflicts', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440321';
@@ -4542,10 +4628,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
       const [frame] = (await got) as Array<{
         id: number;
-        error: { code: number; data?: { errorKind?: string } };
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
       }>;
       expect(frame.id).toBe(212);
       expect(frame.error.code).toBe(-32603);
+      expect(frame.error.message).toContain(
+        'Delete the session with POST /sessions/delete',
+      );
       expect(frame.error.data?.errorKind).toBe('session_conflict');
     });
   });
@@ -4773,6 +4866,454 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s restores reserved-source transcripts on the generic surface',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440133'
+            : '550e8400-e29b-41d4-a716-446655440134';
+        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 218,
+          method,
+          params: { sessionId },
+        });
+        // Generic (non-isolated) restore keeps loading legacy
+        // reserved-source transcripts; only the isolated Conversations
+        // surface hides them (parity with the REST restore handler).
+        expect(await reader.next()).toMatchObject({
+          id: 218,
+          result: expect.any(Object),
+        });
+        reader.close();
+
+        expect(
+          method === 'session/load'
+            ? bridge.loadRequests.length
+            : bridge.resumeRequests.length,
+        ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s restores mixed-case reserved-source transcripts on the generic surface',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440133'
+            : '550e8400-e29b-41d4-a716-446655440134';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(
+          storageSessionId,
+          'active',
+          undefined,
+          'standalone',
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId
+              ? { sourceType: 'standalone' }
+              : {},
+          );
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 219,
+            method,
+            params: { sessionId },
+          });
+          // Generic (non-isolated) restore keeps loading legacy
+          // reserved-source transcripts; only the isolated Conversations
+          // surface hides them (parity with the REST restore handler).
+          expect(await reader.next()).toMatchObject({
+            id: 219,
+            result: expect.any(Object),
+          });
+          reader.close();
+
+          expect(findSessionId).toHaveBeenCalledWith(sessionId);
+          expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
+          expect(
+            method === 'session/load'
+              ? bridge.loadRequests.length
+              : bridge.resumeRequests.length,
+          ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+        } finally {
+          readCreationMetadata.mockRestore();
+          findSessionId.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s rejects ordinary case conflicts before bridge dispatch',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440142'
+            : '550e8400-e29b-41d4-a716-446655440143';
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(new SessionIdCaseConflictError(sessionId));
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 220,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 220,
+            error: {
+              data: expect.objectContaining({
+                errorKind: 'session_conflict',
+                sessionId,
+              }),
+            },
+          });
+          reader.close();
+
+          expect(bridge.loadRequests).toHaveLength(loadCount);
+          expect(bridge.resumeRequests).toHaveLength(resumeCount);
+        } finally {
+          findSessionId.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s takes the shared restore guard on the request session id',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440145'
+            : '550e8400-e29b-41d4-a716-446655440146';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId);
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 230,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 230,
+            result: expect.any(Object),
+          });
+          reader.close();
+
+          // Parity with the REST restore handler: the coordinator
+          // canonicalizes lock keys, so holding the request spelling
+          // alone contends with the raw-spelled exclusive batch locks
+          // (pinned in session-archive.test.ts).
+          expect(runSharedMany).toHaveBeenCalledWith(
+            [sessionId],
+            expect.any(Function),
+          );
+        } finally {
+          runSharedMany.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s converts a pre-guard both-states conflict to actionable session conflict',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440149'
+            : '550e8400-e29b-41d4-a716-44665544014a';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId, 'active');
+        await writeStoredSession(storageSessionId, 'archived');
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 231,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 231,
+          error: {
+            message: expect.stringContaining(
+              'Delete the session with POST /sessions/delete',
+            ),
+            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+          },
+        });
+        reader.close();
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s converts an in-guard both-states conflict to actionable session conflict',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-44665544014b'
+            : '550e8400-e29b-41d4-a716-44665544014c';
+        const storageSessionId = sessionId.toUpperCase();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValueOnce(storageSessionId)
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 232,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 232,
+            error: {
+              message: expect.stringContaining(
+                'Delete the session with POST /sessions/delete',
+              ),
+              data: expect.objectContaining({ errorKind: 'session_conflict' }),
+            },
+          });
+          reader.close();
+          // The conversion must re-check the resolver's candidate spelling:
+          // the request-case id finds nothing on a case-sensitive filesystem.
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      });
+    },
+  );
+
+  it('keeps the bridge key canonical while isolating mixed-case storage', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440135';
+    const storageSessionId = sessionId.toUpperCase();
+    const explicitSessionId = '550e8400-e29b-41d4-a716-446655440136';
+    const materializeConversationDirectory = vi.fn(
+      async (candidateId: string) => `/live/conversation-${candidateId}`,
+    );
+    await writeStoredSession(storageSessionId, 'active', undefined, 'default');
+    await writeStoredSession(
+      explicitSessionId,
+      'active',
+      undefined,
+      'standalone',
+    );
+    const changeSessionCwd = vi.fn(
+      async (candidateId: string, request: { path: string }) => ({
+        sessionId: candidateId,
+        previousCwd: TEST_WORKSPACE,
+        newCwd: request.path,
+        warnings: [],
+      }),
+    );
+    Object.assign(bridge, { changeSessionCwd });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const registry = new ConnectionRegistry();
+    const rememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    const dispatcher = new AcpDispatcher(
+      bridge as unknown as HttpAcpBridge,
+      TEST_WORKSPACE,
+      () => process.env,
+      fakeWorkspace,
+      rememberLane,
+      createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: TEST_WORKSPACE,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
+      undefined,
+      undefined,
+      false,
+      registry,
+      archiveCoordinator,
+      () => true,
+      () => undefined,
+      {
+        materializeConversationDirectory,
+        isSessionActive: () => false,
+      },
+      Storage.getRuntimeBaseDir(),
+    );
+    const conn = registry.create(true)!;
+    const frames: unknown[] = [];
+    let resolverSpy: { mockRestore(): void } | undefined;
+    conn.attachConnStream({
+      kind: 'sse',
+      isClosed: false,
+      async send(message: unknown): Promise<void> {
+        frames.push(message);
+      },
+      async sendSerialized(payload: Buffer) {
+        frames.push(JSON.parse(payload.toString('utf8')));
+        return 'delivered' as const;
+      },
+      close(): void {},
+    } satisfies TransportStream);
+
+    try {
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 217,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await waitUntil(() => frames.length > 0);
+      expect(frames).toContainEqual(
+        expect.objectContaining({ id: 217, result: expect.any(Object) }),
+      );
+      expect(bridge.loadRequests).toContainEqual(
+        expect.objectContaining({ sessionId }),
+      );
+      // The private directory follows the live entry, so it is keyed on the
+      // canonical id even though storage keeps the mixed-case spelling.
+      expect(materializeConversationDirectory).toHaveBeenCalledWith(sessionId);
+      expect(materializeConversationDirectory).not.toHaveBeenCalledWith(
+        storageSessionId,
+      );
+      expect(changeSessionCwd).toHaveBeenCalledWith(sessionId, {
+        path: `/live/conversation-${sessionId}`,
+        allowedRoots: [TEST_WORKSPACE],
+        managedRelocation: 'live-conversation',
+      });
+
+      const loadCount = bridge.loadRequests.length;
+      const materializeCount =
+        materializeConversationDirectory.mock.calls.length;
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: 'session/load',
+        params: { sessionId: explicitSessionId },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            frame.id === 218,
+        ),
+      );
+      expect(frames).toContainEqual(
+        expect.objectContaining({
+          id: 218,
+          error: expect.objectContaining({
+            message: expect.stringContaining('No session with id'),
+          }),
+        }),
+      );
+      expect(bridge.loadRequests).toHaveLength(loadCount);
+      expect(materializeConversationDirectory).toHaveBeenCalledTimes(
+        materializeCount,
+      );
+
+      resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockRejectedValueOnce(new SessionIdCaseConflictError(sessionId));
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 219,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            frame.id === 219,
+        ),
+      );
+      expect(frames).toContainEqual(
+        expect.objectContaining({
+          id: 219,
+          error: expect.objectContaining({
+            message: expect.stringContaining('by case'),
+            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+          }),
+        }),
+      );
+      expect(bridge.loadRequests).toHaveLength(loadCount);
+      expect(materializeConversationDirectory).toHaveBeenCalledTimes(
+        materializeCount,
+      );
+    } finally {
+      resolverSpy?.mockRestore();
+      registry.dispose();
+      rememberLane.dispose();
+    }
+  });
+
   it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';
@@ -4898,6 +5439,112 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 221,
         result: { archived: [sessionId], errors: [] },
       });
+      reader.close();
+    });
+  });
+
+  it('ACP catalog mutations advance the bridge catalog revision with exact no-op semantics', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+      await writeStoredSession(sessionId);
+      const revision = () => bridge.getSessionCatalogVersion().revision;
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const v0 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 230,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 230,
+        result: { archived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v0);
+
+      const v1 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 231,
+        method: '_qwen/sessions/unarchive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 231,
+        result: { unarchived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v1);
+
+      const v2 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 232,
+        method: '_qwen/session/update_organization',
+        params: { sessionId, isPinned: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 232,
+        result: { sessionId, isPinned: true },
+      });
+      expect(revision()).toBeGreaterThan(v2);
+
+      const v3 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 233,
+        method: '_qwen/workspace/session_groups/create',
+        params: { name: 'acp-group', color: 'blue' },
+      });
+      const created = (await reader.next()) as {
+        result?: { group?: { id?: string } };
+      };
+      const groupId = created.result?.group?.id;
+      expect(typeof groupId).toBe('string');
+      expect(revision()).toBeGreaterThan(v3);
+
+      const v4 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 236,
+        method: '_qwen/workspace/session_groups/update',
+        params: { groupId, name: 'acp-group-renamed' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 236,
+        result: { group: { id: groupId, name: 'acp-group-renamed' } },
+      });
+      expect(revision()).toBeGreaterThan(v4);
+
+      // A group delete that reports `deleted: false` changes nothing.
+      const v5 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 234,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId: 'missing-group' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 234,
+        result: { deleted: false },
+      });
+      expect(revision()).toBe(v5);
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 235,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 235,
+        result: { deleted: true },
+      });
+      expect(revision()).toBeGreaterThan(v5);
+
       reader.close();
     });
   });
@@ -9672,7 +10319,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 // ── WebSocket transport security tests ────────────────────────────────
 describe('ACP WebSocket transport security', () => {
   let server: Server;
+  let lanServer: Server | undefined;
+  let acpHandle: AcpHttpHandle | undefined;
   let port: number;
+  let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
 
@@ -9691,6 +10341,7 @@ describe('ACP WebSocket transport security', () => {
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+      localControlToken?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -9698,12 +10349,19 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
+      const credentials = opts.localControlToken
+        ? new CredentialStore(opts.token)
+        : undefined;
+      if (opts.localControlToken) {
+        credentials!.addPairingToken('test-pairing', opts.localControlToken);
+      }
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
         boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
         enabled: true,
         daemonEnv: opts.daemonEnv,
         token: opts.token,
+        credentials,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
@@ -9731,13 +10389,33 @@ describe('ACP WebSocket transport security', () => {
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
         handle?.attachServer(listeningServer);
-        resolve();
+        acpHandle = handle;
+        if (!opts.localControlToken) {
+          resolve();
+          return;
+        }
+        const localServer = createServer(app);
+        localServer.listen(0, '127.0.0.1', () => {
+          lanPort = (localServer.address() as AddressInfo).port;
+          const authority = `127.0.0.1:${lanPort}`;
+          tagListener(localServer, {
+            kind: 'local-control',
+            authority,
+            origin: `http://${authority}`,
+          });
+          handle?.attachServer(localServer);
+          lanServer = localServer;
+          resolve();
+        });
       });
       server = listeningServer;
     });
   }
 
   afterEach(async () => {
+    lanServer?.closeAllConnections?.();
+    await new Promise<void>((r) => lanServer?.close(() => r()) ?? r());
+    lanServer = undefined;
     server?.closeAllConnections?.();
     await new Promise<void>((r) => server?.close(() => r()) ?? r());
     if (previousCdpMcpCommand === undefined) {
@@ -9782,6 +10460,30 @@ describe('ACP WebSocket transport security', () => {
       ws.once('unexpected-response', (_req, res) => {
         resolve({ code: res.statusCode ?? 0 });
       });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
+  function wsConnectLocalControl(
+    token: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ code: number; socket?: WebSocket }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${lanPort}/acp`,
+        ['qwen-ws', bearerProto(token)],
+        {
+          headers: {
+            Origin: `http://127.0.0.1:${lanPort}`,
+            ...headers,
+          },
+          handshakeTimeout: 2000,
+        },
+      );
+      ws.once('open', () => resolve({ code: 101, socket: ws }));
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
       ws.once('error', () => resolve({ code: 0 }));
     });
   }
@@ -10180,6 +10882,54 @@ describe('ACP WebSocket transport security', () => {
   // Non-secret marker the web-shell offers alongside the bearer subprotocol so
   // the daemon can select it (never the secret) and the handshake completes.
   const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
+
+  it('accepts the pairing token and advertised Origin only on the LAN listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+    });
+
+    const paired = await wsConnectLocalControl('pairing-token');
+    expect(paired.code).toBe(101);
+    paired.socket?.terminate();
+
+    expect((await wsConnectLocalControl('runtime-token')).code).toBe(401);
+    expect(
+      (
+        await wsConnectLocalControl('pairing-token', {
+          Origin: 'http://evil.example',
+        })
+      ).code,
+    ).toBe(403);
+    expect(
+      (
+        await wsConnectLocalControl('pairing-token', {
+          Host: 'evil.example',
+        })
+      ).code,
+    ).toBe(403);
+  });
+
+  it('terminates LAN WebSockets when their listener is detached', async () => {
+    await startServer({ localControlToken: 'pairing-token' });
+    const paired = await wsConnectLocalControl('pairing-token');
+    expect(paired.code).toBe(101);
+
+    // The detach must be SELECTIVE: a client on the primary listener (the
+    // operator's own loopback Web Shell / desktop session) stays connected
+    // while only the LAN (phone) sockets are cut.
+    const primary = await wsConnect();
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+
+    const closed = new Promise<void>((resolve) =>
+      paired.socket!.once('close', () => resolve()),
+    );
+    acpHandle!.detachServer(lanServer!);
+    await closed;
+    expect(paired.socket!.readyState).toBe(WebSocket.CLOSED);
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.close();
+  });
 
   function wsConnectWithSubprotocols(
     protocols: string[],

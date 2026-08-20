@@ -298,6 +298,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
@@ -331,6 +332,23 @@ export interface WorkflowAgentOpts {
   model?: string;
   isolation?: 'worktree' | 'remote';
   agentType?: string;
+  /**
+   * Pin this agent to an EXISTING, caller-owned git worktree of the current
+   * repository — the same contract as `AgentTool`'s `working_dir`, and
+   * validated by the same check. The runtime neither creates nor removes the
+   * directory; it only rebinds the subagent Config's cwd surfaces, so the
+   * agent's file / shell / search tools resolve inside it.
+   *
+   * `isolation: 'worktree'` is not a substitute and the two are mutually
+   * exclusive: isolation CREATES a worktree from the current tree and refuses
+   * to run when the parent tree is dirty — which is the opposite of pinning an
+   * agent to a directory whose uncommitted state is the whole point (a review
+   * worktree, a scratch checkout a prior step provisioned).
+   *
+   * It is a cwd pin, not a filesystem sandbox: an explicit absolute path can
+   * still reach outside it.
+   */
+  workingDir?: string;
   /**
    * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
    * is aborted + retried (up to 3 attempts) after this many ms of no
@@ -389,6 +407,19 @@ export interface WorkflowOrchestratorEmitter {
   agentDispatched?(label?: string): void;
   /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
   agentCompleted?(label?: string, error?: string): void;
+  /** A dispatch was issued and joined to the runtime dependency graph. */
+  dispatchQueued?(event: {
+    id: string;
+    label?: string;
+    prompt: string;
+    dependsOn: string[];
+    queuedAt: number;
+    cached?: boolean;
+  }): void;
+  /** A queued dispatch acquired a scheduler slot. */
+  dispatchStarted?(id: string, startedAt: number): void;
+  /** A dispatch reached a terminal state. */
+  dispatchSettled?(id: string, error?: string, endedAt?: number): void;
   /**
    * P5: cumulative `spent` re-snapshot after each successful agent
    * completion. `total` is `null` when no per-run cap is set
@@ -603,13 +634,7 @@ export interface WorkflowSandbox {
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
-  /**
-   * Append a log line produced by a nested workflow run. Nested logs
-   * reach no production surface on their own (the nested sandbox's
-   * buffer is never read by the orchestrator), so the orchestrator
-   * merges them into the parent run's logs at nested settlement —
-   * including the nested unconsumed-rejection mirror lines.
-   */
+  /** Merge a nested workflow log into the parent buffer without re-emitting. */
   appendLog(line: string): void;
   /**
    * The script's `export const meta = {...}` declaration, validated and
@@ -670,26 +695,36 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const phases: string[] = [];
   const logs: string[] = [];
 
-  const safeLog = (msg: unknown): void => {
+  const emitLog = (line: string): void => {
+    try {
+      opts.emitter?.logAppended?.(line);
+    } catch (e) {
+      debugLogger.warn('emitter.logAppended threw:', e);
+    }
+  };
+
+  const safeLog = (msg: unknown, notify = true): void => {
     if (logs.length < MAX_LOG_LINES) {
       const line = String(msg);
       logs.push(line);
       // P4b: emit to host-side subscriber (registry). Defensive try/catch
       // because a subscriber error must not interrupt script execution
       // — the script body has no business knowing about UI plumbing.
-      try {
-        opts.emitter?.logAppended?.(line);
-      } catch (e) {
-        debugLogger.warn('emitter.logAppended threw:', e);
-      }
+      if (notify) emitLog(line);
     } else if (logs.length === MAX_LOG_LINES) {
-      logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
+      const line = `[workflow log truncated at ${MAX_LOG_LINES} lines]`;
+      logs.push(line);
+      if (notify) emitLog(line);
     }
   };
 
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
-      const t = String(title);
+      // Normalize before collapse/push/emit so the sandbox list and the
+      // registry mirror (same rule at its boundary) compare the same value:
+      // titles colliding only after ANSI/control stripping or the 200-char
+      // cap previously diverged the two phase surfaces of the same run.
+      const t = stripAnsiAndControl(String(title)).slice(0, 200) || 'phase';
       // R7 (wenshao): collapse consecutive identical titles so the
       // sandbox is the single source of truth for the phase list.
       // Without this, `outcome.phases` (terminal `returnDisplay` JSON)
@@ -1284,7 +1319,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs'];
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1313,6 +1348,34 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
             "Known modes are: 'worktree', 'remote'."
           );
+        }
+        // NOTE: this init script is a host-side template literal — no
+        // backticks anywhere below, in code or comments.
+        //
+        // A non-number stallMs is silently dropped downstream and the
+        // default watchdog applies, contradicting "0 disables the watchdog"
+        // — refuse it loudly like the other option gates.
+        if (agentOpts.stallMs !== undefined && (typeof agentOpts.stallMs !== 'number' || !Number.isFinite(agentOpts.stallMs))) {
+          throw new Error("agent({stallMs}): must be a finite number of milliseconds (0 disables the watchdog).");
+        }
+        // workingDir pins the agent to a worktree the CALLER already owns;
+        // isolation creates and reaps one. Asking for both is a contradiction
+        // about who owns the directory's lifetime, so name it here rather than
+        // silently letting one win.
+        if (agentOpts.workingDir !== undefined) {
+          if (typeof agentOpts.workingDir !== 'string' || agentOpts.workingDir.trim().length === 0) {
+            throw new Error(
+              "agent({workingDir}): must be a non-empty string naming an existing " +
+              "git worktree of this repository."
+            );
+          }
+          if (agentOpts.isolation !== undefined) {
+            throw new Error(
+              "agent({workingDir, isolation}): incompatible options. workingDir " +
+              "pins the agent to a worktree you already own; isolation creates " +
+              "a fresh one and removes it afterwards. Pass one."
+            );
+          }
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {
@@ -1767,7 +1830,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
-    appendLog: (line: string) => safeLog(line),
+    appendLog: (line: string) => safeLog(line, false),
     getMeta: () => extractedMeta,
   };
 }

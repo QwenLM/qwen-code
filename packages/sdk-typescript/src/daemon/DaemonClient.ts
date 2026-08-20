@@ -61,6 +61,7 @@ import type {
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
   DaemonWorkspaceSessionInfo,
+  DaemonWorkspaceSessionLiveState,
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
@@ -157,6 +158,8 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -187,6 +190,7 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
@@ -1650,6 +1654,23 @@ export class DaemonClient {
     );
   }
 
+  async setExtensionDefaultActivations(
+    extensionNames: readonly string[],
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      '/extensions/activation',
+      'PUT /extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
+    );
+  }
+
   async extensionOperation(
     operationId: string,
     signal?: AbortSignal,
@@ -2633,6 +2654,26 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Read the memory-only live-state snapshot for a workspace via
+   * `GET /workspaces/:workspace/sessions/live-state`: the complete set of
+   * live sessions with volatile state plus the in-memory catalog version
+   * equality token. Always uses native REST transport (never the pluggable
+   * ACP transport).
+   *
+   * This method deliberately does not pre-flight
+   * `requireCapability('workspace_session_live_state')` — a capability
+   * probe on every poll would double request volume. Consumers preflight
+   * the capability once from their already-loaded capabilities and fall
+   * back to the full session catalog when it is absent.
+   */
+  getWorkspaceSessionLiveState(
+    workspaceCwd: string,
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<DaemonWorkspaceSessionLiveState> {
+    return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
+  }
+
   async listSessionGroups(
     workspaceCwd: string,
   ): Promise<DaemonSessionGroupCatalog> {
@@ -3252,16 +3293,115 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  async uploadSessionAttachment(
+    sessionId: string,
+    data: Blob,
+    name: string,
+    mimeType: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionAttachmentReference> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          {
+            'Content-Type': mimeType,
+            'X-Qwen-Attachment-Name': encodeURIComponent(name),
+          },
+          opts?.clientId,
+        ),
+        body: data,
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/attachments');
+        }
+        return (await res.json()) as DaemonSessionAttachmentReference;
+      },
+    );
+  }
+
+  async readSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionAttachmentData> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/attachments/:attachmentId',
+          );
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        // This package also targets browsers, where Node's Buffer is absent.
+        // Chunking keeps the spread call below the engine's argument limit.
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(
+            ...bytes.subarray(offset, offset + 0x8000),
+          );
+        }
+        return {
+          data: btoa(binary),
+          mimeType:
+            res.headers.get('content-type') ?? 'application/octet-stream',
+        };
+      },
+    );
+  }
+
+  async removeSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<boolean> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /session/:id/attachments/:attachmentId',
+          );
+        }
+        return ((await res.json()) as { removed?: unknown }).removed === true;
+      },
+    );
+  }
+
   /**
    * Queue a user message typed while the session's turn is still running. The
    * ACP child drains it between tool batches so the model sees it before the
    * turn ends. Every accepted request is daemon-owned; a caller-supplied id
-   * makes ambiguous retries idempotent.
+   * makes ambiguous retries idempotent. `opts.content` carries media content
+   * image blocks alongside the text — pre-flight the
+   * `session_attachments` capability; older daemons ignore the
+   * field and drop the media.
    */
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      clientId?: string;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
@@ -3275,7 +3415,13 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message, messageId: opts?.messageId }),
+        body: JSON.stringify({
+          message,
+          messageId: opts?.messageId,
+          ...(opts?.content && opts.content.length > 0
+            ? { content: opts.content }
+            : {}),
+        }),
         signal: opts?.signal,
       },
       async (res) => {
@@ -5886,6 +6032,29 @@ export class WorkspaceDaemonClient {
   }
 
   /**
+   * Read the memory-only live-state snapshot for this workspace: the
+   * complete set of live sessions with volatile state plus the in-memory
+   * catalog version equality token. Always uses native REST transport
+   * (never the pluggable ACP transport).
+   *
+   * This method deliberately does not pre-flight
+   * `requireCapability('workspace_session_live_state')` — a capability
+   * probe on every poll would double request volume. Consumers preflight
+   * the capability once from their already-loaded capabilities and fall
+   * back to the full session catalog when it is absent.
+   */
+  getSessionLiveState(
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<DaemonWorkspaceSessionLiveState> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceSessionLiveState>(
+      this.workspaceSelector,
+      '/sessions/live-state',
+      'GET /workspaces/:workspace/sessions/live-state',
+      { clientId: opts.clientId, timeoutMs: opts.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  /**
    * Read one page from an active persisted session transcript in this
    * workspace.
    * The daemon performs replay locally without attaching to the session or
@@ -5930,6 +6099,19 @@ export class WorkspaceDaemonClient {
       `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/archive/export`,
       'GET /workspaces/:workspace/session/:id/archive/export',
       opts,
+    );
+  }
+
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return this.client.workspaceJsonRequest<SessionMetadataResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/metadata`,
+      'PATCH /workspaces/:workspace/session/:id/metadata',
+      { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
     );
   }
 
@@ -6325,6 +6507,24 @@ export class WorkspaceDaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  setExtensionActivations(
+    extensionNames: readonly string[],
+    state: ExtensionWorkspaceBatchActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      '/extensions/activation',
+      'PUT /workspaces/:workspace/extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 

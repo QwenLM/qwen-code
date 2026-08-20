@@ -1,4 +1,4 @@
-import type { ACPToolCall } from './types';
+import type { ACPToolCall } from './types.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -50,6 +50,7 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     name === 'agent' && tool.parentToolCallId === undefined;
   const defaultsToBackground =
     isTopLevelQwenAgent &&
+    args !== undefined &&
     args?.run_in_background === undefined &&
     args?.working_dir === undefined &&
     args?.name === undefined &&

@@ -199,6 +199,31 @@ function replaceTextPartsForDisplay(
   return projected;
 }
 
+function stripGeneratedAttachmentTokens(
+  displayText: string,
+  payload: Record<string, unknown> | undefined,
+): string {
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
+}
+
 export function toTranscriptEpochMs(
   timestamp?: string | number,
 ): number | undefined {
@@ -257,6 +282,31 @@ export function createTranscriptImageUpdate(
     content: { type: 'image', data: options.data, mimeType: options.mimeType },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+function createTranscriptAttachmentReferenceUpdate(
+  reference: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  if (
+    (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+    typeof reference['attachmentId'] !== 'string' ||
+    typeof reference['mimeType'] !== 'string' ||
+    typeof reference['size'] !== 'number'
+  ) {
+    return undefined;
+  }
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: reference['type'],
+      attachmentId: reference['attachmentId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
 }
 
 export function createTranscriptUsageUpdate(
@@ -550,6 +600,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    const replayMeta: UpdateMetaOptions =
+      record.subtype === 'mid_turn_user_message'
+        ? {
+            ...meta,
+            extra: {
+              ...meta.extra,
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : meta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -558,8 +619,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     ) {
       const displayText =
         payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
+          ? stripGeneratedAttachmentTokens(payload['displayText'], payload)
           : undefined;
+      if (record.subtype === 'mid_turn_user_message' && displayText === '') {
+        const media = [
+          ...this.projectUserAttachmentReferences(payload, emit, replayMeta),
+        ];
+        if (media.length > 0) {
+          yield* media;
+          return;
+        }
+      }
       if (displayText) {
         const isNotification = record.subtype === 'notification';
         const backgroundTask =
@@ -570,7 +640,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
-            ...meta,
+            ...replayMeta,
             ...(isNotification
               ? {
                   extra: {
@@ -584,6 +654,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
+        yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
@@ -591,17 +662,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const projection = projectUserTranscriptForDisplay(record);
     if (projection.displayText !== undefined) {
+      const displayText = stripGeneratedAttachmentTokens(
+        projection.displayText,
+        payload,
+      );
       yield* this.projectMessageParts(
         record,
         'user',
         emit,
-        meta,
+        replayMeta,
         undefined,
-        replaceTextPartsForDisplay(
-          record.message?.parts,
-          projection.displayText,
-        ),
+        replaceTextPartsForDisplay(record.message?.parts, displayText),
       );
+      yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
       return;
     }
 
@@ -609,10 +682,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       record,
       'user',
       emit,
-      meta,
+      replayMeta,
       undefined,
       projection.parts,
     );
+    yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
+  }
+
+  private *projectUserAttachmentReferences(
+    payload: Record<string, unknown> | undefined,
+    emit: (update: SessionUpdate) => TranscriptReplayEmission,
+    meta: UpdateMetaOptions,
+  ): Iterable<TranscriptReplayEmission> {
+    const references = payload?.['attachmentReferences'];
+    if (!Array.isArray(references)) return;
+    for (const reference of references) {
+      if (!isObjectRecord(reference)) continue;
+      const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
+      if (update) yield emit(update);
+    }
   }
 
   private *projectAssistantRecord(

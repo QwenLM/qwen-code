@@ -851,7 +851,7 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
   await expect
     .poll(() => emptyMobileComposerLayout(page))
     .toMatchObject({
-      chatViewPosition: 'relative',
+      chatViewPosition: 'static',
       footerPosition: 'relative',
     });
   const wideLayout = await emptyMobileComposerLayout(page);
@@ -1042,7 +1042,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 }
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
-  test(`bounds shared attachments and long text at ${viewportHeight}px @smoke`, async ({
+  test(`bounds attachments and long text at ${viewportHeight}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: viewportHeight });
@@ -1058,7 +1058,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 
     await pasteComposerImages(page, 8);
     const images = page.locator(
-      '[data-web-shell-composer-attachments] img[src^="data:image/png;base64,"]',
+      '[data-web-shell-composer-images] img[src^="data:image/png;base64,"]',
     );
     await expect(images).toHaveCount(8);
     await expectImagesDecoded(images);
@@ -1116,15 +1116,15 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     });
     await expect
       .poll(async () => {
-        const [attachmentsBox, imageBox] = await Promise.all([
+        const [attachmentsBox, tagBox] = await Promise.all([
           attachments.boundingBox(),
-          images.last().boundingBox(),
+          tags.last().boundingBox(),
         ]);
-        if (!attachmentsBox || !imageBox) return false;
+        if (!attachmentsBox || !tagBox) return false;
         const tolerance = 1;
         return (
-          imageBox.y >= attachmentsBox.y - tolerance &&
-          imageBox.y + imageBox.height <=
+          tagBox.y >= attachmentsBox.y - tolerance &&
+          tagBox.y + tagBox.height <=
             attachmentsBox.y + attachmentsBox.height + tolerance
         );
       })
@@ -1177,7 +1177,7 @@ test('drops ordered PNG and BMP images and submits them without text @smoke', as
   await expect(surface).not.toHaveAttribute('data-image-drag-active');
   await expect(surface).not.toHaveAttribute('aria-busy');
   const images = surface.locator(
-    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+    '[data-web-shell-composer-images] img[src^="data:image/"]',
   );
   await expect(images).toHaveCount(2);
   await expectImagesDecoded(images);

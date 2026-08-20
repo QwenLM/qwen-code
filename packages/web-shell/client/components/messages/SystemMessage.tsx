@@ -19,6 +19,7 @@ import {
 } from './TasksStatusMessage';
 import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
+import { UserMessage } from './UserMessage';
 import styles from './SystemMessage.module.css';
 
 interface SystemMessageProps {
@@ -26,8 +27,11 @@ interface SystemMessageProps {
   variant: 'info' | 'error' | 'warning';
   source?: string;
   data?: unknown;
+  images?: Array<{ data: string; mimeType: string }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an image to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
@@ -38,12 +42,23 @@ export const SystemMessage = memo(function SystemMessage({
   variant,
   source,
   data,
+  images,
   onShowContextDetail,
+  onImagePreview,
   isLatest = false,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
   const { t } = useI18n();
+  if (source === 'mid_turn_message_injected') {
+    return (
+      <UserMessage
+        content={content}
+        images={images}
+        onImagePreview={onImagePreview}
+      />
+    );
+  }
   // The user ESC-cancelled a live stream. Render it right-aligned and subtle —
   // a user-initiated stop reads as belonging to the user side of the transcript.
   if (source === 'prompt_cancelled') {

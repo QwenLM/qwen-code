@@ -10,19 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import {
-  localControlUrls,
-  maybeOpenWebShellBrowser,
-  serveCommand,
-} from './serve.js';
+import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
-const mockNetworkInterfaces = vi.hoisted(() => vi.fn());
-const mockSleepInhibitor = vi.hoisted(() => ({
-  acquire: vi.fn(() => ({ release: vi.fn() })),
-}));
 const mockQr = vi.hoisted(() => ({
   generate: vi.fn(
     (
@@ -33,17 +25,12 @@ const mockQr = vi.hoisted(() => ({
   ),
   setErrorLevel: vi.fn(),
 }));
-vi.mock('node:os', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:os')>();
-  return { ...actual, networkInterfaces: mockNetworkInterfaces };
-});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
     openBrowserSecurely: mockOpenBrowserSecurely,
-    sleepInhibitor: mockSleepInhibitor,
     shouldLaunchBrowser: mockShouldLaunchBrowser,
   };
 });
@@ -210,7 +197,7 @@ describe('serve command args', () => {
     ).toBe(1048576);
   });
 
-  it('parses --local-control and requires its generated token and Web Shell', () => {
+  it('parses --local-control without taking over daemon credentials', () => {
     expect(buildParser().parseSync('')['local-control']).toBe(false);
     expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');
     expect(
@@ -221,28 +208,26 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('--local-control')['local-control']).toBe(
       true,
     );
-    expect(() =>
-      buildParser().parseSync('--local-control --token fixed'),
-    ).toThrow(/generates its own token/);
-    expect(() =>
-      buildParser().parseSync(
-        '--local-control --allow-origin http://localhost:3000',
-      ),
-    ).toThrow(/manages its browser origins/);
+    const composed = buildParser().parseSync(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+    expect(composed['token']).toBe('fixed');
+    expect(composed['allow-origin']).toEqual(['http://localhost:3000']);
+    expect(composed['port']).toBe(0);
     expect(() => buildParser().parseSync('--local-control --no-web')).toThrow(
       /Local Control requires the Web Shell/,
     );
-    expect(() => buildParser().parseSync('--local-control --port 0')).toThrow(
-      /Local Control requires a fixed port/,
-    );
-    for (const port of ['-1', '1.5', '65536']) {
-      expect(() =>
-        buildParser().parseSync(`--local-control --port ${port}`),
-      ).toThrow(/Local Control requires a fixed port/);
-    }
     expect(() =>
       buildParser().parseSync('--local-control --hostname 192.168.1.2'),
-    ).toThrow(/Local Control manages its hostname/);
+    ).toThrow(/Local Control requires --hostname 127\.0\.0\.1/);
+    expect(() =>
+      buildParser().parseSync('--local-control-address 192.168.1.2'),
+    ).toThrow(/requires --local-control/);
+    expect(
+      buildParser().parseSync(
+        '--local-control --local-control-address 192.168.1.2',
+      )['local-control-address'],
+    ).toBe('192.168.1.2');
   });
 
   it('parses repeatable --channel values', () => {
@@ -313,82 +298,12 @@ describe('serve command args', () => {
   });
 });
 
-describe('localControlUrls', () => {
-  it('builds fragment-authenticated URLs for each non-loopback IPv4 address', () => {
-    const urls = localControlUrls('http://0.0.0.0:4170/', 'a/b token', {
-      en1: [
-        {
-          address: '10.0.0.20',
-          netmask: '255.255.255.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:01',
-          internal: false,
-          cidr: '10.0.0.20/24',
-        },
-      ],
-      en0: [
-        {
-          address: '192.168.1.20',
-          netmask: '255.255.255.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:00',
-          internal: false,
-          cidr: '192.168.1.20/24',
-        },
-        {
-          address: 'fe80::1',
-          netmask: 'ffff:ffff:ffff:ffff::',
-          family: 'IPv6',
-          mac: '00:00:00:00:00:00',
-          internal: false,
-          cidr: 'fe80::1/64',
-          scopeid: 1,
-        },
-      ],
-      lo0: [
-        {
-          address: '127.0.0.1',
-          netmask: '255.0.0.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:00',
-          internal: true,
-          cidr: '127.0.0.1/8',
-        },
-      ],
-      unavailable: undefined,
-    });
-
-    expect(urls).toEqual([
-      {
-        interfaceName: 'en0',
-        url: 'http://192.168.1.20:4170/#token=a%2Fb%20token',
-      },
-      {
-        interfaceName: 'en1',
-        url: 'http://10.0.0.20:4170/#token=a%2Fb%20token',
-      },
-    ]);
-  });
-});
-
 describe('serve rate limit env parsing', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv, QWEN_CODE_SUPPRESS_YOLO_WARNING: '1' };
-    mockNetworkInterfaces.mockReturnValue({
-      en0: [
-        {
-          address: '192.168.1.20',
-          netmask: '255.255.255.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:00',
-          internal: false,
-          cidr: '192.168.1.20/24',
-        },
-      ],
-    });
   });
 
   afterEach(() => {
@@ -531,18 +446,25 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
-  it('starts Local Control with a fresh token, QR pairing, and sleep inhibition', async () => {
+  it('delegates Local Control to the daemon service and prints its pairing URL', async () => {
     const stdoutWrites: string[] = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       stdoutWrites.push(String(chunk));
       return true;
     });
-    mockRunQwenServe.mockImplementationOnce(async (options) => ({
-      url: 'https://0.0.0.0/',
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'https://192.168.1.20/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: true,
+      encrypted: true,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
       webShellMounted: true,
-      resolvedToken: options.token,
       runtimeReady: Promise.resolve(),
-    }));
+      getLocalControl: () => ({ enable }),
+    });
 
     await startServeHandlerWithArgs(
       '--local-control --open --port 443 --tls-cert cert.pem --tls-key key.pem',
@@ -552,40 +474,59 @@ describe('serve rate limit env parsing', () => {
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).toEqual(
       expect.objectContaining({
-        hostname: '0.0.0.0',
-        strictPort: true,
-        token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+        hostname: '127.0.0.1',
+        token: undefined,
       }),
     );
-    expect(mockSleepInhibitor.acquire).toHaveBeenCalledWith(
-      'Qwen Code Local Control is active',
-    );
+    expect(options).not.toHaveProperty('strictPort');
+    expect(enable).toHaveBeenCalledWith({});
     expect(mockQr.setErrorLevel).toHaveBeenCalledWith('Q');
-    expect(String(mockQr.generate.mock.calls[0]?.[0])).toContain(
-      `#token=${options.token}`,
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'https://192.168.1.20/#token=pairing',
+      { small: true },
+      expect.any(Function),
     );
-    expect(String(mockQr.generate.mock.calls[0]?.[0])).toMatch(/^https:/);
-    expect(options.allowOrigins).toContain(
-      new URL(String(mockQr.generate.mock.calls[0]?.[0])).origin,
-    );
-    expect(options.allowOrigins).not.toContain('*');
-    expect(options.allowOrigins).toContain('https://127.0.0.1');
     expect(stdoutWrites.join('')).toContain('Local Control is on');
-    expect(stdoutWrites.join('')).toContain('Restart after changing networks');
-    expect(stdoutWrites.join('')).toContain('Sleep inhibition is best effort');
-    expect(stdoutWrites.join('')).toContain(
-      'Traffic is encrypted only when --tls-cert and --tls-key are set',
-    );
+    expect(stdoutWrites.join('')).toContain('Sleep is inhibited');
+    expect(stdoutWrites.join('')).toContain('Traffic is encrypted');
     await vi.waitFor(() =>
       expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
-        expect.stringMatching(
-          /^https:\/\/127\.0\.0\.1\/#token=[A-Za-z0-9_-]{43}$/,
-        ),
+        'https://127.0.0.1/',
       ),
     );
   });
 
-  it('does not inhibit sleep when pairing output fails', async () => {
+  it('forwards --token and --allow-origin through to runQwenServe with --local-control', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getLocalControl: () => ({
+        enable: vi.fn().mockResolvedValue({
+          active: true,
+          url: 'http://192.168.1.20:4170/#token=pairing',
+          interfaceName: 'en0',
+          sleepInhibited: false,
+          encrypted: false,
+        }),
+      }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        token: 'fixed',
+        allowOrigins: ['http://localhost:3000'],
+      }),
+    );
+  });
+
+  it('closes the daemon when pairing output fails', async () => {
     const close = vi.fn().mockRejectedValue(new Error('close failed'));
     const stderrWrites: string[] = [];
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -596,12 +537,19 @@ describe('serve rate limit env parsing', () => {
     mockQr.generate.mockImplementationOnce(() => {
       throw new Error('QR failed');
     });
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
     mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://0.0.0.0:4170/',
+      url: 'http://127.0.0.1:4170/',
       webShellMounted: true,
-      resolvedToken: 'secret',
       runtimeReady: Promise.resolve(),
       close,
+      getLocalControl: () => ({ enable }),
     });
     vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit(${code}) called`);
@@ -616,7 +564,6 @@ describe('serve rate limit env parsing', () => {
     expect(close).toHaveBeenCalledOnce();
     expect(stderrWrites.join('')).toContain('QR failed');
     expect(stderrWrites.join('')).not.toContain('close failed');
-    expect(mockSleepInhibitor.acquire).not.toHaveBeenCalled();
   });
 
   it('closes Local Control when the authenticated Web Shell is unavailable', async () => {
