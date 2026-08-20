@@ -6810,6 +6810,12 @@ export class Session implements SessionContext {
       signal: abortSignal,
       onVisionBridgeNotice: (notice) => notices.push(notice),
     });
+    // A cancellation arriving during the awaited bridge work must keep the
+    // original media intact too: the rewritten parts would otherwise flow
+    // into the abort branch's message and persist in session history.
+    if (abortSignal.aborted) {
+      return parts;
+    }
     for (const notice of notices) {
       try {
         await this.messageEmitter.emitAgentMessage(notice);
@@ -6819,7 +6825,14 @@ export class Session implements SessionContext {
         );
       }
     }
-    return this.#applyBridgeConversionsIfNeeded(nestedChecked, abortSignal);
+    const converted = await this.#applyBridgeConversionsIfNeeded(
+      nestedChecked,
+      abortSignal,
+    );
+    if (abortSignal.aborted) {
+      return parts;
+    }
+    return converted;
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -7180,14 +7193,18 @@ export class Session implements SessionContext {
       message: DrainedMidTurnMessage;
     }> = [];
     for (const resolved of resolvedMessages) {
-      const audioChecked = options.getModelOverride
-        ? await this.#applyAudioBridgeIfNeeded(
-            resolved.parts,
-            abortSignal,
-            options.getModelOverride(),
-            onModelOverrideResolutionFailed,
-          )
-        : resolved.parts;
+      // A cancelled drain must keep queued media intact: bridging after the
+      // abort would rewrite it into cancellation markers that then persist
+      // into session history via the recording and the abort-branch message.
+      const audioChecked =
+        !abortSignal.aborted && options.getModelOverride
+          ? await this.#applyAudioBridgeIfNeeded(
+              resolved.parts,
+              abortSignal,
+              options.getModelOverride(),
+              onModelOverrideResolutionFailed,
+            )
+          : resolved.parts;
       audioCheckedMessages.push({
         parts: audioChecked,
         displayText: resolved.displayText,
@@ -7196,7 +7213,8 @@ export class Session implements SessionContext {
     }
     const parts: Part[] = [];
     for (const resolved of audioCheckedMessages) {
-      const finalized =
+      let finalized =
+        !abortSignal.aborted &&
         modelOverrideResolutionFailed &&
         (hasImageParts(resolved.parts) || hasAudioParts(resolved.parts))
           ? await this.#applyBridgeConversionsIfNeeded(
@@ -7204,6 +7222,11 @@ export class Session implements SessionContext {
               abortSignal,
             )
           : resolved.parts;
+      // Abort arriving during the awaited conversion: fall back to the
+      // untouched parts so no marker text is recorded or sent.
+      if (abortSignal.aborted) {
+        finalized = resolved.parts;
+      }
       const recorder = this.config.getChatRecordingService();
       if (
         resolved.message.kind === 'structured' &&

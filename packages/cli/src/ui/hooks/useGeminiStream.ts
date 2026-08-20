@@ -177,8 +177,14 @@ function applyModelOverride(
 function clearModelOverride(
   modelOverrideRef: { current: string | undefined },
   inlineActiveRef: { current: boolean },
+  mediaRoutedRef: { current: string | undefined },
 ): void {
   applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+  // The media-routed marker must clear atomically with the override:
+  // leaving it behind lets a later re-assertion of the same override value
+  // skip media handling and send the trailing-NUL exact route for a
+  // media-free continuation.
+  mediaRoutedRef.current = undefined;
 }
 
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
@@ -1407,6 +1413,7 @@ export const useGeminiStream = (
               clearModelOverride(
                 modelOverrideRef,
                 inlineModelOverrideActiveRef,
+                mediaRoutedOverrideRef,
               );
             }
             if (failClosed) {
@@ -1472,15 +1479,29 @@ export const useGeminiStream = (
               modelOverrideResolutionFailed,
             };
           }
+          if (result.status === 'failed' && preOverrideParts === undefined) {
+            // The bridge substituted marker text for the audio bytes; keep
+            // the originals so Retry (Ctrl+Y) can re-bridge once a voice
+            // model is configured or the endpoint recovers. (When the
+            // fail-closed branch already captured them, nextParts here is
+            // the marker-rewritten list and must not replace the pristine
+            // parts.)
+            preOverrideParts = nextParts;
+          }
           nextParts = result.parts;
         }
       }
       // An active inline override keeps images raw (the vision bridge is skipped
       // for it), so the size clamp has to run here regardless of whether the
-      // turn also carried audio.
+      // turn also carried audio. The resolution-failed term covers the probe
+      // throwing: the inline latch was cleared fail-closed and
+      // targetSupportsImage was never assigned, but the images were still
+      // destined for the override route and must not be forwarded raw.
       if (
         nextParts !== null &&
-        (targetSupportsImage || inlineModelOverrideActiveRef.current)
+        (targetSupportsImage ||
+          inlineModelOverrideActiveRef.current ||
+          modelOverrideResolutionFailed)
       ) {
         const clampedParts = (
           Array.isArray(nextParts) ? nextParts : [nextParts]
@@ -3648,8 +3669,11 @@ export const useGeminiStream = (
               userMessageTimestamp,
             );
           }
-          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
-          mediaRoutedOverrideRef.current = undefined;
+          clearModelOverride(
+            modelOverrideRef,
+            inlineModelOverrideActiveRef,
+            mediaRoutedOverrideRef,
+          );
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
