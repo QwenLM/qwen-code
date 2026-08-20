@@ -2141,6 +2141,34 @@ describe('DwsChannel', () => {
     expect(channel.notificationWatermark()).toBeGreaterThan(0);
   });
 
+  // R7-1: `(documentId, commentKey)` is reconstructed from rendered message
+  // text by a hand-rolled regex set, so a bare URL in an ordinary DM forges a
+  // card the channel cannot tell apart from a real platform notification. The
+  // forged document id then drove `readDocumentContext` BEFORE the sender gate
+  // resolved, so under the documented default `senderPolicy: 'pairing'` an
+  // unpaired stranger could force this profile to read any document it can
+  // reach — a turn it would never be served. The read now waits for the gate.
+  it('does not read a forged document mention before the sender gate resolves', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    const forged =
+      'https://alidocs.dingtalk.com/i/nodes/secretDoc123?iframeQuery=comment_key%3DvictimCommentKey%26mention_source%3D2';
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'forged-mention', forged, {
+        senderId: 'open-stranger',
+        senderName: 'Stranger',
+      }),
+    ];
+
+    await expect(channel.poll()).resolves.toBeUndefined();
+
+    expect(client.readDocument).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
   it('replays a pairing-pending document mention after approval', async () => {
     const client = new FakeDwsClient();
     const config = makeConfig({ senderPolicy: 'pairing' });
@@ -2159,17 +2187,23 @@ describe('DwsChannel', () => {
     const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
     expect(code).toBeDefined();
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.readDocument).toHaveBeenCalledTimes(1);
+    // R7-1: this used to be 1. The parked sender is one the channel refuses to
+    // serve, so reading the document for them was an authenticated read driven
+    // by an unapproved stranger — the read now waits for approval like the turn
+    // already did.
+    expect(client.readDocument).not.toHaveBeenCalled();
 
     client.directMessages = [];
     await channel.poll();
     await channel.poll();
-    expect(client.readDocument).toHaveBeenCalledTimes(1);
+    expect(client.readDocument).not.toHaveBeenCalled();
 
     expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
     await channel.poll();
 
-    expect(client.readDocument).toHaveBeenCalledTimes(2);
+    // The deferred read happens on replay, so the approved turn still gets its
+    // document context.
+    expect(client.readDocument).toHaveBeenCalledTimes(1);
     expect(bridge.prompt).toHaveBeenCalledOnce();
     expect(bridge.prompt).toHaveBeenCalledWith(
       'session-1',
@@ -2178,7 +2212,7 @@ describe('DwsChannel', () => {
     );
 
     await channel.poll();
-    expect(client.readDocument).toHaveBeenCalledTimes(2);
+    expect(client.readDocument).toHaveBeenCalledTimes(1);
   });
 
   it('drops profile-scoped document work and IM targets on profile switch', async () => {

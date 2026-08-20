@@ -1551,10 +1551,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         message.messageId,
         message.conversationId,
       );
-      const context = await this.readDocumentContext(
-        notification.documentId,
-        this.pollAbortController.signal,
-      );
+      // R7-1: `(documentId, commentKey)` is reconstructed from rendered
+      // message text, so a plain DM forges a mention card that is
+      // indistinguishable from a platform notification. Reading the document
+      // here — before `handleInbound` resolves the sender gate — let any DM
+      // stranger force an authenticated read of any document this profile can
+      // reach, under the documented default `senderPolicy: 'pairing'` where
+      // the sender is never served at all. Resolve the gate first and read
+      // only for a sender this channel will actually answer; the envelope
+      // already carries a "Markdown unavailable" fallback, and the gate branch
+      // in `preflightInbound` still parks the mention exactly as before.
+      const context = this.gate.isAllowed(message.senderId)
+        ? await this.readDocumentContext(
+            notification.documentId,
+            this.pollAbortController.signal,
+          )
+        : '';
       const envelope: Envelope = {
         channelName: this.name,
         senderId: message.senderId,
