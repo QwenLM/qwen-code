@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +22,10 @@ import { describe, expect, it } from 'vitest';
 import { getWorkflowJob } from './workflow-helpers.js';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// Long-form rationale moved out of the YAML when the file approached
+// GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
+// than a code line) read it here.
+const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
@@ -3049,7 +3054,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(10) green.
-    expect(workflow.split('--paginate').length - 1).toBe(18);
+    expect(workflow.split('--paginate').length - 1).toBe(19);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) = ten normalized fetch sites. The
@@ -3063,7 +3068,11 @@ describe('qwen-autofix workflow', () => {
     // The R11-2 engaged-stale guard's comments/events reads in
     // takeover-ack are the same class too: captured into shell variables
     // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
-    // over a single flat array), never a WORKDIR file.
+    // over a single flat array), never a WORKDIR file. The review-thread
+    // fetch in resolve_and_reply_threads is the same class again — a GraphQL
+    // paginate whose `--jq '…nodes[]'` stream is slurped straight into
+    // THREADS_JSON — so it bumps the total pin above without joining the
+    // normalizer count below.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -3859,13 +3868,11 @@ describe('qwen-autofix workflow', () => {
     // idle candidates hit `continue` before the TARGETS append, so they
     // never contend for it; the real win is inspection budget + walk
     // latency, and the comment says so.
-    expect(reviewScanJob).toContain(
-      'Idle PRs never reach the\n          # 10-target budget',
-    );
+    expect(designDoc).toContain('Idle PRs never reach the\n10-target budget');
     // The two scan-only signals updatedAt cannot see are named, not
     // papered over by an absolute invariant.
-    expect(reviewScanJob).toContain('base conflict');
-    expect(reviewScanJob).toContain('still-red checks');
+    expect(designDoc).toContain('base conflict');
+    expect(designDoc).toContain('still-red checks');
   });
 
   it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {
@@ -13280,7 +13287,7 @@ exit 1
       // cases; a runnerScript drives the tree-state-proving cases.
       writeFileSync(
         join(tools, 'resolve-owning-packages.sh'),
-        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+        `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
       );
       writeFileSync(
         join(tools, 'bite-runner'),
@@ -15974,9 +15981,18 @@ exit 1
         '  [[ "$a" == query=* ]] && query="${a#query=}"',
         '  [[ "$a" == threadId=* ]] && thread_id="${a#threadId=}"',
         'done',
-        'if [[ "$query" == *"reviewThreads(first:100)"* ]]; then',
+        'if [[ "$query" == *"reviewThreads(first:100, after:\\$endCursor)"* ]]; then',
+        '  [[ " $* " == *" --paginate "* ]] || exit 3',
         '  printf \'%s\' "$THREADS_RAW_STUB"',
-        '  exit 0',
+        '  if [[ "${THREADS_FETCH_EXIT:-0}" != 0 ]]; then',
+        "    # On a failing page real gh skips --jq and appends that page's raw",
+        '    # response body to stdout, after the good nodes.',
+        '    [[ -z "${THREADS_ERROR_BODY_STUB:-}" ]] || printf \'\\n%s\' "$THREADS_ERROR_BODY_STUB"',
+        '    # Real gh writes the reason to stderr; the workflow folds its tail',
+        '    # into the warning, so the stub must produce one to assert on.',
+        '    printf \'%s\\n\' "${THREADS_STDERR_STUB:-threads-fetch stub failure}" >&2',
+        '  fi',
+        '  exit "${THREADS_FETCH_EXIT:-0}"',
         'fi',
         'if [[ "$query" == *PullRequestReviewThread* ]]; then',
         '  saw_jq=false; saw_guard_filter=false',
@@ -16013,31 +16029,45 @@ exit 1
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
     }).trim();
-    const threadsRaw = JSON.stringify({
-      nodes: [
-        {
-          id: 'T_open_1',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 111 }] },
+    // The real `gh --paginate --jq '...nodes[]'` emits ONE node per line,
+    // concatenated across every page — so the stub stands in for gh's output
+    // after its own jq, not for the raw GraphQL envelope. Two "pages" worth
+    // are interleaved deliberately: the block must treat them as one stream.
+    const threadNodes = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_2',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 222 }] },
+      },
+      {
+        id: 'T_open_2',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 222 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_3',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 444 }] },
+      },
+      {
+        id: 'T_open_3',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 444 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_done',
-          isResolved: true,
-          comments: { nodes: [{ databaseId: 333 }] },
+      },
+      {
+        id: 'T_done',
+        isResolved: true,
+        comments: {
+          nodes: [{ databaseId: 333 }],
+          pageInfo: { hasNextPage: false },
         },
-      ],
-      pageInfo: { hasNextPage: false },
-    });
+      },
+    ];
+    const threadsRaw = threadNodes.map((n) => JSON.stringify(n)).join('\n');
     const headReadCount = join(dir, 'head-read-count');
     const threadStateFile = join(dir, 'thread-state');
     const runResolve = (env = {}) => {
@@ -16079,6 +16109,23 @@ exit 1
     expect(block).toContain(
       'node(id:$threadId){... on PullRequestReviewThread{isResolved}}',
     );
+
+    // The fix this block exists for: GitHub returns reviewThreads in
+    // ASCENDING creation order, so an unpaginated first-100 page is the
+    // OLDEST hundred — precisely not the threads the current round answers.
+    // Ask for pagination, and ask for it in the shape gh's --paginate needs
+    // (an $endCursor variable plus pageInfo), or the stub gh exits 3.
+    expect(block).toContain('--paginate');
+    expect(block).toContain('reviewThreads(first:100, after:$endCursor)');
+    // Field order, not just presence: gh's cursor scanner carries its flags
+    // across pageInfo objects and breaks at the first one yielding both
+    // fields, so pageInfo{endCursor hasNextPage} would break on the outer
+    // endCursor while hasNextPage still carries the last INNER page's value —
+    // almost always false, and the outer page's own hasNextPage is read only
+    // after the break. gh then returns no cursor and stops after page one with
+    // exit 0 and no warning, restoring the oldest-hundred bug silently. Do not
+    // "fix" this pin by reordering it.
+    expect(block).toContain('pageInfo{hasNextPage endCursor}');
 
     const matching = runResolve();
     expect(matching.status).toBe(0);
@@ -16211,6 +16258,166 @@ exit 1
     );
     expect(movedBeforeSecondMutation.out).toContain(
       'confirmed 1 selected review thread(s) resolved',
+    );
+
+    // A thread far past the old first-100 cap must resolve like any other:
+    // #8403 carries 1256 threads, and one page reached 8% of them. The target
+    // sits at index 400 of the stream, so any surviving hundred-item ceiling
+    // in the slurp would drop it.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:900001\n');
+    const deepStream = [
+      ...Array.from({ length: 400 }, (_, i) => ({
+        id: `T_filler_${i}`,
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 800000 + i }],
+          pageInfo: { hasNextPage: false },
+        },
+      })),
+      {
+        id: 'T_page_five',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 900001 }],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const pastFirstPage = runResolve({ THREADS_RAW_STUB: deepStream });
+    expect(pastFirstPage.status).toBe(0);
+    expect(pastFirstPage.resolved).toEqual(['resolve:T_page_five']);
+
+    // A pagination that dies partway (rate limit on a later page) USES what it
+    // got rather than discarding it — throwing away twelve good pages to fail
+    // on the thirteenth would resolve nothing at all — and says so.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const partialFetch = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(partialFetch.status).toBe(0);
+    expect(partialFetch.resolved).toEqual(['resolve:T_open_1']);
+    expect(partialFetch.out).toContain(
+      'review-thread pagination did not complete',
+    );
+    // …and carries gh's own stderr, the only text that separates a transient
+    // rate limit (back off) from an expired PAT (rotate credentials).
+    expect(partialFetch.out).toContain('threads-fetch stub failure');
+
+    // …and the failing page's own response body, which gh appends to stdout
+    // after the good nodes (it skips --jq on an error response), must not
+    // survive the slurp as a stray thread: both consumers below iterate
+    // .comments.nodes[], so a stray element exits 5 and — under errexit —
+    // aborts this step AFTER a good push, dropping the report and markers.
+    for (const errorBody of [
+      '{"message": "API rate limit exceeded for user \'x\'."}',
+      '{"data": null, "errors": [{"message": "Something went wrong while executing your query."}]}',
+    ]) {
+      const poisoned = runResolve({
+        THREADS_FETCH_EXIT: '1',
+        THREADS_ERROR_BODY_STUB: errorBody,
+      });
+      expect(poisoned.status).toBe(0);
+      expect(poisoned.resolved).toEqual(['resolve:T_open_1']);
+      // 4 stub threads, not 5: the error body was dropped, not counted.
+      expect(poisoned.out).toContain(
+        'review-thread pagination did not complete; 4 thread(s) fetched',
+      );
+    }
+
+    // The folded reason must land ON the annotation. Actions parses workflow
+    // commands line by line, and gh's stderr for a secondary rate limit spans
+    // two lines, so an unflattened fold keeps only the first — cutting off
+    // the very words that separate a back-off from a credential rotation.
+    const multiLineReason = runResolve({
+      THREADS_FETCH_EXIT: '1',
+      THREADS_STDERR_STUB:
+        "gh: API rate limit exceeded for user 'x'.\nYou have exceeded a secondary rate limit. Please wait a few minutes.",
+    });
+    expect(multiLineReason.status).toBe(0);
+    const paginationWarning = multiLineReason.out
+      .split('\n')
+      .find((line) =>
+        line.includes('review-thread pagination did not complete'),
+      );
+    expect(paginationWarning).toContain(
+      "gh: API rate limit exceeded for user 'x'.",
+    );
+    expect(paginationWarning).toContain(
+      'You have exceeded a secondary rate limit.',
+    );
+
+    // R4-1: gh's stderr must not go to a NAMED path under WORKDIR. WORKDIR is
+    // bind-mounted read-write into the agent sandbox, and the round that just
+    // ran executes branch code inside it, so anything at a predictable name
+    // here is attacker-chosen by the time this step runs. A planted FIFO makes
+    // bash block on the O_WRONLY open before gh execs — and the only reader is
+    // the tail AFTER gh returns — so the step hangs to the job timeout with
+    // the push already landed, losing the report and the round markers. A
+    // planted symlink instead truncates its target and folds 300 bytes of it
+    // into a public ::warning::. Probe both plants; the fix (a fresh mktemp
+    // regular file) makes the named path irrelevant, so neither can bite.
+    const canaryTarget = join(dir, 'canary-secret');
+    writeFileSync(canaryTarget, 'CANARY-MUST-SURVIVE\n');
+    const plantedPath = join(dir, 'threads-fetch.err');
+    rmSync(plantedPath, { force: true });
+    symlinkSync(canaryTarget, plantedPath);
+    const symlinkPlant = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(symlinkPlant.status).toBe(0);
+    // Still reports, and still carries gh's own reason — the plant changed
+    // nothing about the diagnostic.
+    expect(symlinkPlant.out).toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(symlinkPlant.out).toContain('threads-fetch stub failure');
+    // …and the symlink's target was never opened for write. Under the
+    // pre-fix `2> "${WORKDIR}/threads-fetch.err"` this file is truncated and
+    // overwritten with gh's stderr.
+    expect(readFileSync(canaryTarget, 'utf8')).toBe('CANARY-MUST-SURVIVE\n');
+    // …and the canary's bytes were never read back out into the annotation.
+    expect(symlinkPlant.out).not.toContain('CANARY-MUST-SURVIVE');
+    rmSync(plantedPath, { force: true });
+
+    // The named path is not written at all — the assertion that kills the
+    // mutation directly, and the same property that defuses the FIFO plant
+    // (a FIFO test cannot be written as a plain assertion: under the pre-fix
+    // code it hangs rather than fails).
+    const noNamedFile = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(noNamedFile.status).toBe(0);
+    expect(noNamedFile.out).toContain('threads-fetch stub failure');
+    expect(existsSync(plantedPath)).toBe(false);
+
+    // The residual cap the fix does NOT close: a thread carrying more than
+    // 100 comments still truncates, so a comment past that page is unmapped.
+    // Unobserved in the live pool, and announced rather than hidden.
+    const innerTruncated = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: true },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const deepThread = runResolve({ THREADS_RAW_STUB: innerTruncated });
+    expect(deepThread.status).toBe(0);
+    expect(deepThread.out).toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
+    );
+
+    // Both warnings must be ABSENT on a clean run. Asserted only in the
+    // positive, either could be made unconditional and ship green — and a
+    // warning that always fires is a warning nobody reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const cleanRun = runResolve();
+    expect(cleanRun.status).toBe(0);
+    expect(cleanRun.out).not.toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(cleanRun.out).not.toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
     );
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 

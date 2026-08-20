@@ -40,6 +40,7 @@ import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 import { AGENT_PLUGIN_SCHEMA } from './agent-plugins-v1/index.js';
+import { prepareStoredGitCredential } from './extension-git-credentials.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -315,6 +316,79 @@ describe('git extension helpers', () => {
       expect(mockGit.fetch).toHaveBeenCalledWith(
         'https://github.com/owner/repo.git',
         'HEAD',
+      );
+    });
+
+    it('passes explicit credentials through scoped Git config without changing the URL', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://git.example.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+        undefined,
+        { username: 'user', password: 'fine-grained-token' },
+      );
+
+      expect(mockGit.clone).toHaveBeenCalledWith(source, './', [
+        '-c',
+        'core.symlinks=true',
+        '--depth',
+        '1',
+      ]);
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: `http.${source}.extraHeader`,
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+            'user:fine-grained-token',
+          ).toString('base64')}`,
+        }),
+      );
+      const gitEnvironment = mockGit.env.mock.calls.at(-1)?.[0];
+      expect(gitEnvironment).not.toHaveProperty('GIT_CONFIG_PARAMETERS');
+      expect(gitEnvironment).not.toHaveProperty('GIT_CONFIG_SYSTEM');
+      expect(gitEnvironment).not.toHaveProperty('HOME');
+      expect(gitEnvironment).not.toHaveProperty('HTTP_PROXY');
+      expect(JSON.stringify(mockGit.clone.mock.calls)).not.toContain(
+        'fine-grained-token',
+      );
+    });
+
+    it('injects GITHUB_TOKEN without adding it to the clone URL', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'ambient-token');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://github.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+      );
+
+      expect(mockGit.clone).toHaveBeenCalledWith(
+        source,
+        './',
+        expect.any(Array),
+      );
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+            'ambient-token:',
+          ).toString('base64')}`,
+        }),
+      );
+      expect(JSON.stringify(mockGit.clone.mock.calls)).not.toContain(
+        'ambient-token',
       );
     });
 
@@ -614,6 +688,85 @@ describe('git extension helpers', () => {
         mockExtensionManager,
       );
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
+
+    it('uses stored credentials for a clean exact-scope remote check', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'stored-git-update-test-'),
+      );
+      vi.stubEnv('QWEN_HOME', path.join(tempDir, 'qwen-home'));
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://git.example.com/owner/repo.git';
+      const extensionPath = path.join(tempDir, 'extension');
+      await fs.mkdir(extensionPath);
+      const stored = await prepareStoredGitCredential(extensionPath, {
+        username: 'user',
+        password: 'fine-grained-token',
+      });
+      stored.commit();
+      mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
+      try {
+        const result = await checkForExtensionUpdate(
+          createExtension({
+            path: extensionPath,
+            installMetadata: {
+              type: 'git',
+              source,
+              gitCommit: 'local-hash',
+              credentialPersistence: 'stored',
+              networkPolicy: 'public',
+            },
+          }),
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(mockGit.listRemote).toHaveBeenCalledWith([source, 'HEAD']);
+        expect(mockGit.env).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            GIT_CONFIG_KEY_0: `http.${source}.extraHeader`,
+            GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+              'user:fine-grained-token',
+            ).toString('base64')}`,
+          }),
+        );
+        expect(JSON.stringify(mockGit.listRemote.mock.calls)).not.toContain(
+          'fine-grained-token',
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails a stored update check before Git when its selector is missing', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'missing-git-credential-test-'),
+      );
+      try {
+        await expect(
+          checkForExtensionUpdate(
+            createExtension({
+              path: tempDir,
+              installMetadata: {
+                type: 'git',
+                source: 'https://git.example.com/owner/repo.git',
+                gitCommit: 'local-hash',
+                credentialPersistence: 'stored',
+                networkPolicy: 'public',
+              },
+            }),
+            mockExtensionManager,
+          ),
+        ).rejects.toMatchObject({
+          code: 'extension_credential_unavailable',
+        });
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     it.each(['Qoder', 'Claude'] as const)(

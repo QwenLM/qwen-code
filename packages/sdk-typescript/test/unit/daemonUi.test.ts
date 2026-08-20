@@ -2698,12 +2698,14 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
-  it('carries debugReason through the reducer onto the transcript block', () => {
+  it('routes unrecognized diagnostics to the sidechannel with classification intact', () => {
     // The normalizer tests above inspect events directly and the Web Shell
     // adapter tests construct blocks by hand, so neither would notice if the
-    // reducer dropped the field on the way across. Production blocks would
-    // then lose their classification and Web Shell would render raw JSON
-    // again with both suites still green.
+    // reducer dropped the field on the way across. Unrecognized diagnostics
+    // are routed to `unrecognizedDiagnostics` instead of `blocks[]` (they
+    // must not finalize a streaming assistant block or consume the
+    // `maxBlocks` budget), so the classification must survive onto the
+    // sidechannel entry.
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       normalizeDaemonEvent(
@@ -2711,12 +2713,104 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       ),
     );
 
-    expect(state.blocks).toEqual([
+    expect(state.blocks).toEqual([]);
+    expect(state.unrecognizedDiagnostics).toEqual([
       expect.objectContaining({
-        kind: 'debug',
         debugReason: 'unrecognized_event',
       }),
     ]);
+  });
+
+  it('carries the envelope coordinates and correlation fields onto sidechannel entries (#8823)', () => {
+    // Every field the type promises must actually land: a mutation deleting
+    // any one spread (or swapping `clientReceivedAt` for a constant) used to
+    // leave the whole suite green because only `debugReason` was asserted.
+    // `now` is distinct from `serverTimestamp` and `eventId` so
+    // `clientReceivedAt` discriminates.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        id: 42,
+        v: 1,
+        type: 'some_future_event',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-9',
+        serverTimestamp: 1234,
+        data: {
+          update: {
+            sessionUpdate: 'mystery_kind',
+            _meta: {
+              qwenTranscript: {
+                sourceRecordIds: ['rec-1', 'rec-2'],
+                branchRecordId: 'branch-1',
+              },
+            },
+          },
+        },
+      } as never),
+      { now: 5 },
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([
+      {
+        debugReason: 'unrecognized_event',
+        text: expect.any(String),
+        promptId: 'prompt-1',
+        sourceRecordIds: ['rec-1', 'rec-2'],
+        branchRecordId: 'branch-1',
+        originatorClientId: 'client-9',
+        eventId: 42,
+        serverTimestamp: 1234,
+        clientReceivedAt: 5,
+      },
+    ]);
+  });
+
+  it('caps sidechannel text at the block-length limit (#8823)', () => {
+    // The replaced `appendStatusBlock` path truncated exactly these
+    // diagnostics; the sidechannel must not admit unbounded strings.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'unrecognized_event',
+          text: 'x'.repeat(110_000),
+        },
+      ],
+    );
+
+    const entry = state.unrecognizedDiagnostics[0];
+    expect(entry).toBeDefined();
+    expect(entry?.text.endsWith('\n[truncated]\n')).toBe(true);
+    // Same total bound as the block path's `truncateText`: the suffix fits
+    // within the cap, not on top of it.
+    expect(entry?.text.length).toBeLessThanOrEqual(100_000);
+  });
+
+  it('still stamps debugReason on the block path for malformed payloads (#8823)', () => {
+    // Block-level `debugReason` stays load-bearing for the events that still
+    // take the block path (and for legacy persisted blocks): dropping the
+    // stamp in `appendStatusBlock` must not ship green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'malformed_payload',
+          text: 'broken frame payload',
+        },
+      ],
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([]);
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    );
   });
 
   it('leaves client-dispatched debug blocks without a debugReason', () => {
@@ -5808,6 +5902,43 @@ describe('transcriptBlockToTerminalText (wenshao review — coverage)', () => {
 });
 
 describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
+  it('shares the block index for text updates and copies it for appends', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'first' } as never],
+      { now: 2 },
+    );
+    const firstState = state;
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: ' second' } as never],
+      { now: 3 },
+    );
+
+    expect(state.blocks).not.toBe(firstState.blocks);
+    expect(state.blockIndexById).toBe(firstState.blockIndexById);
+    expect(Object.isFrozen(state.blockIndexById)).toBe(true);
+    expect(
+      () =>
+        ((state.blockIndexById as Record<string, number>)['assistant-1'] = 99),
+    ).toThrow(TypeError);
+    expect(state.blocks[0]).toMatchObject({ text: 'first second' });
+    expect(firstState.blocks[0]).toMatchObject({ text: 'first' });
+
+    const updatedState = state;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'done' } as never],
+      { now: 4 },
+    );
+
+    expect(state.blockIndexById).not.toBe(updatedState.blockIndexById);
+    expect(updatedState.blockIndexById).not.toHaveProperty('status-2');
+    expect(state.blockIndexById).toHaveProperty('status-2', 1);
+  });
+
   // wenshao 5-23 13:03: lazy COW means non-block-mutating dispatches
   // preserve `state.blocks` reference, so the WeakMap caches actually hit
   // across renders. Verify by checking reference identity.
@@ -6572,7 +6703,7 @@ describe('R5 review batch — coverage additions', () => {
 
   it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
     // Replay producers persist uploaded attachments as media references
-    // (`mediaId`, no inline bytes). Paths that normalize without hydrating
+    // (`attachmentId`, no inline bytes). Paths that normalize without hydrating
     // (offline record projections) must degrade to a visible placeholder
     // instead of silently dropping the user's message.
     expect(
@@ -6585,7 +6716,7 @@ describe('R5 review batch — coverage additions', () => {
             sessionUpdate: 'user_message_chunk',
             content: {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -6600,13 +6731,66 @@ describe('R5 review batch — coverage additions', () => {
     ).toEqual([
       expect.objectContaining({
         type: 'user.text.delta',
-        text: '[Attached media is no longer available]',
+        text: '[Attachment is no longer available]',
         sourceRecordIds: ['record-1'],
         meta: {
           source: 'mid_turn_message_injected',
           qwenDiscreteMessage: true,
         },
       }),
+    ]);
+  });
+
+  it('leaves file attachment references for lazy preview consumers', () => {
+    const textEvents = normalizeDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'check this' },
+      },
+    });
+    const events = normalizeDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'user.file.delta',
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        attachmentId: 'notes.txt',
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...textEvents, ...events],
+    );
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        text: 'check this',
+        files: [
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ],
+      },
     ]);
   });
 
@@ -6637,6 +6821,40 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('normalizes a resource-only mid-turn message without dropping its slot', () => {
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      items: [
+        {
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
+            },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
   it('normalizes a degraded-media mid-turn echo instead of dropping it', () => {
     // The drain's media-failure path publishes `messages: ['']` whose item
     // content is the media-unavailable text block (no image blocks); the
@@ -6648,7 +6866,7 @@ describe('R5 review batch — coverage additions', () => {
       items: [
         {
           content: [
-            { type: 'text', text: '[Attached media is no longer available]' },
+            { type: 'text', text: '[Attachment is no longer available]' },
           ],
         },
       ],

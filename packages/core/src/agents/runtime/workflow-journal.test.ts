@@ -154,6 +154,23 @@ describe('WorkflowJournal', () => {
     expect(replay.started.get('k1')).toHaveLength(1);
   });
 
+  it('drain waits for fire-and-forget appends', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    void j.append({ type: 'started', key: 'k1', agentId: '1' });
+    void j.append({
+      type: 'result',
+      key: 'k1',
+      agentId: '1',
+      result: 'done',
+    });
+
+    await j.drain();
+
+    const replay = await j.load();
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.results.get('k1')?.result).toBe('done');
+  });
+
   it('load on a missing file returns empty maps', async () => {
     const j = new WorkflowJournal(path.join(dir, 'nope.jsonl'));
     const replay = await j.load();

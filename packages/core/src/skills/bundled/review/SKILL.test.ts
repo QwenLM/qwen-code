@@ -488,6 +488,44 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the resume branch on Step 1', () => {
+    // The resume flow is prose over three subcommands (`fetch-pr --resume`,
+    // `recover-findings`, the round re-entry); a later edit dropping any leg
+    // leaves `--resume` silently starting fresh runs. Pin the load-bearing
+    // sentences.
+    const body = skillBody();
+    expect(body).toContain('Resuming an interrupted run (`--resume`)');
+    expect(body).toContain('review recover-findings');
+    expect(body).toContain('`{"resumed": true, ...}`');
+    expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
+    expect(body).toContain('resumes at round `k+1`');
+    expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+    // The restart bound survives a resume only through this reader; the
+    // effort pin and the lightweight inertness disclosure are the two
+    // silent-surprise fixes.
+    expect(body).toContain('`restartsSpent`');
+    expect(body).toContain('`effort-mismatch`');
+    expect(body).toContain('no effect in lightweight mode');
+    // R13-2: the effort rule must key on `effortSource`, so a `--comment`
+    // forced-high is passed through on a resume (a recorded lower level then
+    // refuses and runs fresh at high) rather than silently pinned — dropping
+    // the `forced-by-comment` arm re-creates the "comment at medium" state.
+    expect(body).toContain('`forced-by-comment`');
+    // R15-11: a resumed run must NOT re-take the incremental decision — the
+    // previous attempt's `incremental` field is history, so the continuation
+    // never enters the `upToDate` stop/cleanup branch that would destroy the
+    // reused worktree/lease.
+    expect(body).toContain('is now HISTORY, not a decision to re-take');
+    expect(body).toContain('This branch does not apply on a resumed run');
+    // The Step 7 half specifically: `restartsSpent` also appears in Step 1,
+    // so these anchor the restart-bound blockquote's own survival sentences —
+    // deleting or inverting them must fail here, not ship silently.
+    expect(body).toContain('One slice of this fact survives a resume');
+    expect(body).toContain(
+      "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either
