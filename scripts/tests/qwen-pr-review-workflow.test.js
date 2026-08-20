@@ -3540,14 +3540,32 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     ]);
 
   // The bot account posts more than this pipeline's reviews:
-  // finalize-release.yml approves release PRs under the same CI_BOT_PAT, and
+  // finalize-release.yml approves release PRs under the same CI_BOT_PAT,
   // qwen-triage-finalize.yml posts a deferred APPROVE under
-  // QWEN_CODE_BOT_TOKEN || CI_BOT_PAT — the same account whenever that secret
-  // is unset. In-window approvals like these must not buy the silence that
-  // only THIS pipeline's own review earns.
+  // QWEN_CODE_BOT_TOKEN || CI_BOT_PAT, and the triage skill posts its own
+  // commit-pinned APPROVE through the reviews API. In-window approvals like
+  // these must not buy the silence that only THIS pipeline's own review
+  // earns.
   const FOREIGN_APPROVAL_BODIES = [
     'Automated second approval for the release version bump.',
     'LGTM, looks ready to ship — CI landed green after the review. ✅',
+    'LGTM, looks ready to ship. ✅',
+  ];
+
+  // What the guard recognizes a review THIS pipeline composed by: every
+  // composed body carries the "via Qwen Code /review" attribution footer or
+  // the invisible qwen-review-ledger marker — at least one, never neither —
+  // and no foreign approval carries either. Matching on that evidence is how
+  // the guard stays closed to a producer set no exclusion list can finish.
+  const REVIEW_FOOTER = '_— qwen3.8-max via Qwen Code /review (v0.21.14)_';
+  const REVIEW_LEDGER = '<!-- qwen-review-ledger {"v":1,"round":2} -->';
+  const COMPOSED_REVIEW_BODIES = [
+    // Attribution on: the footer and the ledger marker both ride the body.
+    `No issues found. LGTM! ✅\n\n${REVIEW_FOOTER}\n\n${REVIEW_LEDGER}`,
+    // Attribution off: no footer, but the ledger marker still rides.
+    `No issues found. LGTM! ✅\n\n${REVIEW_LEDGER}`,
+    // Pre-ledger bundles posted the footer alone.
+    `No issues found. LGTM! ✅\n\n${REVIEW_FOOTER}`,
   ];
 
   for (const useInJobStep of [false, true]) {
@@ -3556,23 +3574,23 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     it.skipIf(!hasJq)(
       `${site} stays silent when THIS run already posted its review`,
       () => {
-        const r = runFallbackStep('default', {
-          useInJobStep,
-          prHead: 'HEADSHA1',
-          runCreated: RUN_CREATED,
-          runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture(
-            'qwen-code-ci-bot',
-            'HEADSHA1',
-            AFTER,
-            // A posted review carries its report body, not null; the
-            // foreign-approval exclusions must not swallow it.
-            '**Qwen Code review report** — no blocking findings this round.',
-          ),
-        });
-        expect(r.status).toBe(0);
-        expect(r.posted).toBe('');
-        expect(r.summary).toContain('a bot review of this PR was submitted');
+        // Every shape compose-review can post must buy the silence: the
+        // guard attributes by the markers a composed body carries, so each
+        // marker alone — and both together — has to match.
+        for (const body of COMPOSED_REVIEW_BODIES) {
+          const r = runFallbackStep('default', {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+          });
+          expect(r.status, body).toBe(0);
+          expect(r.posted, body).toBe('');
+          expect(r.summary, body).toContain(
+            'a bot review of this PR was submitted',
+          );
+        }
       },
     );
 
@@ -3585,9 +3603,24 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         // (PENDING) one, and none at all. The head is deliberately not a clause
         // — see the attribute-by-TIME test below.
         const cases = {
-          stale: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', BEFORE),
-          foreign: reviewFixture('someone-else', 'HEADSHA1', AFTER),
-          pending: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', null),
+          stale: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            BEFORE,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+          foreign: reviewFixture(
+            'someone-else',
+            'HEADSHA1',
+            AFTER,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+          pending: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            null,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
           none: '[]',
         };
         for (const [name, reviews] of Object.entries(cases)) {
@@ -3608,10 +3641,11 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       () => {
         // The guard's author + window clauses match ANY review the account
         // posts, and the account also approves release PRs (finalize-release
-        // .yml, same CI_BOT_PAT) and posts deferred triage approvals
-        // (qwen-triage-finalize.yml, QWEN_CODE_BOT_TOKEN || CI_BOT_PAT).
-        // Either landing in-window while THIS pipeline's review is absent
-        // must not silence the fallback — the LGTM would mask a dead run.
+        // .yml), posts deferred triage approvals (qwen-triage-finalize.yml),
+        // and approves through the triage skill's reviews-API call. None of
+        // these bodies carries a composed-review marker, so none may silence
+        // the fallback while THIS pipeline's review is absent — the LGTM
+        // would mask a dead run.
         for (const body of FOREIGN_APPROVAL_BODIES) {
           const r = runFallbackStep('default', {
             useInJobStep,
@@ -3641,7 +3675,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', MID_RERUN),
+          reviews: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            MID_RERUN,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
         });
         expect(r.status).toBe(0);
         expect(r.posted).toBe('');
@@ -3724,7 +3763,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'NEWSHA',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'OLDSHA', AFTER),
+          reviews: reviewFixture(
+            'qwen-code-ci-bot',
+            'OLDSHA',
+            AFTER,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
         });
         expect(r.status, String(useInJobStep)).toBe(0);
         expect(r.posted, String(useInJobStep)).toBe('');
