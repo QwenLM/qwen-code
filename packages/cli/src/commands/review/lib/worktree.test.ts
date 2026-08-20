@@ -185,6 +185,56 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(tree).unmeasured).toBeUndefined();
   });
 
+  it('says UNMEASURED for a gitfile swapped at a repo that answers for this path', () => {
+    // The identity gate reads `--show-toplevel`, which prints the directory the
+    // `.git` FILE sits in — whatever that file points at. A repository whose
+    // `core.worktree` names this tree answers with this path, so the gate saw
+    // itself while every command after it measured the plant's index, which
+    // already holds the contamination as committed content. Measured: through
+    // discovery the swap reports a clean tree with the mutant on disk.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    // Genuine first, so the fixture is known to be measurable at all.
+    expect(worktreeResidue(tree).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const forge = join(repo, 'forge');
+    mkdirSync(forge);
+    const fgit = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: forge, encoding: 'utf8' },
+      );
+    fgit('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+    fgit('add', '-A');
+    fgit(
+      'commit',
+      '-qm',
+      'the mutant, as if it were the commit',
+      '--no-verify',
+    );
+    fgit('config', 'core.worktree', tree);
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('does not point back');
+  });
+
   it('says UNMEASURED, not clean, when a repository is planted at the path', () => {
     // The concealment: `rm .git && git init && git add -A && git commit` over
     // the contamination answers a clean `git status` for a dirty tree, and no
