@@ -751,7 +751,8 @@ jobs:
           # — a deliberate omission, not a capability gap: the ECS pool does run
           # containers (this workflow's own container jobs, and autofix's
           # `sandbox: "docker"` agent, both land on those labels). Adding one
-          # here is tracked in #9556.
+          # here is an open decision, NOT tracked in #9556 — that issue is
+          # scoped to the /review pipeline's execution steps.
           #
           # ⚠️ A command denylist is NOT a security boundary under --yolo, and
           # is not treated as one here. It is defense-in-depth against the

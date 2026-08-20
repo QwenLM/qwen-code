@@ -1978,11 +1978,15 @@ jobs:
     # `sandbox: "docker"` on the `ecs-qwen` labels, gated on a `docker info`
     # preflight that fails the job outright, and it passes there (measured on
     # `ecs-qwen-runner-hk-*` and `ecs-qwen-runner-sg-*`; qwen-triage's container
-    # jobs prove the same pool independently). What DOES differ is the spelling:
-    # `sandbox: true` makes the CLI probe for a runtime and exit 44 ("failed to
-    # determine command for sandbox") when none answers, while `sandbox:
-    # "docker"` names one. Anything moving a sandboxed job onto the pool should
-    # name the runtime and copy autofix's preflight — see #9556.
+    # jobs prove the same pool independently). The runtime spelling is not what
+    # decides it either: `sandbox: true` probes docker first (then podman) with
+    # the same probe as `sandbox: "docker"`, so on the pool's docker-only
+    # runners both spellings resolve when the daemon answers and both exit 44
+    # when it does not — the only divergence (docker down, podman up) favours
+    # `true`. The variable is daemon state, and autofix's preflight is what
+    # checks it up front, failing the job in seconds instead of at agent
+    # startup. Anything moving a sandboxed job onto the pool should copy that
+    # preflight — see #9556.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
