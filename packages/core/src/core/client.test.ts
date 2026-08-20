@@ -9178,6 +9178,7 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(9999),
       };
       client['chat'] = mockChat as GeminiChat;
 

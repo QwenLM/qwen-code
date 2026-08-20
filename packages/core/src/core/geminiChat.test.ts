@@ -15574,6 +15574,102 @@ describe('GeminiChat', async () => {
         /* consume */
       }
     });
+
+    it('invalidates a stale route count before manual compression sizing', async () => {
+      // Authoritative count recorded by the pre-switch route. Manual
+      // /compress reaches tryCompress without sendMessageStream's entry
+      // invalidation, and tryCompress reads the count field directly, so it
+      // must drop the foreign count itself before admission/sizing.
+      chat.setLastPromptTokenCount(691_000, false);
+      switchRoute('anthropic-model@beef1234');
+
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+
+      await chat.tryCompress('prompt-manual-compress', true);
+
+      // History is empty, so the estimate path sizes the attempt at 0 — the
+      // stale 691_000 must not have anchored the compression decision.
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0]?.[1].originalTokenCount).toBe(0);
+    });
+
+    it('does not anchor an exact route output clamp on the active route count', async () => {
+      // Authoritative count recorded by the ACTIVE route. An exact `\0`
+      // route send targets a different serialization, so its output clamp
+      // must not read this count — the entry invalidation has to compare
+      // against the request's route, not the active one.
+      chat.setLastPromptTokenCount(691_000, false);
+
+      const routeGenerateContentStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: routeGenerateContentStream,
+      } as ContentGenerator;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+          // Large enough that the zeroed-count estimate path (history walk
+          // + ESTIMATE_CLAMP_OVERHEAD_PAD + clamp margin) still leaves room
+          // for the full explicit ceiling below.
+          contextWindowSize: 64_000,
+          modalities: {},
+        },
+        retryAuthType: AuthType.USE_OPENAI,
+        model: 'vision-agent',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model) => (model ? `${model}@route` : 'gemini-pro@test0001'),
+      );
+
+      const selector = 'openai:vision-agent\0https://vision.example.com/v1\0';
+      const stream = await chat.sendMessageStream(
+        selector,
+        {
+          message: 'clamp probe',
+          config: { maxOutputTokens: 8_000 },
+        },
+        'prompt-exact-route-clamp',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // With the foreign count zeroed the estimate leaves room for the full
+      // 8_000 ceiling. Had the active route's 691_000 anchored the clamp,
+      // the request would have been floored at MIN_CLAMPED_OUTPUT_TOKENS.
+      const routeRequest = routeGenerateContentStream.mock.calls[0]?.[0] as {
+        config?: { maxOutputTokens?: number };
+      };
+      expect(routeRequest.config?.maxOutputTokens).toBe(8_000);
+    });
   });
 
   // The circuit breaker is the three-strike replacement for the old

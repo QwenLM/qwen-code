@@ -1982,21 +1982,28 @@ export class GeminiChat {
    * compression decisions for a different serialization (#9454). After
    * invalidation those decisions fall back to the history-walk estimate,
    * with reactive overflow recovery as the safety net.
+   *
+   * Defaults to comparing against the ACTIVE route (lazy reads on the
+   * getters). Send paths pass the route the upcoming request actually
+   * targets so a foreign count cannot anchor that request's decisions even
+   * when the active route owns it — e.g. an exact `\0` route selector, or
+   * a non-exact send whose `model` param overrides the active model.
    */
-  private invalidateTokenCountsIfRouteChanged(): void {
+  private invalidateTokenCountsIfRouteChanged(
+    targetRouteKey: string = this.currentRouteKey(),
+  ): void {
     if (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0) {
       return;
     }
-    const currentRoute = this.currentRouteKey();
-    if (this.tokenCountsRouteKey === currentRoute) {
+    if (this.tokenCountsRouteKey === targetRouteKey) {
       return;
     }
     debugLogger.debug(
       `[token-counts] route changed; invalidating counts recorded for ` +
-        `${this.tokenCountsRouteKey ?? 'unknown'} (now ${currentRoute})`,
+        `${this.tokenCountsRouteKey ?? 'unknown'} (now ${targetRouteKey})`,
     );
     this.setLastPromptTokenCount(0);
-    // Keep the telemetry mirror in sync, or the session token-limit gate
+    // Keep the telemetry mirror in sync, or the UI context counters
     // and compression banners keep reading the foreign count.
     this.telemetryService?.setLastPromptTokenCount(0);
   }
@@ -2376,9 +2383,6 @@ export class GeminiChat {
     goalContext?: GoalTurnPermit,
     options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
-    // Counts recorded for a pre-switch route must not anchor this send's
-    // admission/clamp/compression decisions for the active route (#9454).
-    this.invalidateTokenCountsIfRouteChanged();
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -2394,7 +2398,17 @@ export class GeminiChat {
           model,
           exactRoute.contentGeneratorConfig,
         )
-      : this.currentRouteKey();
+      : this.config.getModelRouteIdentity(
+          model,
+          this.config.getContentGeneratorConfig(),
+        );
+    // Counts recorded for a route other than this request's target must not
+    // anchor its admission/clamp/compression decisions (#9454). Comparing
+    // against the REQUEST route — resolved above — keeps an exact `\0`
+    // route's decisions off the active route's counts, and a differing
+    // `model` param gets its own identity instead of borrowing the active
+    // route's.
+    this.invalidateTokenCountsIfRouteChanged(requestRouteKey);
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
