@@ -28,13 +28,33 @@ interface CommonArgs {
   json?: boolean;
 }
 
-function emit(argv: CommonArgs, value: unknown, human: string): void {
+async function emit(
+  argv: CommonArgs,
+  value: unknown,
+  human: string,
+): Promise<void> {
   // Sanitize without flattening: the `show` panel and `ask --wait` answers
   // are genuinely multi-line, and `sanitizeTerminalText` keeps LF/TAB while
   // neutralizing dangerous control sequences.
-  process.stdout.write(
-    `${argv.json ? JSON.stringify(value) : sanitizeTerminalText(human)}\n`,
-  );
+  const text = `${argv.json ? JSON.stringify(value) : sanitizeTerminalText(human)}\n`;
+  // `parseArguments` calls `process.exit` as soon as this handler resolves. A
+  // write to a pipe is asynchronous, so resolving before stdout has drained
+  // truncates output larger than the pipe buffer while still exiting 0.
+  //
+  // A reader that closes early (`... | head`) reports that twice: once to the
+  // write callback and once as a stream `error` event. The listener keeps the
+  // second one from surfacing as an uncaught exception, and the callback
+  // decides the outcome — a closed reader ends the pipeline normally, while
+  // any other write failure still has to reach the caller.
+  if (process.stdout.listenerCount('error') === 0) {
+    process.stdout.on('error', () => {});
+  }
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(text, (err) => {
+      if (err && (err as NodeJS.ErrnoException).code !== 'EPIPE') reject(err);
+      else resolve();
+    });
+  });
 }
 
 async function run(fn: () => Promise<void>): Promise<void> {
@@ -94,7 +114,7 @@ export const boardCommand: CommandModule = {
             const actor =
               a.as === undefined ? undefined : requireActorName(a.as);
             const state = await snapshot(board, actor);
-            emit(a, state, renderBoard(state));
+            await emit(a, state, renderBoard(state));
           }),
       })
 
@@ -114,7 +134,7 @@ export const boardCommand: CommandModule = {
               subject: a.subject,
               owner: a.owner,
             });
-            emit(a, task, `${task.id} ${task.subject}`);
+            await emit(a, task, `${task.id} ${task.subject}`);
           }),
       })
 
@@ -131,7 +151,7 @@ export const boardCommand: CommandModule = {
               a.id,
               requireActorName(a.as),
             );
-            emit(a, task, `${task.id} claimed by ${task.owner}`);
+            await emit(a, task, `${task.id} claimed by ${task.owner}`);
           }),
       })
 
@@ -151,7 +171,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.note,
             );
-            emit(a, task, `${task.id} completed`);
+            await emit(a, task, `${task.id} completed`);
           }),
       })
 
@@ -177,6 +197,11 @@ export const boardCommand: CommandModule = {
               ttl: number;
             };
             const board = requireBoardName(a.board);
+            // Validate the local wait before creating the ask: a rejected
+            // `--timeout` must not leave an orphaned open ask on the board.
+            const waitMs = a.wait
+              ? finiteNumber(a.timeout * 1000, '--timeout', 0)
+              : 0;
             const ask = await createAsk({
               board,
               from: requireActorName(a.as),
@@ -186,17 +211,16 @@ export const boardCommand: CommandModule = {
               ttlMs: finiteNumber(a.ttl, '--ttl', 0.001) * 1000,
             });
             if (!a.wait) {
-              emit(a, ask, `${ask.id} -> ${ask.to}`);
+              await emit(a, ask, `${ask.id} -> ${ask.to}`);
               return;
             }
 
-            const waitMs = finiteNumber(a.timeout * 1000, '--timeout', 0);
             const deadline = Date.now() + waitMs;
             for (;;) {
               const current = await getAsk(board, ask.id);
               if (!current) throw new Error(`Ask "${ask.id}" not found.`);
               if (current.state !== 'open') {
-                emit(
+                await emit(
                   a,
                   current,
                   current.state === 'answered'
@@ -233,7 +257,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.answer,
             );
-            emit(a, ask, `${ask.id} answered`);
+            await emit(a, ask, `${ask.id} answered`);
           }),
       })
 
@@ -253,7 +277,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.reason,
             );
-            emit(a, ask, `${ask.id} declined`);
+            await emit(a, ask, `${ask.id} declined`);
           }),
       })
 
@@ -275,7 +299,7 @@ export const boardCommand: CommandModule = {
             ]);
             const removed = { asks, tasks };
             const total = asks.length + tasks.length;
-            emit(a, removed, `Removed ${total} settled items.`);
+            await emit(a, removed, `Removed ${total} settled items.`);
           }),
       })
 
