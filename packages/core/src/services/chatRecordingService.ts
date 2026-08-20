@@ -423,7 +423,7 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell';
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
