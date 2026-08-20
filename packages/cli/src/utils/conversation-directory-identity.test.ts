@@ -69,6 +69,22 @@ describe('conversation directory identity', () => {
     );
   });
 
+  it('exposes an error cause only when one was provided', () => {
+    const bare = new ConversationDirectoryIdentityError('child', 'not_empty');
+    expect('cause' in bare).toBe(false);
+    expect(Object.keys(bare)).not.toContain('cause');
+
+    const cause = new Error('boom');
+    const wrapped = new ConversationDirectoryIdentityError(
+      'child',
+      'io_error',
+      cause,
+    );
+    expect(wrapped.cause).toBe(cause);
+    expect('cause' in wrapped).toBe(true);
+    expect(Object.keys(wrapped)).not.toContain('cause');
+  });
+
   it('pins root and direct-child device and inode identity', async () => {
     const { root } = await tempRoot();
     const result = await materializeConversationDirectoryIdentity(

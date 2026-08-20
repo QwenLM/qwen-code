@@ -159,7 +159,7 @@ interface ConversationDirectoryIdentity {
 `ConversationWorkspace` 新增窄方法：
 
 - `prepareStandaloneDirectory(sessionId)`：返回 `{ identity, created }`；valid existing empty child 可复用，existing non-empty 返回 conflict。
-- `ensureStandaloneDirectory(sessionId, expected?)`：load/repair 使用；与expected同identity的existing返回`ready`，missing创建后返回`recreated`，existing replacement返回compromised。
+- `ensureStandaloneDirectory(sessionId, expected?)`：load/repair 使用；与expected同identity的existing返回`ready`；missing后首次创建（无expected）返回`created`，已捕获identity后重建（有expected）返回`recreated`；existing replacement返回compromised。
 - `inspectStandaloneDirectory(sessionId, expected?)`：区分 `ready`、`missing`、`compromised`；给 prompt preflight 使用。
 - 现有`discardEmptyConversationDirectory(sessionId)`保持Live-only兼容实现；standalone路径不调用它。路径式删除无法原子绑定到前一次`lstat`得到的identity，PR2A不增加一个名为exact但仍有replacement race的overload。
 

@@ -89,6 +89,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeOptions.ts',
       ),
+      '@qwen-code/acp-bridge/promptLedger': path.resolve(
+        __dirname,
+        '../acp-bridge/src/prompt-ledger.ts',
+      ),
       '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeTypes.ts',
