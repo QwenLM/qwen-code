@@ -233,8 +233,11 @@ export class TeamManager {
    *  cannot clear another request's pending state. */
   private readonly shutdownRequestStates = new Map<
     string,
-    { inFlight: number; delivered: boolean; resolved: boolean }
+    { inFlight: number; delivered: boolean }
   >();
+
+  /** Test-only shutdown markers installed without requestShutdown(). */
+  private readonly markedShutdownRequests = new Set<string>();
 
   /** Per-agent last activity timestamp (updated on events). */
   private readonly lastActivityAt = new Map<string, number>();
@@ -698,11 +701,10 @@ export class TeamManager {
     }
 
     let requestState = this.shutdownRequestStates.get(member.name);
-    if (!requestState || requestState.resolved) {
+    if (!requestState) {
       requestState = {
         inFlight: 0,
-        delivered: this._shutdownPending.has(member.name),
-        resolved: false,
+        delivered: false,
       };
       this.shutdownRequestStates.set(member.name, requestState);
     }
@@ -724,11 +726,13 @@ export class TeamManager {
       requestState.inFlight -= 1;
       if (
         requestState.inFlight === 0 &&
-        (!requestState.delivered || requestState.resolved) &&
+        !requestState.delivered &&
         this.shutdownRequestStates.get(member.name) === requestState
       ) {
         this.shutdownRequestStates.delete(member.name);
-        this._shutdownPending.delete(member.name);
+        if (!this.markedShutdownRequests.has(member.name)) {
+          this._shutdownPending.delete(member.name);
+        }
       }
     }
 
@@ -1351,17 +1355,19 @@ export class TeamManager {
    *  that inject the structured shutdown message directly without
    *  going through `requestShutdown`. */
   markShutdownRequested(name: string): void {
+    this.markedShutdownRequests.add(name);
     this._shutdownPending.add(name);
   }
 
   private clearDeliveredShutdownRequest(name: string): void {
+    this.markedShutdownRequests.delete(name);
     const requestState = this.shutdownRequestStates.get(name);
     if (!requestState) {
       this._shutdownPending.delete(name);
       return;
     }
 
-    requestState.resolved = true;
+    requestState.delivered = false;
     if (requestState.inFlight === 0) {
       this.shutdownRequestStates.delete(name);
       this._shutdownPending.delete(name);
@@ -1573,6 +1579,7 @@ export class TeamManager {
         this.agentIdentities.delete(agentId);
         this._shutdownPending.delete(agentName);
         this.shutdownRequestStates.delete(agentName);
+        this.markedShutdownRequests.delete(agentName);
         this.rejectPendingPlanApprovalsForTeammate(
           agentName,
           new Error(
