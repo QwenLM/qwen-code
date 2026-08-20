@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   SESSION_PR_LIST_LIMIT,
+  mergeSessionPrLists,
   readSessionPrs,
   upsertSessionPr,
   writeSessionPrs,
@@ -136,5 +137,92 @@ describe('upsertSessionPr', () => {
     ]);
     const prs = await readSessionPrs(filePath);
     expect(prs?.map((p) => p.number)).toEqual([100, 101, 102]);
+  });
+});
+
+describe('upsertSessionPr failure handling', () => {
+  it('surfaces the failure to the caller without leaking an unhandled rejection', async () => {
+    // The queue cleanup chain derives from the upsert promise; a derived
+    // finally/catch would reject unhandled on every sidecar I/O failure even
+    // though callers await the returned promise.
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      // filePath does not exist and its would-be parent path component is a
+      // regular file once created below, so both the read (ENOTDIR) and any
+      // mkdir/write fail.
+      await fs.writeFile(filePath, 'blocker', 'utf-8');
+      const blockedPath = path.join(filePath, 'nested.pr.json');
+      await expect(
+        upsertSessionPr(blockedPath, { number: 1, url: entry(1).url }),
+      ).rejects.toThrow();
+      // Give the rejection a turn to be reported as unhandled if the
+      // cleanup chain does not absorb it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toHaveLength(0);
+      // A failed predecessor must not wedge the queue entry: the same path
+      // can be retried (still failing here — the path is still blocked —
+      // but with its own rejection, not hung behind the dead predecessor),
+      // and other paths keep working.
+      await expect(
+        upsertSessionPr(blockedPath, { number: 2, url: entry(2).url }),
+      ).rejects.toThrow();
+      const recovered = path.join(tmpDir, 'recovered.pr.json');
+      await expect(
+        upsertSessionPr(recovered, { number: 3, url: entry(3).url }),
+      ).resolves.toHaveLength(1);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+});
+
+describe('mergeSessionPrLists', () => {
+  const at = (number: number, createdAt: string, url?: string): SessionPr => ({
+    number,
+    url: url ?? `https://github.com/owner/repo/pull/${number}`,
+    createdAt,
+  });
+
+  it('unions disjoint lists in binding-time order', () => {
+    const merged = mergeSessionPrLists(
+      [at(100, '2026-08-20T00:00:00.000Z')],
+      [at(101, '2026-08-20T01:00:00.000Z')],
+    );
+    expect(merged.map((p) => p.number)).toEqual([100, 101]);
+  });
+
+  it('dedupes by number, keeping the freshest entry', () => {
+    const merged = mergeSessionPrLists(
+      [at(100, '2026-08-20T00:00:00.000Z', 'https://old.example/100')],
+      [at(100, '2026-08-20T01:00:00.000Z', 'https://new.example/100')],
+    );
+    expect(merged).toEqual([
+      at(100, '2026-08-20T01:00:00.000Z', 'https://new.example/100'),
+    ]);
+  });
+
+  it('orders by binding time regardless of which side an entry came from', () => {
+    const merged = mergeSessionPrLists(
+      [at(102, '2026-08-20T02:00:00.000Z')],
+      [at(101, '2026-08-20T01:00:00.000Z')],
+    );
+    expect(merged.map((p) => p.number)).toEqual([101, 102]);
+  });
+
+  it('caps the merged list, dropping the oldest', () => {
+    const base = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      at(i + 1, `2026-08-20T00:00:${String(i).padStart(2, '0')}.000Z`),
+    );
+    const incoming = [
+      at(SESSION_PR_LIST_LIMIT + 1, '2026-08-20T01:00:00.000Z'),
+    ];
+    const merged = mergeSessionPrLists(base, incoming);
+    expect(merged).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(merged[0]?.number).toBe(2);
+    expect(merged[merged.length - 1]?.number).toBe(SESSION_PR_LIST_LIMIT + 1);
   });
 });

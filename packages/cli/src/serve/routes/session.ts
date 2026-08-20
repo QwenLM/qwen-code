@@ -27,6 +27,7 @@ import {
   writeWorktreeSession,
   readWorktreeSession,
   upsertSessionPr,
+  SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -55,7 +56,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  isValidSessionId,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
@@ -2113,12 +2117,11 @@ export function registerSessionRoutes(
       !Number.isInteger(number) ||
       number <= 0 ||
       typeof url !== 'string' ||
-      url.length > 2048 ||
+      url.length > SESSION_PR_URL_MAX_LENGTH ||
       !/^https?:\/\//i.test(url)
     ) {
       res.status(400).json({
-        error:
-          '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters',
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters`,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -5252,6 +5255,16 @@ export function registerSessionRoutes(
     withOwnerMutableSession(
       'PATCH /session/:id/metadata',
       async (req, res, sessionId, runtime) => {
+        // The session id is embedded in the sidecar filesystem path; reject
+        // anything that is not a session id before it can reach the chats
+        // directory.
+        if (!isValidSessionId(sessionId)) {
+          res.status(400).json({
+            error: '`sessionId` must be a valid session id',
+            code: 'invalid_session_id',
+          });
+          return;
+        }
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -5275,26 +5288,22 @@ export function registerSessionRoutes(
             : undefined;
         let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
         try {
-          // Persist first: the sidecar holds the full binding history (the
-          // live bridge entry only knows bindings from this daemon
-          // lifetime), and writing it before the bridge mutation means a
-          // failure in either step still leaves the binding durable.
-          let persistedPrs: Array<{ number: number; url: string }> | undefined;
-          if (pr) {
-            const service = createWorkspaceRuntimeSessionService(runtime);
-            persistedPrs = (
-              await upsertSessionPr(
-                service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
-              )
-            ).map(({ number, url }) => ({ number, url }));
-          }
+          // Bridge first: it resolves session liveness, client trust, and
+          // metadata content. Persisting the sidecar only after it succeeds
+          // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
             { displayName, ...(pr ? { pr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
-          if (persistedPrs) {
+          if (pr) {
+            const service = createWorkspaceRuntimeSessionService(runtime);
+            const persistedPrs = (
+              await upsertSessionPr(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                pr,
+              )
+            ).map(({ number, url }) => ({ number, url }));
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -5314,6 +5323,16 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
+      // The session id is embedded in the sidecar filesystem path; reject
+      // anything that is not a session id before it can reach the chats
+      // directory.
+      if (!isValidSessionId(sessionId)) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       const rawDisplayName = safeBody(req)['displayName'];
@@ -5399,19 +5418,23 @@ export function registerSessionRoutes(
               prs?: Array<{ number: number; url: string }>;
             };
             try {
-              // Persist first: the sidecar holds the full binding history
-              // (the live bridge entry only knows bindings from this daemon
-              // lifetime), and writing it before the bridge mutation means a
-              // failure in either step still leaves the binding durable. If
-              // the bridge then reports the session as not live, the
-              // persisted fallback re-upserts at the located state — the
-              // number-keyed upsert makes that idempotent.
-              let persistedPrs:
-                | Array<{ number: number; url: string }>
-                | undefined;
+              // Bridge first: it resolves client trust and metadata
+              // content, and reports non-live sessions. Persisting the
+              // sidecar only after it succeeds keeps a rejected request
+              // from leaving a durable binding behind — and a live
+              // session's sidecar always lives in the active chats dir, so
+              // 'active' is known-correct here. Non-live sessions are
+              // handled by the fallback below, which persists at the
+              // located archive state.
+              effective = runtime.bridge.updateSessionMetadata(
+                sessionId,
+                { displayName, ...(pr ? { pr } : {}) },
+                clientId !== undefined ? { clientId } : undefined,
+              );
+              assertRuntimeGenerationOpen?.();
               if (pr) {
                 const service = createWorkspaceRuntimeSessionService(runtime);
-                persistedPrs = (
+                const persistedPrs = (
                   await upsertSessionPr(
                     service.getPrSessionPathForArchiveState(
                       sessionId,
@@ -5421,14 +5444,6 @@ export function registerSessionRoutes(
                   )
                 ).map(({ number, url }) => ({ number, url }));
                 assertRuntimeGenerationOpen?.();
-              }
-              effective = runtime.bridge.updateSessionMetadata(
-                sessionId,
-                { displayName, ...(pr ? { pr } : {}) },
-                clientId !== undefined ? { clientId } : undefined,
-              );
-              assertRuntimeGenerationOpen?.();
-              if (persistedPrs) {
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {

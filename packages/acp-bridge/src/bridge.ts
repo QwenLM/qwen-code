@@ -36,6 +36,8 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  SESSION_PR_LIST_LIMIT,
+  SESSION_PR_URL_MAX_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
@@ -1256,10 +1258,6 @@ function writeServeDebugLine(message: string): void {
 }
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
-/** Bound on the per-session PR binding list; oldest are dropped beyond it. */
-const MAX_SESSION_PRS = 10;
-/** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
-const MAX_SESSION_PR_URL_LENGTH = 2048;
 
 /**
  * Upper bound on how many prompt content blocks the bridge echoes per
@@ -9675,12 +9673,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           !Number.isInteger((pr as SessionPrInfo).number) ||
           (pr as SessionPrInfo).number <= 0 ||
           typeof (pr as SessionPrInfo).url !== 'string' ||
-          (pr as SessionPrInfo).url.length > MAX_SESSION_PR_URL_LENGTH ||
+          (pr as SessionPrInfo).url.length > SESSION_PR_URL_MAX_LENGTH ||
           !/^https?:\/\//i.test((pr as SessionPrInfo).url)
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            'must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters',
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters`,
           );
         }
       }
@@ -9762,7 +9760,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           entry.prs = [
             ...existing.filter((p) => p.number !== bound.number),
             { number: bound.number, url: bound.url },
-          ].slice(-MAX_SESSION_PRS);
+          ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
           try {
             entry.events.publish({
