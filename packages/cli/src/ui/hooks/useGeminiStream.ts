@@ -851,7 +851,9 @@ export const useGeminiStream = (
   // read/search/list tool, the two commit as one merged line ("Thought for
   // 9s, searched 2 patterns"). Ink's <Static> renders committed items once,
   // so the merge decision must be made before the thought lands in history.
-  const thoughtMergeDeferralRef = useRef(false);
+  // Holds the callIds of the batch that armed the deferral so a concurrent
+  // turn's completing batch cannot consume another turn's deferred thought.
+  const thoughtMergeDeferralRef = useRef<Set<string> | null>(null);
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -1195,7 +1197,7 @@ export const useGeminiStream = (
   // commitPendingThought when no deferral is active.
   const abortThoughtMergeDeferral = useCallback(
     (userMessageTimestamp: number) => {
-      thoughtMergeDeferralRef.current = false;
+      thoughtMergeDeferralRef.current = null;
       commitPendingThought(userMessageTimestamp);
     },
     [commitPendingThought],
@@ -1205,9 +1207,10 @@ export const useGeminiStream = (
   // `gemini_thought` head has its commit deferred (with its duration frozen)
   // until the batch completes; anything else — no thought, or the
   // `gemini_thought_content` tail of a split oversized thought — commits as
-  // today.
+  // today. The arming callId is recorded so only the owning batch's
+  // onComplete may resolve the deferral.
   const deferThoughtCommitForToolMerge = useCallback(
-    (userMessageTimestamp: number) => {
+    (userMessageTimestamp: number, callId: string) => {
       const pending = pendingThoughtItemRef.current;
       if (pending?.type !== 'gemini_thought') {
         commitPendingThought(userMessageTimestamp);
@@ -1223,7 +1226,11 @@ export const useGeminiStream = (
       // Null the start time so later commits keep the frozen duration
       // instead of charging tool-execution time to the thought.
       thoughtStartTimeRef.current = null;
-      thoughtMergeDeferralRef.current = true;
+      // An already-armed deferral means another ToolCallRequest of the same
+      // batch (thoughts only re-arm fresh — a new Thought aborts first).
+      const armedCallIds = thoughtMergeDeferralRef.current ?? new Set<string>();
+      armedCallIds.add(callId);
+      thoughtMergeDeferralRef.current = armedCallIds;
     },
     [commitPendingThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
@@ -1236,10 +1243,23 @@ export const useGeminiStream = (
   // thought unchanged. Returns the group to commit.
   const mergeDeferredThoughtWithToolGroup = useCallback(
     (toolGroup: HistoryItemToolGroup): HistoryItemToolGroup => {
-      if (!thoughtMergeDeferralRef.current) {
+      const armedCallIds = thoughtMergeDeferralRef.current;
+      if (!armedCallIds) {
         return toolGroup;
       }
-      thoughtMergeDeferralRef.current = false;
+      // Ownership guard: streams can run concurrently in this hook (/btw
+      // during Responding, goal/cron/teammate submits share these refs), so
+      // the batch completing here may not be the one that armed the
+      // deferral. Leave it armed for its own batch instead of merging
+      // another turn's thought.
+      const groupCallIds = toolGroup.tools.map((tool) => tool.callId);
+      const ownedByThisBatch =
+        groupCallIds.length === armedCallIds.size &&
+        groupCallIds.every((id) => armedCallIds.has(id));
+      if (!ownedByThisBatch) {
+        return toolGroup;
+      }
+      thoughtMergeDeferralRef.current = null;
       const thought = pendingThoughtItemRef.current;
       const tools = toolGroup.tools;
       const mergeable =
@@ -2067,6 +2087,13 @@ export const useGeminiStream = (
         : thoughtText;
 
       if (startingNewThought) {
+        // An active deferral holds a finalized thought awaiting its tool
+        // batch. A new thought supersedes it, so commit it as-is first —
+        // otherwise the pending slot is replaced below and the deferred
+        // thought is lost from history.
+        if (thoughtMergeDeferralRef.current) {
+          abortThoughtMergeDeferral(userMessageTimestamp);
+        }
         thoughtStartTimeRef.current = Date.now();
         newThoughtBuffer = description;
       }
@@ -2138,7 +2165,13 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
+    [
+      addItem,
+      abortThoughtMergeDeferral,
+      mergeThought,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -2701,7 +2734,10 @@ export const useGeminiStream = (
               // completes so a mergeable read/search batch can fold into its
               // line (commits as-is when the thought doesn't qualify).
               flushBufferedStreamEvents();
-              deferThoughtCommitForToolMerge(userMessageTimestamp);
+              deferThoughtCommitForToolMerge(
+                userMessageTimestamp,
+                event.value.callId,
+              );
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
               if (event.value.goalContext && turnAdmission) {

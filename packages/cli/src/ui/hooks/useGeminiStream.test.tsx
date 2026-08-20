@@ -12634,6 +12634,203 @@ describe('useGeminiStream', () => {
       expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
     });
 
+    it('should commit both thoughts when a new thought arrives after the ToolCallRequest boundary', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'FIRST-THOUGHT-ALPHA' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'SECOND-THOUGHT-BETA' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'the answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('interleaved thought after tool call');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The second thought supersedes the deferred first one: the deferral
+      // must resolve (committing the first thought as-is) before the new
+      // thought replaces the pending slot — otherwise the first thought is
+      // silently lost from history.
+      await waitFor(() => {
+        const thoughtCommits = mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        );
+        expect(thoughtCommits).toHaveLength(2);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits[0][0].text).toContain('FIRST-THOUGHT-ALPHA');
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+      expect(thoughtCommits[1][0].text).toContain('SECOND-THOUGHT-BETA');
+      expect(thoughtCommits[1][0].toolSummary).toBeUndefined();
+
+      // The batch completing afterwards must not merge: the deferral was
+      // aborted when the second thought started.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall()]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(2);
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit).toBeDefined();
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+    });
+
+    it('should leave the deferral armed when a non-owning batch completes first', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      // Held stream for the tool-response continuation: keeps it open so
+      // the end-of-stream anti-stranding fallback cannot resolve the
+      // deferral while the ownership guard is under test.
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      // eslint-disable-next-line require-yield
+      const heldStream = (async function* () {
+        await holdStream;
+      })();
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'MAIN thought M' },
+            };
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        )
+        .mockReturnValue(heldStream);
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('ownership of the merge deferral');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitForDeferralEstablished(result);
+
+      // A concurrent turn's batch completes first (different callIds): it
+      // must not consume the deferral — no merge, no thought commit, and
+      // the deferral stays armed for its own batch.
+      const otherBatchToolCall = (): TrackedToolCall =>
+        ({
+          request: {
+            callId: 'tc-other',
+            name: 'read_file',
+            args: { file_path: '/other' },
+            isClientInitiated: false,
+            prompt_id: 'p2',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'tc-other',
+            responseParts: [{ text: 'other contents' }],
+          },
+          tool: { displayName: 'ReadFile' },
+          invocation: {
+            getDescription: () => '/other',
+          } as unknown as AnyToolInvocation,
+        }) as TrackedCompletedToolCall;
+
+      await act(async () => {
+        void getOnComplete()?.([otherBatchToolCall()]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        const otherGroupCommit = mockAddItem.mock.calls.find(
+          ([item]) => item.type === 'tool_group',
+        );
+        expect(otherGroupCommit).toBeDefined();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      const otherGroupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(otherGroupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+
+      // The owning batch completes: the merge resolves as usual. (Fire and
+      // wait for the commit — the completion's continuation is the held
+      // stream and never resolves until release.)
+      await act(async () => {
+        void getOnComplete()?.([successfulReadToolCall()]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('MAIN thought M'),
+            toolSummary: 'Read /foo',
+          }),
+          expect.any(Number),
+        );
+      });
+      const mergedGroupCommit = mockAddItem.mock.calls.find(
+        ([item]) =>
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought === true,
+      );
+      expect(mergedGroupCommit).toBeDefined();
+
+      releaseStream?.();
+    });
+
     it('should commit the deferred thought as-is on UserCancelled', async () => {
       captureSchedulerOnComplete();
       mockSendMessageStream.mockReturnValue(
