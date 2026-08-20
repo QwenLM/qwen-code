@@ -2579,6 +2579,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }
           return {
             llmContent: notFoundMessage,
+            // `error` marks the call failed in the scheduler (see
+            // buildSpawnBlockedResult): a launch that never ran must not
+            // count as a successful agent call, and the failure path
+            // forwards only `error.message` to the model — so it carries
+            // the full guidance text including the available-subagents list.
+            error: { message: notFoundMessage },
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: effectiveSubagentType,
@@ -2745,6 +2751,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         return {
           llmContent: reason,
+          // `error` marks the call failed in the scheduler (see
+          // buildSpawnBlockedResult): a launch that never ran must not
+          // count as a successful agent call. The failure path forwards
+          // only `error.message` to the model, so it carries the full
+          // provisioning reason.
+          error: { message: reason },
           returnDisplay: this.currentDisplay,
         };
       };
