@@ -9,12 +9,28 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { redirectedAncestor, sanitizedGitEnv } from './worktree.js';
+import {
+  INERT_GIT_ARGS,
+  redirectedAncestor,
+  sanitizedGitEnv,
+} from './worktree.js';
 import { existsSync, lstatSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 export const GIT_TIMEOUT_MS = 120_000;
+
+/**
+ * Args prepended to every invocation below: {@link INERT_GIT_ARGS}. A
+ * checkout launched through this module — fetch-pr's `worktree add` that
+ * creates the review worktree is one — executes hooks and `core.fsmonitor`
+ * from the common dir otherwise, and a probe's plant lands exactly there.
+ * Commands that run neither are unaffected by the overrides; uniformity is
+ * the same trade this file already makes with the sanitised env.
+ */
+function gitArgs(args: string[]): string[] {
+  return [...INERT_GIT_ARGS, ...args];
+}
 
 /**
  * Options every wrapper shares, **read fresh on every call**.
@@ -47,7 +63,7 @@ function gitOpts() {
 
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
-  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8' })
+  return execFileSync('git', gitArgs(args), { ...gitOpts(), encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -60,7 +76,11 @@ export function git(...args: string[]): string {
  * every other subcommand would try to open the name as an ordinary file.
  */
 export function gitWithInput(input: Buffer, args: string[]): string {
-  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input })
+  return execFileSync('git', gitArgs(args), {
+    ...gitOpts(),
+    encoding: 'utf8',
+    input,
+  })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -99,7 +119,7 @@ export function gitProbe(...args: string[]): {
 } {
   try {
     return {
-      out: execFileSync('git', args, {
+      out: execFileSync('git', gitArgs(args), {
         ...gitOpts(),
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -286,7 +306,7 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
  * ENOBUFS rather than returning a short read. Diff capture uses this instead.
  */
 export function gitRaw(...args: string[]): Buffer {
-  return execFileSync('git', args, {
+  return execFileSync('git', gitArgs(args), {
     ...gitOpts(),
     maxBuffer: 512 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],

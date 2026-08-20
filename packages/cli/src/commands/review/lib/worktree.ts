@@ -35,6 +35,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
+import { inertPath } from './paths.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
 
@@ -558,27 +559,47 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 }
 
 /**
- * The repo-local `filter.<name>` COMMANDS, when any are defined.
+ * The repo-local config keys a checkout EXECUTES, when any are defined:
+ * `filter.<name>.smudge|clean|process` commands, and the `include`/
+ * `includeIf` directives that reach more of them. Returns the keys, never
+ * the values; a hit is a refusal upstream, not a cleanup here.
  *
- * Every checkout in this pipeline EXECUTES these — the scratch tree's reset
+ * Every checkout this pipeline runs executes these — fetch-pr's creation of
+ * the review worktree, the base tree's creation, the scratch tree's reset
  * and rebuild, the probe tree's creation, its per-run restores and the
- * revert phase's checkout, and the base tree's creation — hooks being
- * disabled covers hooks and not filters. The planting surface is two plain
- * writes a probe can make into the COMMON dir this command's report calls
- * shared: `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The local config files
- * are checked with `--file` rather than merged config because filters in the
- * user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. `--includes` because the merged config a
- * checkout EXECUTES follows `include.*` directives and a bare `--file` read
- * does not — a filter defined behind an include planted in the local config
- * would be invisible to the screen and still run. The state cannot be told
- * apart from a filter the user set deliberately, and cannot be safely wiped,
- * so a hit is a refusal upstream, not a cleanup here.
+ * revert phase's checkout. Hooks are not this screen's subject: every one
+ * of those checkouts runs with the {@link INERT_GIT_ARGS} overrides. The
+ * planting surface is two plain writes a probe can make into the COMMON dir
+ * this command's report calls shared: `git config filter.evil.smudge CMD`
+ * and one line appended to `$(git rev-parse --git-path info/attributes)`.
+ * discard and cleanup never wipe the common dir, so a filter planted while
+ * reviewing one PR fires on every later matching checkout of the user's OWN
+ * repository — persistence planted by reviewing a malicious PR, measured
+ * live.
+ *
+ * The local config files are read with `--file` rather than merged config
+ * because filters in the user's global config (git-lfs is the common one)
+ * are the user's own contract, exactly like any git command they run. A
+ * probe CAN also write `--global`; that scope is a disclosed limit of this
+ * screen, not a screened surface.
+ *
+ * Include directives are refused as KEYS, never followed: `--includes`
+ * evaluates an `includeIf` condition against the READING tree's gitdir and
+ * branch, while the checkout the screen authorises evaluates it against its
+ * OWN — so a directive aimed at a sibling worktree's admin dir
+ * (`includeIf.gitdir:<common>/worktrees/<label>-*`, labels are
+ * attacker-knowable) or at the user's own branch (`includeIf.onbranch:main`,
+ * which no detached screen ever matches) screened clean and still executed
+ * — measured live, both arms. Refusing on any directive is the fail-safe
+ * trade this screen makes everywhere; the benign conditional include a user
+ * set deliberately is indistinguishable from the plant.
+ *
+ * Submodule configs under the common dir are candidates for the same
+ * reason: a checkout run with `submodule.recurse=true` — one more key a
+ * probe writes, which the filter regex never matches — recurses into every
+ * initialised submodule and executes the filters THAT config defines. The
+ * recurse key itself stays legal (a user may set it deliberately), so the
+ * screen reads what it would execute instead.
  */
 export function localFilterCommands(worktree: string): string[] {
   const files = spawnSync(
@@ -609,40 +630,114 @@ export function localFilterCommands(worktree: string): string[] {
   // once `extensions.worktreeConfig` is on and was never read here — a filter
   // planted there executed during the reset while this function reported the
   // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
+  // any of these is a plant whichever tree carries it. The submodule configs
+  // under each admin dir (and under `<common>/modules/` for the main
+  // worktree) join for the `submodule.recurse` reason in the docstring: a
+  // `submodule update --init` run inside a linked tree lands the submodule's
+  // gitdir at `<common>/worktrees/<label>/modules/<name>/`, and the filters
+  // planted in its config were never candidates.
+  const submoduleConfigs = (modulesDir: string): void => {
+    try {
+      for (const mod of readdirSync(modulesDir)) {
+        candidates.push(join(modulesDir, mod, 'config'));
+        candidates.push(join(modulesDir, mod, 'config.worktree'));
+      }
+    } catch {
+      // No submodules registered here.
+    }
+  };
   try {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+      const admin = join(common, 'worktrees', entry);
+      candidates.push(join(admin, 'config.worktree'));
+      submoduleConfigs(join(admin, 'modules'));
     }
   } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
+    // No linked worktrees registered: the candidates above are all of it.
   }
+  submoduleConfigs(join(common, 'modules'));
   const found: string[] = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--includes',
-        '--get-regexp',
-        // `process` beside the pair: it is the third executable key (a
-        // long-running filter git speaks a protocol to), and enumerating two
-        // of three is how the first cut of this screen read as complete.
-        '^filter\\..*\\.(smudge|clean|process)$',
-      ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-    );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+    for (const pattern of [
+      // `process` beside the pair: it is the third executable key (a
+      // long-running filter git speaks a protocol to), and enumerating two
+      // of three is how the first cut of this screen read as complete.
+      '^filter\\..*\\.(smudge|clean|process)$',
+      // The directives themselves, NOT `--includes`: the filter read no
+      // longer follows them, because the conditional ones evaluate against
+      // the wrong tree's context (docstring above) and the unconditional
+      // ones are refused by this pattern anyway. Section names normalise to
+      // lowercase in git's output (`includeIf` reads as `includeif`).
+      '^(include\\.path|includeif\\..*\\.path)$',
+    ]) {
+      const r = spawnSync(
+        'git',
+        ['config', '--file', file, '--get-regexp', pattern],
+        { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+      );
+      if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+      for (const line of r.stdout.split('\n')) {
+        const key = line.split(/\s+/)[0];
+        if (key && !found.includes(key)) found.push(key);
+      }
     }
   }
   return found;
 }
+
+/**
+ * The refusal every checkout-authorising guard in this pipeline shares, when
+ * {@link localFilterCommands} finds anything — one wording for what used to
+ * be five hand-written copies, born drifted inside a single PR (one dropped
+ * the sanitisation, another the remediation advice, a third the
+ * clarification clause). `context` names the checkout the guard is about to
+ * authorise. Null is the clean answer; the caller proceeds.
+ *
+ * The keys ride through {@link inertPath}: a subsection name legally carries
+ * control and bidi bytes, and the refusal reaches out.json, terminals and
+ * Markdown briefs — the exact sinks that flattening exists to protect.
+ */
+export function localFilterRefusal(
+  worktree: string,
+  context: string,
+): string | null {
+  const keys = localFilterCommands(worktree);
+  if (keys.length === 0) return null;
+  return (
+    `the repository's local config defines ${keys.map(inertPath).join(', ')} — ` +
+    `content filter command(s), or include directives that reach them, which ` +
+    `${context} would EXECUTE. Two plain writes into the common dir plant ` +
+    'both a filter and the attributes that select it, and the state cannot be ' +
+    'told apart from one you set deliberately, so remove those config entries ' +
+    'if they are not yours (removing only the attributes that select them ' +
+    'does not clear this refusal — it reads the filter definitions). Until ' +
+    'then no checkout in this pipeline is safe to run.'
+  );
+}
+
+/**
+ * The `-c` overrides every git spawn in this pipeline that runs a checkout
+ * prepends — the execution-neutralising half, beside the detection half
+ * ({@link localFilterCommands}).
+ *
+ * `core.hooksPath`: a linked worktree's hooks resolve to the common dir —
+ * the user's own `.git/hooks` — and `worktree add` and `checkout` both fire
+ * `post-checkout` from there, a pathspec checkout included (flag 0, measured
+ * live). Pointing the key at a path holding no hooks covers every hook.
+ * `core.fsmonitor`: ONE write into the common config (`git config
+ * core.fsmonitor CMD`) is command execution on every index refresh — no
+ * attributes line needed — and nothing the pipeline runs unsets it. `-c` is
+ * command-line scope: it overrides whatever the config holds for THIS spawn
+ * without touching the config — the plant persists, and the screen stays
+ * the half that detects and refuses it.
+ */
+export const INERT_GIT_ARGS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
 
 /**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen

@@ -17,10 +17,16 @@ import {
   writeFileSync,
   mkdirSync,
   symlinkSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitProbe, gitRawTolerateDiff, releaseWorktree } from './git.js';
+import {
+  git as gitUnderTest,
+  gitProbe,
+  gitRawTolerateDiff,
+  releaseWorktree,
+} from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -215,6 +221,42 @@ describe('releaseWorktree', () => {
     expect(() =>
       git('worktree', 'add', '-q', 'wt-link', '-b', 'topic2'),
     ).not.toThrow();
+  });
+});
+
+describe('the INERT_GIT_ARGS prefix — checkouts through this module execute nothing the config names', () => {
+  // fetch-pr creates the review worktree through this module's `git` — the
+  // pipeline's FIRST checkout — and the common dir it reads is exactly where
+  // a probe's plant lands: ONE executable `post-checkout` file, ONE
+  // `core.fsmonitor` config write. The wrappers prepend the overrides, so a
+  // checkout they run fires neither (probe, git 2.39: the unprefixed shape
+  // fires both; the prefixed one does not).
+  it('runs a worktree add with a planted hook and fsmonitor inert', () => {
+    // The fixture points core.hooksPath here already: a plant into it is the
+    // one-file attack, no config write needed.
+    const hooksDir = join(repo, '.no-such-hooks');
+    mkdirSync(hooksDir, { recursive: true });
+    const hook = join(hooksDir, 'post-checkout');
+    writeFileSync(hook, `#!/bin/sh\ntouch "${repo}/PWNED-hook"\n`);
+    chmodSync(hook, 0o755);
+    git('config', 'core.fsmonitor', `touch ${repo}/PWNED-fsm`);
+
+    // Negative control: the SAME add without the prefix fires both plants —
+    // the fixture is armed, so an inert run below proves the prefix, not an
+    // unfirable plant.
+    execFileSync('git', ['worktree', 'add', '-q', 'control', '-b', 'ctrl'], {
+      cwd: repo,
+      encoding: 'utf8',
+    });
+    expect(existsSync(join(repo, 'PWNED-hook'))).toBe(true);
+    expect(existsSync(join(repo, 'PWNED-fsm'))).toBe(true);
+    rmSync(join(repo, 'PWNED-hook'));
+    rmSync(join(repo, 'PWNED-fsm'));
+
+    gitUnderTest('worktree', 'add', '-q', 'inert', '-b', 'inert-topic');
+    expect(existsSync(join(repo, 'inert'))).toBe(true);
+    expect(existsSync(join(repo, 'PWNED-hook'))).toBe(false);
+    expect(existsSync(join(repo, 'PWNED-fsm'))).toBe(false);
   });
 });
 

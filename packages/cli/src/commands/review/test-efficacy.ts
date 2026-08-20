@@ -69,7 +69,8 @@ import { probeWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
   exposeDependencies,
-  localFilterCommands,
+  INERT_GIT_ARGS,
+  localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -1288,8 +1289,11 @@ interface TestEfficacyArgs {
 // resets, the revert's checkout — so the mutations would land in whichever
 // repository the environment names while every check against the tree passes
 // silently. The trees this file touches are chosen by the paths it is given.
+// The INERT_GIT_ARGS prefix is for the checkouts among them — the probe
+// tree's `worktree add` and the revert's pathspec checkout both fire hooks
+// and `core.fsmonitor` from the common dir otherwise.
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
@@ -1305,7 +1309,7 @@ function git(cwd: string, ...args: string[]): void {
 
 /** Run git and return trimmed stdout; throws on spawn failure or non-zero. */
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
@@ -1587,35 +1591,21 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
-  // A pathspec checkout runs no hook — but the config that decides that lives
-  // in a tree this code is defending against, so it is emptied here the way
-  // every other checkout in this pipeline empties it. `--` and a pathspec:
-  // this restores FILES and never moves HEAD.
-  // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
-  // whenever it rewrites a file, and the restore below rewrites every tracked
-  // file this tree has — the same surface `scratch-tree` refuses to reset
-  // through, screened again here because this restore runs before EVERY suite
-  // run in the probe tree and a filter can be planted between the phase's
-  // entry screen and any one of them. The screen reads repo-LOCAL config
-  // only: `git lfs install` writes `filter.lfs.clean` into the user's GLOBAL
-  // config, and refusing on that would put every contributor with git-lfs
-  // into permanent refusal — the same failure as a tripwire that fires on
-  // every healthy run.
-  const filters = localFilterCommands(probeTree);
-  if (filters.length > 0) {
-    return `the repository's local config defines content filter(s) ${filters.join(', ')}, which this tree's restore would EXECUTE`;
-  }
-  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
-  // it lives in the tree they are cleaning: the residue probe empties it for
-  // exactly this reason and these two spawns were the ones still steerable.
-  const inert = [
-    '-c',
-    'core.hooksPath=/dev/null/no-hooks',
-    '-c',
-    'core.fsmonitor=',
-  ];
+  // The screen, before either spawn: a checkout EXECUTES
+  // `filter.<name>.smudge` whenever it rewrites a file, and the restore below
+  // rewrites every tracked file this tree has — the same surface
+  // `scratch-tree` refuses to reset through, screened again here because this
+  // restore runs before EVERY suite run in the probe tree and a plant can
+  // land between the phase's entry screen and any one of them.
+  const refusal = localFilterRefusal(probeTree, "this tree's restore");
+  if (refusal !== null) return refusal;
+  // `--` and a pathspec: this restores FILES and never moves HEAD. A
+  // pathspec checkout still fires `post-checkout` (flag 0, measured live)
+  // and `core.fsmonitor` — the config that decides that lives in a tree this
+  // code is defending against, so it is emptied here the way every other
+  // checkout in this pipeline empties it.
   for (const args of [
-    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    [...INERT_GIT_ARGS, 'checkout', '--force', 'HEAD', '--', '.'],
     // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
     // commit under test, so a plant named to match one of them (a committed
     // `.gitignore` line and a file to match it) survived every restore. The
@@ -1623,7 +1613,7 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // rather than built, and it is the only ignored thing in this tree the
     // probes cannot run without. Everything else ignored — a built `dist`, a
     // planted config — goes.
-    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
+    [...INERT_GIT_ARGS, 'clean', '-ffdx', '-e', 'node_modules'],
   ]) {
     const r = spawnSync('git', args, {
       cwd: probeTree,
@@ -2561,9 +2551,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // a filter planted before the run fired there, ahead of every other
       // screen. (One planted DURING a run is what the restore screens and
       // the revert phase's own screen below are for.)
-      const filters = localFilterCommands(worktree);
-      if (filters.length > 0) {
-        createDetail = `the repository's local config defines content filter(s) ${filters.join(', ')}, which the probe phase's checkouts — the probe tree's own creation, every per-run restore, and the revert's checkout — would EXECUTE`;
+      const refusal = localFilterRefusal(
+        worktree,
+        "the probe phase's checkouts — the probe tree's own creation, every " +
+          "per-run restore, and the revert's checkout",
+      );
+      if (refusal !== null) {
+        createDetail = refusal;
       } else {
         // Clear a stale probe tree left by a crashed run — it would fail `add`.
         // Its stderr is kept to explain a subsequent `add` failure.
@@ -2911,12 +2905,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // code — a filter planted mid-run was what the restore screens
           // refused, while the flow landed here, and this checkout rewrote
           // the matching files and executed the plant.
-          const filters = localFilterCommands(probeTree);
-          if (filters.length > 0) {
-            throw new Error(
-              `the repository's local config defines content filter(s) ${filters.join(', ')}, which the revert checkout would EXECUTE`,
-            );
-          }
+          const refusal = localFilterRefusal(probeTree, 'the revert checkout');
+          if (refusal !== null) throw new Error(refusal);
           git(probeTree, 'checkout', base, '--', ...modified);
         }
         for (const p of added) safeRmWithin(probeTree, p);

@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -2039,6 +2040,41 @@ process.stdout.write(JSON.stringify({
       expect.objectContaining({ verdict: 'inconclusive' }),
     ]);
     expect(out.probed[0].detail).toContain('content filter');
+  });
+
+  it('runs the whole phase with a planted hook and fsmonitor inert', async () => {
+    // The screen refuses config keys it can read; two execution surfaces are
+    // neutralised at the spawn instead — ONE executable `post-checkout` file
+    // (cheaper than the two-write filter plant) and ONE `core.fsmonitor`
+    // config write, which every checkout here would run: the probe tree's
+    // `worktree add`, every per-run restore, and the revert's pathspec
+    // checkout (probe, git 2.39: all three fire both plants without the
+    // `-c` overrides; the fixture's beforeEach hooksPath names the dir the
+    // hook is planted into). A healthy run must stay healthy AND nothing
+    // may fire.
+    const { wt, base } = scaffoldModifiedPr();
+    const markerDir = mkdtempSync(join(tmpdir(), 'qwen-inert-'));
+    const hook = join(repo, '.git-hooks-disabled', 'post-checkout');
+    writeFileSync(hook, `#!/bin/sh\ntouch "${join(markerDir, 'hook')}"\n`);
+    chmodSync(hook, 0o755);
+    git(wt, 'config', 'core.fsmonitor', `touch ${join(markerDir, 'fsm')}`);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
+    expect(existsSync(join(markerDir, 'hook'))).toBe(false);
+    expect(existsSync(join(markerDir, 'fsm'))).toBe(false);
   });
 
   it("reaps the suite's process group, so nothing it spawned outlives the run", async () => {

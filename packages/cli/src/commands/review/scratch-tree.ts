@@ -57,7 +57,8 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
-  localFilterCommands,
+  INERT_GIT_ARGS,
+  localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -123,23 +124,15 @@ export interface ScratchTreeArgs {
 }
 
 /**
- * `git`, with the user's hooks out of the way.
- *
- * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
- * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
- * `post-checkout` from there, which means this command would run whatever hooks
- * that repository has (and whatever a probe managed to write into it) as a side
- * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
- * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
+ * `git`, with the execution surfaces out of the way — see {@link INERT_GIT_ARGS}
+ * for why every checkout-running spawn here carries those overrides. Content
+ * FILTERS are not covered by them: they are config-driven, and a checkout runs
  * whichever ones an attributes file selects. `runScratchTree` detects that
  * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
+ * `localFilterRefusal`). What a probe does with its own shell is the probe's
  * business, and the report says plainly that the common dir is shared rather
  * than isolated.
  */
-const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
-
 function gitOut(cwd: string, ...args: string[]): string {
   // `ls-files -v` prints a line per tracked file and `clean` a line per removal;
   // both pass the default 1 MiB buffer on a large repo, and `spawnSync` answers
@@ -149,7 +142,7 @@ function gitOut(cwd: string, ...args: string[]): string {
   // the ENTIRE identity gate at once — both sides of every comparison see the
   // same override, so no check can detect it — and the head sha itself comes
   // back from the wrong repository.
-  const r = spawnSync('git', [...NO_HOOKS, ...args], {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -383,21 +376,13 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     );
   }
 
-  // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
-    return unavailable(
-      `the repository's local config defines content filter(s) ${filters
-        .map(inertPath)
-        .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
-    );
-  }
+  // BEFORE any checkout runs — the reuse path's reset and the rebuild
+  // path's `worktree add` both execute whatever the screen detects.
+  const refusal = localFilterRefusal(
+    worktree,
+    'the reset or the rebuild this command runs',
+  );
+  if (refusal !== null) return unavailable(refusal);
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did.

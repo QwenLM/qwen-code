@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
@@ -1442,14 +1442,15 @@ describe('localFilterCommands', () => {
     expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
   });
 
-  it('follows include.path — the merged read the checkout does, the --file read it used to do does not', () => {
-    // `git config --file` ignores `include.*` directives unless `--includes`
-    // is passed, while the merged config a checkout EXECUTES follows them: a
-    // filter defined behind an include planted in the repo-local config was
-    // invisible to the screen and still ran (probe: the --file read exits 1
-    // and reports clean, `git checkout HEAD --` of a dirty file fires the
-    // smudge). The include target lives outside the tree, so the restore's
-    // `clean -ffdx` never removes it either.
+  it('refuses on an include.path DIRECTIVE — never follows it', () => {
+    // The first cut followed `include.*` with `--includes`, mirroring the
+    // merged read a checkout does. That read is exactly what is unsafe: git
+    // evaluates an `includeIf` condition against the READING tree's gitdir
+    // and branch, while the checkout the screen authorises evaluates it
+    // against its OWN — so a directive aimed at another tree or branch was
+    // invisible here and still executed. Refusing on the directive ITSELF is
+    // the fail-closed trade: a benign include is indistinguishable from the
+    // plant, same as a benign filter is.
     const outside = join(mkdtempSync(join(tmpdir(), 'qwen-include-')), 'cfg');
     writeFileSync(
       outside,
@@ -1457,7 +1458,39 @@ describe('localFilterCommands', () => {
     );
     gitRepo('config', 'include.path', outside);
 
-    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+    expect(localFilterCommands(tree)).toEqual(['include.path']);
+
+    rmSync(dirname(outside), { recursive: true, force: true });
+  });
+
+  it('refuses on includeIf directives the screening tree cannot evaluate', () => {
+    // Two live-reproduced entrances (probe, git 2.39): (a) a `gitdir` arm
+    // aimed at a SIBLING worktree's admin dir — the screening tree's read
+    // never matches it, the authorised `worktree add`'s does, and its
+    // initial checkout executes the planted smudge; (b) an `onbranch` arm
+    // aimed at the user's own branch — every screen runs detached, so the
+    // condition never matches any of them, and the plant fires later on the
+    // user's own branched checkout. Both are refused here as the directive
+    // key git normalises to `includeif.`
+    const outside = join(mkdtempSync(join(tmpdir(), 'qwen-includeif-')), 'cfg');
+    writeFileSync(outside, '[filter "evil"]\n\tsmudge = touch /tmp/x\n');
+
+    gitRepo(
+      'config',
+      `includeIf.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
+      outside,
+    );
+    expect(localFilterCommands(tree)).toEqual([
+      `includeif.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
+    ]);
+    gitRepo(
+      'config',
+      '--unset',
+      `includeIf.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
+    );
+
+    gitRepo('config', 'includeIf.onbranch:main.path', outside);
+    expect(localFilterCommands(tree)).toEqual(['includeif.onbranch:main.path']);
 
     rmSync(dirname(outside), { recursive: true, force: true });
   });
@@ -1481,5 +1514,111 @@ describe('localFilterCommands', () => {
     );
 
     expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+  });
+
+  it('reads submodule configs under the common dir', () => {
+    // A checkout run with `submodule.recurse=true` — one more key a probe
+    // writes, which the filter regex never matches — recurses into every
+    // initialised submodule and executes the filters THAT config defines
+    // (probe: restore-shape checkout over a dirty submodule file creates the
+    // marker; worktree add does not recurse). Those configs live under the
+    // common dir and were never candidates: `<common>/modules/<name>/` for
+    // the main worktree, `<common>/worktrees/<label>/modules/<name>/` for a
+    // linked one (a `submodule update --init` run inside the tree lands the
+    // gitdir there). Refusing on the filter they execute, wherever it is
+    // planted, keeps the screen's posture; the recurse key itself stays
+    // legal. The recurse key is the plant's other half but is NOT refused —
+    // a user may set it deliberately — so this pins only the filter half.
+    const subRepo = mkdtempSync(join(tmpdir(), 'qwen-sub-'));
+    const g = (...a: string[]) =>
+      execFileSync('git', a, { cwd: subRepo, encoding: 'utf8' }).trim();
+    g('init', '-q', '-b', 'main');
+    g('config', 'user.email', 't@t.t');
+    g('config', 'user.name', 't');
+    writeFileSync(join(subRepo, 's.txt'), 'sub\n');
+    g('add', '-A');
+    g('commit', '-qm', 'sub');
+
+    // `.qwen/` ignored, or the `add -A` below stages the screening
+    // worktree (it sits inside the fixture repo) as an embedded gitlink and
+    // every later `submodule` command dies on the url-less entry.
+    writeFileSync(join(repo, '.gitignore'), '.qwen/\n');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subRepo,
+        'sub',
+      ],
+      { cwd: repo, encoding: 'utf8' },
+    );
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'with-submodule');
+    // Re-point the screening tree at the new HEAD so it carries the gitlink.
+    execFileSync('git', ['worktree', 'remove', '--force', tree], {
+      cwd: repo,
+      encoding: 'utf8',
+    });
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    // Init inside the LINKED tree: the submodule's gitdir lands at
+    // `<common>/worktrees/<label>/modules/sub`.
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+      ],
+      { cwd: tree, encoding: 'utf8' },
+    );
+
+    // A plant in the linked tree's submodule config...
+    const linkedSub = join(
+      repo,
+      '.git',
+      'worktrees',
+      basename(tree),
+      'modules',
+      'sub',
+      'config',
+    );
+    execFileSync(
+      'git',
+      ['config', '--file', linkedSub, 'filter.evil.smudge', 'x'],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+      },
+    );
+    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+    execFileSync(
+      'git',
+      ['config', '--file', linkedSub, '--unset', 'filter.evil.smudge'],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+      },
+    );
+
+    // ...and one in the main worktree's `<common>/modules/sub/config`.
+    const mainSub = join(repo, '.git', 'modules', 'sub', 'config');
+    execFileSync(
+      'git',
+      ['config', '--file', mainSub, 'filter.evil.clean', 'x'],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+      },
+    );
+    expect(localFilterCommands(tree)).toEqual(['filter.evil.clean']);
+
+    rmSync(subRepo, { recursive: true, force: true });
   });
 });

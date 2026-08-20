@@ -38,7 +38,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { localFilterRefusal, sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -999,6 +999,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
       );
     }
+
+    // Screen BEFORE the fetch, against the main checkout's common dir. The
+    // review worktree does not exist yet, so there is nothing to screen FROM
+    // — but step 4's `worktree add` initial checkout would execute any filter
+    // planted in the shared common dir by an EARLIER review's probe, ahead of
+    // every other screen this pipeline runs. Refuse before fetching so no ref
+    // or worktree is created on a dirty common dir. Same refusal as base-tree.
+    const filterRefusal = localFilterRefusal(
+      process.cwd(),
+      'the review worktree add this command runs',
+    );
+    if (filterRefusal !== null) throw new Error(filterRefusal);
 
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);

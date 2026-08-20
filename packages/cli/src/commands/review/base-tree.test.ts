@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   utimesSync,
   mkdtempSync,
   mkdirSync,
@@ -319,6 +320,28 @@ describe('runBaseTree', () => {
     expect(r.note).toContain('filter.evil.smudge');
     expect(existsSync(pwned)).toBe(false);
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('adds the base tree with a planted hook and fsmonitor inert', () => {
+    // The add's initial checkout fires `post-checkout` and refreshes the
+    // index — running `core.fsmonitor` — from the COMMON dir: one executable
+    // file and one config write a probe can make. The screen refuses content
+    // filters (above); these two surfaces are neutralised at the spawn
+    // instead, and this pins the prefix on THIS command's git — removing it
+    // creates both markers.
+    const hooksDir = join(repo, '.git', 'hooks');
+    git(repo, 'config', 'core.hooksPath', hooksDir);
+    mkdirSync(hooksDir, { recursive: true });
+    const hook = join(hooksDir, 'post-checkout');
+    writeFileSync(hook, `#!/bin/sh\ntouch ${repo}/PWNED-hook\n`);
+    chmodSync(hook, 0o755);
+    git(worktree, 'config', 'core.fsmonitor', `touch ${repo}/PWNED-fsm`);
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(existsSync(join(repo, 'PWNED-hook'))).toBe(false);
+    expect(existsSync(join(repo, 'PWNED-fsm'))).toBe(false);
   });
 
   it('ignores an exported GIT_DIR redirect when adding the base tree', () => {

@@ -6,8 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -524,6 +527,40 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('refuses BEFORE the fetch when repo-local config defines a content filter', async () => {
+    // Step 4's `worktree add` is the pipeline's FIRST checkout, and its
+    // initial checkout executes repo-local content filters: a plant an
+    // earlier review's probe left in the shared common dir fires there,
+    // ahead of every other screen, and persists for the user's own later
+    // checkouts. The fetch is refused before any ref or worktree exists.
+    // `spawnSync` stays real in this suite (the child_process mock replaces
+    // only execFileSync), so the screen reads a fixture repo the test
+    // chdirs into.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-fetch-screen-'));
+    const g = (...args: string[]) =>
+      spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    g('init', '-q', '-b', 'main');
+    g('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
+    const prev = process.cwd();
+    process.chdir(dir);
+    try {
+      await expect(reportFor({})).rejects.toThrow('filter.evil.smudge');
+      // The worktree add — the firing checkout — never ran, and nothing was
+      // fetched into a ref.
+      expect(
+        producerMocks.git.mock.calls.some(
+          ([a, b]: unknown[]) => a === 'worktree' && b === 'add',
+        ),
+      ).toBe(false);
+      expect(
+        producerMocks.git.mock.calls.some(([a]: unknown[]) => a === 'fetch'),
+      ).toBe(false);
+    } finally {
+      process.chdir(prev);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {

@@ -53,10 +53,11 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { baseWorktreePath, inertPath } from './lib/paths.js';
+import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
-  localFilterCommands,
+  INERT_GIT_ARGS,
+  localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
@@ -95,8 +96,11 @@ export interface BaseTreeArgs {
 // discovery for every call at once — the base tree would be added into the
 // redirected repository and its reuse check would read HEAD from it, an A/B
 // against the wrong program while every check against the given tree passes.
+// The INERT_GIT_ARGS prefix is for the `worktree add` below: its initial
+// checkout fires hooks and `core.fsmonitor` from the common dir otherwise,
+// and a probe's plant lands exactly there.
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
@@ -109,7 +113,7 @@ function gitOut(cwd: string, ...args: string[]): string {
 }
 
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
@@ -261,21 +265,14 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
   // The parameter re-narrows: TS narrowing does not cross function scopes.
   function buildBaseTree(baseSha: string): BaseTreeReport {
-    // BEFORE any checkout runs: the `worktree add` below executes configured
-    // content filters — the same surface `scratch-tree` refuses to reset
-    // through (see `localFilterCommands`), one directory over.
-    const filters = localFilterCommands(worktree);
-    if (filters.length > 0) {
-      return unavailable(
-        `the repository's local config defines content filter(s) ${filters
-          .map(inertPath)
-          .join(', ')} — the worktree add this command runs would EXECUTE ` +
-          'them, and two plain writes into the common dir are enough to plant ' +
-          'both the filter and the attributes that select it. Remove the ' +
-          'filter config — or the attributes file that uses it — if it is ' +
-          'not yours; until then no base tree is safe to create.',
-      );
-    }
+    // BEFORE any checkout runs: the `worktree add` below executes whatever
+    // the screen detects — the same surface `scratch-tree` refuses to reset
+    // through, one directory over.
+    const refusal = localFilterRefusal(
+      worktree,
+      'the worktree add this command runs',
+    );
+    if (refusal !== null) return unavailable(refusal);
     let sweep: SweepResult | undefined;
     try {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its

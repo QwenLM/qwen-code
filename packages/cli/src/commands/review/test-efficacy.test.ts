@@ -602,6 +602,38 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('flattens control bytes a planter put into the filter key it quotes', () => {
+    // A git config subsection name legally carries any byte but NUL and
+    // newline: a suite that plants `filter.evil<ESC>....smudge` is correctly
+    // refused, but the refusal then interpolates the key — and a raw ESC in
+    // out.json reaches the terminals and Markdown briefs that consume it,
+    // the exact sinks `inertPath` exists to protect. Measured: git accepts
+    // the key and emits the ESC byte raw.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-esc-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      const evilKey = 'filter.ev\x1bil.smudge';
+      execFileSync('git', ['config', evilKey, 'touch /tmp/qwen-never'], {
+        cwd: dir,
+      });
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).not.toContain('\x1b');
+      expect(r.detail).toContain('filter.ev il.smudge');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to run when the index hides a tracked file from the restore', () => {
     // `checkout --force` SILENTLY skips a file carrying skip-worktree, and
     // `clean` never touches a tracked file — so a bit the guest suite sets with

@@ -180,6 +180,37 @@ describe('runScratchTree', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
+  it('creates and resets the tree with a planted hook and fsmonitor inert', () => {
+    // NO_HOOKS covered hooks here from the start; `core.fsmonitor` is the
+    // one-write command-execution surface both the rebuild's `worktree add`
+    // and the reset's `checkout --force` run on an index refresh (probe, git
+    // 2.39: both verbs fire a planted command without the `-c` override).
+    // Removing the prefix from gitOut creates both markers.
+    const hooksDir = join(repo, '.git', 'hooks');
+    git(repo, 'config', 'core.hooksPath', hooksDir);
+    mkdirSync(hooksDir, { recursive: true });
+    const hook = join(hooksDir, 'post-checkout');
+    writeFileSync(hook, `#!/bin/sh\ntouch ${repo}/PWNED-hook\n`);
+    chmodSync(hook, 0o755);
+    git(worktree, 'config', 'core.fsmonitor', `touch ${repo}/PWNED-fsm`);
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.reused).toBe(false);
+    expect(existsSync(join(repo, 'PWNED-hook'))).toBe(false);
+    expect(existsSync(join(repo, 'PWNED-fsm'))).toBe(false);
+
+    // The RESET path too: dirty a tracked file so the checkout rewrites it,
+    // and re-run against the standing tree.
+    writeFileSync(join(r.path!, 'a.ts'), 'dirty\n');
+    const r2 = run();
+    expect(r2.available).toBe(true);
+    expect(r2.reused).toBe(true);
+    expect(existsSync(join(repo, 'PWNED-hook'))).toBe(false);
+    expect(existsSync(join(repo, 'PWNED-fsm'))).toBe(false);
+  });
+
   it('places it BESIDE the review worktree, never inside it', () => {
     // Nested, every probe file would land in the tree this command exists to
     // keep clean — and in the PR's own diff with it.
