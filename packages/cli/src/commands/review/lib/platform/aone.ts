@@ -660,6 +660,13 @@ export interface AoneSubmitResult {
  * and a retry posts it twice. So an ambiguous failure is counted as
  * LANDED for the do-not-re-run advisory — overcounting by one is a
  * cosmetic lie; undercounting is a duplicate post.
+ *
+ * `headMovedDuringPost` carries the mid-batch drift disclosure the
+ * success path re-reads for: a batch runs minutes of sequential execs,
+ * and an AGit-Flow amend pushed mid-batch orphans the landed pins at
+ * code the author already replaced. Undefined when the re-read itself
+ * failed — "could not verify" is not "verified stable", but it also
+ * must not mask the post failure.
  */
 export class AonePartialPostError extends Error {
   constructor(
@@ -668,6 +675,7 @@ export class AonePartialPostError extends Error {
     readonly inlineCommentIds: number[],
     readonly summaryPosted: boolean,
     readonly ambiguous: boolean = false,
+    readonly headMovedDuringPost?: boolean,
   ) {
     super(message);
     this.name = 'AonePartialPostError';
@@ -866,6 +874,19 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       !summaryPosted && postedIds.length === req.comments.length
         ? `; the summary did NOT land`
         : '';
+    // The same mid-batch drift the success path re-reads for: an amend
+    // pushed during the batch orphans the landed pins. Re-read tolerantly
+    // — a read failure degrades to unknown, it never masks the post
+    // failure — so the partial report carries the disclosure instead of
+    // silently dropping the warning the moment a write also fails.
+    let headMovedDuringPost: boolean | undefined;
+    try {
+      const after = mrView(req.prNumber, req.ownerRepo);
+      const afterHead = (after.sourceBranch ?? '').trim();
+      headMovedDuringPost = afterHead !== '' && afterHead !== req.commitId;
+    } catch {
+      headMovedDuringPost = undefined;
+    }
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
@@ -876,6 +897,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       ids,
       summaryPosted,
       true,
+      headMovedDuringPost,
     );
   }
 
@@ -913,14 +935,16 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     // execs (minutes for a long review), so a head that moves DURING it
     // slips the gate. Re-read once and disclose — the success report must
     // not claim the pins held. A read failure after a successful post must
-    // not fail the post.
+    // not fail the post, and leaves the field UNDEFINED: "could not
+    // verify" is not "verified stable", and submit discloses the two
+    // states differently.
     headMovedDuringPost: (() => {
       try {
         const after = mrView(req.prNumber, req.ownerRepo);
         const afterHead = (after.sourceBranch ?? '').trim();
         return afterHead !== '' && afterHead !== req.commitId;
       } catch {
-        return false;
+        return undefined;
       }
     })(),
     webUrl: view.detailUrl ?? '',

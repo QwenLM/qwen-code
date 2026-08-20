@@ -63,7 +63,13 @@ findings), and `--comment` on an Aone target refuses cleanly.
 - `comment-status.ts` anchor-status and `presubmit.ts` CI checks: skip for
   Aone v1 (the skill already handles their absence).
 
-`--comment` on an Aone target refuses with a clear message (posting is Phase 3).
+~~`--comment` on an Aone target refuses with a clear message (posting is Phase 3).~~
+**Superseded — Phase 3 landed.** `--comment` on an Aone target POSTS: `submit`
+routes the write at `submitAoneReview` (one `a1 repo mr comment create` per
+inline finding, then the summary comment, `a1 repo mr approve` on APPROVE).
+See the "Landed" entries in
+`2026-08-13-review-platform-provider-abstraction.md` for the write-safety
+semantics (head-drift refusal, partial-post reporting, host binding).
 
 ## Key design decisions
 

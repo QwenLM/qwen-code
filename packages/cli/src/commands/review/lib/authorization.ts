@@ -87,6 +87,18 @@ export interface WriteAuthorizationRequest {
    * skill's own review.)
    */
   host?: string;
+  /**
+   * True only for callers whose routing FALLS BACK to the recorded
+   * binding when no host is asserted (submit: the gh write binds
+   * explicitHost ?? recordedHost ?? cwdOriginHost). There the recording
+   * cannot contradict the routing it supplies — an absent `host` is NOT
+   * a github.com claim, and the pr-url host check is skipped instead of
+   * reading absence as one (which refused the ordinary flagless publish
+   * of a GHE-recorded review after the whole review ran). publish-assets
+   * leaves this false: its routing falls back to github.com/ambient, so
+   * an absent host IS github.com there and the comparison stands.
+   */
+  absentHostFollowsRecording?: boolean;
 }
 
 /**
@@ -387,15 +399,22 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     }
     // The host check stands on its own, NOT nested under the repo binding —
     // and it binds in BOTH directions: an absent req.host means the write
-    // routes at github.com, which is a host like any other, not an exemption.
+    // routes at github.com, which is a host like any other, not an exemption
+    // — UNLESS the caller's routing follows the recorded binding when no
+    // host is asserted (submit): there the recording supplies the routing
+    // host itself, so absence is not a github.com claim and cannot
+    // contradict the recording. Reading it as one refused the ordinary
+    // flagless publish of a GHE-recorded review after the whole review ran.
     // Hosts compare through hostsEquivalent, not raw equality — Aone is one
     // platform under TWO names (the CR URL records the web host
     // `code.alibaba-inc.com`; the skill's own `--host` rule for Aone targets
     // carries the git host `gitlab.alibaba-inc.com`). Raw equality refused
     // every codereview-URL target that followed that rule — the whole review
     // ran, and the write died at the gate.
+    const hostUnasserted =
+      req.host === undefined && req.absentHostFollowsRecording === true;
     const writeHost = (req.host ?? 'github.com').toLowerCase();
-    if (!hostsEquivalent(t.host.toLowerCase(), writeHost)) {
+    if (!hostUnasserted && !hostsEquivalent(t.host.toLowerCase(), writeHost)) {
       return {
         ok: false,
         why:

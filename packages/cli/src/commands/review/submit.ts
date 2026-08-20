@@ -52,6 +52,7 @@ import { getCliVersion } from '../../utils/version.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import {
   ghWithInput,
+  HOSTNAME_RE,
   isOwnerRepo,
   resolveGhHost,
   setGhHost,
@@ -219,10 +220,16 @@ function authorization(
     skillArgs: args.skillArgs,
     pr: args.pr,
     repo: args.repo,
-    // The EFFECTIVE host, not merely the flag: with --host absent the gh
-    // child inherits an operator-exported GH_HOST, so that is where this
-    // write would route — and what the gate must bind.
-    host: resolveGhHost(args.host),
+    // The host the CALLER asserted, never the ambient env: submit's
+    // routing never consults GH_HOST (the platform gate documents this),
+    // and with no flag the write routes at the recorded binding — so an
+    // env-resolved host here made the gate compare the recording against
+    // a host the write never takes and refuse the ordinary flagless
+    // publish. The recorded-binding fallback is declared below, and the
+    // ambient-env shape the flagless routing can still take (no recorded
+    // host, no cwd origin) is policed by the platform gate itself.
+    host: args.host?.trim() || undefined,
+    absentHostFollowsRecording: true,
   });
 }
 
@@ -605,6 +612,27 @@ export function runSubmit(
   //    keystrokes; a caller-typed flag is not entitled to retarget it.
   const recordedHost = auth.recordedHost;
   const explicitHost = args.host?.trim() || undefined;
+  // A SHAPED-BUT-EMPTY flag is not an absent one. The host value rides
+  // shell interpolation in agent-built commands (`--host "$REVIEW_HOST"`
+  // with the variable unset), and collapsing it to "no flag" would fire
+  // the very refusal the flag was the remedy for — byte-identically —
+  // sending the re-runner into a futile retry loop. Refuse it DISTINCTLY
+  // so the two failure states are tellable apart.
+  if (args.host !== undefined && explicitHost === undefined) {
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: \`--host\` was ` +
+        `passed but is EMPTY — an empty flag is not platform proof. ` +
+        `Re-run with \`--host <host>\` naming the host the target lives ` +
+        `on (or drop the flag entirely when the recorded review names ` +
+        `the host). The findings are in the terminal output and the ` +
+        `saved report.`,
+    );
+    writeStdoutLine(
+      JSON.stringify({ posted: false, reason: 'host-flag-empty' }, null, 2),
+    );
+    process.exitCode = 3;
+    return;
+  }
   if (
     explicitHost !== undefined &&
     recordedHost !== undefined &&
@@ -688,9 +716,65 @@ export function runSubmit(
   // (e.g. a GHE instance) posted wherever the ambient env pointed —
   // github.com's same-named repo — instead of where the review actually
   // ran; and a cwd-selected post restored ambient env inheritance, routing
-  // the write past the very clone that chose the platform. setGhHost
-  // validates its input; a1 writes never touch the gh host state.
-  if (!aoneWrite) setGhHost(explicitHost ?? recordedHost ?? cwdOriginHost);
+  // the write past the very clone that chose the platform. a1 writes never
+  // touch the gh host state.
+  if (!aoneWrite) {
+    const boundHost = explicitHost ?? recordedHost ?? cwdOriginHost;
+    // Validate BEFORE setGhHost: a recorded host is recorded VERBATIM
+    // (parse-args does not validate --host), and an invalid one — scheme,
+    // underscore — used to throw setGhHost's TypeError straight out of
+    // runSubmit: a failed command with a stack trace instead of the
+    // exit-3 refusal shape Step 7 treats as a complete, correct outcome.
+    // Same answer, structured shape, naming the offender and its origin.
+    if (boundHost !== undefined && !HOSTNAME_RE.test(boundHost)) {
+      writeStderrLine(
+        `REFUSED to post to ${args.repo}#${args.pr}: the host this ` +
+          `write would route at (${JSON.stringify(boundHost)}, from ` +
+          (explicitHost !== undefined
+            ? `the \`--host\` flag`
+            : recordedHost !== undefined
+              ? `the recorded review's \`--host\``
+              : `this clone's origin remote`) +
+          `) is not a hostname (optionally :port). Re-run with a valid ` +
+          `\`--host\`, or re-record the review with one. The findings ` +
+          `are in the terminal output and the saved report.`,
+      );
+      writeStdoutLine(
+        JSON.stringify({ posted: false, reason: 'invalid-host' }, null, 2),
+      );
+      process.exitCode = 3;
+      return;
+    }
+    setGhHost(boundHost);
+    // Nothing bound means the gh child INHERITS the ambient env — and an
+    // operator-exported GH_HOST pointing at a canonical Aone host (the
+    // org intranet export pattern) then routes the write at a host gh
+    // cannot post to, failing opaquely after validation and compose ran.
+    // Pre-PR this shape refused actionably; refuse actionably again.
+    if (
+      boundHost === undefined &&
+      isAoneCanonicalHost(resolveGhHost(args.host))
+    ) {
+      writeStderrLine(
+        `REFUSED to post to ${args.repo}#${args.pr}: nothing names the ` +
+          `host this write should route at, and the ambient \`GH_HOST\` ` +
+          `environment variable points at Aone Code ` +
+          `(${resolveGhHost(args.host)}) — gh cannot post there. Unset ` +
+          `GH_HOST for this command (posts at github.com), or re-run ` +
+          `with \`--host <host>\` naming the host the target lives on. ` +
+          `The findings are in the terminal output and the saved report.`,
+      );
+      writeStdoutLine(
+        JSON.stringify(
+          { posted: false, reason: 'ambient-gh-host-aone' },
+          null,
+          2,
+        ),
+      );
+      process.exitCode = 3;
+      return;
+    }
+  }
 
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
@@ -972,6 +1056,16 @@ export function runSubmit(
               `— it is never an agent action.`
             : ''),
       );
+      if (partial.headMovedDuringPost) {
+        // The same disclosure the success path prints — adding a write
+        // failure must not silently remove it: the landed pins may
+        // reference code the author already replaced, and the user
+        // hand-posting the remainder must know.
+        writeStderrLine(
+          `WARNING: the MR head MOVED during posting — the comments ` +
+            `that landed may reference code the author already replaced.`,
+        );
+      }
       writeStdoutLine(
         JSON.stringify(
           {
@@ -1041,6 +1135,15 @@ export function runSubmit(
           `may reference code the author already replaced. Re-review the ` +
           `new head before relying on the posted pins.`,
       );
+    } else if (result.headMovedDuringPost === undefined) {
+      // The post-batch re-read FAILED — "could not verify" is not
+      // "verified stable", and the success report must not claim the
+      // pins held.
+      writeStderrLine(
+        `WARNING: could not re-verify the MR head after posting — ` +
+          `confirm the pins still anchor the live head before relying ` +
+          `on them.`,
+      );
     }
     writeStdoutLine(
       JSON.stringify(
@@ -1049,6 +1152,14 @@ export function runSubmit(
           event,
           cappedBy,
           inlineComments: result.postedInline,
+          // The ids the success path reads back — the same audit the
+          // partial shape surfaces and the gh path's receipt records.
+          // Without them a successful run leaves nothing to reconcile
+          // "what did this post" against the MR.
+          postedCommentIds: result.inlineCommentIds,
+          ...(result.summaryCommentId !== undefined
+            ? { summaryCommentId: result.summaryCommentId }
+            : {}),
           floorEnforced: floorEnforced.length,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
@@ -1174,7 +1285,7 @@ export const submitCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The host the target lives on. SELECTS the platform the write lands on: a canonical Aone host (code./gitlab. alibaba-inc.com) routes the post at a1, anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). It is also the remedy the target-platform-unbound refusal names.',
+          'The host the target lives on. SELECTS the platform the write lands on: a canonical Aone host (code.alibaba-inc.com or gitlab.alibaba-inc.com) routes the post at a1, anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). It is also the remedy the target-platform-unbound refusal names.',
       })
       .option('dry-run', {
         type: 'boolean',
