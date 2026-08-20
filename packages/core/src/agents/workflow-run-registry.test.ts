@@ -427,6 +427,129 @@ describe('WorkflowRunRegistry', () => {
     expect(event.respond).not.toHaveBeenCalled();
   });
 
+  it('allows the same source to retry after an approval is rejected', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_rejected_retry'));
+    const emitter = new AgentEventEmitter();
+    const rejectedRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_rejected_retry', emitter);
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: rejectedRespond }),
+    );
+    await vi.waitFor(() => {
+      expect(rejectedRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+      );
+    });
+
+    r.setApprovalChangeCallback(() => {});
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_rejected_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('allows the same source to retry after TOOL_RESULT clears it', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_tool_result_retry'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const firstRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_tool_result_retry', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    emitter.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: 'workflow-agent-a',
+      round: 1,
+      callId: 'call-1',
+      name: 'Shell',
+      success: true,
+      timestamp: 1_700_000_000_200,
+    });
+
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_300,
+      }),
+    );
+
+    expect(r.get('wf_tool_result_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_300,
+      },
+    ]);
+    expect(firstRespond).not.toHaveBeenCalled();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('does not let an active duplicate block a later retry', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_duplicate_retry'));
+    r.setApprovalChangeCallback(() => {});
+    const firstEmitter = new AgentEventEmitter();
+    const duplicateEmitter = new AgentEventEmitter();
+    const firstRespond = vi.fn(async () => {});
+    const duplicateRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_duplicate_retry', firstEmitter);
+    r.bridgeApprovalEvents('wf_duplicate_retry', duplicateEmitter);
+
+    firstEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    duplicateEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: duplicateRespond }),
+    );
+    r.cancel('wf_duplicate_retry', 2_000);
+    await vi.waitFor(() => {
+      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+    r.register(reg('wf_duplicate_retry'));
+
+    const retryRespond = vi.fn(async () => {});
+    duplicateEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_duplicate_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(duplicateRespond).not.toHaveBeenCalled();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
   it('re-parks a hook-bounced approval after the prior emission resolves', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_hook_bounce'));
