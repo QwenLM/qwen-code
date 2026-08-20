@@ -158,11 +158,30 @@ export function redirectedAncestor(
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
 export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of [...GIT_ENV_REDIRECTS, ...GIT_ENV_CONFIG, ...GIT_ENV_EXEC])
-    delete env[key];
+  // Case-INSENSITIVE, because Windows env lookup is: `git_dir` and `Git_Dir`
+  // reach the child exactly as `GIT_DIR` does, while an exact-case delete on a
+  // plain object removes neither. `config/shared-env-keys.ts` — the file this
+  // list is modelled on — folds case for this reason, and diverging from the
+  // model was an oversight rather than a decision.
+  const drop = new Set(
+    [...GIT_ENV_REDIRECTS, ...GIT_ENV_CONFIG, ...GIT_ENV_EXEC].map((k) =>
+      k.toLowerCase(),
+    ),
+  );
   for (const key of Object.keys(env)) {
-    if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) delete env[key];
+    const lower = key.toLowerCase();
+    if (drop.has(lower) || /^git_config_(key|value)_\d+$/.test(lower)) {
+      delete env[key];
+    }
   }
+  // `refs/replace` redirects OBJECT lookup: one `git replace <sha> <evil>` in
+  // the common dir — a directory nothing in this pipeline wipes — and every
+  // later `worktree add --detach <sha>` and `checkout --detach <sha>` in this
+  // pipeline materialises the attacker's tree while `rev-parse <sha>` still
+  // answers the original, because rev-parse resolves the ref and the checkout
+  // resolves the object. Nothing here wants a replacement object, and the
+  // reader the pipeline points at `git show HEAD:` does not either.
+  env['GIT_NO_REPLACE_OBJECTS'] = '1';
   return env;
 }
 
@@ -982,10 +1001,27 @@ export function exposeDependencies(
   // COMMITTED SYMLINK at a workspace path is fully contained as a string and
   // still lands the same delete outside the tree; `readWorkspacePackages`
   // deliberately follows such links, because npm does.
-  const memberSources = members.map((dir) => ({
-    dir,
-    source: containedIn(dependencyRoot, dir),
-  }));
+  const memberSources = members
+    .map((dir) => ({
+      dir,
+      source: containedIn(dependencyRoot, dir),
+    }))
+    // A member that resolves to the dependency ROOT is not a member. npm
+    // accepts `workspaces: ["."]` in a root manifest and creates the self-link
+    // itself, and `containedIn(root, '.')` answers the root — which would put
+    // the whole shared review worktree into the whitelist below, so ANY
+    // `node_modules` link resolving anywhere inside it would be mirrored into
+    // the disposable tree as a read-write channel back. Reachable from a
+    // committed manifest with nothing executed, which is the line this file
+    // draws elsewhere.
+    .filter((m) => {
+      if (m.source === null) return true;
+      try {
+        return realpathSync(m.source) !== realpathSync(dependencyRoot);
+      } catch {
+        return true;
+      }
+    });
   // What a farm entry's symlink may resolve to, decided ONCE for every farm
   // this call builds: a `node_modules` it borrows from, or a workspace member
   // directory — npm's self-links. The resolved member directories are the
@@ -1128,11 +1164,21 @@ function removeUnownedNodeModules(
         try {
           const real = realpathSync(full);
           const root = realpathSync(tree);
-          if (
-            (real === root || real.startsWith(root + sep)) &&
-            statSync(full).isDirectory()
-          ) {
+          if (!statSync(full).isDirectory()) {
+            // A link to a FILE hides no directory tree.
+          } else if (real === root || real.startsWith(root + sep)) {
             inTreeLinks.push(real);
+          } else {
+            // Resolving OUT of the tree, and this half was silently skipped:
+            // the in-tree case got the disclosure and the outside case — the
+            // one a COMMITTED `vendor -> ../stash` produces with no execution
+            // at all — reported `{linked: n, failed: 0}` while a planted
+            // `node_modules` under the target steered resolution for every
+            // later run (Node realpaths the importing file, so an import under
+            // the link resolves in the stash). The state cannot be wiped from
+            // here — it is outside the tree this function owns — so it is
+            // COUNTED, which is what the contract promises.
+            done.failed++;
           }
         } catch {
           // Dangling or unreadable: nothing resolvable to hide anything.

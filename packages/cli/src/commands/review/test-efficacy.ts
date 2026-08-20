@@ -59,7 +59,7 @@ import {
   realpathSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, isAbsolute, sep } from 'node:path';
+import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
@@ -69,6 +69,7 @@ import { probeWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
   exposeDependencies,
+  redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
@@ -1519,20 +1520,60 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
   }
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd: probeTree,
-    encoding: 'utf8',
-    env: sanitizedGitEnv(),
-  });
+  const top = spawnSync(
+    'git',
+    [
+      'rev-parse',
+      '--path-format=absolute',
+      '--show-toplevel',
+      '--git-common-dir',
+      '--git-dir',
+    ],
+    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
   if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
     return top.error
       ? top.error.message
       : (top.stderr ?? '').toString().trim() ||
           `git rev-parse exited ${top.status}`;
   }
+  const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
   try {
-    if (realpathSync(top.stdout.trim()) !== realpathSync(probeTree)) {
+    if (realpathSync(toplevel) !== realpathSync(probeTree)) {
       return `the tree at ${probeTree} is not the root of its own checkout`;
+    }
+    // `--show-toplevel` prints the directory the `.git` FILE sits in, whatever
+    // that file points at — so a rewritten gitfile naming another repository
+    // passes the check above while the checkout below writes THAT repository's
+    // content into this tree and certifies it. `scratch-tree` gates its own
+    // reset on the admin entry pointing back, and this function is the same
+    // reset one directory over; it now asks the same question — of the shape
+    // that HAS an answer. A probe tree the pipeline built is a linked worktree
+    // and carries its `.git` as a gitfile; a plain checkout has a `.git`
+    // DIRECTORY and no admin entry to round-trip, and demanding one there
+    // would refuse every ordinary repository.
+    if (lstatSync(join(probeTree, '.git')).isFile()) {
+      const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
+      if (
+        realpathSync(dirname(resolve(gitDir, backpointer))) !==
+        realpathSync(probeTree)
+      ) {
+        return `${probeTree}'s admin entry does not point back at it`;
+      }
+      // And every ancestor between the tree and the repository it belongs to:
+      // a link above the tree redirects the checkout and the clean together,
+      // while every check here resolves through it and agrees with itself.
+      // Only for a LINKED worktree — a standalone checkout IS the repository
+      // root, so there is nothing between it and the stop point to walk, and
+      // an unbounded walk above it meets the system links (`/var` on macOS)
+      // this bound exists to stay below.
+      const redirected = redirectedAncestor(
+        dirname(resolve(probeTree)),
+        dirname(realpathSync(commonDir)),
+      );
+      if (redirected !== null) {
+        return `${redirected} is a symlink, so the restore would land wherever it points`;
+      }
     }
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
@@ -1573,6 +1614,31 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
         `git ${args[2]} exited ${r.status}`
       );
     }
+  }
+  // `checkout --force` SILENTLY skips a file carrying the skip-worktree bit,
+  // and `clean` never touches a tracked file — so a bit the suite set with
+  // `update-index` leaves its tampered content standing through a restore that
+  // returns "as the commit left it", with `git status` reading empty.
+  // `scratch-tree` documents this shape for the identical reset and refuses on
+  // it; this function did not read the bits at all.
+  const bits = spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
+    {
+      cwd: probeTree,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (bits.error || bits.status !== 0 || typeof bits.stdout !== 'string') {
+    return bits.error
+      ? bits.error.message
+      : (bits.stderr ?? '').toString().trim() ||
+          `git ls-files exited ${bits.status}`;
+  }
+  if (bits.stdout.split('\0').some((rec) => /^[a-zS]/.test(rec))) {
+    return 'the index carries skip-worktree or assume-unchanged bits, so the restore cannot have reached every tracked file';
   }
   return null;
 }
@@ -2783,9 +2849,31 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
+        // The probes were screened for symlinks ONCE, from the index, before
+        // the baseline — and every run since has executed the PR's own test
+        // code, which can replace a probe file with a link at any point. The
+        // mutation writers re-check their target immediately before they
+        // write; this collection had no equivalent, so a probe relinked out of
+        // the tree during an earlier run was collected THROUGH the link here
+        // and its verdict scored against code the revert never touched. A
+        // probe that escapes is dropped from this run rather than believed.
+        const collectable = probes.filter(
+          (p) => !probeTargetEscapes(probeTree, p),
+        );
+        for (const p of probes) {
+          if (collectable.includes(p)) continue;
+          results.push({
+            file: p,
+            verdict: 'inconclusive',
+            reason: 'not-run',
+            detail:
+              'the probe resolves through a symlink out of the probe tree — it was relinked after the baseline, so this run could not score it',
+          });
+        }
+
         const revertRun = runProbeSuite(
           probeTree,
-          probes,
+          collectable,
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,

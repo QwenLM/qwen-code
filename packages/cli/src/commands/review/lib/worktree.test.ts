@@ -673,6 +673,55 @@ describe('exposeDependencies', () => {
     }
   });
 
+  it('COUNTS a node_modules link that resolves out of the tree', () => {
+    // The in-tree half of this branch discloses and the outside half was a
+    // silent `continue`, so `{linked: n, failed: 0}` was reported while a
+    // committed `vendor -> ../stash` (mode 120000, no execution anywhere) kept
+    // a `node_modules` alive under the target: Node realpaths the importing
+    // file, so imports under the link resolve in the stash and decide every
+    // later run. The state is outside the tree and cannot be wiped from here —
+    // counting it is what the contract promises.
+    const root = tmp('escape-root-');
+    const probe = tmp('escape-probe-');
+    const stash = tmp('escape-stash-');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(stash, 'node_modules', 'evil'), { recursive: true });
+    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+    writeFileSync(join(probe, 'node_modules', '.qwen-review-farm'), root);
+    symlinkSync(stash, join(probe, 'vendor'));
+
+    const got = exposeDependencies(probe, root, { rebuild: true });
+
+    expect(got.failed).toBe(1);
+    // ...and the link itself is untouched, because it is not this tree's.
+    expect(lstatSync(join(probe, 'vendor')).isSymbolicLink()).toBe(true);
+  });
+
+  it('does not let `workspaces: ["."]` widen the self-link whitelist', () => {
+    // npm accepts a root manifest declaring itself a workspace and creates the
+    // self-link, so no planted symlink is needed: `containedIn(root, '.')`
+    // answers the root, and the whole shared review worktree would enter the
+    // whitelist — after which ANY node_modules link resolving anywhere inside
+    // it is mirrored into the disposable tree as a read-write channel back.
+    const root = tmp('selfws-root-');
+    const probe = tmp('selfws-probe-');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['.'] }),
+    );
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    symlinkSync(root, join(root, 'node_modules', 'r'));
+    writeFileSync(join(root, 'secret.txt'), 'shared worktree content\n');
+
+    const got = exposeDependencies(probe, root, { rebuild: true });
+
+    // The self-link naming the ROOT is not mirrored as a member self-link.
+    expect(got.selfLinked).toBe(0);
+    expect(existsSync(join(probe, 'node_modules', 'r', 'secret.txt'))).toBe(
+      false,
+    );
+  });
+
   it('links top-level and scoped packages, counting what it linked', () => {
     const root = tmp('expose-root-');
     const probe = tmp('expose-probe-');
@@ -1243,6 +1292,37 @@ describe('sanitizedGitEnv', () => {
       }
       // And it is still the caller's environment otherwise.
       expect(env['PATH']).toBe(saved['PATH']);
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('drops a case VARIANT too, and turns replacement objects off', () => {
+    // Windows env lookup is case-insensitive, so `git_dir` reaches the child
+    // exactly as `GIT_DIR` does while an exact-case delete on a plain object
+    // removes neither — the model this list is copied from
+    // (`config/shared-env-keys.ts`) folds case for this reason. And
+    // `refs/replace` redirects OBJECT lookup: one `git replace <sha> <evil>`
+    // in the common dir makes every `checkout --detach <sha>` here materialise
+    // someone else's tree while `rev-parse <sha>` still answers the original.
+    const saved = { ...process.env };
+    try {
+      process.env['git_dir'] = '/tmp/elsewhere/.git';
+      process.env['Git_Config_Count'] = '1';
+      process.env['git_config_key_0'] = 'core.fsmonitor';
+      process.env['GIT_ssh_COMMAND'] = 'touch /tmp/pwned';
+
+      const env = sanitizedGitEnv();
+
+      for (const key of [
+        'git_dir',
+        'Git_Config_Count',
+        'git_config_key_0',
+        'GIT_ssh_COMMAND',
+      ]) {
+        expect(env[key]).toBeUndefined();
+      }
+      expect(env['GIT_NO_REPLACE_OBJECTS']).toBe('1');
     } finally {
       process.env = saved;
     }

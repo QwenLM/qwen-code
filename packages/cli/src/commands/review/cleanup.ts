@@ -440,6 +440,26 @@ function scratchWorktreesOf(worktree: string): {
   };
 }
 
+/**
+ * Clear registrations whose worktree directory is gone. A no-op when none are.
+ *
+ * `releaseWorktree` runs this after its own unlink and says why: a
+ * registration whose tree once stood at a path wedges the next
+ * `git worktree add` there with `already exists`, and holds its branch checked
+ * out against `branch -D`. Best-effort like every other step on the cleanup
+ * path — a prune that fails must not mask the error that got us here.
+ */
+function pruneWorktrees(): void {
+  try {
+    execFileSync('git', ['worktree', 'prune'], {
+      stdio: 'pipe',
+      env: sanitizedGitEnv(),
+    });
+  } catch {
+    // Reported by the next `worktree add` if it mattered.
+  }
+}
+
 export function runCleanup(target: string): void {
   // Before anything is deleted: the whole temp dir hangs off one path, and a
   // symlink anywhere above it redirects EVERY sweep below — the scratch family,
@@ -550,6 +570,14 @@ export function runCleanup(target: string): void {
       if (symlink) {
         try {
           rmSync(path, { force: true });
+          // The registration outlives the link. `releaseWorktree` prunes after
+          // its own unlink for this exact reason — "a registration whose tree
+          // once stood at this path must not wedge the next `worktree add` or
+          // hold the branch checked out" — and this branch returns before ever
+          // reaching it, so the family paths were unlinked and reported swept
+          // while their admin entries stayed behind. It is the only prune in
+          // this function, and a no-op when nothing is stale.
+          pruneWorktrees();
           writeStdoutLine(`Removed ${label} link: ${path}`);
           removedAny = true;
         } catch (err) {

@@ -528,6 +528,40 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('refuses to run when the index hides a tracked file from the restore', () => {
+    // `checkout --force` SILENTLY skips a file carrying skip-worktree, and
+    // `clean` never touches a tracked file — so a bit the guest suite sets with
+    // `update-index` leaves its tampered content standing through a restore
+    // that answered "as the commit left it", with `git status` reading empty.
+    // `scratch-tree` documents this shape for the identical reset and refuses;
+    // this function did not read the bits at all.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-skipwt-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // A second tracked file, so `checkout -- .` still has something to do:
+      // with the only tracked path hidden the pathspec matches nothing and git
+      // fails for a different reason — fail-closed either way, but this test is
+      // about the oracle, not about that.
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      asCheckout(dir);
+      execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
+        cwd: dir,
+      });
+      writeFileSync(join(dir, 'a.ts'), 'MUTANT\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('skip-worktree');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to run when the tree HAS a .git it cannot resolve', () => {
     // The gate skips a directory with no `.git` because there is no commit to
     // restore FROM — but `.git` is untracked, so nothing ever restores IT, and

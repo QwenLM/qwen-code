@@ -58,6 +58,7 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
+  redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -269,15 +270,6 @@ function resetScratchTree(
   // resolves to. Discard-and-rebuild is the correct answer to all of it —
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
   try {
-    // The PARENT, before anything else. Every check below — the toplevel
-    // comparison, the common-dir equality, the backpointer round-trip —
-    // resolves THROUGH a link there and so they all agree with each other
-    // about a tree that is not this one, while `lstatSync(tree)` cannot see it
-    // at all: it dereferences every component except the last. This is the
-    // directory the pipeline creates its trees in (`.qwen/tmp`), which is the
-    // one component above the leaf that anything running in these trees can
-    // replace; `runCleanup` refuses its whole sweep for the same reason.
-    if (lstatSync(dirname(resolve(tree))).isSymbolicLink()) return false;
     if (!lstatSync(tree).isDirectory()) return false;
     // A genuine linked worktree carries its `.git` as a FILE naming its admin
     // entry, and its gitdir is `<common>/worktrees/<name>`. A tree claiming
@@ -303,6 +295,21 @@ function resetScratchTree(
         gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
       );
     if (commonOf(tree) !== commonOf(worktree)) return false;
+    // EVERY ancestor, not just the parent. The first cut lstat'd `dirname(tree)`
+    // on the stated premise that `.qwen/tmp` is the one component above the leaf
+    // anything here can replace — which is false one hop higher: a link at
+    // `.qwen` redirects the whole path, and then every check in this gate agrees
+    // with every other because they all resolve THROUGH it (measured: toplevel
+    // self-equality, common-dir equality, gitdir ≠ commondir and even the
+    // backpointer round-trip all pass, because the entry's own lexical path
+    // resolves through the same link). The walk is bounded at the repository the
+    // common dir belongs to — above that is the user's own layout, and `/var` is
+    // a symlink on every macOS box.
+    if (
+      redirectedAncestor(dirname(resolve(tree)), dirname(commonOf(worktree)))
+    ) {
+      return false;
+    }
     const gitdir = realpathSync(
       gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );

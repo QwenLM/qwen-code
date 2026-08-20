@@ -469,6 +469,16 @@ describe('runCleanup', () => {
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('Removed base worktree link'),
     );
+    // The registration outlives the link. This branch returns before ever
+    // reaching `releaseWorktree`, which is where the pipeline's only other
+    // prune lives — so without one here the family paths were reported swept
+    // while their admin entries stayed behind and wedged the next
+    // `worktree add` with `already exists`.
+    expect(mocks.execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'prune'],
+      expect.anything(),
+    );
   });
 
   it('does not announce a clean sweep when it could not list the family', () => {
