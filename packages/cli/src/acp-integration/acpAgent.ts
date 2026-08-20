@@ -5913,19 +5913,32 @@ class QwenAgent implements Agent {
           session.getConfig(),
         );
         if (modelReasoning) {
+          const effortValues = modelReasoning.toggleOnly
+            ? undefined
+            : modelReasoning.efforts;
           const selected =
             value === ACP_REASONING_EFFORT_NONE
               ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.efforts.find((effort) => effort === value);
+              : modelReasoning.toggleOnly
+                ? value === ACP_REASONING_EFFORT_DEFAULT
+                  ? ACP_REASONING_EFFORT_DEFAULT
+                  : undefined
+                : effortValues?.find((effort) => effort === value);
           if (!selected) {
+            const choices = [
+              ACP_REASONING_EFFORT_NONE,
+              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+            ];
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_NONE}, ${modelReasoning.efforts.join(', ')}`,
+              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
             );
           }
           const generation = session.getConfig().getContentGeneratorConfig();
           if (selected === ACP_REASONING_EFFORT_NONE) {
             generation.reasoning = false;
+          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+            generation.reasoning = undefined;
           } else {
             const current = generation.reasoning;
             generation.reasoning = {
@@ -13118,24 +13131,36 @@ class QwenAgent implements Agent {
           currentValue:
             config.getContentGeneratorConfig().reasoning === false
               ? ACP_REASONING_EFFORT_NONE
-              : (modelReasoning.efforts.find(
-                  (effort) => effort === currentModelEffort,
-                ) ?? modelReasoning.defaultEffort),
+              : modelReasoning.toggleOnly
+                ? ACP_REASONING_EFFORT_DEFAULT
+                : (modelReasoning.efforts.find(
+                    (effort) => effort === currentModelEffort,
+                  ) ?? modelReasoning.defaultEffort),
           options: [
             {
               value: ACP_REASONING_EFFORT_NONE,
               name: 'Thinking off',
               description: 'Disable thinking for this session',
             },
-            ...modelReasoning.efforts.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description: 'Apply this effort to the next request',
-            })),
+            ...(modelReasoning.toggleOnly
+              ? [
+                  {
+                    value: ACP_REASONING_EFFORT_DEFAULT,
+                    name: 'Thinking on',
+                    description: 'Use the model or provider thinking default',
+                  },
+                ]
+              : modelReasoning.efforts.map((effort) => ({
+                  value: effort,
+                  name: ACP_REASONING_EFFORT_NAMES[effort],
+                  description: 'Apply this effort to the next request',
+                }))),
           ],
           _meta: {
             'qwenCode/reasoning': {
-              defaultEffort: modelReasoning.defaultEffort,
+              ...(modelReasoning.toggleOnly
+                ? { toggleOnly: true }
+                : { defaultEffort: modelReasoning.defaultEffort }),
             },
           },
         }
@@ -13177,7 +13202,9 @@ class QwenAgent implements Agent {
     const reasoning = getModelConfiguration(config.getModel())?.reasoning;
     const currentEffort = config.getReasoningEffort?.();
     return reasoning?.thinking &&
-      (!currentEffort || reasoning.efforts.includes(currentEffort))
+      (reasoning.toggleOnly ||
+        !currentEffort ||
+        reasoning.efforts.includes(currentEffort))
       ? reasoning
       : undefined;
   }
