@@ -571,6 +571,100 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    // issue #9348: hybrid-thinking models (qwen3-class via OpenAI-compatible
+    // proxies) stream a first thinking phase through reasoning_content and may
+    // then emit a second, properly balanced <thinking>...</thinking> block
+    // inside content. The balanced block is legitimate — rejecting it
+    // hard-fails the whole turn (retries regenerate the same shape), which
+    // surfaced to users as "[API Error: Model response leaked thinking tags.]".
+    it('demotes a balanced inline thinking block to the thought channel when reasoning is present (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      const closing = converter.convertOpenAIChunkToGemini(
+        streamChunk('closing', { content: 'user asked X</thinking>' }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk('answer', { content: 'Answer here.' }, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'Let me think.' },
+      ]);
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'user asked X' },
+      ]);
+      const answerParts = answer.candidates?.[0]?.content?.parts ?? [];
+      expect(answerParts).toEqual([{ text: 'Answer here.' }]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('demotes a balanced inline thinking block split across chunks (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'phase one' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-start', { content: '<thi' }),
+        stream,
+      );
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-body', { content: 'nking>recheck</thi' }),
+        stream,
+      );
+      const third = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-close', { content: 'nking>Done.' }, 'stop'),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(second.candidates?.[0]?.content?.parts).toEqual([]);
+      const parts = third.candidates?.[0]?.content?.parts ?? [];
+      expect(parts).toEqual([
+        { thought: true, text: 'recheck' },
+        { text: 'Done.' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('still rejects an unclosed inline thinking block after reasoning (issue #9348 regression guard)', () => {
+      // The fix must not weaken real leak detection: an opening tag that is
+      // never balanced by a closing tag remains a PROTOCOL_TAG_LEAK.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('body', { content: 'user asked X' }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
     it('holds a long confirmed opening tag until its closing tag arrives', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
