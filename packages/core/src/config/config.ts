@@ -1214,6 +1214,12 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   autoCompactThreshold?: number;
   interactive?: boolean;
+  /**
+   * True when this process serves an ACP host (daemon or IDE): the host
+   * closes session children and may reload them from disk afterwards, so
+   * session snapshots must outlive this Config's shutdown.
+   */
+  acpMode?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
@@ -2059,6 +2065,7 @@ export class Config {
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
+  private readonly acpMode: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
@@ -2356,6 +2363,7 @@ export class Config {
     this.chatCompression = params.chatCompression;
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
+    this.acpMode = params.acpMode ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
@@ -5486,7 +5494,10 @@ export class Config {
       // throwaway temp directory (e.g. `%TEMP%\qwen-*-sess-*`): such a
       // path can never be resumed, so the entry would linger under
       // `<runtime>/projects/` forever (issue #7906). The startup sweep
-      // backstops crash paths that skip shutdown. The chat recording
+      // backstops crash paths that skip shutdown. ACP mode is the
+      // inverse exception: the host closes a session child and may load
+      // it back from disk right after, so this leg stays off there and
+      // leaves cleanup to the sweep's freshness + marker gates. The chat recording
       // flush happens in shutdown() before this runs, so no records are
       // removed mid-write. A handoff is the one exception: its writer
       // was sealed so a successor can resume from this very entry, so
@@ -5501,6 +5512,7 @@ export class Config {
       // class is left to the grace-gated startup sweep.
       try {
         if (
+          !this.acpMode &&
           !this.sessionWriterHandoffRequested &&
           isTempDirPath(this.storage.getProjectRoot())
         ) {

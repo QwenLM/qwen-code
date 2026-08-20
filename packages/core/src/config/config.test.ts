@@ -7266,6 +7266,36 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('keeps the project dir when serving an ACP host (daemon reload)', async () => {
+      // A daemon closes the session child and may load it back from
+      // disk right after; deleting the entry at child exit breaks the
+      // close/load contract. Cleanup is left to the startup sweep's
+      // freshness + marker gates.
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-acp-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+          acpMode: true,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+
     it('keeps the project dir for regular project roots', async () => {
       const config = new Config(baseParams);
       config['initialized'] = true;
