@@ -2319,7 +2319,27 @@ function readExistingProviderConfig(
             return ids.length > 0 ? [[option.url, [...new Set(ids)]]] : [];
           }),
         )
-      : undefined;
+      : existing && config.baseUrl === undefined
+        ? // Free-form provider: group saved models by their own endpoint so
+          // the client can restore the right model list when the typed
+          // endpoint matches a saved one. Without this map the client seeds
+          // only the restored endpoint's ids, and reconnecting at a sibling
+          // endpoint deletes that endpoint's saved models.
+          Object.fromEntries(
+            existing.models.reduce<Map<string, string[]>>(
+              (byEndpoint, model) => {
+                const endpoint = normalizeBaseUrlForMatching(
+                  model.baseUrl ?? baseUrl,
+                );
+                const ids = byEndpoint.get(endpoint) ?? [];
+                if (!ids.includes(model.id)) ids.push(model.id);
+                byEndpoint.set(endpoint, ids);
+                return byEndpoint;
+              },
+              new Map(),
+            ),
+          )
+        : undefined;
 
   return {
     protocol,

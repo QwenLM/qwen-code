@@ -429,10 +429,17 @@ export class AuthMessageHandler extends BaseMessageHandler {
       }
       const selectedIdSet = new Set(modelIds);
       preserveModels = provider.mergeModelsByIdentity
-        ? restoredModels.filter(
-            (model) =>
-              !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
-          )
+        ? restoredModels
+            .filter(
+              (model) =>
+                !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
+            )
+            // Stamp a selected legacy model before identity merging so its
+            // rich configuration survives canonical regeneration (same as
+            // the non-merge branch below and the CLI/ACP/serve surfaces).
+            .map((model) =>
+              model.baseUrl === undefined ? { ...model, baseUrl } : model,
+            )
         : existing?.models.flatMap((model) => {
             if (!isSelectedEndpointModel(model)) return [model];
             if (defaultIdSet.has(model.id) || !selectedIdSet.has(model.id)) {

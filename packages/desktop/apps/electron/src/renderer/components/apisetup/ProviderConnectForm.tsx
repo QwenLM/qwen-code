@@ -125,6 +125,10 @@ export function ProviderConnectForm({
   const customModelIdsRef = useRef<string[]>([]);
   const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
   const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
+  // The endpoint the per-endpoint model state was last reconciled against.
+  // The free-form input reconciles on blur (typed URLs are incomplete
+  // mid-keystroke, so onChange cannot switch model state).
+  const committedBaseUrlRef = useRef('');
 
   const groups = useMemo(
     () =>
@@ -193,6 +197,7 @@ export function ProviderConnectForm({
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
+    committedBaseUrlRef.current = baseUrl;
     setApiKey(initialApiKey(apiKeyDraftsRef.current));
     const seeded = seedProviderModelState(provider, baseUrl);
     customModelIdsRef.current = seeded.customModelIds;
@@ -480,6 +485,39 @@ export function ProviderConnectForm({
               <Input
                 value={baseUrl}
                 onChange={(event) => setBaseUrl(event.target.value)}
+                onBlur={() => {
+                  const nextBaseUrl = baseUrl.trim();
+                  const committed = committedBaseUrlRef.current;
+                  if (!nextBaseUrl || nextBaseUrl === committed) return;
+                  // Same reconciliation as the endpoint-options select:
+                  // save the old endpoint's edited custom ids and restore the
+                  // new endpoint's saved state, so reconnecting at a
+                  // sibling endpoint seeds that endpoint's models instead
+                  // of re-homing the previous endpoint's ids onto it.
+                  setBaseUrl(nextBaseUrl);
+                  committedBaseUrlRef.current = nextBaseUrl;
+                  setFormError(null);
+                  setApiKey(
+                    apiKeyAfterBaseUrlChange(
+                      selectedProvider,
+                      committed,
+                      nextBaseUrl,
+                      apiKey,
+                      apiKeyDraftsRef.current,
+                    ),
+                  );
+                  const nextModelIds = switchEndpointModelState(
+                    selectedProvider,
+                    committed,
+                    nextBaseUrl,
+                    modelIdsText,
+                    customModelIdsRef.current,
+                    customModelIdsByBaseUrlRef.current,
+                    trimmedDefaultModelIdsRef.current,
+                  );
+                  customModelIdsRef.current = nextModelIds.customModelIds;
+                  setModelIdsText(nextModelIds.modelIds.join(', '));
+                }}
                 placeholder={
                   selectedProvider.baseUrlPlaceholder ||
                   'https://api.example.com/v1'

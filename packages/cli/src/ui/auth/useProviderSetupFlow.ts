@@ -518,6 +518,11 @@ export function useProviderSetupFlow(
           model.baseUrl !== undefined &&
           normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
         if (!provider.mergeModelsByIdentity && belongsToAnotherEndpoint) {
+          // Non-merge providers own every endpoint, so sibling-endpoint
+          // models must be carried or the replace-owned patch deletes
+          // them. Merge providers own only the submitted endpoint —
+          // sibling entries are not removed there and carrying them would
+          // duplicate them (the preserved existing copy survives too).
           return true;
         }
         const belongsToSelectedMergeEndpoint =

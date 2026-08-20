@@ -345,6 +345,58 @@ describe('AuthMessageHandler', () => {
     );
   });
 
+  it('stamps a selected baseUrl-less legacy model for a merge provider', async () => {
+    // R34-4: custom-openai-compatible is mergeModelsByIdentity. A restored
+    // legacy model without baseUrl must be stamped with the submitted
+    // endpoint before identity merging, matching the non-merge branch and
+    // the CLI/ACP/serve surfaces — otherwise buildInstallPlan writes a
+    // duplicate regenerated entry and strands the rich generationConfig on
+    // an orphan.
+    const customUrl = 'https://my-proxy.example.com/v1';
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: 'legacy-custom',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce(customUrl)
+      .mockResolvedValueOnce('sk-custom-openai')
+      .mockResolvedValueOnce('legacy-custom');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({ openai: [legacyCustom] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        baseUrl: customUrl,
+        modelIds: ['legacy-custom'],
+        preserveModels: [
+          expect.objectContaining({
+            id: 'legacy-custom',
+            baseUrl: customUrl,
+            generationConfig: { contextWindowSize: 54321 },
+          }),
+        ],
+      }),
+    );
+  });
+
   // -- Custom provider flow ------------------------------------------------
   // The custom provider exercises every step in runProviderSetupFlow:
   // protocol pick, free-form URL input + scheme validation, API key,

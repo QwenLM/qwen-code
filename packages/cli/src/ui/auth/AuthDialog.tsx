@@ -209,7 +209,11 @@ export function getExistingProviderSetup(
     );
     const shouldPreserve =
       (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
-      (!belongsToAnotherEndpoint && !endpointDefaults.has(preserved.id));
+      // Custom models of every saved endpoint are carried: submitting at a
+      // sibling endpoint must rebuild its models from these rich entries,
+      // otherwise their stored generationConfig is silently reset. Sibling
+      // entries keep their own baseUrl and are written back unchanged.
+      !endpointDefaults.has(preserved.id);
     return shouldPreserve ? [preserved] : [];
   });
   const restoredModelIdSet = new Set(restoredModelIds);

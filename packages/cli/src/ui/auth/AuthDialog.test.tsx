@@ -340,7 +340,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     });
   });
 
-  it('scopes restored custom models to the restored endpoint', () => {
+  it("scopes the restored model seed to one endpoint but carries every endpoint's custom entries", () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();
 
@@ -389,7 +389,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         ['https://api.kimi.com/coding/v1', ['k3-256k', 'custom-code-model']],
         ['https://api.moonshot.ai/v1', ['kimi-k3', 'custom-kimi-model']],
       ]),
-      preserveModels: [codeCustom],
+      // Every endpoint's custom entries are carried: the user can switch the
+      // endpoint field before submitting, and the submitted endpoint's rich
+      // entries must survive the rebuild (buildCurrentInputs still filters
+      // sibling entries out of the actual submission for merge providers).
+      preserveModels: [codeCustom, apiCustom],
     });
   });
 
@@ -620,6 +624,16 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         {
           id: 'gpt-oss',
           baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
           envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
         },
         {
