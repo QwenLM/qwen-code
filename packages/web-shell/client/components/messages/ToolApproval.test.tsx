@@ -319,6 +319,57 @@ describe('ToolApproval accessibility', () => {
       pressKey(opts[0]!, 'ArrowDown');
       expect(document.activeElement).toBe(opts[1]);
     });
+
+    it('yields to a contenteditable composer (CodeMirror shape)', () => {
+      // The production composer is a CodeMirror EditorView — a contenteditable
+      // div inside `.cm-editor` (the textarea backend is touch devices only).
+      // The textarea cases above never exercise isEditableTarget's
+      // contenteditable branches; pin them so simplifying the helper to bare
+      // form controls cannot silently re-open #9571.
+      const editor = document.createElement('div');
+      editor.className = 'cm-editor';
+      const editable = document.createElement('div');
+      editable.setAttribute('contenteditable', 'true');
+      editor.appendChild(editable);
+      document.body.appendChild(editor);
+      act(() => {
+        editable.focus();
+      });
+      expect(document.activeElement).toBe(editable);
+      render(undefined);
+      expect(document.activeElement).toBe(editable);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+      editor.remove();
+    });
+
+    it('yields in shadow-DOM (portal) mode, where document.activeElement retargets', () => {
+      // Portal mode mounts the shell inside a shadow root, where
+      // document.activeElement retargets to the non-editable host; the guard
+      // must resolve the active element from the panel's own root instead.
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const shadowComposer = document.createElement('textarea');
+      shadowRoot.appendChild(shadowComposer);
+      const shadowContainer = document.createElement('div');
+      shadowRoot.appendChild(shadowContainer);
+      act(() => {
+        shadowComposer.focus();
+      });
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+
+      container = shadowContainer;
+      root = createRoot(container);
+      rerender(undefined);
+
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+      expect(optionButtons().some((o) => o === shadowRoot.activeElement)).toBe(
+        false,
+      );
+      host.remove();
+    });
   });
 
   it('confirms the clicked option', () => {

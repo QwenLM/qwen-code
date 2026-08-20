@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useMemo,
@@ -310,7 +311,14 @@ export function ToolApproval({
   // already topmost on mount still focuses its default.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation (by reading layout) before any passive
+  // effect runs — Chromium drops focus from the just-hidden composer during
+  // that recalculation, so a passive guard would read `body` and miss.
+  // Layout effects run right after DOM mutation, before any recalculation,
+  // while the hidden composer still holds focus.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -319,14 +327,11 @@ export function ToolApproval({
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
     // The approval can appear while the user is mid-typing in the composer:
-    // the same commit hides the composer and mounts this overlay, so focus is
-    // still on the editable target when this effect runs. Grabbing it would
-    // redirect the in-progress keystrokes — Enter-to-send, Space, digits — to
-    // the safe-default option and can confirm the request unintentionally.
-    // Yield to the editable target; the dialog stays reachable by Tab/click.
-    // (The composer is hidden via CSS in the same commit, so style recalc —
-    // and its focus drop — has not happened yet when effects run; the active
-    // element still reflects where the user was typing.)
+    // the same commit hides the composer and mounts this overlay. Grabbing
+    // focus would redirect the in-progress keystrokes — Enter-to-send, Space,
+    // digits — to the safe-default option and can confirm the request
+    // unintentionally. Yield to the editable target; the dialog stays
+    // reachable by Tab/click.
     if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
       return;
     }
