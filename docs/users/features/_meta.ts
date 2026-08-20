@@ -6,6 +6,7 @@ export default {
   'markdown-rendering': 'Markdown Rendering',
   'terminal-images': 'Terminal Images',
   'sub-agents': 'SubAgents',
+  'multi-agent-coordination': 'Multi-Agent Coordination',
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',

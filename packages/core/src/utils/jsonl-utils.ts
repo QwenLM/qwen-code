@@ -35,6 +35,15 @@ type JsonlReadOptions = {
   throwOnNonEnoentError?: boolean;
 };
 
+type JsonlReadLinesOptions = {
+  signal?: AbortSignal;
+};
+
+interface ParsedJsonlLine<T> {
+  records: T[];
+  complete: boolean;
+}
+
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
  */
@@ -66,12 +75,13 @@ function getFileLock(filePath: string): Mutex {
  *
  * Exported for unit tests; not part of the module's stable surface.
  */
-export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
+function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   const out: T[] = [];
   let depth = 0;
   let inString = false;
   let escape = false;
   let start = -1;
+  let complete = true;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (escape) {
@@ -84,6 +94,7 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
       continue;
     }
     if (c === '"') {
+      if (depth === 0) complete = false;
       inString = true;
       continue;
     }
@@ -97,18 +108,30 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
         try {
           out.push(JSON.parse(fragment) as T);
         } catch {
+          complete = false;
           // Skip un-parseable fragment; caller may still recover others.
         }
         start = -1;
       } else if (depth < 0) {
+        complete = false;
         // Unbalanced close brace — reset and keep scanning for the next
         // well-formed object rather than giving up on the whole line.
         depth = 0;
         start = -1;
       }
+    } else if (depth === 0 && !/\s/.test(c)) {
+      complete = false;
     }
   }
-  return out;
+  return {
+    records: out,
+    complete:
+      complete && out.length > 0 && depth === 0 && !inString && start === -1,
+  };
+}
+
+export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
+  return recoverObjectsFromLine<T>(line).records;
 }
 
 /**
@@ -123,7 +146,10 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
  * forwarding scalars or arrays would trip property accesses in callers
  * (`record.type`, `record.uuid`).
  */
-export function parseLineTolerant<T>(line: string, filePath: string): T[] {
+function parseLineTolerantWithIntegrity<T>(
+  line: string,
+  filePath: string,
+): ParsedJsonlLine<T> {
   try {
     const parsed = JSON.parse(line);
     if (
@@ -131,21 +157,25 @@ export function parseLineTolerant<T>(line: string, filePath: string): T[] {
       typeof parsed === 'object' &&
       !Array.isArray(parsed)
     ) {
-      return [parsed as T];
+      return { records: [parsed as T], complete: true };
     }
     debugLogger.warn(`Skipping non-object JSONL value in ${filePath}`);
-    return [];
+    return { records: [], complete: false };
   } catch {
-    const fragments = _recoverObjectsFromLine<T>(line);
-    if (fragments.length === 0) {
+    const recovered = recoverObjectsFromLine<T>(line);
+    if (recovered.records.length === 0) {
       debugLogger.warn(`Failed to parse line in ${filePath}`);
     } else {
       debugLogger.warn(
-        `Recovered ${fragments.length} record(s) from malformed line in ${filePath}`,
+        `Recovered ${recovered.records.length} record(s) from malformed line in ${filePath}`,
       );
     }
-    return fragments;
+    return recovered;
   }
+}
+
+export function parseLineTolerant<T>(line: string, filePath: string): T[] {
+  return parseLineTolerantWithIntegrity<T>(line, filePath).records;
 }
 
 async function closeLineReader(
@@ -168,42 +198,70 @@ async function closeLineReader(
  * Reads the first N lines from a JSONL file efficiently.
  * Returns an array of parsed objects.
  */
-export async function readLines<T = unknown>(
+async function readLinesWithIntegrityInternal<T = unknown>(
   filePath: string,
   count: number,
-): Promise<T[]> {
+  options: JsonlReadLinesOptions = {},
+): Promise<{ records: T[]; complete: boolean }> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
-    fileStream = fs.createReadStream(filePath);
+    options.signal?.throwIfAborted();
+    fileStream = options.signal
+      ? fs.createReadStream(filePath, { signal: options.signal })
+      : fs.createReadStream(filePath);
     rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
 
     const results: T[] = [];
+    let complete = true;
     for await (const line of rl) {
       if (results.length >= count) break;
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
-      for (const obj of parseLineTolerant<T>(trimmed, filePath)) {
+      const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
+      complete &&= parsed.complete;
+      for (const obj of parsed.records) {
         if (results.length >= count) break;
         results.push(obj);
       }
     }
 
-    return results;
+    options.signal?.throwIfAborted();
+    return { records: results, complete };
   } catch (error) {
+    options.signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(
         `Error reading first ${count} lines from ${filePath}:`,
         error,
       );
     }
-    return [];
+    return { records: [], complete: false };
   } finally {
     await closeLineReader(rl, fileStream);
+    options.signal?.throwIfAborted();
   }
+}
+
+export async function readLines<T = unknown>(
+  filePath: string,
+  count: number,
+  options: JsonlReadLinesOptions = {},
+): Promise<T[]> {
+  return (await readLinesWithIntegrityInternal<T>(filePath, count, options))
+    .records;
+}
+
+/** Reports whether every scanned non-empty line was fully recoverable. */
+export async function readLinesWithIntegrity<T = unknown>(
+  filePath: string,
+  count: number,
+  options: JsonlReadLinesOptions = {},
+): Promise<{ records: T[]; complete: boolean }> {
+  return readLinesWithIntegrityInternal<T>(filePath, count, options);
 }
 
 /**

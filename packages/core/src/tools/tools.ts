@@ -466,6 +466,13 @@ export type ToolArtifactKind =
   | 'notebook'
   | 'other';
 
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
+
 export type ToolArtifactStorage =
   | 'workspace'
   | 'external_url'
@@ -659,6 +666,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -914,6 +922,8 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];

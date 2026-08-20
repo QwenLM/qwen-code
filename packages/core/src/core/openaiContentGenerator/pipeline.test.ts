@@ -43,6 +43,8 @@ import {
   setGenAiUsageProvenance,
 } from '../../telemetry/gen-ai-usage.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -115,6 +117,9 @@ describe('ContentGenerationPipeline', () => {
     mockContentGeneratorConfig = {
       model: 'test-model',
       authType: 'openai' as AuthType,
+      // Official endpoint so response_format assertions exercise the
+      // buildResponseFormat gate (custom endpoints suppress it).
+      baseUrl: 'https://api.openai.com/v1',
       samplingParams: {
         temperature: 0.7,
         top_p: 0.9,
@@ -749,6 +754,39 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'remove required tool selection when thinking budget enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { thinking_budget: 4096 },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'remove required tool selection when a string thinking budget enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { thinking_budget: '4096' },
+        thinkingMandatory: undefined,
+        reasoning: { effort: 'high' },
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when thinking is explicitly disabled alongside a budget',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-max',
+        extraBody: { thinking_budget: 4096 },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
         name: 'preserve required tool selection when reasoning effort is none',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max',
@@ -865,6 +903,30 @@ describe('ContentGenerationPipeline', () => {
         reasoning: undefined,
         includeThoughts: false,
         expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when a null thinking budget means unset',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-max',
+        extraBody: { thinking_budget: null },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'strip the tier-native disable shape for thinkingMandatory models',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extraBody: { reasoning_effort: 'none' },
+        thinkingMandatory: true,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedReasoningEffort: undefined,
         expectedToolChoice: undefined,
       },
     ])('should $name', async (testCase) => {
@@ -1010,6 +1072,82 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(true);
       expect(apiCall.reasoning_effort).toBe('high');
       expect(apiCall.tool_choice).toBe('required');
+    });
+
+    it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
+      // The provider canonicalizes the documented extra_body
+      // `enable_thinking: false` escape hatch into the tiered family's
+      // canonical disable shape (`reasoning_effort: 'none'`) even when no
+      // effort tier ships. The thinkingMandatory strip must catch that
+      // shape too: on a mandatory-thinking model it is a guaranteed
+      // request failure, exactly like the boolean it replaced.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        authType: AuthType.QWEN_OAUTH,
+        thinkingMandatory: true,
+        extra_body: { enable_thinking: false },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'side-query:escape-hatch'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.8-max-preview',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: true },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:escape-hatch');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBeUndefined();
+      expect(apiCall.tool_choice).toBeUndefined();
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
@@ -4214,6 +4352,60 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('buildResponseFormat endpoint gate', () => {
+    const jsonModeRequest = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      config: { responseMimeType: 'application/json' },
+    };
+
+    it('omits response_format on custom OpenAI-compatible endpoints', () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.custom-provider.com/v1';
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toBeUndefined();
+    });
+
+    it('keeps json_object response_format on the official endpoint', () => {
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+
+    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              ok: { type: 'boolean' },
+              note: { type: 'string' },
+            },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+
+    it('falls back to json_object when a property lacks a type', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: { ok: {} },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+  });
+
   describe('buildRequest', () => {
     it('should build request with sampling parameters', async () => {
       // Arrange
@@ -4300,11 +4492,12 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should allow provider to enhance request', async () => {
+    it('should map JSON mode before provider enhancement', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { responseMimeType: 'application/json' },
       };
       const userPromptId = 'test-prompt-id';
       const mockMessages = [
@@ -4339,6 +4532,7 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           model: 'test-model',
           messages: mockMessages,
+          response_format: { type: 'json_object' },
         }),
         userPromptId,
       );
@@ -4350,6 +4544,480 @@ describe('ContentGenerationPipeline', () => {
           signal: undefined,
         }),
       );
+    });
+
+    it('uses json_schema when a response schema is present', async () => {
+      const schema = {
+        type: 'object',
+        properties: { verdict: { type: 'string' } },
+        required: ['verdict'],
+        additionalProperties: false,
+      };
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: schema,
+        },
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema,
+              strict: true,
+            },
+          },
+        }),
+        userPromptId,
+      );
+    });
+
+    it('normalizes responseJsonSchema before strict OpenAI output', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              verdict: { type: 'string', minLength: 1 },
+            },
+            required: ['verdict'],
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { verdict: { type: 'string' } },
+                required: ['verdict'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
+      );
+    });
+
+    it('uses json_schema for compatible Gemini responseSchema configs', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: { ok: { type: 'BOOLEAN' } },
+            required: ['ok'],
+            additionalProperties: false,
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' } },
+                required: ['ok'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
+      );
+    });
+
+    it('adds an official OpenAI session cache key to regular requests', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.5';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.5',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        },
+        'prompt-id',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+          messages,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('partitions official OpenAI cache keys for concurrent subagents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a subagent' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runWithAgentContext('Explore-a1b2c3d4', () =>
+        pipeline.execute(
+          {
+            model: 'gpt-5.6',
+            contents: [
+              { role: 'user', parts: [{ text: 'Hello from a subagent' }] },
+            ],
+          },
+          'prompt-id',
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123:Explore-a1b2c3d4',
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('preserves the session cache key for forked agents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a fork' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runInForkContext(() =>
+        runWithAgentContext('fork-a1b2c3d4', () =>
+          pipeline.execute(
+            {
+              model: 'gpt-5.6',
+              contents: [
+                { role: 'user', parts: [{ text: 'Hello from a fork' }] },
+              ],
+            },
+            'prompt-id',
+          ),
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('does not add explicit cache fields to regular GPT-5.6 requests', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'First question' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Follow-up question' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: unknown;
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages).toEqual(messages);
+    });
+
+    it('does not add official OpenAI cache fields when cache control is disabled', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockContentGeneratorConfig.enableCacheControl = false;
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as Record<string, unknown>;
+      expect(sent['prompt_cache_key']).toBeUndefined();
+      expect(sent['prompt_cache_options']).toBeUndefined();
+    });
+
+    it('does not add official OpenAI cache fields to third-party compatible endpoints', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: unknown;
+      };
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages).toEqual(messages);
+    });
+
+    it('marks the stable official OpenAI prefix for GPT-5.6 compression', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
+      expect(sent.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'main request',
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        },
+      ]);
+      expect(sent.messages.at(-1)?.content).toBe('compression directive');
+    });
+
+    it('does not add official OpenAI cache fields when baseUrl is unset', async () => {
+      mockContentGeneratorConfig.baseUrl = undefined;
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages[1]?.content).toBe('main request');
     });
 
     it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {
@@ -5371,42 +6039,6 @@ describe('ContentGenerationPipeline', () => {
       await consume;
       expect(settled).toBe(true);
       expect(gated.wasReturned()).toBe(true);
-    });
-
-    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
-      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
-      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
-      // WITHOUT the code. If the inactivity timeout were routed through it, the
-      // retryable-transport classification (which reads err.code) would be lost.
-      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
-        (error: unknown) => {
-          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
-            throw new Error('stripped'); // the production failure mode
-          }
-          throw error;
-        },
-      );
-      const gated = gatedStream(); // silent
-      (mockClient.chat.completions.create as Mock).mockResolvedValue(
-        gated.stream,
-      );
-      const p = buildPipeline(1000);
-      const gen = await p.executeStream(
-        streamingRequest(new AbortController().signal),
-        'id',
-      );
-      const captured = (async () => {
-        for await (const _ of gen) {
-          /* drain */
-        }
-      })().catch((e: unknown) => e);
-      await vi.advanceTimersByTimeAsync(1000);
-      const err = await captured;
-      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
-      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
-      expect(gated.wasReturned()).toBe(true);
-      // Proves the bypass: the handler (which would strip the code) is skipped.
-      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
     it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {

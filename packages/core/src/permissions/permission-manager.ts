@@ -16,7 +16,10 @@ import {
 import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import {
+  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
+} from '../utils/shellAstParser.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -233,7 +236,10 @@ export class PermissionManager {
           SHELL_TOOL_NAMES.has(toolName) &&
           command !== undefined
         ) {
-          bashDecision = await this.resolveDefaultPermission(command);
+          bashDecision = await this.resolveDefaultPermission(
+            command,
+            ctx.cwd ?? this.config.getCwd?.(),
+          );
         }
       }
     } else {
@@ -449,6 +455,9 @@ export class PermissionManager {
     };
 
     let mostRestrictive: ResolvedDecision = 'allow';
+    const changesDirectory = subCommands.some((command) =>
+      /^\s*(?:cd|pushd)(?:\s|$)/.test(command),
+    );
 
     for (const subCmd of subCommands) {
       const subCtx: PermissionCheckContext = {
@@ -461,7 +470,10 @@ export class PermissionManager {
       // (same logic as ShellToolInvocation.getDefaultPermission)
       const decision: ResolvedDecision =
         rawDecision === 'default'
-          ? await this.resolveDefaultPermission(subCmd)
+          ? await this.resolveDefaultPermission(
+              changesDirectory ? ctx.command! : subCmd,
+              ctx.cwd ?? this.config.getCwd?.(),
+            )
           : (rawDecision as ResolvedDecision);
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
@@ -495,9 +507,12 @@ export class PermissionManager {
    */
   private async resolveDefaultPermission(
     command: string,
+    cwd?: string,
   ): Promise<'allow' | 'ask'> {
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = cwd
+        ? await isShellCommandReadOnlyASTInDirectory(command, cwd)
+        : await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
         return 'allow';
       }

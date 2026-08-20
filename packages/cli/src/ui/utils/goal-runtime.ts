@@ -13,6 +13,7 @@ import {
 export function shouldDisplayGoalStateCause(cause: GoalStateCause): boolean {
   switch (cause) {
     case 'turn_finished':
+    case 'checkpoint':
     case 'verifier_accept':
       return false;
     case 'verifier_reject':

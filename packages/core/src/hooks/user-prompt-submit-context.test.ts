@@ -6,12 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
 } from './user-prompt-submit-context.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 describe('wrapUserPromptSubmitContext', () => {
   it('wraps context between the open and close tags', () => {
@@ -80,10 +80,28 @@ describe('isUserPromptSubmitContextPartText', () => {
     ).toBe(false);
   });
 
+  it('rejects nested reserved tags in the body', () => {
+    expect(
+      isUserPromptSubmitContextPartText(
+        wrapUserPromptSubmitContext(
+          `inner ${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG} tag`,
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('rejects an unterminated open tag', () => {
     expect(
       isUserPromptSubmitContextPartText(
         `${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG}\nctx`,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a complete block without newline delimiters', () => {
+    expect(
+      isUserPromptSubmitContextPartText(
+        `${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG}ctx${USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG}`,
       ),
     ).toBe(false);
   });

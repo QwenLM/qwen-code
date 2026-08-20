@@ -247,6 +247,8 @@ export interface SubmitPromptActionReturn {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. When set, this prompt (and any tool-call
    * continuations it spawns) runs on the given model without changing the

@@ -19,9 +19,18 @@ test('uses docs_only for markdown-only changes', () => {
 
 test('uses docs_only for uppercase and extensionless docs', () => {
   assert.equal(
-    classifyChangedFiles(['README.MD', 'docs/guide.MDX', 'LICENSE', 'README']),
+    classifyChangedFiles(['README.MD', 'docs/guide.MD', 'LICENSE', 'README']),
     'docs_only',
   );
+});
+
+test('MDX is executable content, never docs_only', () => {
+  // MDX pages can import components and carry expressions — a runtime/build
+  // failure surface the docs-only downgrade must not skip over.
+  assert.equal(classifyChangedFiles(['docs/guide.mdx']), 'full');
+  assert.equal(classifyChangedFiles(['docs/guide.MDX']), 'full');
+  assert.equal(classifyChangedFiles(['README.mdx']), 'full');
+  assert.equal(classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']), 'full');
 });
 
 test('falls back to full for root docs names used as directories', () => {
@@ -113,4 +122,15 @@ test('falls back to full for runtime markdown assets and instruction files', () 
     'full',
   );
   assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
+});
+
+test('reserved prose basenames classify docs_only only with inert extensions', () => {
+  assert.equal(classifyChangedFiles(['README.md']), 'docs_only');
+  assert.equal(classifyChangedFiles(['LICENSE']), 'docs_only');
+  assert.equal(classifyChangedFiles(['SECURITY.txt']), 'docs_only');
+  // Executable files named after reserved basenames must never downgrade a
+  // review: the open-extension form classified all of these as docs.
+  assert.equal(classifyChangedFiles(['README.js']), 'full');
+  assert.equal(classifyChangedFiles(['SECURITY.ts']), 'full');
+  assert.equal(classifyChangedFiles(['LICENSE.sh']), 'full');
 });

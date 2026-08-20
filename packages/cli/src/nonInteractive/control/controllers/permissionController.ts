@@ -258,6 +258,7 @@ export class PermissionController extends BaseController {
    * This is passed to executeToolCall to hook into CoreToolScheduler updates
    */
   getToolCallUpdateCallback(): (toolCalls: unknown[]) => void {
+    const turnSignal = this.getTurnRequestAbortSignal();
     return (toolCalls: unknown[]) => {
       for (const call of toolCalls) {
         if (
@@ -271,7 +272,7 @@ export class PermissionController extends BaseController {
             !this.pendingOutgoingRequests.has(awaiting.request.callId)
           ) {
             this.pendingOutgoingRequests.add(awaiting.request.callId);
-            void this.handleOutgoingPermissionRequest(awaiting);
+            void this.handleOutgoingPermissionRequest(awaiting, turnSignal);
           }
         }
       }
@@ -330,7 +331,7 @@ export class PermissionController extends BaseController {
     event: TeammateApprovalRequestEvent,
   ): Promise<void> {
     try {
-      if (this.context.abortSignal?.aborted) {
+      if (this.context.abortSignal.aborted) {
         await event.respond(ToolConfirmationOutcome.Cancel);
         return;
       }
@@ -504,6 +505,7 @@ export class PermissionController extends BaseController {
    */
   private async handleOutgoingPermissionRequest(
     toolCall: WaitingToolCall,
+    signal: AbortSignal,
   ): Promise<void> {
     const requiresUserInteraction =
       toolCall.invocation?.requiresUserInteraction?.() === true;
@@ -513,7 +515,7 @@ export class PermissionController extends BaseController {
         : `The host could not present the required approval for "${toolCall.request.name}".`;
     try {
       // Check if already aborted
-      if (this.context.abortSignal?.aborted) {
+      if (signal.aborted) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
         );
@@ -557,7 +559,7 @@ export class PermissionController extends BaseController {
           blocked_path: null,
         } as CLIControlPermissionRequest,
         this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
-        this.context.abortSignal,
+        signal,
       );
 
       if (response.subtype !== 'success') {

@@ -4,8 +4,12 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './turnOutputSelectors';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import type { ACPToolCall, Message } from '../../adapters/types';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 
 type ToolGroupMessage = Extract<Message, { role: 'tool_group' }>;
 
@@ -221,7 +225,7 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
-  it('omits stats for large full-content diffs', () => {
+  it('shows stats for large full-content diffs', () => {
     const oldContent = Array.from({ length: 1001 }, (_, index) => `${index}`)
       .join('\n')
       .concat('\n');
@@ -245,11 +249,50 @@ describe('turnOutputSelectors', () => {
     ];
 
     const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
-    expect(change?.additions).toBeUndefined();
-    expect(change?.deletions).toBeUndefined();
+    expect(change).toMatchObject({
+      additions: 1001,
+      deletions: 1001,
+    });
     expect(change?.diffs).toEqual([
       { oldText: oldContent, newText: newContent, fullContent: true },
     ]);
+  });
+
+  it('shows accurate stats for a large file with a small edit', () => {
+    const oldContent = Array.from(
+      { length: 2000 },
+      (_, index) => `line ${index}`,
+    )
+      .join('\n')
+      .concat('\n');
+    const newContent = [
+      ...oldContent.split('\n').slice(0, 1000),
+      'inserted line',
+      ...oldContent.split('\n').slice(1000, -1),
+    ]
+      .join('\n')
+      .concat('\n');
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: oldContent,
+            newContent,
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
   });
 
   it('omits stats for unrelated partial diffs', () => {
@@ -474,6 +517,51 @@ describe('turnOutputSelectors', () => {
         newText: 'export const value = 1;\nconsole.log(value);\n',
         fullContent: true,
       },
+    ]);
+  });
+
+  it('keeps the complete write_file diff when a preview is also present', () => {
+    const rawContent = 'export const value = 1;\nconsole.log(value);\n';
+    const blocks: DaemonTranscriptBlock[] = [
+      {
+        id: 'u1',
+        kind: 'user',
+        text: 'write file',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'write-block',
+        kind: 'tool',
+        toolCallId: 'write-1',
+        toolName: 'write_file',
+        title: 'Write src/generated.ts',
+        status: 'completed',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: rawContent,
+        },
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_PREVIEW\n',
+        },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      path: 'src/generated.ts',
+      additions: 2,
+      deletions: 0,
+    });
+    expect(change?.diffs).toEqual([
+      { oldText: '', newText: rawContent, fullContent: true },
     ]);
   });
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,6 +14,7 @@ import {
   toSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
+  deleteWorkflowSnapshot,
   MAX_RETAINED_SNAPSHOTS,
 } from './workflow-snapshot.js';
 import type { WorkflowTask } from './workflow-run-registry.js';
@@ -38,9 +39,25 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     abortController: new AbortController(),
     currentPhase: null,
     phases: ['Plan', 'Build'],
+    phaseVisits: [],
+    currentPhaseVisitId: null,
+    dispatches: [],
     agentsDispatched: 3,
     agentsCompleted: 3,
     recentLogs: ['log1'],
+    events: [
+      {
+        id: 'event-1',
+        type: 'log',
+        at: 1_700_000_004_000,
+        message: 'log1',
+      },
+      {
+        id: 'event-2',
+        type: 'workflow-completed',
+        at: 1_700_000_005_000,
+      },
+    ],
     tokensSpent: 450,
     tokenBudgetTotal: 1000,
     perPhaseTokens: new Map<string | null, number>([
@@ -55,8 +72,23 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
 }
 
 describe('toSnapshot', () => {
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'rejects an active %s workflow',
+    (status) => {
+      expect(() => toSnapshot(task({ status }))).toThrow(
+        'Cannot snapshot active workflow wf_a.',
+      );
+    },
+  );
+
   it('flattens perPhaseTokens Map into [phaseOrNull, tokens] pairs', () => {
-    const s = toSnapshot(task());
+    const s = toSnapshot(
+      task({
+        description: 'Review and fix',
+        sourceRunId: 'wf_source',
+        startMode: 'rerun',
+      }),
+    );
     expect(s.perPhaseTokens).toEqual([
       ['Plan', 200],
       [null, 50],
@@ -64,6 +96,11 @@ describe('toSnapshot', () => {
     expect(s.runId).toBe('wf_a');
     expect(s.script).toBe('return 1;');
     expect(s.result).toEqual({ answer: 42 });
+    expect(s).toMatchObject({
+      description: 'Review and fix',
+      sourceRunId: 'wf_source',
+      startMode: 'rerun',
+    });
   });
 
   it('replaces a non-JSON-serializable result with a placeholder string', () => {
@@ -76,7 +113,9 @@ describe('toSnapshot', () => {
     const t = task();
     const s = toSnapshot(t);
     t.phases.push('Mutated');
+    t.events[0]!.at = 0;
     expect(s.phases).toEqual(['Plan', 'Build']);
+    expect(s.events?.[0]?.at).toBe(1_700_000_004_000);
   });
 
   it('never projects live pending approval data', () => {
@@ -110,6 +149,7 @@ describe('toSnapshot', () => {
     expect(serialized).not.toContain('PRIVATE_DESCRIPTION_SENTINEL');
     expect(serialized).not.toContain('PRIVATE_DIFF_SENTINEL');
     expect(toSnapshot(live)).not.toHaveProperty('pendingApprovals');
+    expect(toSnapshot(live).events).toEqual(live.events);
   });
 });
 
@@ -133,6 +173,64 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       ['Plan', 200],
       [null, 50],
     ]);
+    expect(list[0].events).toEqual([
+      {
+        id: 'event-1',
+        type: 'log',
+        at: 1_700_000_004_000,
+        message: 'log1',
+      },
+      {
+        id: 'event-2',
+        type: 'workflow-completed',
+        at: 1_700_000_005_000,
+      },
+    ]);
+  });
+
+  it('loads a legacy snapshot without an event ledger', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_legacy' }));
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath('wf_legacy');
+    const parsed = JSON.parse(
+      await fs.readFile(snapshotPath, 'utf8'),
+    ) as Record<string, unknown>;
+    delete parsed['events'];
+    delete parsed['phaseVisits'];
+    delete parsed['dispatches'];
+    delete parsed['description'];
+    await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list).toHaveLength(1);
+    expect(list[0].events).toBeUndefined();
+  });
+
+  it('freezes the snapshot projection before the first fs await', async () => {
+    // R11-27: in-flight dispatches keep mutating the live entry across
+    // the fs yields — a projection captured after the first await would
+    // freeze the snapshot at an fs-timing-dependent point mid-drain
+    // (agents_completed reading higher than the settlement value).
+    const config = fakeConfig(projectDir);
+    const t = task({ runId: 'wf_freeze', agentsCompleted: 1 });
+    const realMkdir = fs.mkdir.bind(fs);
+    const mkdirSpy = vi
+      .spyOn(fs, 'mkdir')
+      .mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
+        // Simulate an in-flight dispatch draining across the yield.
+        t.agentsCompleted += 1;
+        return realMkdir(...args);
+      });
+    try {
+      await writeWorkflowSnapshot(config, t);
+    } finally {
+      mkdirSpy.mockRestore();
+    }
+    const list = await listWorkflowSnapshots(config);
+    expect(list).toHaveLength(1);
+    // The settlement value, not the post-await drained value.
+    expect(list[0].agentsCompleted).toBe(1);
   });
 
   it('lists newest-first by startTime', async () => {
@@ -161,6 +259,92 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     await fs.writeFile(path.join(dir, 'broken.json'), '{ not json', 'utf8');
     const list = await listWorkflowSnapshots(config);
     expect(list.map((s) => s.runId)).toEqual(['wf_good']);
+  });
+
+  it('skips parseable files that do not match the snapshot contract', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_good' }));
+    const dir = config.storage.getWorkflowRunsDir();
+    await fs.writeFile(
+      path.join(dir, 'wf_invalid.json'),
+      JSON.stringify({ runId: 'wf_invalid', status: 'completed' }),
+      'utf8',
+    );
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list.map((s) => s.runId)).toEqual(['wf_good']);
+  });
+
+  it('deletes one saved run and its resume journal', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_abcd';
+    await writeWorkflowSnapshot(config, task({ runId }));
+    const journalPath = config.storage.getWorkflowRunJournalPath(runId);
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+
+    await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(true);
+
+    await expect(
+      fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
+    ).rejects.toThrow();
+    await expect(fs.access(path.dirname(journalPath))).rejects.toThrow();
+    await expect(listWorkflowSnapshots(config)).resolves.toEqual([]);
+  });
+
+  it('keeps the snapshot and reports failure when journal deletion fails', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_dead';
+    await writeWorkflowSnapshot(config, task({ runId }));
+    const journalPath = config.storage.getWorkflowRunJournalPath(runId);
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+    const rmSpy = vi
+      .spyOn(fs, 'rm')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('busy'), { code: 'EBUSY' }),
+      );
+
+    await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(false);
+    expect(rmSpy).toHaveBeenCalledTimes(1);
+
+    rmSpy.mockRestore();
+    await expect(
+      fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
+    ).resolves.toBeUndefined();
+    await expect(fs.access(path.dirname(journalPath))).resolves.toBeUndefined();
+  });
+
+  it('rejects traversal-shaped run ids without touching project files', async () => {
+    const config = fakeConfig(projectDir);
+    // Extensionless on purpose: for input '../CANARY' an unguarded recursive
+    // rm targets <projectDir>/CANARY exactly, so bypassing the guard makes
+    // the read-back below fail instead of only the boolean assertion.
+    const canary = path.join(projectDir, 'CANARY');
+    await fs.writeFile(canary, 'keep', 'utf8');
+
+    await expect(deleteWorkflowSnapshot(config, '../CANARY')).resolves.toBe(
+      false,
+    );
+    await expect(deleteWorkflowSnapshot(config, 'wf_bad/path')).resolves.toBe(
+      false,
+    );
+
+    await expect(fs.readFile(canary, 'utf8')).resolves.toBe('keep');
+  });
+
+  it('rejects malformed run ids without deleting another snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_abcd';
+    await writeWorkflowSnapshot(config, task({ runId }));
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(runId);
+
+    await expect(deleteWorkflowSnapshot(config, `${runId}.json`)).resolves.toBe(
+      false,
+    );
+
+    await expect(fs.access(snapshotPath)).resolves.toBeUndefined();
   });
 
   it('prunes the oldest beyond MAX_RETAINED_SNAPSHOTS, journal dirs too', async () => {

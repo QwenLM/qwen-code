@@ -23,13 +23,19 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -45,6 +51,7 @@ import type {
   DaemonSessionTasksStatus,
   HeartbeatResult,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
@@ -81,6 +88,12 @@ export interface DaemonSessionClientOptions {
   eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** True when the load response explicitly carried both replay arrays. */
+  replaySnapshotComplete?: boolean;
+  /** True when persisted replay was only partially reconstructed. */
+  replayPartial?: boolean;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
@@ -121,6 +134,28 @@ export interface DaemonSessionSubscribeOptions
   resume?: boolean;
 }
 
+function isSessionAttachmentReference(
+  value: unknown,
+): value is DaemonSessionAttachmentReference {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record['type'] === 'image' || record['type'] === 'resource') &&
+    typeof record['attachmentId'] === 'string' &&
+    record['attachmentId'].length > 0 &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].length > 0 &&
+    (record['type'] !== 'image' || record['mimeType'].startsWith('image/')) &&
+    typeof record['size'] === 'number' &&
+    Number.isSafeInteger(record['size']) &&
+    record['size'] >= 0 &&
+    (record['type'] !== 'image' || record['size'] > 0)
+  );
+}
+
+const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
+
 /**
  * Session-scoped wrapper around `DaemonClient`.
  *
@@ -137,6 +172,9 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
+  readonly replaySnapshotComplete: boolean;
+  readonly replayPartial: boolean;
+  readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   /**
@@ -167,6 +205,11 @@ export class DaemonSessionClient {
   private reattaching?: Promise<void>;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
+  private readonly attachmentCache = new Map<
+    string,
+    { pending: Promise<DaemonSessionAttachmentData>; size: number }
+  >();
+  private attachmentCacheBytes = 0;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -187,6 +230,9 @@ export class DaemonSessionClient {
       compactedReplay: [],
       liveJournal: [],
     };
+    this.replaySnapshotComplete = opts.replaySnapshotComplete ?? false;
+    this.replayPartial = opts.replayPartial ?? false;
+    this.replayError = opts.replayError;
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
     this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
@@ -258,6 +304,10 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
+    const restored = await client.loadSession(sessionId, req, clientId);
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
     const {
       state,
       hasActivePrompt,
@@ -266,11 +316,13 @@ export class DaemonSessionClient {
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
+      partial,
+      replayError,
       lastEventId: serverLastEventId,
       eventEpoch,
       ...session
-    } = await client.loadSession(sessionId, req, clientId);
-    return new DaemonSessionClient({
+    } = restored;
+    const result = new DaemonSessionClient({
       client,
       session,
       hasActivePrompt,
@@ -281,10 +333,15 @@ export class DaemonSessionClient {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
     });
+    await result.hydrateReplaySnapshot();
+    return result;
   }
 
   /**
@@ -342,6 +399,10 @@ export class DaemonSessionClient {
 
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
+  }
+
+  get eventEpoch(): string | undefined {
+    return this.lastSeenEpoch;
   }
 
   setLastEventId(lastEventId: number | undefined): void {
@@ -436,6 +497,56 @@ export class DaemonSessionClient {
       throw new Error('Expected non-blocking prompt acceptance');
     }
     return accepted;
+  }
+
+  async uploadAttachment(
+    data: Blob,
+    name: string,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentReference> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.uploadSessionAttachment(
+        this.sessionId,
+        data,
+        name,
+        mimeType,
+        {
+          ...(signal ? { signal } : {}),
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        },
+      ),
+    );
+  }
+
+  async readAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentData> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.readSessionAttachment(this.sessionId, attachmentId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+  }
+
+  async removeAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const removed = await this.withClientIdSelfHeal(() =>
+      this.client.removeSessionAttachment(this.sessionId, attachmentId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+    if (removed) {
+      const cached = this.attachmentCache.get(attachmentId);
+      this.attachmentCache.delete(attachmentId);
+      this.attachmentCacheBytes -= cached?.size ?? 0;
+    }
+    return removed;
   }
 
   /**
@@ -542,6 +653,18 @@ export class DaemonSessionClient {
     );
   }
 
+  async setConfigOption(
+    configId: 'reasoning_effort',
+    value: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.client.setSessionConfigOption(
+      this.sessionId,
+      configId,
+      value,
+      this.clientId,
+    );
+  }
+
   async getRewindSnapshots(): Promise<{
     snapshots: DaemonRewindSnapshotInfo[];
   }> {
@@ -608,15 +731,23 @@ export class DaemonSessionClient {
   /**
    * Queue a user message typed while this session's turn is still running so
    * the ACP child can drain it mid-turn. Forwards the client id bound at
-   * create/attach. Resolves `{ accepted: false }` when the session is idle —
-   * the caller should then send the message as a normal next-turn prompt.
+   * create/attach. Accepted requests become daemon-owned even when the active
+   * turn settles while the request is in flight.
    */
   async enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
+      ...(opts?.content && opts.content.length > 0
+        ? { content: opts.content }
+        : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -629,10 +760,62 @@ export class DaemonSessionClient {
     });
   }
 
-  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
-    return await this.client.getPendingPrompts(this.sessionId, {
+  /**
+   * Fetch the mid-turn reconciliation snapshot (queue + delivery-state rings) for
+   * this session. Forwards the bound client id. See
+   * `DaemonClient.getMidTurnMessages` — requires the daemon to advertise
+   * `session_mid_turn_message_query`; older daemons reject with 404 and
+   * callers preserve their current state.
+   */
+  async getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult> {
+    const result = await this.client.getMidTurnMessages(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+    return {
+      ...result,
+      messages: await Promise.all(
+        result.messages.map(async (message) => ({
+          ...message,
+          ...(message.content
+            ? { content: await this.hydrateContent(message.content) }
+            : {}),
+        })),
+      ),
+    };
+  }
+
+  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    const result = await this.client.getPendingPrompts(this.sessionId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+    return {
+      pendingPrompts: await Promise.all(
+        result.pendingPrompts.map(async (prompt) => ({
+          ...prompt,
+          ...(prompt.content
+            ? { content: await this.hydrateContent(prompt.content) }
+            : {}),
+        })),
+      ),
+    };
+  }
+
+  async getTranscriptPage(
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const page = await this.client.getSessionTranscriptPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
+    });
+    return {
+      ...page,
+      events: await Promise.all(
+        page.events.map(async (event) => await this.hydrateEvent(event)),
+      ),
+    };
   }
 
   async removePendingPrompt(
@@ -872,8 +1055,9 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
-        this._dispatchTurnEvent(event);
-        yield event;
+        const hydratedEvent = await this.hydrateEvent(event);
+        this._dispatchTurnEvent(hydratedEvent);
+        yield hydratedEvent;
         if (event.id !== undefined) {
           this.lastSeenEventId = Math.max(
             this.lastSeenEventId ?? 0,
@@ -884,6 +1068,131 @@ export class DaemonSessionClient {
     } finally {
       this._rejectAllPending(new Error('SSE stream ended'));
       release();
+    }
+  }
+
+  private async hydrateReplaySnapshot(): Promise<void> {
+    this.replaySnapshot.compactedReplay = await Promise.all(
+      this.replaySnapshot.compactedReplay.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+    this.replaySnapshot.liveJournal = await Promise.all(
+      this.replaySnapshot.liveJournal.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+  }
+
+  private async hydrateEvent(event: DaemonEvent): Promise<DaemonEvent> {
+    if (!event.data || typeof event.data !== 'object') return event;
+    const data = event.data as Record<string, unknown>;
+    if (event.type === 'session_update') {
+      const update = data['update'];
+      if (update && typeof update === 'object' && !Array.isArray(update)) {
+        const content = (update as Record<string, unknown>)['content'];
+        const hydrated = await this.hydrateBlock(content);
+        if (hydrated === content) return event;
+        return {
+          ...event,
+          data: { ...data, update: { ...update, content: hydrated } },
+        };
+      }
+      const content = data['content'];
+      const hydrated = await this.hydrateBlock(content);
+      if (hydrated === content) return event;
+      return { ...event, data: { ...data, content: hydrated } };
+    }
+    if (event.type !== 'mid_turn_message_injected') return event;
+    const items = data['items'];
+    if (!Array.isArray(items)) return event;
+    return {
+      ...event,
+      data: {
+        ...data,
+        items: await Promise.all(
+          items.map(async (item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+              return item;
+            }
+            const record = item as Record<string, unknown>;
+            return Array.isArray(record['content'])
+              ? {
+                  ...record,
+                  content: await this.hydrateContent(record['content']),
+                }
+              : item;
+          }),
+        ),
+      },
+    };
+  }
+
+  private async hydrateContent(
+    content: readonly unknown[],
+  ): Promise<PromptContentBlock[]> {
+    return await Promise.all(
+      content.map(async (block) => await this.hydrateBlock(block)),
+    );
+  }
+
+  private async hydrateBlock(block: unknown): Promise<PromptContentBlock> {
+    if (!isSessionAttachmentReference(block)) {
+      return block as PromptContentBlock;
+    }
+    if (block.type === 'resource') return block;
+    let cached = this.attachmentCache.get(block.attachmentId);
+    if (cached) {
+      this.attachmentCache.delete(block.attachmentId);
+      this.attachmentCache.set(block.attachmentId, cached);
+    } else {
+      const pending = this.withClientIdSelfHeal(() =>
+        this.client.readSessionAttachment(this.sessionId, block.attachmentId, {
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        }),
+      );
+      cached = { pending, size: block.size };
+      this.attachmentCache.set(block.attachmentId, cached);
+      this.attachmentCacheBytes += block.size;
+      while (
+        this.attachmentCache.size > MAX_ATTACHMENT_CACHE_ENTRIES ||
+        this.attachmentCacheBytes > MAX_ATTACHMENT_CACHE_BYTES
+      ) {
+        const oldestId = this.attachmentCache.keys().next().value;
+        if (oldestId === undefined) break;
+        const evicted = this.attachmentCache.get(oldestId);
+        this.attachmentCache.delete(oldestId);
+        this.attachmentCacheBytes -= evicted?.size ?? 0;
+      }
+      void pending.catch(() => {
+        if (this.attachmentCache.get(block.attachmentId)?.pending !== pending)
+          return;
+        this.attachmentCache.delete(block.attachmentId);
+        this.attachmentCacheBytes -= block.size;
+      });
+    }
+    try {
+      const attachment = await cached.pending;
+      return {
+        type: 'image',
+        data: attachment.data,
+        mimeType: attachment.mimeType,
+      };
+    } catch (err) {
+      // 404/410 means the daemon no longer holds the blob, so pin the
+      // placeholder. Any other failure is transient: return the reference
+      // unchanged so the snapshot keeps its attachment id and a later hydration
+      // pass can retry (the failed cache entry evicted itself above).
+      if (
+        err instanceof DaemonHttpError &&
+        (err.status === 404 || err.status === 410)
+      ) {
+        return {
+          type: 'text',
+          text: '[Attachment is no longer available]',
+        };
+      }
+      return block;
     }
   }
 

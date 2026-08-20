@@ -55,6 +55,32 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
+  it('allows the SDK archive timeout to run before the wrapper timeout', async () => {
+    vi.useFakeTimers();
+    const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ installExtensionArchive }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const result = actions
+      .installExtensionArchive({
+        archive: new Blob(['archive']),
+        filename: 'demo.zip',
+        consent: true,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    await vi.advanceTimersByTimeAsync(130_000);
+
+    await expect(result).resolves.toMatchObject({
+      message: 'Install extension timed out after 130000ms',
+    });
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
@@ -373,7 +399,10 @@ describe('workspace actions', () => {
       pairingApprovals,
     );
     await expect(
-      actions.channelPairing.revoke('bot', 'sender-1'),
+      actions.channelPairing.revoke('bot', { senderId: 'sender-1' }),
+    ).resolves.toBe(pairingRevocation);
+    await expect(
+      actions.channelPairing.revoke('bot', { groupId: 'group-1' }),
     ).resolves.toBe(pairingRevocation);
 
     expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
@@ -402,6 +431,9 @@ describe('workspace actions', () => {
     expect(
       workspace.revokeWorkspaceChannelPairingApproval,
     ).toHaveBeenCalledWith('bot', { senderId: 'sender-1' });
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { groupId: 'group-1' });
   });
 
   it('rejects Channel management without a selected workspace', async () => {

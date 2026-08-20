@@ -29,6 +29,7 @@ import {
   expandHomeDir,
   getProjectHash,
   realpathNearestExisting,
+  realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
 } from './paths.js';
 import type { Config } from '../config/config.js';
@@ -868,6 +869,46 @@ describe('realpathNearestExisting', () => {
       fs.symlinkSync(a, b);
       // Bounded by SYMLOOP_MAX hops; the caller still range-checks the result.
       expect(() => realpathNearestExisting(a)).not.toThrow();
+    },
+  );
+});
+
+describe('realpathNearestExistingAsync', () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-async-')),
+    );
+    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('matches the sync variant across the canonicalization cases', async () => {
+    const cases = [
+      path.join(root, 'real', 'file.txt'),
+      path.join(root, 'real', 'a', 'b.txt'),
+      path.resolve(path.sep, 'no', 'such', 'ancestor', 'x'),
+    ];
+    for (const target of cases) {
+      await expect(realpathNearestExistingAsync(target)).resolves.toBe(
+        realpathNearestExisting(target),
+      );
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a dangling symlink to its non-existent target',
+    async () => {
+      const link = path.join(root, 'dangling-async');
+      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
+      await expect(realpathNearestExistingAsync(link)).resolves.toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
     },
   );
 });

@@ -19,6 +19,28 @@ const skillPath = resolve(
   'SKILL.md',
 );
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
+// (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
+// container entry and then sat silent for the whole absolute budget,
+// burning 2 hours per round for zero work. Streamed agent events keep active
+// runs observable; the longest silence the fleet tolerates elsewhere is the
+// review pipeline's 10-minute stream-idle window for thinking phases on
+// ~1M-token contexts, so twice that is the default. Distinct from
+// QWEN_TIMEOUT_MS so
+// the failure comment says which limit fired; a leg whose absolute budget is
+// shorter than this window (the review workflow's 18-minute repair pass)
+// always reaches the absolute timer first.
+const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
+// Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`
+// guard would arm a sub-second window and kill every agent at the first
+// idle tick.
+const QWEN_IDLE_TIMEOUT_MS =
+  Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+    ? parsedIdleTimeoutMs
+    : 20 * 60 * 1000;
+const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
+const OVERSIZED_STREAM_JSON_LINE_NOTICE =
+  '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -158,6 +180,19 @@ function isLoopGuardOutput(output) {
   );
 }
 
+function streamResultOutput(event) {
+  if (!event || event.type !== 'result') return '';
+  return [event.error?.message, event.result]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+}
+
+function isLoopGuardResult(event) {
+  return (
+    event?.is_error === true && isLoopGuardOutput(streamResultOutput(event))
+  );
+}
+
 function killQwen(child, signal) {
   try {
     process.kill(-child.pid, signal);
@@ -172,33 +207,117 @@ function runQwen(options, prompt) {
     flags: 'w',
   });
   log.on('error', () => {});
-  let outputTail = '';
-  let loopDetected = false;
+  let diagnosticTail = '';
+  let stdoutCarry = '';
+  let discardingOversizedStdoutLine = false;
+  let terminalResult;
   let settled = false;
   let timedOut = false;
+  let idleTimedOut = false;
+  let lastOutputAt = Date.now();
+  // The sandbox launcher prints the container name before the container
+  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // run's own container — the kill-path reap below relies on that ownership.
+  let sandboxName = '';
+  let lineCarry = '';
   let timer;
   let killTimer;
+  let idleTimer;
+  let sandboxRemoval = null;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      [
+        '--yolo',
+        '--output-format',
+        'stream-json',
+        '--include-partial-messages',
+        '--prompt',
+        prompt,
+      ],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
+
+    const appendDiagnostic = (text) => {
+      diagnosticTail = (diagnosticTail + text).slice(-20_000);
+    };
+
+    const consumeStreamJsonLine = (line, terminated) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        lastOutputAt = Date.now();
+        if (event?.type === 'result') terminalResult = event;
+        if (event?.type !== 'stream_event') {
+          process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+        }
+      } catch {
+        appendDiagnostic(`${line}${terminated ? '\n' : ''}`);
+        process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+      }
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      const parts = text.split('\n');
+      for (const [index, part] of parts.entries()) {
+        const terminated = index < parts.length - 1;
+        if (!discardingOversizedStdoutLine) {
+          const remaining = MAX_STREAM_JSON_LINE_LENGTH - stdoutCarry.length;
+          if (part.length <= remaining) {
+            stdoutCarry += part;
+          } else {
+            stdoutCarry = '';
+            discardingOversizedStdoutLine = true;
+          }
+        }
+        if (terminated) {
+          if (discardingOversizedStdoutLine) {
+            process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+          } else {
+            consumeStreamJsonLine(stdoutCarry, true);
+          }
+          stdoutCarry = '';
+          discardingOversizedStdoutLine = false;
+        }
+      }
+      if (final) {
+        if (discardingOversizedStdoutLine) {
+          process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+        } else {
+          consumeStreamJsonLine(stdoutCarry, false);
+        }
+        stdoutCarry = '';
+        discardingOversizedStdoutLine = false;
+      }
+    };
 
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
-      const apiErrorInfo = recoverableApiError(outputTail);
+      clearInterval(idleTimer);
+      consumeStreamJson('', true);
+      const terminalOutput = streamResultOutput(terminalResult);
+      const apiErrorInfo = recoverableApiError(
+        result.status === 0
+          ? terminalOutput
+          : `${diagnosticTail}\n${terminalOutput}`,
+      );
       const payload = {
         ...result,
         timedOut,
-        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        idleTimedOut,
+        loopDetected: isLoopGuardResult(terminalResult),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
         apiErrorKind: apiErrorInfo.kind,
+        sandboxRemoval,
       };
       if (log.destroyed) {
         resolve(payload);
@@ -207,28 +326,101 @@ function runQwen(options, prompt) {
       }
     };
 
-    const record = (chunk, stream) => {
+    const record = (chunk, stream, source) => {
       const text = chunk.toString('utf8');
-      outputTail = (outputTail + text).slice(-20_000);
-      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
+      if (!sandboxName) {
+        lineCarry += text;
+        const lastNewline = lineCarry.lastIndexOf('\n');
+        if (lastNewline === -1) {
+          lineCarry = lineCarry.slice(-256);
+        } else {
+          const complete = lineCarry.slice(0, lastNewline + 1);
+          lineCarry = lineCarry.slice(lastNewline + 1).slice(-256);
+          const name = complete.match(
+            /^ContainerName(?: \(regular\))?: (\S+)$/m,
+          )?.[1];
+          if (name && /^qwen-code-[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+            sandboxName = name;
+          }
+        }
+      }
+      if (source === 'stdout') {
+        consumeStreamJson(text);
+      } else {
+        lastOutputAt = Date.now();
+        appendDiagnostic(text);
+        stream.write(chunk);
+      }
       log.write(chunk);
-      stream.write(chunk);
     };
 
-    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
-    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr, 'stderr'));
     child.on('error', (error) => finish({ error, status: null, signal: null }));
     child.on('close', (status, signal) =>
       finish({ error: null, status, signal }),
     );
 
-    timer = setTimeout(() => {
-      timedOut = true;
+    // Killing the host-side docker client leaves the sandbox container
+    // RUNNING on this persistent runner, and the startup reaper may not
+    // touch running containers (one can belong to a concurrent job on
+    // another registration of the same host). Remove it HERE, where
+    // ownership is unambiguous: the name was captured from this run's own
+    // launcher line. Best-effort — a daemon blip must not mask the kill.
+    const escalateKill = () => {
       killQwen(child, 'SIGTERM');
       killTimer = setTimeout(() => {
         if (!settled) killQwen(child, 'SIGKILL');
       }, 10_000);
+      if (sandboxName) {
+        // Async, not spawnSync: a synchronous removal blocks the event loop
+        // for up to the spawn timeout, holding up the SIGKILL backstop
+        // queued above and the child's close/finish/log-flush — in exactly
+        // the wedged-daemon scenario this kill path exists for. The main
+        // flow awaits sandboxRemoval, so the leak warning and the kill-path
+        // reap stay deterministic without blocking the backstop.
+        const rm = spawn('docker', ['rm', '-f', '--', sandboxName], {
+          stdio: 'ignore',
+          timeout: 30_000,
+        });
+        sandboxRemoval = new Promise((resolveRemoval) => {
+          let warned = false;
+          const warnLeak = () => {
+            if (warned) return;
+            warned = true;
+            process.stderr.write(
+              `warning: leaked sandbox container ${sandboxName} could not be removed; it keeps running on this host\n`,
+            );
+          };
+          rm.on('error', warnLeak);
+          rm.on('close', (code) => {
+            if (code !== 0) warnLeak();
+            resolveRemoval();
+          });
+        });
+      }
+    };
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      escalateKill();
     }, QWEN_TIMEOUT_MS);
+    // Poll rather than reset-a-timeout-per-chunk: chunks arrive far more
+    // often than the watchdog needs to look, and a busy stream would then
+    // spend its time re-arming timers. The tick shrinks with the window so
+    // tiny test values still fire promptly.
+    const idleTick = Math.max(
+      250,
+      Math.min(30_000, Math.floor(QWEN_IDLE_TIMEOUT_MS / 4)),
+    );
+    idleTimer = setInterval(() => {
+      if (settled || timedOut || idleTimedOut) return;
+      if (Date.now() - lastOutputAt >= QWEN_IDLE_TIMEOUT_MS) {
+        idleTimedOut = true;
+        timedOut = true;
+        escalateKill();
+      }
+    }, idleTick);
   });
 }
 
@@ -290,14 +482,39 @@ if (missingInputs.length > 0) {
 }
 
 const result = await runQwen(options, prompt);
-if (result.error || result.signal || result.status !== 0) {
+// Await the kill-path container removal (bounded by its own 30s spawn
+// timeout) so the leak warning and the removal itself settle before this
+// process exits and the next step inspects the host.
+if (result.sandboxRemoval) await result.sandboxRemoval;
+const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+const hasOutputVerdict = spec.anyOutput
+  ? presentOutputs.length > 0
+  : missingOutputs.length === 0;
+const apiErrorWithoutVerdict =
+  result.status === 0 &&
+  result.apiError &&
+  !hasOutputVerdict &&
+  !existsSync(file(options.workdir, 'failure.md'));
+if (
+  result.error ||
+  result.signal ||
+  result.status !== 0 ||
+  apiErrorWithoutVerdict
+) {
   const detail = result.error
     ? result.error.message
-    : result.timedOut
-      ? `timeout (${QWEN_TIMEOUT_MS}ms)`
-      : result.signal
-        ? `signal ${result.signal}`
-        : `status ${String(result.status)}`;
+    : result.idleTimedOut
+      ? `idle-timeout (no output for ${QWEN_IDLE_TIMEOUT_MS}ms — the sandbox likely hung at startup)`
+      : result.timedOut
+        ? `timeout (${QWEN_TIMEOUT_MS}ms)`
+        : result.signal
+          ? `signal ${result.signal}`
+          : apiErrorWithoutVerdict
+            ? 'recoverable API error without an agent verdict'
+            : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     if (result.loopDetected) {
       writeFailure(
@@ -356,7 +573,7 @@ if (result.error || result.signal || result.status !== 0) {
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
   }
-  process.exit(result.status ?? 1);
+  process.exit(result.status === 0 ? 1 : (result.status ?? 1));
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
@@ -369,18 +586,12 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
   process.exit(0);
 }
 
-const missingOutputs = missing(options.workdir, spec.outputs);
-const presentOutputs = spec.outputs.filter(
-  (name) => !missingOutputs.includes(name),
-);
 if (spec.exclusiveOutput && presentOutputs.length > 1) {
   const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
   fail(message);
 }
-const ok = spec.anyOutput
-  ? missingOutputs.length < spec.outputs.length
-  : missingOutputs.length === 0;
+const ok = hasOutputVerdict;
 if (!ok) {
   const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);

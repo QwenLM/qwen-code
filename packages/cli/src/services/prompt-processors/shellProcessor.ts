@@ -10,6 +10,7 @@ import {
   escapeShellArg,
   getShellConfiguration,
   ShellExecutionService,
+  isSignalTermination,
   flatMapTextParts,
   checkArgumentSafety,
 } from '@qwen-code/qwen-code-core';
@@ -218,7 +219,7 @@ export class ShellProcessor implements IPromptProcessor {
           executionResult.exitCode !== null
         ) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' exited with code ${executionResult.exitCode}]`;
-        } else if (executionResult.signal !== null) {
+        } else if (isSignalTermination(executionResult.signal)) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' terminated by signal ${executionResult.signal}]`;
         }
       }

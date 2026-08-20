@@ -10,8 +10,10 @@
 
 import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
+import { matchRemoteCommand } from './review/match-remote.js';
 import { composeReviewCommand } from './review/compose-review.js';
-import { findingsCommand } from './review/findings.js';
+import { findingsCommand } from '../utils/findings.js';
+import { recoverFindingsCommand } from './review/recover-findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
@@ -38,6 +40,10 @@ import { cleanupCommand } from './review/cleanup.js';
 import { costLedgerCommand } from './review/cost-ledger.js';
 import { runCommand } from './review/run.js';
 import { saveArtifactCommand } from './review/save-artifact.js';
+import { metaCommand } from './review/meta.js';
+import { issueContextCommand } from './review/issue-context.js';
+import { fetchDiffCommand } from './review/fetch-diff.js';
+import { commentBodyCommand } from './review/comment-body.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
@@ -47,6 +53,11 @@ export const reviewCommand: CommandModule = {
     yargs
       .command(runCommand)
       .command(parseArgsCommand)
+      .command(matchRemoteCommand)
+      .command(metaCommand)
+      .command(issueContextCommand)
+      .command(fetchDiffCommand)
+      .command(commentBodyCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
       .command(planDiffCommand)
@@ -69,6 +80,7 @@ export const reviewCommand: CommandModule = {
       .command(testEfficacyCommand)
       .command(testPlanCommand)
       .command(findingsCommand)
+      .command(recoverFindingsCommand)
       .command(publishAssetsCommand)
       .command(composeReviewCommand)
       .command(saveArtifactCommand)
@@ -76,7 +88,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

@@ -15,7 +15,10 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
+  DaemonSessionAttachmentReference,
+  DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -38,6 +41,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SessionMetadataResult,
   SetModelResult,
@@ -50,15 +54,22 @@ export type DaemonConnectionStatus =
   | 'disconnected'
   | 'error';
 
+export interface DaemonSessionOwnerSnapshot {
+  isCurrent(): boolean;
+}
+
+export interface DaemonSessionOwnerGuard {
+  capture(): DaemonSessionOwnerSnapshot;
+}
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
    * `X-Qwen-Client-Id`). Consumers use it to recognize their OWN
-   * originator-stamped frames — e.g. the web-shell dedupes a
-   * `mid_turn_message_injected` batch only when its `originatorClientId`
-   * matches this id (a peer on the same session must keep its own entry).
+   * originator-stamped legacy frames. Stable-id mid-turn queues are shared by
+   * the session and do not use this id as an ownership boundary.
    */
   clientId?: string;
   workspaceCwd?: string;
@@ -74,6 +85,7 @@ export interface DaemonConnectionState {
   skills?: string[];
   models?: DaemonModelInfo[];
   currentModel?: string;
+  reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
   /** Latest main-conversation model usage event. */
@@ -94,6 +106,12 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+}
+
+export interface DaemonReasoningControls {
+  enabled: boolean;
+  effort: string;
+  efforts: string[];
 }
 
 export interface DaemonTokenUsage {
@@ -133,7 +151,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
@@ -172,6 +194,7 @@ export type DaemonNoticeOperation =
   | 'send_prompt'
   | 'send_shell_command'
   | 'switch_model'
+  | 'set_reasoning_effort'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -187,6 +210,8 @@ export type DaemonNoticeOperation =
   | 'load_context_usage'
   | 'load_tasks'
   | 'load_artifacts'
+  | 'read_attachment'
+  | 'remove_attachment'
   | 'cancel_task'
   | 'clear_goal'
   | 'load_stats'
@@ -254,6 +279,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
@@ -261,6 +287,8 @@ export interface SendPromptOptions {
    * message in the JSONL transcript. Used by Ctrl+Y retry.
    */
   retry?: boolean;
+  /** Fired after local validation, immediately before dispatch to the daemon. */
+  onAdmissionStarted?: () => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -291,6 +319,15 @@ export interface DaemonPromptImage {
   media_type?: string;
 }
 
+export interface DaemonPromptFile {
+  name: string;
+  data?: Blob;
+  text?: string;
+  mimeType?: string;
+  mediaType?: string;
+  media_type?: string;
+}
+
 export type DaemonTodoStatus = 'pending' | 'in_progress' | 'completed';
 export type DaemonTodoPriority = 'low' | 'medium' | 'high';
 
@@ -315,6 +352,7 @@ export interface DaemonTodoList {
 
 export interface SubmitPromptResult {
   promptId: string;
+  removedAfterAbort?: true;
 }
 
 export interface DaemonSessionActions {
@@ -331,6 +369,7 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  setReasoningEffort(value: string): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean },
@@ -411,20 +450,46 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  uploadAttachment(
+    image: DaemonPromptImage,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonSessionAttachmentReference>;
+  readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  removeAttachment(
+    attachmentId: string,
+    opts?: { sessionId?: string },
+  ): Promise<boolean>;
   /**
-   * Best-effort: queue a message typed while a turn is running so the daemon
-   * can drain it mid-turn. Resolves `{ accepted: false }` (never throws/raises
-   * a notice) when there is no session, the session is idle, or the push
-   * fails — the caller then keeps the message in its own next-turn queue.
+   * Queue a message typed while a turn is running. Calls without an id support
+   * old daemons and are best-effort; calls with a stable `messageId` may reject
+   * on an ambiguous transport failure so the caller can reconcile. `content`
+   * carries attachment blocks — pre-flight the daemon's
+   * `session_attachments` capability before attaching references.
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+      onAdmissionStarted?: () => void;
+    },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
     messageId: string,
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
+  /**
+   * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
+   * daemon. Resolves `undefined` (never throws/raises a notice) when there
+   * is no session or the query fails — callers preserve current state.
+   * Pre-flight the
+   * `session_mid_turn_message_query` capability before relying on it: older
+   * daemons lack the route.
+   */
+  getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult | undefined>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;
@@ -443,7 +508,12 @@ export interface DaemonSessionActions {
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+    atRecordId?: string,
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -496,7 +566,9 @@ export interface PendingSessionLoad {
   id: number;
   sessionId: string;
   mode: 'load' | 'resume' | 'attach';
-  timeout: ReturnType<typeof setTimeout>;
+  timeout?: ReturnType<typeof setTimeout>;
+  /** SDK timeout for load/resume; `0` disables its timer. */
+  requestTimeoutMs?: number;
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;

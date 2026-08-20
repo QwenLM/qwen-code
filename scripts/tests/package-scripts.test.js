@@ -42,6 +42,17 @@ describe('package scripts', () => {
     );
   });
 
+  it('limits SDK integration tests through the forks pool', () => {
+    const packageJson = readPackageJson();
+
+    expect(packageJson.scripts['test:integration:sdk:sandbox:none']).toContain(
+      '--poolOptions.forks.maxForks 2',
+    );
+    expect(
+      packageJson.scripts['test:integration:sdk:sandbox:docker'],
+    ).toContain('--poolOptions.forks.maxForks 2');
+  });
+
   it('cleans package build artifacts before checking the serve fast path bundle', () => {
     const packageJson = readPackageJson();
 
@@ -448,7 +459,9 @@ describe('package scripts', () => {
       );
       expect(publishStep).toContain('already published; skipping');
       expect(publishStep).toContain('exit 0');
-      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
+      expect(publishStep).toContain(
+        'npm publish --provenance "${PUBLISH_ARGS[@]}"',
+      );
     }
 
     // The channel loop must wrap each iteration in a subshell so that

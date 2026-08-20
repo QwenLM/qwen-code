@@ -667,6 +667,80 @@ describe('<ToolMessage />', () => {
       expect(lastFrame()).toContain('?');
     });
 
+    it('hides a tool description repeated in a plain-text Hook confirmation', () => {
+      const content = `DESCRIPTION_TOP \u200b${'middle '.repeat(40)} DESCRIPTION_TAIL`;
+      const escapedContent = JSON.stringify(content).replace(
+        '\u200b',
+        '\\u200b',
+      );
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${escapedContent}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      const frame = lastFrame();
+      const header = frame?.split('\n')[0];
+      expect(header).toContain('test-tool');
+      expect(header).not.toContain('DESCRIPTION_TOP');
+      expect(header).not.toContain('DESCRIPTION_TAIL');
+    });
+
+    it('does not hide a tool description absent from the Hook confirmation', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={`COMMAND_TOP ${'middle '.repeat(20)} COMMAND_TAIL`}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: 'A hook requires approval.',
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('COMMAND_TOP');
+      expect(lastFrame()).toContain('COMMAND_TAIL');
+    });
+
+    it('keeps a repeated string description when another argument is not shown', () => {
+      const content = 'visible content';
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content, destructive: true })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${JSON.stringify(content)}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={80}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('destructive');
+    });
+
     it('shows - for Canceled status', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage {...baseProps} status={ToolCallStatus.Canceled} />,

@@ -206,7 +206,7 @@ describe('file-system', () => {
     const readAttempt = toolLogs.find(
       (log) =>
         log.toolRequest.name === 'read_file' &&
-        log.toolRequest.args.includes(fileName),
+        log.toolRequest.args?.includes(fileName),
     );
     const editAttempt = toolLogs.find(
       (log) => log.toolRequest.name === 'edit_file',
