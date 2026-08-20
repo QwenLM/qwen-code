@@ -1320,21 +1320,6 @@ export class SessionArtifactStore {
       } catch {
         return { inputs: [input] };
       }
-      const relative = path.relative(realWorkspace, realPath);
-      if (!relative || isOutsidePath(relative)) {
-        throw new SessionArtifactValidationError(
-          'workspacePath must stay inside the workspace',
-          'workspacePath',
-        );
-      }
-      if (
-        pathHasSkippedDirectoryComponent(relative.split(path.sep).join('/'))
-      ) {
-        throw new SessionArtifactValidationError(
-          'workspacePath is a skipped directory and cannot be recorded',
-          'workspacePath',
-        );
-      }
       let realStat: Stats;
       try {
         realStat = await fs.lstat(realPath);
@@ -1357,14 +1342,69 @@ export class SessionArtifactStore {
       walkRelative = normalizedPath;
     } else if (!stat.isDirectory()) {
       return { inputs: [input] };
+    } else {
+      // Intermediate symlink components are followed by path lookup, so the
+      // final lstat may look like a plain directory while the real target
+      // sits under a skipped tree. Canonicalize before the skip gate.
+      try {
+        walkDir = await fs.realpath(absolutePath);
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          return { inputs: [input] };
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new SessionArtifactValidationError(
+          `workspacePath could not be inspected: ${reason}`,
+          'workspacePath',
+        );
+      }
     }
 
-    if (walkRelative && pathHasSkippedDirectoryComponent(walkRelative)) {
+    const resolvedRelative = path.relative(realWorkspace, walkDir);
+    if (!resolvedRelative || isOutsidePath(resolvedRelative)) {
+      throw new SessionArtifactValidationError(
+        'workspacePath must stay inside the workspace',
+        'workspacePath',
+      );
+    }
+    if (
+      pathHasSkippedDirectoryComponent(
+        resolvedRelative.split(path.sep).join('/'),
+      ) ||
+      (walkRelative && pathHasSkippedDirectoryComponent(walkRelative))
+    ) {
       throw new SessionArtifactValidationError(
         'workspacePath is a skipped directory and cannot be recorded',
         'workspacePath',
       );
     }
+
+    if (
+      input.metadata !== undefined &&
+      !isPlainMetadataObject(input.metadata)
+    ) {
+      throw new SessionArtifactValidationError(
+        'metadata must be an object',
+        'metadata',
+      );
+    }
+    const childMetadata = {
+      ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
+      expandedFromDirectory: true as const,
+    };
+    if (Buffer.byteLength(JSON.stringify(childMetadata), 'utf8') > 4096) {
+      throw new SessionArtifactValidationError(
+        'metadata is too large to expand a directory',
+        'metadata',
+      );
+    }
+    const parentTitle = normalizeString(input.title, 'title', 200, true);
+    const parentDescription = normalizeString(
+      input.description,
+      'description',
+      1000,
+      false,
+    );
 
     let collected: Awaited<ReturnType<typeof collectRecordableWorkspaceFiles>>;
     try {
@@ -1394,37 +1434,6 @@ export class SessionArtifactStore {
       );
     }
 
-    if (
-      input.metadata !== undefined &&
-      !isPlainMetadataObject(input.metadata)
-    ) {
-      throw new SessionArtifactValidationError(
-        'metadata must be an object',
-        'metadata',
-      );
-    }
-    const childMetadata = {
-      ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
-      expandedFromDirectory: true as const,
-    };
-    if (Buffer.byteLength(JSON.stringify(childMetadata), 'utf8') > 4096) {
-      throw new SessionArtifactValidationError(
-        'metadata is too large to expand a directory',
-        'metadata',
-      );
-    }
-    const parentTitle =
-      typeof input.title === 'string' ? input.title.trim() : '';
-    if (parentTitle.length > 200) {
-      throw new SessionArtifactValidationError(
-        'title exceeds 200 characters',
-        'title',
-      );
-    }
-    const parentDescription =
-      typeof input.description === 'string'
-        ? input.description.trim()
-        : undefined;
     const warnings: string[] = [];
     if (collected.truncated) {
       warnings.push(

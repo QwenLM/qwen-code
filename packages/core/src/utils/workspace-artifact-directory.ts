@@ -55,10 +55,21 @@ export function shouldSkipDirectoryArtifactName(name: string): boolean {
   );
 }
 
+const WORKTREE_ARTIFACT_PREFIX_RE = /^\.qwen\/worktrees\/[^/]+\//;
+
+/**
+ * Bound-root-canonical paths from a worktree session always start with
+ * `.qwen/worktrees/<slug>/`. That leading `.qwen` must not itself trip the
+ * skip-directory gate for ordinary subdirectories inside the worktree.
+ */
+export function stripWorktreeArtifactPrefix(workspacePath: string): string {
+  return workspacePath.replace(WORKTREE_ARTIFACT_PREFIX_RE, '');
+}
+
 export function pathHasSkippedDirectoryComponent(
   workspacePath: string,
 ): boolean {
-  return workspacePath
+  return stripWorktreeArtifactPrefix(workspacePath)
     .split('/')
     .filter(Boolean)
     .some((segment) => shouldSkipDirectoryArtifactName(segment));

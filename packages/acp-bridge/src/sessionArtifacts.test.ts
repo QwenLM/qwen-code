@@ -2167,6 +2167,48 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
+  it('rejects a path whose intermediate symlink aliases a skipped directory', async () => {
+    await fs.mkdir(path.join(workspace, '.qwen', 'sub'), { recursive: true });
+    await fs.writeFile(
+      path.join(workspace, '.qwen', 'sub', 'secret.xlsx'),
+      'xlsx',
+    );
+    await fs.symlink(
+      path.join(workspace, '.qwen'),
+      path.join(workspace, 'link'),
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-intermediate-symlink-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany([{ title: 'Secret', workspacePath: 'link/sub' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('rejects directory expansion when the parent description is invalid', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-desc'));
+    await fs.writeFile(path.join(workspace, 'reports-desc', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-bad-desc',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports-desc',
+            description: 'x'.repeat(1001),
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
+  });
+
   it('keeps a curated title when a same-batch expansion precedes the explicit record', async () => {
     await fs.mkdir(path.join(workspace, 'reports-batch'));
     await fs.writeFile(

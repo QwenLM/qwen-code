@@ -548,7 +548,7 @@ describe('RecordArtifactTool', () => {
   it('skips expansion children whose names are not trim-stable', async () => {
     const ws = await workspace();
     await ws.write('notes/keep.txt', 'ok');
-    await writeFile(path.join(ws.cwd, 'notes', 'report.txt '), 'space');
+    await writeFile(path.join(ws.cwd, 'notes', ' report.txt'), 'space');
 
     const result = await ws.tool
       .build({
@@ -578,6 +578,29 @@ describe('RecordArtifactTool', () => {
     expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
     expect(result.artifacts).toBeUndefined();
     expect(String(result.llmContent)).toContain('workspace root');
+  });
+
+  it('expands a subdirectory inside a worktree session', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await ws.write('reports/a.xlsx', 'xlsx');
+    await ws.write('reports/b.docx', 'docx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Worktree reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      {
+        workspacePath: '.qwen/worktrees/my-feature/reports/a.xlsx',
+      },
+      {
+        workspacePath: '.qwen/worktrees/my-feature/reports/b.docx',
+      },
+    ]);
   });
 
   it('skips junk directories and lock files when expanding a directory', async () => {

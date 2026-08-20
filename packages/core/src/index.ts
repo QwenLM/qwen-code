@@ -217,6 +217,7 @@ export {
   isOfficeDocumentExtension,
   pathHasSkippedDirectoryComponent,
   shouldSkipDirectoryArtifactName,
+  stripWorktreeArtifactPrefix,
 } from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,

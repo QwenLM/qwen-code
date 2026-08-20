@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   collectRecordableWorkspaceFiles,
+  pathHasSkippedDirectoryComponent,
 } from './workspace-artifact-directory.js';
 
 describe('collectRecordableWorkspaceFiles', () => {
@@ -60,16 +61,28 @@ describe('collectRecordableWorkspaceFiles', () => {
   it('counts files rejected by the recordable predicate', async () => {
     const root = await workspace();
     await writeFile(path.join(root, 'keep.txt'), 'ok');
-    await writeFile(path.join(root, '<draft>.txt'), 'bad');
+    await writeFile(path.join(root, 'draft.txt'), 'bad');
 
     const collected = await collectRecordableWorkspaceFiles(
       root,
       '',
       root,
-      (relativePath) => !relativePath.includes('<'),
+      (relativePath) => relativePath !== 'draft.txt',
     );
     expect(collected.files).toEqual(['keep.txt']);
     expect(collected.skippedUnrecordable).toBe(1);
+  });
+
+  it('does not treat a worktree-prefixed subdirectory as skipped', () => {
+    expect(
+      pathHasSkippedDirectoryComponent('.qwen/worktrees/my-feature/reports'),
+    ).toBe(false);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.qwen/worktrees/my-feature/node_modules',
+      ),
+    ).toBe(true);
+    expect(pathHasSkippedDirectoryComponent('.qwen/skills')).toBe(true);
   });
 
   it('records a regular file named after a skipped directory', async () => {
@@ -133,6 +146,9 @@ describe('collectRecordableWorkspaceFiles', () => {
   });
 
   it('treats an unreadable over-depth directory as depth-limited', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
+      return;
+    }
     const root = await workspace();
     const deepParts = Array.from(
       { length: MAX_DIRECTORY_ARTIFACT_DEPTH + 1 },
