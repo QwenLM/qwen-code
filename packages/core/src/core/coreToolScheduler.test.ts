@@ -409,6 +409,7 @@ const mockIdeClient = {
   openDiff: vi.fn(),
   isDiffingEnabled: vi.fn(),
   closeDiff: vi.fn(),
+  resolveDiffFromCli: vi.fn(),
 };
 
 class TestApprovalTool extends BaseDeclarativeTool<{ id: string }, ToolResult> {
@@ -10790,6 +10791,179 @@ describe('CoreToolScheduler Plan shell routing', () => {
     } finally {
       vi.mocked(IdeClient.getInstance).mockReset();
       mockIdeClient.openDiff.mockReset();
+    }
+  });
+
+  // Round-7 ask-bounce regression (#9434 review R7-1): a round-1 IDE diff
+  // whose resolver survives into the bounced round (auto-approval of a
+  // sibling never closes it) must not be able to answer the bounced
+  // confirmation — the bounced TUI view is the only confirm surface.
+  function staleIdeDiffAfterAskBounce(options: {
+    callId: string;
+    toolName: string;
+  }) {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+    mockIdeClient.resolveDiffFromCli.mockReset();
+    let resolveRoundOneDiff!: (
+      resolution: Awaited<ReturnType<IdeClient['openDiff']>>,
+    ) => void;
+    // Stay pending until the test resolves it: the stale answer arrives
+    // AFTER the bounce lands.
+    mockIdeClient.openDiff.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRoundOneDiff = resolve;
+      }),
+    );
+
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [editToolForAskBounce({ name: options.toolName, execute })],
+        mode: () => ApprovalMode.DEFAULT,
+        ideMode: true,
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+      });
+
+    return {
+      execute,
+      scheduler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      resolveRoundOneDiff,
+      async reachBouncedRound() {
+        await scheduler.schedule(
+          [
+            {
+              callId: options.callId,
+              name: options.toolName,
+              args: { param: 'hook-reviewed' },
+              isClientInitiated: false,
+              prompt_id: `prompt-${options.callId}`,
+            },
+          ],
+          new AbortController().signal,
+        );
+
+        // Round 1: confirm from the TUI while the IDE diff stays open —
+        // only the CLI dialog's handleConfirm closes the diff, so the
+        // resolver is still registered when the hook fires.
+        await vi.waitFor(() =>
+          expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1),
+        );
+        const first = (await waitForStatus(
+          onToolCallsUpdate,
+          'awaiting_approval',
+        )) as WaitingToolCall;
+        await first.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+
+        // Round 2: the hook's 'ask' bounces execution back. The bounce
+        // invalidates the outstanding round-1 diff (closeDiff + consume
+        // the resolver, mirroring handleConfirm).
+        await vi.waitFor(() =>
+          expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+        );
+        expect(mockIdeClient.resolveDiffFromCli).toHaveBeenCalledWith(
+          'test.txt',
+          'rejected',
+        );
+
+        // Let the bounce's own resolveDiffFromCli answer (a no-op on the
+        // mock) settle, so the test-controlled resolution below is the one
+        // the continuation observes.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+      },
+      cleanup() {
+        vi.mocked(IdeClient.getInstance).mockReset();
+        mockIdeClient.openDiff.mockReset();
+        mockIdeClient.resolveDiffFromCli.mockReset();
+      },
+    };
+  }
+
+  it('drops a stale round-1 IDE accept after a PreToolUse ask bounce', async () => {
+    // R7-1 accept arm: a stale Accept-with-edit from the leftover round-1
+    // panel must not execute the hook-skipping re-run, and must not set
+    // invocation state (newContent) behind the bounced view's back.
+    const harness = staleIdeDiffAfterAskBounce({
+      callId: 'stale-ide-accept',
+      toolName: 'staleIdeAcceptEdit',
+    });
+    try {
+      const bounced = await harness.reachBouncedRound();
+
+      harness.resolveRoundOneDiff({
+        status: 'accepted',
+        content: 'stale-edit',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(harness.execute).not.toHaveBeenCalled();
+      expect(harness.onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(bounced.status).toBe('awaiting_approval');
+
+      // The bounced TUI view is still the only confirm surface and runs
+      // the hook-reviewed args — not the stale edit.
+      await bounced.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await vi.waitFor(() => expect(harness.execute).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() =>
+        expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
+      );
+
+      expect(harness.execute).toHaveBeenCalledWith({ param: 'hook-reviewed' });
+      const completed = harness.onAllToolCallsComplete.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[];
+      expect(completed[0].status).toBe('success');
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('drops a stale round-1 IDE reject after a PreToolUse ask bounce', async () => {
+    // R7-1 reject arm: a stale Reject from the leftover round-1 panel must
+    // not cancel a call the user is still reviewing in the bounced view.
+    const harness = staleIdeDiffAfterAskBounce({
+      callId: 'stale-ide-reject',
+      toolName: 'staleIdeRejectEdit',
+    });
+    try {
+      const bounced = await harness.reachBouncedRound();
+
+      harness.resolveRoundOneDiff({ status: 'rejected', content: undefined });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(harness.execute).not.toHaveBeenCalled();
+      expect(harness.onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(bounced.status).toBe('awaiting_approval');
+
+      // The bounced view still answers: Cancel terminates the call cleanly.
+      await bounced.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.Cancel,
+      );
+      await vi.waitFor(() =>
+        expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
+      );
+
+      const completed = harness.onAllToolCallsComplete.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[];
+      expect(completed[0].status).toBe('cancelled');
+      expect(harness.execute).not.toHaveBeenCalled();
+    } finally {
+      harness.cleanup();
     }
   });
 

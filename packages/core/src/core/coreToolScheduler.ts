@@ -1451,6 +1451,14 @@ export class CoreToolScheduler {
     string,
     Record<string, unknown>
   >();
+  // Confirmation-round counter keyed by callId. Bumped whenever a new
+  // confirmation surface replaces an existing one for the same call
+  // (currently: the PreToolUse 'ask' bounce). openIdeDiffIfEnabled
+  // captures the epoch when it opens the round-1 IDE diff and drops its
+  // answer if the epoch has moved on, so a stale round-1 diff resolver
+  // can never answer a later confirmation round (#9434 review R7-1).
+  // Cleared on terminal state via finalizeToolSpan.
+  private readonly confirmationEpochs = new Map<string, number>();
   // Plan-mode shell policy decisions computed in the CONFIRMATION phase
   // (`_schedule`), keyed by callId. The EXECUTION phase cannot recompute
   // them cheaply (evaluation needs the confirmation-phase permission
@@ -1890,6 +1898,7 @@ export class CoreToolScheduler {
     this.bouncedAwaitingApproval.delete(callId);
     this.bouncedToolUseId.delete(callId);
     this.bouncedHookReviewedArgs.delete(callId);
+    this.confirmationEpochs.delete(callId);
     this.planShellDecisionByCallId.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
@@ -4089,6 +4098,12 @@ export class CoreToolScheduler {
       return;
     }
 
+    // Capture the confirmation round before the openDiff await: a
+    // PreToolUse 'ask' bounce bumps the epoch and invalidates this diff,
+    // and its answer must be dropped below rather than answered through
+    // the bounced round (#9434 review R7-1).
+    const confirmationEpoch = this.confirmationEpochs.get(callId) ?? 0;
+
     let resolution: Awaited<ReturnType<IdeClient['openDiff']>>;
     try {
       const ideClient = await IdeClient.getInstance();
@@ -4115,6 +4130,16 @@ export class CoreToolScheduler {
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
     if (!still) return;
+    // Guard: skip if a new confirmation round started while this diff was
+    // open (a PreToolUse 'ask' bounce puts the call back in
+    // awaiting_approval, so the status check above alone cannot tell the
+    // rounds apart). The bounced TUI view is the only confirm surface for
+    // the new round; a stale Accept/Reject here would bypass its
+    // hideModify / dropBounceModifyPayload / claim-guard protections
+    // (#9434 review R7-1).
+    if ((this.confirmationEpochs.get(callId) ?? 0) !== confirmationEpoch) {
+      return;
+    }
 
     if (resolution.status === 'accepted') {
       // When content is unchanged, skip the inline modify path so that
@@ -4634,6 +4659,35 @@ export class CoreToolScheduler {
             );
           }),
       };
+    }
+
+    // Start a fresh confirmation round and invalidate any outstanding
+    // round-1 IDE diff for this call (#9434 review R7-1). Auto-approving
+    // a sibling (autoApproveCompatiblePendingTools) never closes the
+    // round-1 diff, so its openDiff resolver can still be registered when
+    // the hook bounces: a stale Accept/Reject from the leftover panel
+    // would answer the bounced confirmation through the status-only guard
+    // in openIdeDiffIfEnabled, bypassing hideModify /
+    // dropBounceModifyPayload / the claim guard this view sets up. Bump
+    // the epoch FIRST so the continuation drops the answer even when the
+    // resolver settles in the same tick, then resolve + close the panel
+    // the same way the CLI's handleConfirm does. Only edit views open an
+    // IDE diff.
+    this.confirmationEpochs.set(
+      callId,
+      (this.confirmationEpochs.get(callId) ?? 0) + 1,
+    );
+    if (toolDetails?.type === 'edit') {
+      try {
+        const ideClient = await IdeClient.getInstance();
+        if (ideClient.isDiffingEnabled()) {
+          await ideClient.resolveDiffFromCli(toolDetails.filePath, 'rejected');
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to invalidate the round-1 IDE diff during PreToolUse ask bounce for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
