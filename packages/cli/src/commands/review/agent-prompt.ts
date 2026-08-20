@@ -1805,11 +1805,13 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    // On a delta-scoped incremental round the probe's range must match the
-    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
-    // handed the merge base it would reverse hunks and delete mutants from
-    // commits an earlier round already reviewed — spending the probe budget
-    // out of scope and reporting survivors this round's diff never contains.
+    // On a narrowed incremental round the probe's range must cover the
+    // published scope: test-efficacy recomputes its own diff as base..HEAD.
+    // The published hunks are hunks of `diffBase..head` — the merge-base
+    // range the producer assembled them from — so that range covers every
+    // one of them and never a byte the PR's diff does not display; the
+    // anchor range, by contrast, can carry hunks an undo round netted out
+    // of the PR's diff, which no comment can anchor on.
     const inc = report.incremental as
       | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
       | undefined;

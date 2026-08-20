@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
-import { serializeGoalStatusMessage } from './GoalStatusMessage';
 import { SystemMessage } from './SystemMessage';
 
 (
@@ -345,38 +343,6 @@ describe('SystemMessage — background notification i18n body', () => {
     });
     expect(seen).toEqual(['abc12345-full']);
     window.removeEventListener('qwen:open-session', handler);
-  });
-});
-
-describe('SystemMessage — goal status activation', () => {
-  const content = serializeGoalStatusMessage({
-    kind: 'set',
-    condition: 'Ship safely',
-    setAt: 1,
-  });
-
-  it('keeps the existing interactive event behavior by default', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <SystemMessage content={content} variant="info" isLatest />,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).toHaveBeenCalledOnce();
-    window.removeEventListener('web-shell-goal-status-active', handler);
-  });
-
-  it('does not dispatch the goal event in readonly mode', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <TranscriptRenderModeProvider value="readonly">
-        <SystemMessage content={content} variant="info" isLatest />
-      </TranscriptRenderModeProvider>,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).not.toHaveBeenCalled();
-    window.removeEventListener('web-shell-goal-status-active', handler);
   });
 });
 

@@ -16,18 +16,11 @@ export interface GitProbe {
   /** Does this ref resolve locally? */
   refExists(ref: string): boolean;
   /**
-   * Merge-base of two refs.
-   *
-   * `status` is what separates "these histories share no ancestor" from "the
-   * probe could not answer": git exits 1 for the first, and 128 — or nothing
-   * at all, on a kill or a spawn failure — for the second. Collapsing both to
-   * a null sha is how a transient failure came to be reported as a
-   * deterministic refusal the recovery flow then refused to retry.
+   * Merge-base of two refs, or null when there is none. An implementation
+   * may THROW when the git surface cannot answer — distinct from answering
+   * "none" — and the throw propagates to the caller.
    */
-  mergeBase(
-    a: string,
-    b: string,
-  ): { sha: string | null; status: number | null };
+  mergeBase(a: string, b: string): string | null;
 }
 
 export interface MergeBaseResult {
@@ -41,17 +34,6 @@ export interface MergeBaseResult {
    * and the review silently examines the wrong diff. The caller says so.
    */
   baseFetchFailed: boolean;
-  /**
-   * True when a candidate ref resolved but the merge-base probe itself could
-   * not answer — an exit above 1, or a kill (the 120s timeout a large
-   * long-lived PR under CI load reaches). Distinct from `sha: null` with this
-   * false, which is the definitive shape: the probe ran and the histories
-   * genuinely share no ancestor, which a re-run reproduces exactly.
-   *
-   * The caller keys the RETRY class on it: a probe that could not answer is
-   * infrastructure, and the component that failed is one a re-run repeats.
-   */
-  probeUnavailable: boolean;
 }
 
 /**
@@ -76,27 +58,13 @@ export function resolveMergeBase(
   git: GitProbe,
 ): MergeBaseResult {
   const baseFetchFailed = !git.fetch(remote, baseRefName);
-  // Sticky across candidates: the tracking ref may fail to probe while the
-  // local fallback answers a definitive "no ancestor", and a round that saw
-  // one unanswerable probe has not established the deterministic shape.
-  // Stickiness serves that no-ancestor question ONLY: a resolution that
-  // succeeded is itself the deterministic shape — the clamp ran against a
-  // real sha — so the taint must not ride into it and misname a later
-  // capture failure `base-untrusted`.
-  let probeUnavailable = false;
   for (const candidate of [
     `refs/remotes/${remote}/${baseRefName}`,
     baseRefName,
   ]) {
     if (!git.refExists(candidate)) continue;
     const mb = git.mergeBase(candidate, headRef);
-    if (mb.sha) {
-      return { sha: mb.sha, baseFetchFailed, probeUnavailable: false };
-    }
-    // Exit 1 is the answer "no common ancestor". Anything else — 128, or no
-    // status at all from a kill or a spawn failure — is the probe failing to
-    // answer, which says nothing about the histories.
-    if (mb.status !== 1) probeUnavailable = true;
+    if (mb) return { sha: mb, baseFetchFailed };
   }
-  return { sha: null, baseFetchFailed, probeUnavailable };
+  return { sha: null, baseFetchFailed };
 }
