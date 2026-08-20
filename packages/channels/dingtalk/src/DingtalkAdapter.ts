@@ -803,8 +803,17 @@ export class DingtalkChannel extends ChannelBase {
     // shapes fail-closed. Run that same sanitization over the outgoing text:
     // well-formed markers are already replaced with receipts above, so only
     // undeliverable residue is touched.
+    const sanitizedText = sanitizeMediaMarkersToStable(
+      outgoingText,
+      stripPartialImageMarker,
+    );
+    // R7-4: residue-only input (a cutoff landing inside a marker) sanitizes
+    // to nothing. Flag that with the empty string so the delivery consumers
+    // send nothing instead of an empty markdown post — which DingTalk either
+    // rejects with a non-zero errcode (failing the turn over content this
+    // step itself stripped) or renders as an empty bubble.
     return {
-      text: sanitizeMediaMarkersToStable(outgoingText, stripPartialImageMarker),
+      text: files.length === 0 && !sanitizedText.trim() ? '' : sanitizedText,
       files,
     };
   }
@@ -948,6 +957,8 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     const prepared = await this.prepareOutgoingContent(text);
+    // R7-4: residue-only input sanitizes to nothing — nothing to send.
+    if (!prepared.text && prepared.files.length === 0) return;
     await this.sendTextThenFiles(
       () => this.sendPreparedReply(chatId, prepared.text, atUserId),
       () => this.sendReplyFiles(chatId, prepared.files),
@@ -1003,13 +1014,64 @@ export class DingtalkChannel extends ChannelBase {
     if (!text.trim()) return;
 
     const prepared = await this.prepareOutgoingContent(text);
-    const chunks = normalizeDingTalkMarkdown(prepared.text);
-    const title = extractTitle(prepared.text);
+    // R7-4: residue-only input sanitizes to nothing — nothing to send.
+    if (!prepared.text.trim() && prepared.files.length === 0) return;
 
-    // R1-6 (location 1 of 3): a failed chunk must not strand the files. The
-    // receipts are already baked into the text — and possibly already
-    // delivered by an earlier chunk — so the file loop below still runs, and
-    // the chunk error is rethrown after it.
+    // R3-6: files go out BEFORE the text chunks their receipts ride. The old
+    // order delivered the receipt first, and under correlated flow control
+    // the file POST to the same recipient then failed while the corrective
+    // notice died on the very endpoint that had just rejected the file —
+    // the recipient kept a receipt for a file that never arrives with no
+    // visible correction. A failed delivery now rewrites its baked receipt
+    // into the failure marker before any chunk sends, so the text only ever
+    // claims a delivery that happened.
+    let firstError: Error | undefined;
+    let outgoingText = prepared.text;
+    for (const file of prepared.files) {
+      try {
+        await this.sendProactiveFile(target, file);
+      } catch (error) {
+        const deliveryError =
+          error instanceof Error ? error : new Error(String(error));
+        firstError ??= deliveryError;
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive file delivery failed (${sanitizeLogText(
+            file.fileName,
+            255,
+          )}): ${sanitizeLogText(deliveryError.message, 300)}\n`,
+        );
+        outgoingText = outgoingText.replace(
+          `[File sent: ${file.fileName}]`,
+          `[File delivery failed: ${file.fileName}]`,
+        );
+        try {
+          await this.sendProactiveChunk(
+            target,
+            'File delivery failed',
+            `[File delivery failed: ${file.fileName}]`,
+            'file delivery failure notice',
+          );
+        } catch (noticeError) {
+          // The rewritten receipt in the text below is the correction that
+          // survives this notice dying; the loss itself still matters when
+          // the chunks fail too, so it is logged.
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive file failure notice not delivered: ${sanitizeLogText(
+              noticeError instanceof Error
+                ? noticeError.message
+                : String(noticeError),
+              300,
+            )}\n`,
+          );
+        }
+      }
+    }
+
+    const chunks = normalizeDingTalkMarkdown(outgoingText);
+    const title = extractTitle(outgoingText);
+
+    // R1-6 (location 1 of 3): the file loop above already ran regardless; a
+    // failed chunk rethrows after it, so the caller sees the send failure.
     let chunkError: unknown;
     try {
       for (let i = 0; i < chunks.length; i++) {
@@ -1024,42 +1086,6 @@ export class DingtalkChannel extends ChannelBase {
       chunkError = error;
     }
 
-    let firstError: Error | undefined;
-    for (const file of prepared.files) {
-      try {
-        await this.sendProactiveFile(target, file);
-      } catch (error) {
-        const deliveryError =
-          error instanceof Error ? error : new Error(String(error));
-        firstError ??= deliveryError;
-        process.stderr.write(
-          `[DingTalk:${this.name}] proactive file delivery failed (${sanitizeLogText(
-            file.fileName,
-            255,
-          )}): ${sanitizeLogText(deliveryError.message, 300)}\n`,
-        );
-        try {
-          await this.sendProactiveChunk(
-            target,
-            'File delivery failed',
-            `[File delivery failed: ${file.fileName}]`,
-            'file delivery failure notice',
-          );
-        } catch (noticeError) {
-          // `firstError` is always set by the enclosing catch, so this can only
-          // ever be logged — assigning it would be dead code. Losing the notice
-          // matters though: the user is left with neither the file nor a reason.
-          process.stderr.write(
-            `[DingTalk:${this.name}] proactive file failure notice not delivered: ${sanitizeLogText(
-              noticeError instanceof Error
-                ? noticeError.message
-                : String(noticeError),
-              300,
-            )}\n`,
-          );
-        }
-      }
-    }
     // The chunk failure is the one the caller must see: it is what made the
     // send fail, and the file loop above has already logged and (where it
     // could) notified about its own.
@@ -1486,7 +1512,16 @@ export class DingtalkChannel extends ChannelBase {
         }
         return;
       }
-      await resp.body?.cancel();
+      // R3-6: a group send rejected with HTTP 200 still carries a non-zero
+      // `code`/`errcode` verdict in the body — reading only `resp.ok` books
+      // it as delivered, exactly the gap R2-9 closed for the webhook path.
+      const code = await readDingTalkErrorCode(resp);
+      if (code !== undefined) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): API code ${code}\n`,
+        );
+        throw new Error(`DingTalk proactive send failed: API code ${code}`);
+      }
       return;
     }
   }
@@ -1881,6 +1916,8 @@ export class DingtalkChannel extends ChannelBase {
     prepared: PreparedDingTalkOutput,
     sessionId: string,
   ): Promise<void> {
+    // R7-4: residue-only output sanitizes to nothing — nothing to send.
+    if (!prepared.text.trim() && prepared.files.length === 0) return;
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
@@ -1917,6 +1954,15 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (segment && this.interactionPresenter) {
       const prepared = await this.prepareOutgoingContent(text);
+      // R2-5: deliver BEFORE the card finalizes. `closeOutput` bakes
+      // `prepared.text` — receipts included — into a card `finalize` can no
+      // longer amend, so a delivery failure landing after it left a
+      // permanent receipt for a file that never arrives. Delivering first
+      // means a delivery that fails without a delivered notice (the
+      // sendReplyFiles throw) keeps the receipts off the card entirely; a
+      // failure with a delivered notice keeps the same correction the
+      // reply path has always relied on.
+      await this.sendReplyFiles(chatId, prepared.files);
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
@@ -1925,10 +1971,14 @@ export class DingtalkChannel extends ChannelBase {
           segment,
         )
       ) {
-        await this.sendReplyFiles(chatId, prepared.files);
         return;
       }
-      await this.sendPreparedResponse(chatId, prepared, sessionId);
+      // The files already went out above — the fallback must not resend them.
+      await this.sendPreparedResponse(
+        chatId,
+        { ...prepared, files: [] },
+        sessionId,
+      );
       return;
     }
     await this.sendResponseMessage(chatId, text, sessionId);
@@ -1969,6 +2019,16 @@ export class DingtalkChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): Promise<void> {
     const presenter = this.interactionPresenter!;
+    // R7-1: with block streaming on, every block of this segment was already
+    // delivered (and its markers uploaded) through `sendResponseMessage`. The
+    // constructor withholds `sendFallback` and status cards in this mode, so
+    // `closeOutput` below answers false and the plain-delivery fallback would
+    // re-upload and re-send the whole accumulated segment on top of the
+    // streamed copy. Mirror the constructor gating: display-close only.
+    if (this.config.blockStreaming === 'on') {
+      await presenter.closeOutput(segment.segmentId, '', reason, segment);
+      return;
+    }
     const content = presenter.segmentContent(segment.segmentId);
     if (!content || findFileMarkers(content).length === 0) {
       await presenter.closeOutput(segment.segmentId, '', reason, segment);
@@ -1999,6 +2059,11 @@ export class DingtalkChannel extends ChannelBase {
       await this.sendReplyFiles(chatId, prepared.files);
       return;
     }
+    // R7-3: `closeOutput` answers false for BOTH "no display surface" and
+    // "the run is already terminal". Pre-PR the boundary delivered nothing
+    // in the terminal case; falling back unconditionally lets a segment
+    // outrun a cancel/fail mid-upload. Only a live run falls back.
+    if (!presenter.isRunActive(segment.runId)) return;
     await this.sendPreparedResponse(chatId, prepared, sessionId);
   }
 

@@ -1,6 +1,7 @@
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -20,6 +21,27 @@ import {
   stripPartialFileMarker,
   uploadDingTalkFile,
 } from './outbound-file.js';
+
+// R7-2: the swap-injection point. A directory component replaced between the
+// containment check and the open is invisible to every check that merely
+// re-resolves the path; the test swaps the tree the moment `openSync` runs,
+// which is inside that window. All other calls pass through untouched.
+const openSyncWindow = vi.hoisted(() => ({
+  swap: undefined as (() => void) | undefined,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    openSync: ((...args: Parameters<typeof actual.openSync>) => {
+      const swap = openSyncWindow.swap;
+      openSyncWindow.swap = undefined;
+      swap?.();
+      return actual.openSync(...args);
+    }) as typeof actual.openSync,
+  };
+});
 
 const testDirs: string[] = [];
 
@@ -246,6 +268,29 @@ describe('readValidatedFile', () => {
     ).toThrow('outside allowed directories');
   });
 
+  it('rejects a directory component swapped before the open', () => {
+    // R7-2: O_NOFOLLOW only refuses a swapped FINAL component — the kernel
+    // follows an intermediate directory swapped to a symlink. Both the open
+    // and a post-open re-resolution of the path then agree with each other,
+    // so only the pre-open identity compared against the descriptor sees it.
+    const root = makeTempDir('dingtalk-toctou-');
+    const workspaceDir = join(root, 'workspace');
+    const insideDir = join(workspaceDir, 'inside');
+    const outsideDir = join(root, 'outside');
+    mkdirSync(insideDir, { recursive: true });
+    mkdirSync(outsideDir);
+    writeFileSync(join(insideDir, 'report.txt'), 'inside-content');
+    writeFileSync(join(outsideDir, 'report.txt'), 'SECRET-CONTENT');
+    openSyncWindow.swap = () => {
+      renameSync(insideDir, join(root, 'inside-moved'));
+      symlinkSync(outsideDir, insideDir);
+    };
+
+    expect(() =>
+      readValidatedFile(join(insideDir, 'report.txt'), { workspaceDir }),
+    ).toThrow('path changed during validation');
+  });
+
   it('does not expose an unavailable allowed directory in the error', () => {
     const workspace = makeTempDir('dingtalk-file-workspace-');
     const filePath = join(workspace, 'report.txt');
@@ -344,7 +389,14 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
     for (let i = 0; i < depth; i++) nested = `[FIL${nested}E: /p${i}.pdf]`;
     const text = nested.slice(0, 20007);
 
+    // The pass budget caps the pass COUNT; the per-pass strip walk must also
+    // stay cheap, or eight passes over a per-bracket line copy still block
+    // the event loop for hundreds of ms at CONTENT_LIMIT (the round-7 probe
+    // measured ~170 ms here). The index-based sweep lands an order of
+    // magnitude under that.
+    const startedAt = performance.now();
     const sanitized = sanitizeFileMarkersToFixedPoint(text);
+    expect(performance.now() - startedAt).toBeLessThan(80);
 
     expect(sanitized).not.toContain('[FILE:');
     expect(sanitized).not.toContain('/x.pdf');

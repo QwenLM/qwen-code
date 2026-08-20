@@ -35,31 +35,38 @@ function opensMediaMarker(text: string, open: number): boolean {
 }
 
 /**
- * What follows the marker name on `line`, with the separating spaces removed,
- * or `undefined` when `line` does not open with a marker name.
+ * The absolute index where the path part of a marker opening starts — after
+ * the marker name and its separating spaces — or `-1` when the text between
+ * `start` and `lineEnd` does not open with a marker name.
  *
  * R6-2: the same `toUpperCase` fold {@link opensMediaMarker} recognises with,
- * carried down to the offset in the ORIGINAL line. Uppercasing is not a
+ * carried down to the offset in the ORIGINAL text. Uppercasing is not a
  * length-preserving map — `'ﬁ'.toUpperCase()` is `'FI'` — so the name cannot
  * be measured on an uppercased copy and sliced off the raw one; fold one
  * source character at a time and cut where the accumulated uppercase
  * completes a name. An `iu`-flagged regex is not a substitute: it rejects
  * `'ı'` for `'I'` and `'ﬁ'` for `'FI'`, which is exactly the divergence
  * R5-2/R5-3 closed for the truncation guard's gates.
+ *
+ * R3-11: walks the ORIGINAL text by index instead of copying the line — the
+ * per-bracket line copies were the sweep's quadratic factor.
  */
-function afterMediaMarkerName(line: string): string | undefined {
-  const leading = /^[^\S\r\n]*/u.exec(line)![0].length;
+function markerPathStart(text: string, start: number, lineEnd: number): number {
+  let index = start;
+  while (index < lineEnd && /[^\S\r\n]/u.test(text[index]!)) index++;
   let upper = '';
-  for (let index = leading; index < line.length; index++) {
-    upper += line[index]!.toUpperCase();
+  for (; index < lineEnd; index++) {
+    upper += text[index]!.toUpperCase();
     if (MEDIA_MARKER_PREFIXES.includes(upper)) {
-      return line.slice(index + 1).replace(/^[^\S\r\n]*/u, '');
+      index++;
+      while (index < lineEnd && /[^\S\r\n]/u.test(text[index]!)) index++;
+      return index;
     }
     if (!MEDIA_MARKER_PREFIXES.some((prefix) => prefix.startsWith(upper))) {
-      return undefined;
+      return -1;
     }
   }
-  return undefined;
+  return -1;
 }
 
 /**
@@ -192,7 +199,7 @@ function previousOpen(text: string, open: number): number {
 
 /**
  * The end of the residue of an unclosed or ill-formed marker opening at
- * `open` whose text after the `[` is `rest`.
+ * `open`.
  *
  * The residue always covers the marker's own line. It reaches a close on a
  * LATER line only for the shape the same-line grammar cannot see — the path
@@ -204,56 +211,99 @@ function previousOpen(text: string, open: number): number {
  * With no usable close at all, the strip additionally covers a bracket-free
  * FOLLOWING line — a cutoff between `[NAME:` and its path must not ship the
  * bare path line — but never reaches past that line into prose.
+ *
+ * R3-11: every probe is an index walk over the ORIGINAL text — the per-call
+ * `rest` copy plus its searches and slices ran per bracket and made the
+ * fixed-point sweep quadratic at CONTENT_LIMIT.
  */
-function partialMarkerResidueEnd(
-  text: string,
-  open: number,
-  rest: string,
-): number {
-  const eol = rest.search(/[\r\n]/u);
-  if (eol === -1) return text.length;
-  const ownLine = rest.slice(0, eol);
+function partialMarkerResidueEnd(text: string, open: number): number {
+  const base = open + 1;
+  const newline = text.indexOf('\n', base);
+  const carriage = text.indexOf('\r', base);
+  const eolAbs =
+    newline === -1
+      ? carriage
+      : carriage === -1
+        ? newline
+        : Math.min(newline, carriage);
+  if (eolAbs === -1) return text.length;
   // R3-4: what remains after the marker name. Empty (the path starts on the
   // next line) or bracketed (never a deliverable path) both let the strip
   // continue past the marker's own line; a real same-line path stops it.
   // R6-2: fold case exactly as the recognition gates do. An `iu` regex left
-  // the name in `pathPart` for `[FıLE:` / `[ﬁLE:` — openings `toUpperCase`
-  // recognition accepts — so `pathCouldContinue` was false and the residue
-  // stopped at the marker's own line, stranding the bare path line below it
-  // with no leading `[` for any backward walk to find.
-  const pathPart = afterMediaMarkerName(ownLine);
-  const pathCouldContinue =
-    pathPart !== undefined && (pathPart === '' || pathPart.includes('['));
-  // Step past the whole line break: `eol` sits on the `\r` of a CRLF pair.
-  const nextStart =
-    rest[eol] === '\r' && rest[eol + 1] === '\n' ? eol + 2 : eol + 1;
-  const close = rest.indexOf(']');
-  if ((close === -1 || close > eol) && pathCouldContinue) {
-    if (close !== -1) {
+  // the name in the path part for `[FıLE:` / `[ﬁLE:` — openings
+  // `toUpperCase` recognition accepts — so `pathCouldContinue` was false and
+  // the residue stopped at the marker's own line, stranding the bare path
+  // line below it with no leading `[` for any backward walk to find.
+  const pathStart = markerPathStart(text, base, eolAbs);
+  let pathCouldContinue = false;
+  if (pathStart !== -1) {
+    const bracket = text.indexOf('[', pathStart);
+    pathCouldContinue =
+      pathStart === eolAbs || (bracket !== -1 && bracket < eolAbs);
+  }
+  // Step past the whole line break: `eolAbs` sits on the `\r` of a CRLF pair.
+  const nextStartAbs =
+    text[eolAbs] === '\r' && text[eolAbs + 1] === '\n'
+      ? eolAbs + 2
+      : eolAbs + 1;
+  const closeAbs = text.indexOf(']', base);
+  if ((closeAbs === -1 || closeAbs > eolAbs) && pathCouldContinue) {
+    if (closeAbs !== -1) {
       // R2-9/R2-8: only a close belonging to the marker's own path may end
       // the strip — a bracket-free segment on the very next line, vetoed by
       // any `[` of its own, run against the ORIGINAL text because masking
       // blanks brackets and may only make stripping LESS aggressive.
-      const trailing = rest.slice(nextStart, close);
-      if (trailing.length > 0 && !/[\r\n[]/u.test(trailing)) {
-        return open + 1 + close + 1;
+      if (
+        closeAbs > nextStartAbs &&
+        !containsAnyOf(text, nextStartAbs, closeAbs, '\r', '\n', '[')
+      ) {
+        return closeAbs + 1;
       }
     }
     // R2-6: no close belonging to the path. The path can still sit alone on
     // the next line (a cutoff before its close), so cover that line when it
     // carries no bracket — and nothing after it.
-    const nextBreak = rest.slice(nextStart).search(/[\r\n]/u);
-    const nextLine =
-      nextBreak === -1
-        ? rest.slice(nextStart)
-        : rest.slice(nextStart, nextStart + nextBreak);
-    if (nextLine.trim() !== '' && !/[[\]]/u.test(nextLine)) {
-      return open + 1 + nextStart + nextLine.length;
+    const nextNewline = text.indexOf('\n', nextStartAbs);
+    const nextCarriage = text.indexOf('\r', nextStartAbs);
+    const nextLineEnd =
+      nextNewline === -1
+        ? nextCarriage === -1
+          ? text.length
+          : nextCarriage
+        : nextCarriage === -1
+          ? nextNewline
+          : Math.min(nextNewline, nextCarriage);
+    if (
+      !blankRange(text, nextStartAbs, nextLineEnd) &&
+      !containsAnyOf(text, nextStartAbs, nextLineEnd, '[', ']')
+    ) {
+      return nextLineEnd;
     }
   }
   // Splice only to end-of-line so the lines after an abandoned marker survive;
   // a marker on the final line still takes the rest of the text.
-  return open + 1 + eol;
+  return eolAbs;
+}
+
+function containsAnyOf(
+  text: string,
+  start: number,
+  end: number,
+  ...chars: string[]
+): boolean {
+  for (const char of chars) {
+    const found = text.indexOf(char, start);
+    if (found !== -1 && found < end) return true;
+  }
+  return false;
+}
+
+function blankRange(text: string, start: number, end: number): boolean {
+  for (let index = start; index < end; index++) {
+    if (!/[^\S\r\n]/u.test(text[index]!)) return false;
+  }
+  return true;
 }
 
 /**
@@ -337,7 +387,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
           // including a path line on the next line — so a cross-line marker
           // never deposits a bare path at the head of the retained tail.
           if (!opensMediaMarker(text, open)) continue;
-          return partialMarkerResidueEnd(text, open, text.slice(open + 1));
+          return partialMarkerResidueEnd(text, open);
         }
         // R1-11: only skip when the span really completes a marker. A prose
         // bracket like `[IMAGE [FILE: /p]` prefix-matches too, and jumping to
@@ -370,7 +420,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
           const sameLineTail =
             lineBreak === -1 ? restAfter : restAfter.slice(0, lineBreak);
           if (sameLineTail.includes(']')) {
-            return partialMarkerResidueEnd(text, open, text.slice(open + 1));
+            return partialMarkerResidueEnd(text, open);
           }
           return balanced;
         }
@@ -385,7 +435,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
       if (
         MEDIA_MARKER_PREFIXES.some((prefix) => trimmedFirst.startsWith(prefix))
       ) {
-        const end = partialMarkerResidueEnd(text, open, text.slice(open + 1));
+        const end = partialMarkerResidueEnd(text, open);
         // The residue can stop at the marker's own line, which precedes a cut
         // already past it; the prose tail from `start` is safe, and moving
         // backwards would break the `<= limit` guarantee.
@@ -583,6 +633,37 @@ export function replaceOutboundMediaMarkers(
   return result;
 }
 
+/**
+ * Whether the `[` at `open` opens a residue of the marker named by `prefix`:
+ * the full name immediately after the bracket (`immediate`) or after leading
+ * horizontal spaces (`spaced`), confined to the bracket's line. Folds case
+ * one source character at a time exactly as the recognition gates do (R6-2).
+ * R3-11: walks the name region of the ORIGINAL text without copying the
+ * line, so a text full of brackets costs a name-length probe per bracket.
+ */
+function markerOpeningShape(
+  text: string,
+  open: number,
+  prefix: string,
+): 'immediate' | 'spaced' | undefined {
+  let upper = '';
+  let sawLeadingSpace = false;
+  for (let index = open + 1; index < text.length; index++) {
+    const char = text[index]!;
+    if (char === '\r' || char === '\n') return undefined;
+    if (upper === '' && /[^\S\r\n]/u.test(char)) {
+      sawLeadingSpace = true;
+      continue;
+    }
+    upper += char.toUpperCase();
+    if (upper === prefix) {
+      return sawLeadingSpace ? 'spaced' : 'immediate';
+    }
+    if (!prefix.startsWith(upper)) return undefined;
+  }
+  return undefined;
+}
+
 export function stripPartialOutboundMediaMarker(
   text: string,
   markerName: 'IMAGE' | 'FILE',
@@ -613,26 +694,26 @@ export function stripPartialOutboundMediaMarker(
   const spans: Array<{ start: number; end: number }> = [];
   let open = text.lastIndexOf('[');
   while (open !== -1) {
-    // R1-5: confine the candidate to its OWN line instead of breaking the walk
-    // at the first newline. Breaking meant only a marker on the final line
-    // could ever be stripped, so an abandoned `[FILE: /abs/path` followed by
-    // more output survived every sanitizer — contradicting this function's own
-    // documented intent and leaking the path onto the card.
-    const rest = text.slice(open + 1);
-    const eol = rest.search(/[\r\n]/u);
-    const candidate = eol === -1 ? rest : rest.slice(0, eol);
     // R3-9: residue opens only with the FULL marker name. Bare name prefixes
     // (`[i`, `[im`) are prose — substituting them minted `[Image pending]`
-    // claims the delivery path can never honour.
-    const normalized = candidate.toUpperCase();
-    const immediate = normalized.startsWith(prefix);
-    // R3-1: a spaced opening (`[ FILE: /path]`) matches no delivery grammar —
-    // well-formed or not it can never be delivered, so it can only ship its
-    // path as literal text. Strip it as residue; a well-formed marker with an
-    // immediate opening keeps the pinned leave-alone behaviour.
-    const spaced =
-      !immediate && normalized.replace(/^[^\S\r\n]+/u, '').startsWith(prefix);
-    if (immediate || spaced) {
+    // claims the delivery path can never honour. R3-1: a spaced opening
+    // (`[ FILE: /path]`) matches no delivery grammar — well-formed or not it
+    // can never be delivered, so it can only ship its path as literal text.
+    // Strip it as residue; a well-formed marker with an immediate opening
+    // keeps the pinned leave-alone behaviour. R3-11: the shape decision reads
+    // only the name region of the ORIGINAL text — the per-bracket whole-line
+    // copy, uppercase, and re-scan this replaces were the sweep's quadratic
+    // factor at CONTENT_LIMIT.
+    const shape = markerOpeningShape(text, open, prefix);
+    if (shape !== undefined) {
+      // R1-5: confine the candidate to its OWN line instead of breaking the
+      // walk at the first newline. Breaking meant only a marker on the final
+      // line could ever be stripped, so an abandoned `[FILE: /abs/path`
+      // followed by more output survived every sanitizer — contradicting this
+      // function's own documented intent and leaking the path onto the card.
+      const rest = text.slice(open + 1);
+      const eol = rest.search(/[\r\n]/u);
+      const candidate = eol === -1 ? rest : rest.slice(0, eol);
       const closeIdx = candidate.indexOf(']');
       // The whole marker is quoted only when its own `[` is masked; a masked
       // `]` under a visible `[` is the mixed shape the finder drops.
@@ -641,7 +722,7 @@ export function stripPartialOutboundMediaMarker(
         closeIdx !== -1 &&
         (quotedWhole || maskedText[open + 1 + closeIdx] === ']');
       const complete =
-        immediate &&
+        shape === 'immediate' &&
         closeDeliverable &&
         completedPattern.test(candidate.slice(0, closeIdx + 1));
       if (!complete) {
@@ -655,7 +736,7 @@ export function stripPartialOutboundMediaMarker(
         // never prefix-match a marker name.
         spans.push({
           start: open,
-          end: partialMarkerResidueEnd(text, open, rest),
+          end: partialMarkerResidueEnd(text, open),
         });
       }
     }

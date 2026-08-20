@@ -171,6 +171,17 @@ export class DingtalkInteractionPresenter {
     return this.segments.get(segmentId)?.content;
   }
 
+  /**
+   * Whether the run is still live — registered and not yet terminal. R7-3:
+   * `closeOutput` answers false for both "no display surface" and "the run
+   * is already terminal"; a boundary fallback that may only deliver in the
+   * former needs the two told apart.
+   */
+  isRunActive(runId: string): boolean {
+    const run = this.runs.get(runId);
+    return run !== undefined && !run.terminal;
+  }
+
   closeOutput(
     segmentId: string,
     text: string,

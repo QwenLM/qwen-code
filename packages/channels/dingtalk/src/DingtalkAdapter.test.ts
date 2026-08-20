@@ -4776,7 +4776,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('prepares a status-card file once and sends it after finalization', async () => {
+  it('prepares a status-card file once and sends it before finalization', async () => {
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
@@ -4820,7 +4820,10 @@ describe('DingtalkChannel outbound file delivery', () => {
         'completed',
         segment,
       );
-      expect(events.indexOf('card')).toBeLessThan(events.indexOf('file'));
+      // R2-5: the file is delivered BEFORE the card finalizes with the
+      // receipt, so a delivery that fails without a delivered notice keeps
+      // the receipt off the permanent card.
+      expect(events.indexOf('file')).toBeLessThan(events.indexOf('card'));
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -4874,14 +4877,11 @@ describe('DingtalkChannel outbound file delivery', () => {
         ),
       ).rejects.toThrow(/no delivered notice: report\.txt/);
 
-      // The receipt did ship and the file did not — which is exactly why the
-      // silent return was wrong, and why the throw has to be the outcome.
-      expect(closeOutput).toHaveBeenCalledWith(
-        'segment-1',
-        '[File sent: report.txt]',
-        'completed',
-        segment,
-      );
+      // R2-5: the delivery attempt now precedes finalization, so a send that
+      // can never deliver (no webhook) also never bakes its receipt into the
+      // card — the throw remains the outcome, and the silent return the R5-1
+      // fix removed stays removed.
+      expect(closeOutput).not.toHaveBeenCalled();
       expect(uploadCalls()).toHaveLength(1);
       expect(fileCalls()).toHaveLength(0);
     } finally {
@@ -5435,6 +5435,163 @@ describe('DingtalkChannel outbound file delivery', () => {
     );
   });
 
+  it('does not re-deliver a boundary segment in block-streaming mode', async () => {
+    // R7-1: with blockStreaming on, BlockStreamer already delivered every
+    // block of the segment through `sendResponseMessage`. The constructor
+    // withholds sendFallback and status cards in this mode, so the boundary
+    // close used to fall through to plain delivery and re-upload + re-send
+    // the whole accumulated segment on top of the streamed copy.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir, blockStreaming: 'on' });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+          };
+        }
+      ).interactionPresenter = { closeOutput, segmentContent };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(uploadCalls()).toHaveLength(0);
+      expect(fileCalls()).toHaveLength(0);
+      expect(markdownCalls()).toHaveLength(0);
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'response_boundary',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fall back for a boundary segment of a terminal run', async () => {
+    // R7-3: `closeOutput` answers false for BOTH "no display surface" and
+    // "the run already terminated". The boundary fallback used to treat
+    // every false as the former, so a segment whose multi-second prepare
+    // outlived a cancel or failure delivered its text and files AFTER the
+    // terminal card — output the cancel cannot recall. Pre-PR the boundary
+    // delivered nothing on terminal runs.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const isRunActive = vi.fn().mockReturnValue(false);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            isRunActive: typeof isRunActive;
+          };
+        }
+      ).interactionPresenter = { closeOutput, segmentContent, isRunActive };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(isRunActive).toHaveBeenCalledWith('run-1');
+      expect(markdownCalls()).toHaveLength(0);
+      expect(fileCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back for a boundary segment of a live run without surface', async () => {
+    // R7-3 counterpart: the same `closeOutput === false` from a LIVE run is
+    // the "no display surface" case the R2-13 fallback exists for.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const isRunActive = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            isRunActive: typeof isRunActive;
+          };
+        }
+      ).interactionPresenter = { closeOutput, segmentContent, isRunActive };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(markdownCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('strips undeliverable marker residue from the outgoing webhook text', async () => {
     // R4-1: `prepareOutgoingContent` substituted only well-formed markers and
     // nothing sanitized between prepare and POST, so every undeliverable
@@ -5467,6 +5624,21 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(delivered).not.toContain('/workspace/secret/report.png');
     expect(delivered).not.toContain('/workspace/secret/other.pdf');
     expect(delivered).toContain('cutoff:');
+  });
+
+  it('sends nothing when sanitization strips the reply to nothing', async () => {
+    // R7-4: residue-only input — a cutoff landing inside a marker —
+    // sanitizes to ''. `splitChunks('')` yields `['']`, so the reply path
+    // used to POST an empty markdown text DingTalk rejects with a non-zero
+    // errcode (failing the turn over content the R4-1 step itself stripped)
+    // or renders as an empty bubble.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await channel.sendMessage('cid-1', '[FILE: /workspace/report.pdf');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -5690,7 +5862,9 @@ describe('DingtalkChannel proactive send', () => {
         (sendCall) =>
           new Response(
             JSON.stringify(
-              sendCall === 0 ? {} : { processQueryKey: 'file-key' },
+              // R3-6: the file POST now precedes the text chunk its receipt
+              // rides.
+              sendCall === 0 ? { processQueryKey: 'file-key' } : {},
             ),
             { status: 200 },
           ),
@@ -5703,7 +5877,7 @@ describe('DingtalkChannel proactive send', () => {
       expect(robotTokenCalls()).toHaveLength(1);
       const sends = sendCalls();
       expect(sends).toHaveLength(2);
-      const fileInit = sends[1]![1] as RequestInit;
+      const fileInit = sends[0]![1] as RequestInit;
       expect(
         (fileInit.headers as Record<string, string>)[
           'x-acs-dingtalk-access-token'
@@ -5734,7 +5908,7 @@ describe('DingtalkChannel proactive send', () => {
           (sendCall) =>
             new Response(
               JSON.stringify(
-                sendCall === 0 ? {} : { processQueryKey: 'direct-file-key' },
+                sendCall === 0 ? { processQueryKey: 'direct-file-key' } : {},
               ),
               { status: 200 },
             ),
@@ -5746,7 +5920,7 @@ describe('DingtalkChannel proactive send', () => {
       expect(mediaCalls()).toHaveLength(1);
       expect(robotTokenCalls()).toHaveLength(1);
       expect(sends).toHaveLength(2);
-      const fileInit = sends[1]![1] as RequestInit;
+      const fileInit = sends[0]![1] as RequestInit;
       expect(
         (fileInit.headers as Record<string, string>)[
           'x-acs-dingtalk-access-token'
@@ -6029,5 +6203,79 @@ describe('DingtalkChannel proactive send', () => {
     await channel.pushProactive(groupTarget, '   \n ');
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing when sanitization strips proactive text to nothing', async () => {
+    // R7-4: residue-only input passes the raw blank check, then sanitizes to
+    // '' — the old code POSTed an empty chunk afterwards.
+    const channel = proactive(createChannel());
+    const { spy } = stubProactiveFetch();
+
+    await channel.pushProactive(groupTarget, '[FILE: /workspace/report.pdf');
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rewrites the baked receipt when a proactive file delivery fails', async () => {
+    // R3-6: the receipt used to ride a text chunk sent BEFORE the file POST,
+    // so a correlated-flow-control rejection of the file left the recipient
+    // a receipt for a file that never arrives — the corrective notice rides
+    // the same just-failed endpoint and dies there. Files now go first, and
+    // a failed delivery rewrites its receipt into the failure marker before
+    // any chunk sends.
+    const file = createTempFile();
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // call 0 = file POST → no processQueryKey (fails); call 1 = failure
+      // notice → 403 (dies on the just-failed endpoint); call 2 = text chunk.
+      const { sendCalls } = stubProactiveFetch((sendCall) =>
+        sendCall === 1
+          ? new Response('denied', { status: 403 })
+          : new Response(JSON.stringify({}), { status: 200 }),
+      );
+
+      await expect(
+        channel.pushProactive(groupTarget, `done [FILE: ${file.path}]`),
+      ).rejects.toThrow('missing processQueryKey');
+
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      const markdownBodies = bodies.filter(
+        (body) => body.msgKey === 'sampleMarkdown',
+      );
+      // The notice and the text chunk; neither may claim delivery happened.
+      expect(markdownBodies).toHaveLength(2);
+      for (const body of markdownBodies) {
+        const param = JSON.parse(body.msgParam) as { text: string };
+        expect(param.text).not.toContain('[File sent:');
+      }
+      const chunkParam = JSON.parse(markdownBodies[1].msgParam) as {
+        text: string;
+      };
+      expect(chunkParam.text).toContain('[File delivery failed: report.txt]');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects group messages when the 200 body carries a non-zero verdict', async () => {
+    // R3-6: the group branch read only `resp.ok`; DingTalk rejects with HTTP
+    // 200 and a non-zero `code` body, which the webhook and DM paths already
+    // treat as a rejection.
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({ code: 'flowControlled', message: 'rate limited' }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: API code flowControlled',
+    );
   });
 });

@@ -63,14 +63,27 @@ export function readValidatedLocalFile(
     throw new Error(`${label} path outside allowed directories`);
   }
 
+  // R7-2: identity of the validated path BEFORE the open. The kernel follows
+  // a DIRECTORY component swapped between the containment check and the open
+  // — both the open and the post-open `statSync(realPath)` resolve through
+  // the swapped path and agree, so the descriptor check alone cannot see it.
+  // Comparing this pre-open resolution against the opened descriptor catches
+  // a swap landing in that window; only the stat-to-open gap remains, and
+  // closing even that needs openat(2)-style traversal node's sync fs API
+  // does not expose.
+  let preOpen: Stats;
+  try {
+    preOpen = statSync(realPath);
+  } catch {
+    throw new Error(`${label} path changed during validation`);
+  }
+
   let descriptor: number;
   try {
     // O_NOFOLLOW: `realPath` has no symlink final component by construction, so
     // if one is there by the time we open, the path was swapped between the
     // containment check and this call. Refusing to follow it closes the widest
-    // leg of that race. (A swapped DIRECTORY component is still possible —
-    // closing that needs openat(2)-style traversal that node's sync fs API does
-    // not expose. The identity check below detects it after the fact.)
+    // leg of that race.
     descriptor = openSync(
       realPath,
       constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
@@ -91,7 +104,12 @@ export function readValidatedLocalFile(
     } catch {
       throw new Error(`${label} path changed during validation`);
     }
-    if (current.ino !== stats.ino || current.dev !== stats.dev) {
+    if (
+      preOpen.ino !== stats.ino ||
+      preOpen.dev !== stats.dev ||
+      current.ino !== stats.ino ||
+      current.dev !== stats.dev
+    ) {
       throw new Error(`${label} path changed during validation`);
     }
     if (stats.size === 0 && options.allowEmpty !== true) {

@@ -177,6 +177,20 @@ describe('DingtalkInteractionPresenter', () => {
     });
   });
 
+  it('reports run liveness for boundary fallback decisions', () => {
+    // R7-3: `closeOutput === false` conflates "no display surface" with "the
+    // run already terminated"; the adapter's boundary fallback may only
+    // deliver in the former and needs the two told apart.
+    const { presenter } = createHarness();
+
+    expect(presenter.isRunActive('run-1')).toBe(true);
+    expect(presenter.isRunActive('run-missing')).toBe(false);
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    expect(presenter.isRunActive('run-1')).toBe(false);
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
