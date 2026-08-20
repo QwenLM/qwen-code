@@ -70,14 +70,26 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
+        JSON.stringify({
+          ...ledger,
+          commitId: 'b'.repeat(40),
+          reviewId: 7,
+          // The volumes describe the round this file still names, and this
+          // path keeps that round — so they stay. Generalising the
+          // anonymous branch's drop to here would erase this account's
+          // last posting count on every transient failure, leaving the
+          // next VOLUME line and the next marker's `prevPosted` blank at
+          // exactly the rounds this path exists to protect.
+          posted: 4,
+          prevPosted: 2,
+        }),
       );
       persistRecoveredLedger(side, null, {
         noOwnReview: false,
         identityKnown: true,
       });
       const written = JSON.parse(readFileSync(side, 'utf8'));
-      expect(written).toEqual(ledger);
+      expect(written).toEqual({ ...ledger, posted: 4, prevPosted: 2 });
       expect(written.round).toBe(3);
       expect(written.sha).toBe('deadbeef00112233');
     } finally {
@@ -214,6 +226,13 @@ describe('persistRecoveredLedger', () => {
           round: 7,
           reviewId: 100,
           commitId: 'b'.repeat(40),
+          // The volumes belong to round 7. This branch advances the counter
+          // past it, so they must go the way the anchor and the age
+          // reference go — kept, they would attribute this account's round-7
+          // posting count to the foreign round that won recovery, and the
+          // next compose would stamp it as `prevPosted`.
+          posted: 4,
+          prevPosted: 2,
         }),
       );
       persistRecoveredLedger(

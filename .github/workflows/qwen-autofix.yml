@@ -47,6 +47,8 @@ name: 'Qwen Autofix'
 # through CI_DEV_BOT_PAT so the bot acts as the configured autofix identity.
 # PAT label writes can emit issues:labeled events; the route guards below make
 # those runs exit unless the label, issue state, and ready label all match.
+# 2026-08-19: no-op comment forcing Actions to re-parse this file — dispatch of
+# issue_comment/schedule/pull_request events had been silently dead ~12 hours.
 on:
   issues:
     types:
