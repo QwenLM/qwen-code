@@ -243,6 +243,10 @@ const producerMocks = vi.hoisted(() => ({
   lstatSync: vi.fn((_path?: unknown): { isFile: () => boolean } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // Identity by default: this fixture's filesystem holds no symlinks, so a
+  // path's real location IS its lexical one and the widening reader's
+  // containment passes. A test that wants an ESCAPE steers it per path.
+  realpathSync: vi.fn((path?: unknown): string => String(path)),
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
@@ -282,12 +286,14 @@ vi.mock('node:fs', async (importOriginal) => {
       ...actual,
       mkdirSync: producerMocks.mkdirSync,
       lstatSync: producerMocks.lstatSync,
+      realpathSync: producerMocks.realpathSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
       statSync: statSyncThroughMock,
     },
     mkdirSync: producerMocks.mkdirSync,
     lstatSync: producerMocks.lstatSync,
+    realpathSync: producerMocks.realpathSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
     statSync: statSyncThroughMock,
@@ -1294,6 +1300,43 @@ describe('fetch-pr report assembly', () => {
     // the plan naming it is worth nothing if no chunk holds its diff.
     expect(writtenDiff()).toContain('b/a.ts');
     expect(writtenDiff()).toContain('b/b.ts');
+  });
+
+  it('drops a widening candidate whose real path leaves the worktree', async () => {
+    // Wiring, not the rule itself — `worktree-reader.test.ts` proves the rule
+    // against a real filesystem, where the kernel does the resolving. What
+    // this pins is that `fetch-pr` reaches the worktree THROUGH the contained
+    // reader: `lstat` spares only the final component, so an intermediate
+    // symlink the PR planted keeps the path lexically inside while its real
+    // location is outside, and what the reader returns is content-derived and
+    // lands in `scope.interaction` in the published report.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // `b.ts` is reached through a symlinked ancestor: lexically inside,
+    // really outside.
+    producerMocks.realpathSync.mockImplementation((path?: unknown) =>
+      String(path).endsWith('b.ts') ? '/elsewhere/victim.ts' : String(path),
+    );
+    // The edge EXISTS in the content this serves — only containment stops it.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['interaction']).toEqual([]);
+    expect(writtenDiff()).not.toContain('b/b.ts');
   });
 
   it('treats an irregular worktree file as unreadable, never reading it', async () => {

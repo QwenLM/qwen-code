@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -58,6 +58,7 @@ import type {
   WidenedScope,
 } from './lib/incremental-scope.js';
 import { widenScope } from './lib/incremental-scope.js';
+import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -1295,22 +1296,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ((widened = widenScope({
           anchor: anchor.diffBase ?? anchor.incremental.since,
           selection,
-          readWorktree: (rel) => {
-            try {
-              const abs = resolve(wt, rel);
-              // Gate the read on lstat: the paths are the PR's own, so a
-              // planted symlink or fifo reaches this closure. Opening a fifo
-              // blocks the synchronous read forever, and a device like
-              // /dev/zero grows the buffer until SIGKILL — neither throws,
-              // so the catch that frees the worktree lease never runs. An
-              // irregular file just contributes no edge: null already means
-              // "unreadable" to the widening.
-              if (!lstatSync(abs).isFile()) return null;
-              return readFileSync(abs, 'utf8');
-            } catch {
-              return null;
-            }
-          },
+          readWorktree: containedWorktreeReader(wt),
         })),
         (narrowed = assembleSections(selection, widened.paths)) === null)
       ) {
