@@ -30,9 +30,18 @@ const workflow = readFileSync(
 const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
 
 // The `wedged` predicate is defined once in the workflow and reused by the
-// in-flight count, the census, and the conflict lever's busy-set; tests replay
-// it VERBATIM so a drift in any of them fails here.
+// in-flight count, the census, and the liveness re-dispatch guard; tests
+// replay it VERBATIM so a drift in any of them fails here.
 const zombieDef = workflow.match(/ZOMBIE_JQ='([\s\S]*?)'\n/)?.[1];
+
+// The SCAN_INFLIGHT program is extracted once and replayed by both the
+// foreign-dispatch test and the wedged-queue test — one copy, so a workflow
+// edit updates one extraction instead of drifting between two.
+const inflightProgram = workflow
+  .match(
+    /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+  )?.[1]
+  ?.replace(/\n {12}/g, '\n');
 
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
@@ -304,8 +313,11 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       'run-list read failed; liveness lever and conflict dispatches skipped',
     );
+    // The FULL gate, including the wedge self-limit: a still-wedged recorded
+    // liveness run keeps it closed, so a persistent wedge plants one corpse
+    // per snapshot window at worst, not one per watermark cycle.
     expect(workflow).toContain(
-      '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}"',
+      '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" && "${PREV_LIVENESS_WEDGED}" == "0"',
     );
     // The watermark LIVES in the dashboard body: an unreadable body is
     // unknown watermark state, so the lever is skipped AND the body is not
@@ -443,7 +455,7 @@ exit 1`;
     // must collect the PR into the busy-set, and no live runs at all must
     // leave BUSY_OK true with an empty set.
     const busyWalk = workflow.match(
-      /(SHEP_BUSY=' '\n[\s\S]*?done < <\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'\.\[\] \| select\(\.status != "completed"\) \| select\(wedged\(\$now; \$zmin\) \| not\) \| \.databaseId' \/tmp\/scan-runs\.json 2> \/dev\/null\))/,
+      /(SHEP_BUSY=' '\n[\s\S]*?done < <\(jq -r '\.\[\] \| select\(\.status != "completed"\) \| \.databaseId' \/tmp\/scan-runs\.json 2> \/dev\/null\))/,
     )?.[1];
     expect(busyWalk).toBeTruthy();
     const runBusyWalk = ({ runs, ghScript }) => {
@@ -466,11 +478,6 @@ exit 1`;
               SCAN_RUNS_OK: 'true',
               ACTIONS_TOKEN: 'x',
               REPO: 'QwenLM/qwen-code',
-              NOW_EPOCH: String(
-                Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000),
-              ),
-              ZOMBIE_QUEUED_MINUTES: '30',
-              ZOMBIE_JQ: zombieDef,
             },
             encoding: 'utf8',
           },
@@ -498,10 +505,11 @@ exit 1`;
         ghScript: 'exit 1',
       }),
     ).toBe('true| ');
-    // A run wedged in `queued` is never inspected: it holds no jobs, so
-    // reading it wastes an API call and — worse, before this — a failing read
-    // on a permanently-queued run deferred every conflict dispatch forever.
-    // `exit 1` proves gh is not called at all: BUSY_OK survives as true.
+    // A run wedged by AGE is still inspected — age alone proves jobless
+    // only for the wedge class that defined the threshold. When the runner
+    // pool is offline, queued runs hold live review-address jobs
+    // indefinitely, and the busy-set must keep deferring their PRs (the
+    // marker-failure safety net), so the jobs read decides, not the birthday.
     expect(
       runBusyWalk({
         runs: [
@@ -511,17 +519,32 @@ exit 1`;
             createdAt: '2026-08-19T05:01:14Z',
           },
         ],
-        ghScript: 'exit 1',
+        ghScript: `printf '%s' '{"jobs":[{"status":"queued","name":"review-address (7127, ci/autofix-concurrent-fanout)"}]}'`,
       }),
-    ).toBe('true| ');
-    // ...while a freshly queued run IS still inspected.
+    ).toBe('true| 7127 ');
+    // The wedge class that defined the threshold reads clean: zero jobs,
+    // nothing collected, BUSY_OK survives.
     expect(
       runBusyWalk({
         runs: [
           {
-            databaseId: 103,
+            databaseId: 102,
             status: 'queued',
-            createdAt: '2026-08-19T23:56:00Z',
+            createdAt: '2026-08-19T05:01:14Z',
+          },
+        ],
+        ghScript: `printf '%s' '{"jobs":[]}'`,
+      }),
+    ).toBe('true| ');
+    // And a FAILED jobs read on an old queued run stays fail-closed like any
+    // other run: busy-state unknown, conflict dispatches deferred this tick.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 102,
+            status: 'queued',
+            createdAt: '2026-08-19T05:01:14Z',
           },
         ],
         ghScript: 'exit 1',
@@ -536,15 +559,10 @@ exit 1`;
     // is created seconds from the liveness watermark, so any proximity
     // window would count its two-hour address run as in-flight liveness and
     // starve the watchdog.
-    const jqProgram = workflow
-      .match(
-        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
-      )?.[1]
-      ?.replace(/\n {12}/g, '\n');
-    expect(jqProgram).toBeTruthy();
+    expect(inflightProgram).toBeTruthy();
     expect(zombieDef).toBeTruthy();
     const NOW = Math.floor(Date.parse('2026-07-18T08:00:05Z') / 1000);
-    const count = (runs, lvrun, { now = NOW, zmin = '30' } = {}) =>
+    const count = (runs, lvrun) =>
       execFileSync(
         'jq',
         [
@@ -554,11 +572,11 @@ exit 1`;
           lvrun,
           '--arg',
           'now',
-          String(now),
+          String(NOW),
           '--arg',
           'zmin',
-          zmin,
-          zombieDef + jqProgram,
+          '30',
+          zombieDef + inflightProgram,
         ],
         { encoding: 'utf8', input: JSON.stringify(runs) },
       ).trim();
@@ -617,21 +635,22 @@ exit 1`;
     // dispatching for 18 hours ("last scan signal 1107m ago, in-flight: 1")
     // while the loop was dark. A queued run older than ZOMBIE_QUEUED_MINUTES
     // is wedged, not live, and must drop out of the count.
-    const inflightProgram = workflow
-      .match(
-        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
-      )?.[1]
-      ?.replace(/\n {12}/g, '\n');
     const censusProgram = workflow
       .match(
         /SCAN_ZOMBIES="\$\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
       )?.[1]
       ?.replace(/\n {12}/g, '\n');
+    const oldestProgram = workflow
+      .match(
+        /SCAN_ZOMBIE_OLDEST="\$\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
     expect(inflightProgram).toBeTruthy();
     expect(censusProgram).toBeTruthy();
+    expect(oldestProgram).toBeTruthy();
 
     const NOW = Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000);
-    const jq = (program, runs, extra) =>
+    const jq = (program, runs, extra, zmin = '30') =>
       execFileSync(
         'jq',
         [
@@ -642,14 +661,15 @@ exit 1`;
           String(NOW),
           '--arg',
           'zmin',
-          '30',
+          zmin,
           zombieDef + program,
         ],
         { encoding: 'utf8', input: JSON.stringify(runs) },
       ).trim();
-    const inflight = (runs) =>
-      jq(inflightProgram, runs, ['--arg', 'lvrun', '900001']);
+    const inflight = (runs, zmin) =>
+      jq(inflightProgram, runs, ['--arg', 'lvrun', '900001'], zmin);
     const census = (runs) => jq(censusProgram, runs, []);
+    const oldest = (runs) => jq(oldestProgram, runs, []);
     const run = (event, databaseId, createdAt, status) => ({
       event,
       databaseId,
@@ -685,6 +705,22 @@ exit 1`;
         run('workflow_dispatch', 900001, '2026-08-19T23:30:01Z', 'queued'),
       ]),
     ).toBe('1');
+    // The repository-variable override is behaviorally live: the same
+    // 10-minute-old queued run is wedged at zmin=5 and in flight at zmin=15.
+    // A hardcoded threshold would pass this whole suite while silently
+    // ignoring a tuned variable mid-incident.
+    expect(
+      inflight(
+        [run('workflow_dispatch', 900001, '2026-08-19T23:50:00Z', 'queued')],
+        '5',
+      ),
+    ).toBe('0');
+    expect(
+      inflight(
+        [run('workflow_dispatch', 900001, '2026-08-19T23:50:00Z', 'queued')],
+        '15',
+      ),
+    ).toBe('1');
     // Only QUEUED runs wedge. A review-address run legitimately runs for
     // hours, and must keep deferring the watchdog for every one of them.
     expect(
@@ -711,6 +747,105 @@ exit 1`;
         run('schedule', 5, '2026-08-19T20:00:00Z', 'completed'),
       ]),
     ).toBe('3');
+    // ...and the reported "oldest" is the EARLIEST wedged createdAt, not the
+    // newest — a sort|first→last mutant would flip the banner during the
+    // very incident it exists for.
+    expect(
+      oldest([
+        run('workflow_dispatch', 1, '2026-08-19T01:04:50Z', 'queued'),
+        run('workflow_dispatch', 2, '2026-08-19T13:44:13Z', 'queued'),
+        run('pull_request_review', 3, '2026-08-19T05:14:09Z', 'queued'),
+        run('schedule', 4, '2026-08-19T23:55:00Z', 'queued'),
+        run('schedule', 5, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('2026-08-19T01:04:50Z');
+    // Nothing wedged → empty, never a bogus timestamp.
+    expect(
+      oldest([
+        run('workflow_dispatch', 6, '2026-08-19T23:56:00Z', 'queued'),
+        run('schedule', 7, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('');
+  });
+
+  it('behaviorally proves the liveness gate refuses to stack on a wedged dispatch', () => {
+    // During a PERSISTENT wedge the watermark cycle would reopen the gate
+    // every 60 minutes and plant a fresh uncancellable queued dispatch per
+    // hour, each refreshing the very liveness watermark whose growing age
+    // exposed the incident. The guard looks at the RECORDED liveness run:
+    // still wedged in the snapshot → the gate stays closed. It lengthens
+    // the interval rather than blocking hard — once that run starts,
+    // completes, or leaves the snapshot window, the gate reopens on its own.
+    const prevWedgedProgram = workflow
+      .match(
+        /PREV_LIVENESS_WEDGED="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    expect(prevWedgedProgram).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000);
+    const prevWedged = (runs, lvrun) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'lvrun',
+          lvrun,
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'zmin',
+          '30',
+          zombieDef + prevWedgedProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
+    const run = (event, databaseId, createdAt, status) => ({
+      event,
+      databaseId,
+      createdAt,
+      status,
+    });
+    // Our recorded liveness run, still wedged → the gate must stay closed.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued')],
+        '900001',
+      ),
+    ).toBe('1');
+    // The same run once GitHub starts it → the gate reopens.
+    expect(
+      prevWedged(
+        [
+          run(
+            'workflow_dispatch',
+            900001,
+            '2026-08-19T05:01:14Z',
+            'in_progress',
+          ),
+        ],
+        '900001',
+      ),
+    ).toBe('0');
+    // A wedged run that is NOT ours (a foreign dispatch) never blocks the
+    // watchdog — attribution stays by recorded run id.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900002, '2026-08-19T05:01:14Z', 'queued')],
+        '900001',
+      ),
+    ).toBe('0');
+    // No id recorded → nothing can be wedged by attribution.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued')],
+        '',
+      ),
+    ).toBe('0');
+    // The recorded run left the snapshot window → the gate reopens; the
+    // residual is the documented one absorbed duplicate scan.
+    expect(prevWedged([], '900001')).toBe('0');
   });
 
   it('reports and routes around wedged runs everywhere they matter', () => {
@@ -719,11 +854,22 @@ exit 1`;
     expect(workflow).toContain(
       'ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || \'30\' }}"',
     );
-    // The conflict lever's busy-set reads the same predicate: a wedged run
-    // holds no review-address job, so waiting on it would defer conflict
-    // dispatches forever too.
+    // The tunable is operator-breakable — a non-numeric repo variable falls
+    // back to the default with a warning instead of failing every $zmin
+    // consumer open (mirrors AUTO_RELEASE_DAYS), and the guard runs BEFORE
+    // the first consumer (the census), not after.
+    expect(workflow).toMatch(
+      /if \[\[ ! "\$\{ZOMBIE_QUEUED_MINUTES\}" =~ \^\[0-9\]\+\$ \]\] \|\| \[\[ \$\{#ZOMBIE_QUEUED_MINUTES\} -gt 3 \]\]; then/,
+    );
+    expect(workflow).toMatch(
+      /is not an integer or is too large; using 30"\n\s+ZOMBIE_QUEUED_MINUTES=30\n[\s\S]*?SCAN_ZOMBIES="/,
+    );
+    // The conflict lever's busy-set deliberately does NOT share the wedged
+    // exclusion: age alone proves jobless only for the wedge class that
+    // defined the threshold — offline runners keep live jobs queued
+    // indefinitely, so the jobs read decides, not the birthday.
     expect(workflow).toContain(
-      'select(.status != "completed") | select(wedged($now; $zmin) | not) | .databaseId',
+      'done < <(jq -r \'.[] | select(.status != "completed") | .databaseId\' /tmp/scan-runs.json 2> /dev/null)',
     );
     // Visible in the tick log and on the dashboard, not just in the count.
     expect(workflow).toContain('wedged-queued: ${SCAN_ZOMBIES}');
