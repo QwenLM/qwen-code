@@ -1718,7 +1718,6 @@ export class AgentCore {
     }
 
     // Build scheduler
-    const responded = new Set<string>();
     let resolveBatch: (() => void) | null = null;
     const emittedCallIds = new Set<string>();
     // pidMap: callId → PTY PID, populated by onToolCallsUpdate when a shell
@@ -1868,6 +1867,7 @@ export class AgentCore {
             // can restore it. See `runInAgentFrames` for why this matters
             // (mis-attributed `from="leader"` + leader-guard bypass).
             const inheritedTeammateIdentity = getTeammateContext();
+            let responded = false;
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1885,8 +1885,8 @@ export class AgentCore {
                   ToolCallConfirmationDetails['onConfirm']
                 >[1],
               ) => {
-                if (responded.has(waiting.request.callId)) return;
-                responded.add(waiting.request.callId);
+                if (responded) return;
+                responded = true;
                 // UI invokes this from its own async chain (outside the
                 // reasoning-loop ALS frames), so re-enter both the agent's
                 // runtime view AND its name context before the resumed

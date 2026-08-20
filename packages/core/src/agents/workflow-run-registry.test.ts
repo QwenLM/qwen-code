@@ -427,26 +427,47 @@ describe('WorkflowRunRegistry', () => {
     expect(event.respond).not.toHaveBeenCalled();
   });
 
-  it('does not re-park a duplicate event after it was resolved', async () => {
+  it('re-parks a hook-bounced approval after the prior emission resolves', async () => {
     const r = new WorkflowRunRegistry();
-    r.register(reg('wf_late_duplicate'));
+    r.register(reg('wf_hook_bounce'));
     r.setApprovalChangeCallback(() => {});
     const emitter = new AgentEventEmitter();
-    const event = approvalEvent();
-    r.bridgeApprovalEvents('wf_late_duplicate', emitter);
-    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
-    const approvalId =
-      r.get('wf_late_duplicate')!.pendingApprovals[0].approvalId;
+    const secondRespond = vi.fn(async () => {});
+    const firstRespond = vi.fn(async () => {
+      emitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        approvalEvent({
+          respond: secondRespond,
+          timestamp: 1_700_000_000_200,
+        }),
+      );
+    });
+    r.bridgeApprovalEvents('wf_hook_bounce', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    const firstApprovalId =
+      r.get('wf_hook_bounce')!.pendingApprovals[0].approvalId;
     await r.resolvePendingApproval(
-      'wf_late_duplicate',
-      approvalId,
+      'wf_hook_bounce',
+      firstApprovalId,
       ToolConfirmationOutcome.ProceedOnce,
     );
 
-    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
-
-    expect(r.get('wf_late_duplicate')?.pendingApprovals).toEqual([]);
-    expect(event.respond).toHaveBeenCalledOnce();
+    const secondApproval = r.get('wf_hook_bounce')!.pendingApprovals[0];
+    expect(secondApproval).toMatchObject({
+      subagentId: 'workflow-agent-a',
+      callId: 'call-1',
+      at: 1_700_000_000_200,
+    });
+    await r.resolvePendingApproval(
+      'wf_hook_bounce',
+      secondApproval.approvalId,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(secondRespond).toHaveBeenCalledOnce();
   });
 
   it('normalizes persistent approval outcomes to cancel', async () => {

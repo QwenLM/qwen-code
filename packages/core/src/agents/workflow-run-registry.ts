@@ -617,11 +617,19 @@ export class WorkflowRunRegistry {
         if (dispatch) dispatch.subagentId = event.subagentId;
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
-      // Re-emission of an already-settled call: respond is idempotent via
-      // the runtime's responded set, so silently dropping it is safe.
       if (seenSources.has(sourceKey)) return;
       seenSources.add(sourceKey);
-      const parked = this.parkPendingApproval(runId, event, dispatchId);
+      const parked = this.parkPendingApproval(
+        runId,
+        {
+          ...event,
+          respond: async (...args) => {
+            seenSources.delete(sourceKey);
+            await event.respond(...args);
+          },
+        },
+        dispatchId,
+      );
       if (parked === 'duplicate') return;
       if (parked === 'rejected') {
         this.rejectResponder(event.respond);

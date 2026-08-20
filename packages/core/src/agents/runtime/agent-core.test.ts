@@ -52,6 +52,16 @@ import {
 import { GeminiChat } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
 import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+import {
+  CoreToolScheduler,
+  type ToolCall,
+  type WaitingToolCall,
+} from '../../core/coreToolScheduler.js';
+import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import {
+  AgentEventType,
+  type AgentApprovalRequestEvent,
+} from './agent-events.js';
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -420,6 +430,103 @@ describe('AgentCore.runInAgentFrames', () => {
     }, otherView);
 
     expect(observed).toBe(ownView);
+  });
+});
+
+describe('AgentCore approval response deduplication', () => {
+  it('allows one response for each hook-bounced approval emission', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('approval-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'approval-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const firstOnConfirm = vi.fn(async () => {});
+    const secondOnConfirm = vi.fn(async () => {});
+    const request = {
+      callId: 'call-1',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-1',
+    };
+    const secondWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'info',
+        title: 'Hook confirmation',
+        prompt: 'Approve bounced execution?',
+        onConfirm: secondOnConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const firstWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {
+          await firstOnConfirm();
+          const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+            onToolCallsUpdate?: (calls: ToolCall[]) => void;
+          };
+          scheduler.onToolCallsUpdate?.([secondWaiting]);
+        }),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([firstWaiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+    await Promise.all([
+      approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+      approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+    ]);
+    await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+    await Promise.all([
+      approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+      approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+    ]);
+    abortController.abort();
+    await processing;
+
+    expect(firstOnConfirm).toHaveBeenCalledOnce();
+    expect(secondOnConfirm).toHaveBeenCalledOnce();
+    scheduleSpy.mockRestore();
   });
 });
 
