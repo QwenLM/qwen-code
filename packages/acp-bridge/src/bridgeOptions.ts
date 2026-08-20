@@ -193,6 +193,12 @@ export interface BridgeTelemetry {
  */
 export interface BridgeOptions {
   /**
+   * Runtime-owned directory for persistent session attachment bytes. Daemon
+   * callers provide a workspace-scoped directory under the Qwen runtime temp
+   * root. Direct embedded callers may omit it for process-local storage.
+   */
+  sessionAttachmentsRoot?: string;
+  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.

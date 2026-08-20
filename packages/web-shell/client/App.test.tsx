@@ -249,6 +249,10 @@ const {
       cancel: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
       getContextUsage: vi.fn().mockResolvedValue({}),
+      readAttachment: vi.fn().mockResolvedValue({
+        data: 'aGVsbG8=',
+        mimeType: 'text/plain',
+      }),
       getTasks: vi.fn().mockResolvedValue({
         v: 1,
         sessionId: 'session-1',
@@ -267,6 +271,17 @@ const {
       refreshCapabilities: vi.fn(),
     },
     mockWorkspaceActions: {
+      readWorkspaceFile: vi.fn().mockResolvedValue({
+        content: '',
+        truncated: false,
+      }),
+      stat: vi.fn().mockResolvedValue({
+        kind: 'stat',
+        path: '',
+        type: 'file',
+        sizeBytes: 0,
+        modifiedMs: 0,
+      }),
       loadSkillsStatus,
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
       loadPreflight: vi.fn().mockResolvedValue(null),
@@ -335,6 +350,10 @@ const {
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+        onAttachmentPreview?: (file: {
+          name: string;
+          attachmentId?: string;
+        }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
       } | null,
@@ -731,6 +750,10 @@ vi.mock('./components/MessageList', async () => {
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+        onAttachmentPreview?: (file: {
+          name: string;
+          attachmentId?: string;
+        }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
         welcomeHeader?: React.ReactNode;
@@ -1329,6 +1352,40 @@ vi.doMock('./components/SplitView', async () => {
               }),
           },
           'open main artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-attachment-one',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'attachment:shared.txt',
+                kind: 'attachment',
+                title: 'shared.txt',
+                turnId: 'turn-1',
+                data: new Blob(['one']),
+                sourceSessionId: 'pane-session-1',
+              }),
+          },
+          'open attachment one',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-attachment-two',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'attachment:shared.txt',
+                kind: 'attachment',
+                title: 'shared.txt',
+                turnId: 'turn-2',
+                data: new Blob(['two']),
+                sourceSessionId: 'pane-session-2',
+              }),
+          },
+          'open attachment two',
         ),
         React.createElement(
           'button',
@@ -2173,6 +2230,156 @@ describe('task activity key', () => {
 });
 
 describe('artifact panel fullscreen', () => {
+  it('opens an @ file with the current workspace identity', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValueOnce({
+      content: 'hello',
+      truncated: false,
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'notes.txt',
+        workspacePath: 'notes.txt',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      'notes.txt',
+    );
+    expect(container.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
+  });
+
+  it('does not open an @ directory in the file preview', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.stat.mockResolvedValueOnce({
+      kind: 'stat',
+      path: 'docs',
+      type: 'directory',
+      sizeBytes: 0,
+      modifiedMs: 0,
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'docs',
+        workspacePath: 'docs',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledWith('docs');
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+  });
+
+  it('loads a daemon attachment before opening its preview', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'notes.txt',
+        attachmentId: 'attachment-1',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.readAttachment).toHaveBeenCalledWith(
+      'attachment-1',
+    );
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('reports attachment preview failures', async () => {
+    const onToast = vi.fn();
+    mockSessionActions.readAttachment.mockRejectedValueOnce(
+      new Error('attachment unavailable'),
+    );
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'notes.txt',
+        attachmentId: 'attachment-1',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onToast).toHaveBeenCalledWith('error', 'attachment unavailable');
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+  });
+
+  it('does not open an attachment after switching sessions', async () => {
+    let resolveAttachment:
+      | ((value: { data: string; mimeType: string }) => void)
+      | undefined;
+    mockSessionActions.readAttachment.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAttachment = resolve;
+      }),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'notes.txt',
+        attachmentId: 'attachment-1',
+      });
+    });
+    mockConnection.sessionId = 'session-2';
+    testState.ownerVersion += 1;
+    rerender();
+    await flush();
+
+    await act(async () => {
+      resolveAttachment?.({ data: 'aGVsbG8=', mimeType: 'text/plain' });
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+  });
+
   it('drops fullscreen when the panel closes and reopens docked', async () => {
     const { container } = renderApp();
 
@@ -4607,6 +4814,10 @@ beforeEach(() => {
   mockSessionActions.cancel.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
   mockSessionActions.getContextUsage.mockResolvedValue({});
+  mockSessionActions.readAttachment.mockResolvedValue({
+    data: 'aGVsbG8=',
+    mimeType: 'text/plain',
+  });
   mockSessionActions.getTasks.mockResolvedValue({
     v: 1,
     sessionId: 'session-1',
@@ -4618,6 +4829,19 @@ beforeEach(() => {
   mockStore.getSnapshot.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+  mockWorkspaceActions.readWorkspaceFile.mockReset();
+  mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+    content: '',
+    truncated: false,
+  });
+  mockWorkspaceActions.stat.mockReset();
+  mockWorkspaceActions.stat.mockResolvedValue({
+    kind: 'stat',
+    path: '',
+    type: 'file',
+    sizeBytes: 0,
+    modifiedMs: 0,
+  });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
@@ -10397,6 +10621,55 @@ describe('App session callbacks', () => {
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
+  it('hides the composer while a tool approval overlay is pending and restores it after resolution', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    const composerWrapper = () =>
+      container.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(composerWrapper()?.className).toContain('composerHidden');
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+  });
+
+  it('hides the composer while an ask-user question overlay is pending', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+  });
+
   it('does not show missing-session state for non-404/410 errors', async () => {
     mockConnection.status = 'disconnected';
     mockConnection.sessionId = undefined;
@@ -14030,6 +14303,7 @@ describe('App session callbacks', () => {
     });
     expect(sessionCatalogController.turnCompleted).toHaveBeenCalledWith(
       '/tmp/project',
+      'session-1',
     );
 
     onSessionChange.mockClear();
@@ -14084,6 +14358,7 @@ describe('App session callbacks', () => {
 
     expect(sessionCatalogController.turnCompleted).toHaveBeenCalledWith(
       '/tmp/project',
+      'session-late',
     );
     expect(onSessionChange).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -16342,6 +16617,36 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).not.toBeNull();
+  });
+
+  it('keeps same-name attachment tabs separate across split sessions', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-attachment-one"]',
+        )
+        ?.click();
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-attachment-two"]',
+        )
+        ?.click();
+    });
+
+    expect(
+      document.body.querySelectorAll(
+        'aside[aria-label="Right panel"] button[role="tab"]',
+      ),
+    ).toHaveLength(2);
   });
 
   it('clears split pane artifact snapshots when switching sessions', async () => {
