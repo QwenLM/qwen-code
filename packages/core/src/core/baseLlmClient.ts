@@ -201,8 +201,6 @@ export interface GenerateJsonOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
-  /** Fail instead of falling back to the main generator for missing model config. */
-  failClosed?: boolean;
 }
 
 /**
@@ -239,7 +237,6 @@ export class BaseLlmClient {
       systemInstruction,
       promptId,
       maxAttempts,
-      failClosed,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -267,7 +264,7 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model, { failClosed });
+    } = await this.resolveForModel(model);
     const requestContents = slimCompactionInput(
       contents,
       contentGeneratorConfig.modalities,

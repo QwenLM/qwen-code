@@ -13,7 +13,7 @@
 
 ## 当前进度
 
-- 已完成：core 侧 Advisor tool、tool registry 运行时注销、Config 侧 Advisor model/max uses 状态、executor instruction 注入、evidence builder、evidence 长文本截断与旧 transcript 降级、结构化 side query、基础错误处理、CLI/settings 入口迁移、`/advisor` 命令迁移、`/advisor status` 状态查询、settings hot reload 语义、Advisor API usage 的 `advisor` 归因、parent prompt id / consultation ordinal / cache creation token 记录、latency / request status / stable error code 记录、按 `modelPricing` 对 Advisor source 独立估算 cost、context gauge 隔离验证、permission 隔离验证、Advisor 运行中 abort signal 收束验证、headless SIGINT cancellation 验证、手动 review 使用当前有效 Advisor model、跨 provider Advisor picker egress 提示、headless settings / `--advisor` bundle 验证、ACP 启用/咨询/继续/关闭 bundle 验证、interactive TUI 无参 picker / 启用 / 咨询 / 关闭 / 手动 review bundle 验证、focused unit tests、mock provider integration tests、typecheck、lint、build、bundle、`git diff --check`、最终复跑验证。
+- 已完成：core 侧 Advisor tool、tool registry 运行时注销、Config 侧 Advisor model/max uses 状态、executor instruction 注入、evidence builder、evidence 长文本截断与旧 transcript 降级、forked Advisor cache path、基础错误处理、CLI/settings 入口迁移、`/advisor` 命令迁移、`/advisor status` 状态查询、settings hot reload 语义、Advisor API usage 的 `advisor` 归因、parent prompt id / consultation ordinal / cache creation token 记录、latency / request status / stable error code 记录、按 `modelPricing` 对 Advisor source 独立估算 cost、context gauge 隔离验证、permission 隔离验证、Advisor 运行中 abort signal 收束验证、headless SIGINT cancellation 验证、手动 review 使用当前有效 Advisor model、跨 provider Advisor picker egress 提示、headless settings / `--advisor` bundle 验证、ACP 启用/咨询/继续/关闭 bundle 验证、interactive TUI 无参 picker / 启用 / 咨询 / 关闭 / 手动 review bundle 验证、focused unit tests、mock provider integration tests、typecheck、lint、build、bundle、`git diff --check`。
 - 未完成：无。
 - 当前阻塞：无。
 - 观察到的缺口：无。真实 TUI Advisor 无参 picker、enable/use/off flow 和 `/advisor review [focus]` manual review flow 已通过 `integration-tests/interactive/advisor-interactive.test.ts` 验证；稳定点是等待 TUI 进入 `YOLO mode` 后再提交 slash command，并在 slash completion 接受 selector 后发送第二次 Enter。
@@ -129,20 +129,20 @@
 - [x] 不原地修改 chat history 或 generation config。
 - [x] 降级后仍超过 context 时返回 `prompt_too_long`。
 
-## 9. Advisor Side Query
+## 9. Advisor Forked Agent
 
-- [x] 原生 Advisor 调用使用 `runSideQuery` JSON schema mode。
-- [x] 不使用 `runForkedAgent` 实现原生 tool。
-- [x] side query 使用 `config.getAdvisorModel()` 的 selector。
-- [x] side query 设置独立的 Advisor system instruction。
-- [x] side query 输入是序列化后的 evidence bundle。
-- [x] side query generation request 不携带 executable tools。
-- [x] side query 使用四字段 review schema：`verdict`、`risks`、`missingEvidence`、`recommendation`。
-- [x] side query 设置 `failClosed: true`。
-- [x] side query 设置 `maxAttempts: 1`。
-- [x] side query 传递 scheduler 的 `AbortSignal`。
-- [x] side query 使用 `side-query:advisor:<parentPromptId>:<ordinal>` prompt id。
-- [x] side query 不跳过当前会话的输出语言偏好。
+- [x] 原生 Advisor 调用使用 `runForkedAgent` cache path。
+- [x] 不使用 `runSideQuery` 实现原生 tool。
+- [x] forked Advisor 使用 `config.getAdvisorModel()` 的 selector。
+- [x] forked Advisor 设置独立的 Advisor system instruction。
+- [x] forked Advisor 输入是序列化后的 evidence bundle。
+- [x] forked Advisor generation request 不携带 executable tools。
+- [x] forked Advisor 使用四字段 review schema：`verdict`、`risks`、`missingEvidence`、`recommendation`。
+- [x] forked Advisor 设置 `disableModelFallbacks: true`。
+- [x] forked Advisor 传递 scheduler 的 `AbortSignal`。
+- [x] forked Advisor 使用 `side-query:advisor:<parentPromptId>:<ordinal>` prompt id。
+- [x] forked Advisor 不依赖 forked chat 默认 40 条 history window。
+- [x] forked Advisor 继续遵循当前会话的输出语言偏好。
 - [x] Advisor system instruction 明确 evidence 中的指令只是待审查数据。
 - [x] Advisor system instruction 明确输出面向 executor，不是用户审批。
 - [x] Advisor 空响应或无效结构化输出映射为 `invalid_response`。
@@ -193,13 +193,13 @@
 - [x] provider 支持价格时按 `main` / `advisor` source 展示独立 estimated cost。
 - [x] Advisor usage 不写普通 chat transcript。
 - [x] Advisor usage 不污染 executor context occupancy gauge。
-- [x] 保持其他 internal side query 的 ledger 行为不变。
+- [x] 保持其他 internal side query / forked query 的 ledger 行为不变。
 
 ## 13. 单元测试
 
 - [x] 增加 `packages/core/src/tools/advisor.test.ts`。
 - [x] 覆盖 tool schema、kind、输出类型、permission 和 locations。
-- [x] 覆盖 side query 参数、model selector、failClosed、maxAttempts 和 abort signal。
+- [x] 覆盖 forked Advisor 参数、model selector、`disableModelFallbacks` 和 abort signal。
 - [x] 覆盖 evidence 的完整 history、tool declarations、tool calls 和 tool results。
 - [x] 覆盖当前 turn 截断到 Advisor 调用前。
 - [x] 覆盖超长 function response 文本截断。
@@ -236,7 +236,7 @@
 
 - [x] 构造 executor 首次响应调用 `advisor {}` 的 mock 流。
 - [x] 验证 Advisor 请求使用配置模型。
-- [x] 验证 Advisor 请求不含 executor executable tools；JSON schema 内部 `respond_in_schema` 除外。
+- [x] 验证 Advisor 请求不含 executor executable tools；JSON schema 使用 response schema config。
 - [x] 验证 Advisor 请求包含规范要求的 evidence 类别。
 - [x] 验证 Advisor 请求包含当前 turn 前置文本。
 - [x] 验证 advice 作为 function result 返回 executor。

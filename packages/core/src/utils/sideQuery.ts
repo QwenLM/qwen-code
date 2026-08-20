@@ -54,11 +54,6 @@ export interface SideQueryJsonOptions<TResponse> {
    * new user-visible side queries honor the preference automatically.
    */
   skipOutputLanguagePreference?: boolean;
-  /**
-   * Fail (throw) instead of silently falling back to the main generator when a
-   * distinct generator for `model` can't be created.
-   */
-  failClosed?: boolean;
   validate?: (response: TResponse) => string | null;
 }
 
@@ -240,9 +235,6 @@ export async function runSideQuery<TResponse>(
       config: requestConfig,
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
-      }),
-      ...(options.failClosed !== undefined && {
-        failClosed: options.failClosed,
       }),
     })) as TResponse;
 

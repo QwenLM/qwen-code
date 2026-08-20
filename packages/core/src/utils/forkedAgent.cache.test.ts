@@ -375,6 +375,44 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
+  it('passes a custom cache-path prompt id when provided', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+
+    const mockSendMessageStream = vi.fn(() => {
+      async function* generate() {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              { content: { role: 'model', parts: [{ text: 'review' }] } },
+            ],
+          },
+        };
+      }
+      return Promise.resolve(generate());
+    });
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({ sendMessageStream: mockSendMessageStream }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'review this',
+      cacheSafeParams: getCacheSafeParams()!,
+      promptId: 'side-query:advisor:prompt-1:1',
+      disableModelFallbacks: true,
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      'test-model',
+      expect.any(Object),
+      'side-query:advisor:prompt-1:1',
+      undefined,
+      { disableModelFallbacks: true },
+    );
+  });
+
   it('preserves tools: [] even when jsonSchema is provided', async () => {
     saveCacheSafeParams(
       {

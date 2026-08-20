@@ -266,7 +266,7 @@ describe('advisor native tool', () => {
       "Call 'advisor' by itself",
     );
     for (const advisorRequest of advisorRequests) {
-      expect(toolNames(advisorRequest)).toEqual(['respond_in_schema']);
+      expect(toolNames(advisorRequest)).toEqual([]);
     }
 
     const firstEvidence = parseAdvisorEvidence(advisorRequests[0]!);

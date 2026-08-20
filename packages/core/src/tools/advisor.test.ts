@@ -13,11 +13,11 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import { Kind } from './tools.js';
 
-const mockRunSideQuery = vi.hoisted(() => vi.fn());
+const mockRunForkedAgent = vi.hoisted(() => vi.fn());
 const mockTokenLimit = vi.hoisted(() => vi.fn(() => 1_000_000));
 
-vi.mock('../utils/sideQuery.js', () => ({
-  runSideQuery: mockRunSideQuery,
+vi.mock('../utils/forkedAgent.js', () => ({
+  runForkedAgent: mockRunForkedAgent,
 }));
 
 vi.mock('../core/tokenLimits.js', () => ({
@@ -29,6 +29,13 @@ const ADVISOR_REVIEW = {
   risks: 'The current plan may miss retries.',
   missingEvidence: 'No failing test output was shown.',
   recommendation: 'Add a focused regression test.',
+};
+
+const ADVISOR_FORKED_RESULT = {
+  text: JSON.stringify(ADVISOR_REVIEW),
+  jsonResult: ADVISOR_REVIEW,
+  usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
+  model: 'advisor-model',
 };
 
 function makeConfig(options: {
@@ -63,6 +70,7 @@ function makeConfig(options: {
     ] as Content[]);
 
   return {
+    getModel: () => 'executor-model',
     getAdvisorModel: () => options.advisorModel,
     getAdvisorMaxUses: () => options.advisorMaxUses,
     getGeminiClient: () => ({
@@ -81,7 +89,7 @@ describe('AdvisorTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockTokenLimit.mockReturnValue(1_000_000);
-    mockRunSideQuery.mockResolvedValue(ADVISOR_REVIEW);
+    mockRunForkedAgent.mockResolvedValue(ADVISOR_FORKED_RESULT);
   });
 
   it('declares the native Advisor contract', async () => {
@@ -105,7 +113,7 @@ describe('AdvisorTool', () => {
     expect(() => tool.build({ extra: true } as never)).toThrow();
   });
 
-  it('runs Advisor as a no-tools side query with sanitized evidence', async () => {
+  it('runs Advisor as a no-tools forked agent with sanitized evidence', async () => {
     const config = makeConfig({ advisorModel: 'advisor-model' });
     const tool = new AdvisorTool(config);
     const signal = new AbortController().signal;
@@ -114,23 +122,31 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(signal),
     );
 
-    expect(mockRunSideQuery).toHaveBeenCalledWith(
-      config,
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        config,
         model: 'advisor-model',
-        systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
         abortSignal: signal,
         promptId: 'side-query:advisor:prompt-1:1',
-        maxAttempts: 1,
-        failClosed: true,
-        schema: expect.objectContaining({
+        disableModelFallbacks: true,
+        jsonSchema: expect.objectContaining({
           required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
         }),
       }),
     );
-    const [, options] = mockRunSideQuery.mock.calls[0];
-    expect(options).not.toHaveProperty('tools');
-    const evidenceText = options.contents[0].parts[0].text;
+    const [options] = mockRunForkedAgent.mock.calls[0];
+    expect(options.cacheSafeParams).toMatchObject({
+      history: [],
+      model: 'executor-model',
+      version: 0,
+    });
+    expect(options.cacheSafeParams.generationConfig).toEqual({
+      systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
+    });
+    expect(options.cacheSafeParams.generationConfig).not.toHaveProperty(
+      'tools',
+    );
+    const evidenceText = options.userMessage;
     const evidence = JSON.parse(evidenceText);
     expect(evidence.executorSystemInstruction).toEqual({
       parts: [{ text: 'executor system' }],
@@ -172,7 +188,7 @@ describe('AdvisorTool', () => {
     const tool = new AdvisorTool(config);
     const controller = new AbortController();
     const abortError = new Error('user cancelled');
-    mockRunSideQuery.mockImplementationOnce(() => {
+    mockRunForkedAgent.mockImplementationOnce(() => {
       controller.abort(abortError);
       return Promise.reject(abortError);
     });
@@ -193,7 +209,7 @@ describe('AdvisorTool', () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    mockRunSideQuery.mockImplementationOnce(() => {
+    mockRunForkedAgent.mockImplementationOnce(() => {
       markStarted();
       return new Promise(() => undefined);
     });
@@ -254,8 +270,8 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(new AbortController().signal),
     );
 
-    const [, options] = mockRunSideQuery.mock.calls[0];
-    const evidence = JSON.parse(options.contents[0].parts[0].text);
+    const [options] = mockRunForkedAgent.mock.calls[0];
+    const evidence = JSON.parse(options.userMessage);
     expect(evidence.transcript).toEqual([
       {
         role: 'user',
@@ -326,8 +342,8 @@ describe('AdvisorTool', () => {
       new AdvisorTool(config).build({}).execute(new AbortController().signal),
     );
 
-    const [, options] = mockRunSideQuery.mock.calls[0];
-    const evidence = JSON.parse(options.contents[0].parts[0].text);
+    const [options] = mockRunForkedAgent.mock.calls[0];
+    const evidence = JSON.parse(options.userMessage);
     const output =
       evidence.transcript[1].parts[0].functionResponse.response.output;
     expect(output).toContain('<truncated 50 chars>');
@@ -360,8 +376,8 @@ describe('AdvisorTool', () => {
       new AdvisorTool(config).build({}).execute(new AbortController().signal),
     );
 
-    const [, options] = mockRunSideQuery.mock.calls[0];
-    const evidenceText = options.contents[0].parts[0].text;
+    const [options] = mockRunForkedAgent.mock.calls[0];
+    const evidenceText = options.userMessage;
     const evidence = JSON.parse(evidenceText);
     expect(evidenceText.length).toBeLessThanOrEqual(32_768 * 4 * 0.75);
     expect(evidence.truncation.omittedTranscriptEntries).toBeGreaterThan(0);
@@ -375,7 +391,7 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(new AbortController().signal),
     );
 
-    expect(mockRunSideQuery).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
     expect(result.error?.message).toContain('code="disabled"');
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(String(result.llmContent)).toContain('code="disabled"');
@@ -393,7 +409,7 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(new AbortController().signal),
     );
 
-    expect(mockRunSideQuery).toHaveBeenCalledTimes(1);
+    expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(String(result.llmContent)).toContain('code="max_uses_exceeded"');
   });
@@ -403,14 +419,14 @@ describe('AdvisorTool', () => {
 
     const result = await tool.build({}).execute(new AbortController().signal);
 
-    expect(mockRunSideQuery).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
     expect(String(result.llmContent)).toContain(
       'code="missing_prompt_context"',
     );
   });
 
   it('does not consume configured uses for failed requests', async () => {
-    mockRunSideQuery.mockRejectedValueOnce(new Error('temporary failure'));
+    mockRunForkedAgent.mockRejectedValueOnce(new Error('temporary failure'));
     const tool = new AdvisorTool(
       makeConfig({ advisorModel: 'advisor-model', advisorMaxUses: 1 }),
     );
@@ -428,16 +444,17 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(new AbortController().signal),
     );
 
-    expect(mockRunSideQuery).toHaveBeenCalledTimes(3);
+    expect(mockRunForkedAgent).toHaveBeenCalledTimes(3);
     expect(second.error).toBeUndefined();
     expect(third.error).toBeUndefined();
     expect(String(fourth.llmContent)).toContain('code="max_uses_exceeded"');
   });
 
   it('maps invalid Advisor responses to invalid_response', async () => {
-    mockRunSideQuery.mockRejectedValueOnce(
-      new Error('Invalid side query response: missing verdict'),
-    );
+    mockRunForkedAgent.mockResolvedValueOnce({
+      ...ADVISOR_FORKED_RESULT,
+      jsonResult: { verdict: '' },
+    });
     const tool = new AdvisorTool(makeConfig({ advisorModel: 'advisor-model' }));
 
     const result = await promptIdContext.run('prompt-1', () =>
@@ -454,7 +471,7 @@ describe('AdvisorTool', () => {
     ],
     ['model_not_found', new Error('model advisor-model not found')],
   ] as const)('maps provider failures to %s', async (code, error) => {
-    mockRunSideQuery.mockRejectedValueOnce(error);
+    mockRunForkedAgent.mockRejectedValueOnce(error);
     const tool = new AdvisorTool(makeConfig({ advisorModel: 'advisor-model' }));
 
     const result = await promptIdContext.run('prompt-1', () =>
@@ -485,7 +502,7 @@ describe('AdvisorTool', () => {
       tool.build({}).execute(new AbortController().signal),
     );
 
-    expect(mockRunSideQuery).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
     expect(String(result.llmContent)).toContain('code="invalid_call_order"');
   });
 });
