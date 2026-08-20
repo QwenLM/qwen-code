@@ -165,6 +165,14 @@ describe('extractCertificateBlocks', () => {
     ).toEqual([ROOT_PEM.trim(), LEAF_PEM.trim()]);
   });
 
+  it('stops when a non-certificate block does not decode', () => {
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN PRIVATE KEY-----\nnot%base64\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
   it('normalizes CRLF and marker/body padding to canonical PEM', () => {
     // Oracle: authorized=true for both. The bundle this feeds is written to
     // disk, so the output has to be canonical whatever the input looked like.
@@ -177,6 +185,17 @@ describe('extractCertificateBlocks', () => {
       .join('\n');
     expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
   });
+
+  it.each(['\f', '\v', '\x01', '\x1f'])(
+    'takes marker lines with trailing control byte %j',
+    (control) => {
+      const padded = ROOT_PEM.trim()
+        .split('\n')
+        .map((line) => (line.startsWith('-----') ? `${line}${control}` : line))
+        .join('\n');
+      expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
+    },
+  );
 
   it.each([
     ['a space', ' '],

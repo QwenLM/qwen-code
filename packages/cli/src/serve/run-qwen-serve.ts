@@ -660,6 +660,23 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+function canonicalIpLiteral(host: string): string | undefined {
+  const inner =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  try {
+    const hostname = new URL(
+      `http://${inner.includes(':') ? `[${inner}]` : inner}`,
+    ).hostname;
+    const canonical =
+      hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    return isIP(canonical) === 0 ? undefined : canonical;
+  } catch {
+    return undefined;
+  }
+}
+
 function workspaceRuntimeEffectiveEnv(
   runtime: WorkspaceRuntime,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
@@ -677,6 +694,7 @@ export function formatChannelWorkerDaemonUrl(
 ): string {
   const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
+  const canonicalIp = canonicalIpLiteral(normalized);
   // R7-7: a wildcard bind's loopback has to match the FAMILY that was bound.
   // An IPv6 wildcard socket answers 127.0.0.1 only when the kernel gives it a
   // dual-stack mapping; on an IPv6-only host, or one with
@@ -692,10 +710,10 @@ export function formatChannelWorkerDaemonUrl(
   //
   // The v4 wildcard keeps v4 loopback: measured against `0.0.0.0`,
   // `dial ::1` is ECONNREFUSED.
-  if (normalized === '' || normalized === '::' || normalized === '[::]') {
+  if (normalized === '' || canonicalIp === '::') {
     return `${scheme}://[::1]:${port}`;
   }
-  if (normalized === '0.0.0.0') {
+  if (canonicalIp === '0.0.0.0') {
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
@@ -1109,9 +1127,9 @@ function keyUsageBits(cert: X509Certificate): readonly number[] | undefined {
   const value = certificateExtension(cert, KEY_USAGE_OID);
   if (value === undefined) return undefined;
   const bitString = derElementAt(value, 0);
-  if (bitString?.tag !== BIT_STRING_TAG) return undefined;
+  if (bitString?.tag !== BIT_STRING_TAG) return [];
   const unused = value[bitString.start];
-  if (unused === undefined) return undefined;
+  if (unused === undefined) return [];
   const bytes = value.subarray(bitString.start + 1, bitString.end);
   const bits: number[] = [];
   for (let bit = 0; bit < bytes.length * 8 - unused; bit++) {
@@ -1149,7 +1167,7 @@ function keyUsageBits(cert: X509Certificate): readonly number[] | undefined {
  */
 function servesTlsClients(cert: X509Certificate): boolean {
   const eku = cert.keyUsage;
-  if (eku && eku.length > 0 && !eku.includes(EKU_SERVER_AUTH)) return false;
+  if (eku !== undefined && !eku.includes(EKU_SERVER_AUTH)) return false;
   const bits = keyUsageBits(cert);
   if (!bits) return true;
   return (
@@ -1174,7 +1192,7 @@ function servesTlsClients(cert: X509Certificate): boolean {
  */
 function issuerServesTlsChain(cert: X509Certificate): boolean {
   const eku = cert.keyUsage;
-  if (!eku || eku.length === 0) return true;
+  if (eku === undefined) return true;
   return eku.includes(EKU_SERVER_AUTH);
 }
 

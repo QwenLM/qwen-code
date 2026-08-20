@@ -1155,12 +1155,30 @@ describe('formatChannelWorkerDaemonUrl', () => {
     );
   });
 
+  it.each(['0', '0.0'])(
+    'canonicalizes IPv4 wildcard spelling %j before choosing loopback',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://127.0.0.1:4170',
+      );
+    },
+  );
+
   // R7-7: `[::]` -> 127.0.0.1 is only reachable through a dual-stack mapping
   // the kernel is free not to give (IPv6-only hosts, net.ipv6.bindv6only=1).
   // `''` is grouped here, not with 0.0.0.0, because `listen(port, '')` — how
   // the daemon binds — reports `{address: '::', family: 'IPv6'}`.
   it.each(['', '::', '[::]'])(
     'uses IPv6 loopback when the daemon binds IPv6 wildcard host %j',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://[::1]:4170',
+      );
+    },
+  );
+
+  it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
+    'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
         'http://[::1]:4170',
@@ -1235,7 +1253,20 @@ describe('formatChannelWorkerDaemonUrl', () => {
 // daemon, later channels restart-loop with /health green.
 describe('assertChannelWorkerDaemonUrlIsLocal', () => {
   it('accepts loopback and wildcard-rewritten worker URLs', () => {
-    for (const host of ['', '0.0.0.0', '::', '[::]', '127.0.0.1', '::1']) {
+    for (const host of [
+      '',
+      '0',
+      '0.0',
+      '0.0.0.0',
+      '::',
+      '::0',
+      '0::0',
+      '[::]',
+      '[::0]',
+      '0:0:0:0:0:0:0:0',
+      '127.0.0.1',
+      '::1',
+    ]) {
       expect(() =>
         assertChannelWorkerDaemonUrlIsLocal(
           formatChannelWorkerDaemonUrl(host, 4170, true),
@@ -2149,6 +2180,88 @@ ir177Y/o6XBBfNZCN7Q=
 -----END CERTIFICATE-----
 `;
 
+const TEST_TLS_CERT_LEAF_KEY_USAGE_MALFORMED = `-----BEGIN CERTIFICATE-----
+MIIDCDCCAfCgAwIBAgIUG1EjnHbTNEKayVPSpZtj8yhElzQwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSbWFsZm9ybWVkIGtleVVzYWdlMCAXDTI2MDEwMTAwMDAw
+MFoYDzIxMjYwMTAxMDAwMDAwWjAdMRswGQYDVQQDDBJtYWxmb3JtZWQga2V5VXNh
+Z2UwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrCXg3lORQsWmBc6p7
+PP7/fsN8/86XRe3K0CMwDSMiIqTbGEK7/BpJCEvldW31yqDvhkotZ5ypd++mZ1K4
+cxvZY3YgU4j+We1sPMEuKMDW9CQT2gZJibakdcKaD0wr5gWV1NRGRGCVBzpjP4Do
+YPHrPm2g1n1mw2OuphIy4C5B3SMiR9ycNmlgFAaSIRPL2bmbwJhu3PI2hKkqi31V
+JgcXHZTxRpoASbEnVBFKmHhKYmlfhYUAaPoRIzuRPNL0aZMOJi7btHmshzBgSRqm
+BFPkaW3CkBfXKDIBuOkd6rve/Z9RotHj7RtLqmmqc1hDK4GAj87CTeDkTAAtMkd0
+SZPpAgMBAAGjPjA8MBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAPBgNVHRMB
+Af8EBTADAQH/MA0GA1UdDwEB/wQDBAEDMA0GCSqGSIb3DQEBCwUAA4IBAQCFiEih
+k6dBU2x7hZL2Bp3RJ8P9jMTP6MxHW6f2valDjLx2uYwQOr0d4Hj57pEPI2AWrDz/
+IGQL5OFlT4fXKImmn4d9gL53unJ9NztqX5s9IKd+yLoRpEYABmylI3awqgqJFUtT
+3lalDa5HaxkzF7qf9BJj+nLrJ8Wl0VmtGCY55ZWJsNND3STBEuHcNFl0gFbZ1vqc
+jVnGKCcv/qoLSLtLALkQmhaCKKv75jdAoVu1w5jm5hEkntzPXA5+RyNOnV+G3pm8
+9+3gJe/OhVzO4+MC8nBa6nP/M3omu0255bKTYK5nkS+6sHPnFuzvHi2IVzqWVt70
+YzHaC45ufVkW/NS1
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_LEAF_EKU_EMPTY = `-----BEGIN CERTIFICATE-----
+MIIDHzCCAgegAwIBAgIUPN5T7uRMnckpvijiTe/E8W4P5VgwDQYJKoZIhvcNAQEL
+BQAwITEfMB0GA1UEAwwWZW1wdHkgZXh0ZW5kZWRLZXlVc2FnZTAgFw0yNjAxMDEw
+MDAwMDBaGA8yMTI2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWZW1wdHkgZXh0ZW5k
+ZWRLZXlVc2FnZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKVHlXgz
+/tH9oXSiZ5zA5zc+mRYPb4UqroA13Qt0hSH+z4xwcasFhIizcNw4hU+AYUDfhUF8
+J+/IfIWX7EOYKY77rUpm4stcd9mJtNIWb3QJ2yAQysdPkzxx4skl9w2ym3ic0fag
+6a0j4KyBUwyRCYXskUGU6Usl2Hy7hNP03BzB44TPHW4yI5UVBaWJL5fkp5XcQ+RI
+93T02S1/OG25aj/0htm1abwQaHxHWT6VhL1cKQwFnaxJaTmVyOeFK5YtQxCKLUsC
+WDOaYO+/0+Y9YzT5h83y+5oMzq/s9rXaSe37jw7lES15tjoju5W4E4Q0b0qsFpYs
+LdYSEurDUIov/cUCAwEAAaNNMEswGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAAB
+MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgWgMAwGA1UdJQEB/wQCMAAw
+DQYJKoZIhvcNAQELBQADggEBAGU0ZFzxjarW0Bjnv0x756Pf+fcJfAU1stRD3nwl
+S4dBM7tVTSrsDoMn8c9gNRqvG/fyp7P5u0Yjguqptuhmrz1jXYMZS2AiycFMe4GP
+ls7Z2f6bnpseNC+F/gjonKAmpE2eChCHtc8xbw5R1TYymaBvZjuIorkR/UH+kdNN
+K26tDbXka+CU9KyGATjpDtUHG3UKDb3SdCt/12En1l4aXxrCvDJZcz+7UNZJdTWD
+J2n8RRUJtPPURhRVUOJhUVDCC/k3uuwasWso9LtmolsdnkpNNYylvznfi01XfOoN
+petiUh06l3wZJU+kHAvQmYjewP4tksczQ1SMvh89/81HLcs=
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_FULLCHAIN_EKU_EMPTY_CA = `-----BEGIN CERTIFICATE-----
+MIIDFDCCAfygAwIBAgIUEZjiMQZm9MuO0xHLMXRtGgMCdyYwDQYJKoZIhvcNAQEL
+BQAwHzEdMBsGA1UEAwwUZW1wdHkgRUtVIGlzc3VpbmcgQ0EwIBcNMjYwMTAxMDAw
+MDAwWhgPMjEyNjAxMDEwMDAwMDBaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAK4EiIPOA3ld5JYbuJ7o9pC+BWXf
+Jr1HcAQ56OttUmbto5psTafNjxwSg8pwhVxq9OM8xBqJY0JiBZw49X1d4gKtJAGE
+Q4xRdIc1Y9It+mqzslstWN70QYKz728o1aHdt1NVa6Dxc8DABZ1v+oJA2MNxHFwp
++gAD+Vhp2otTUbiGG5qX6uAT5OyInrYnWFqtv6x3dtDoUoFL8QSy9PcH3KhjqetC
+oiXzuwEUreEOmnwr5QsHFORfm4t9BLz9x7ks+PNihO9+gzIVojLxYGHqbc5AZmQA
+yklJqJ//8mCGniOTwpoGhLV7uUaePCud4yL/do75tIEEEoyYdKLU3JcWN/8CAwEA
+AaNRME8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAwGA1UdEwEB/wQCMAAw
+DgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA0GCSqGSIb3DQEB
+CwUAA4IBAQAjjdVr6XiOLl+yLReKER41fq93i8m8zeXvEa12nwH1dMCJGyAIoUwq
+BChWCg9idFTYZqg0Z8j30rVhu+g8jIjw1iCEQPhpWAfUqRU29dfRxsLr7Y/KRFNj
+SdxXXoUdmlo5NUtyQqUdhknskxR96ceRNA8ck63JweX3etANAKH/siuCgjrkS15i
+xij6x7hD/WObJCuycvcroP+bqilJIML40+bypf25+SBYZItx0jdDSjD/chN7jPlu
+h332wowAKhd642GCYgHtvSTkHM+IaRq9B6nwFYZULDD48IHw2GqFG4SAvxA19iBt
+bzXzDMEQy1JjTitb7VjujY6BVnphVd/2
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC/zCCAeegAwIBAgIUWf8CCBpA6C8md1LNqjN/4u9XE5UwDQYJKoZIhvcNAQEL
+BQAwHzEdMBsGA1UEAwwUZW1wdHkgRUtVIGlzc3VpbmcgQ0EwIBcNMjYwMTAxMDAw
+MDAwWhgPMjEyNjAxMDEwMDAwMDBaMB8xHTAbBgNVBAMMFGVtcHR5IEVLVSBpc3N1
+aW5nIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm4di7hsWQfdw
+H9g30pRZ1Ml71RMyXoMgvXh3sz6WVqNQO3JMoNemEOvvyj16eBFMLUfF+qEak1sE
+EETYHxD2ecekf5ebLMumLYjRip5lVO5Uzhpq2oMXkA/pgDMZAWS0/8BNz1fsypm1
+8RnddoyDC0wYcKJUIxIo1PVed42mKhiDBQG+1fud8whiTv8Tsg0uaIU3zzZRM8OM
+Hw2ULujuJUoSXbpHoaHS695c6bOCrg+i90U8hCMBVxHJLct5LycbTR/mHtqDmTI/
+rWvyH1LUmQ4Euvcl8cyofmTblBMooGb98TMYFHIZY4nOKr1K7Un4FvHU+lVxQhKp
+pcDWYBMAUQIDAQABozEwLzAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIB
+BjAMBgNVHSUBAf8EAjAAMA0GCSqGSIb3DQEBCwUAA4IBAQA6JALOPiV2nmJAQDlj
+DR1BY3akwvtB+aXug4TDjfmKhoTvuoloph9uzbCIb31oOimWQEE6+sDECQNaobrd
++YspX02QuUUkoGH85ZZm24V52jNQUiJueRMEj5boOYy4GD1/9zn/BFEXa4u7ngz4
+HC6tRloIDefQcfHfQ1+cTVh+X0amCkAbOwtMesXEQIchDKEK5aQRliNZDkZ5L3Fx
+hckyoGrg9GRMqFDO/O2mMHIrxIGCCtaRLuzSqRJ0kLrQqvkQd0L6Gk2yq3E2Ir2H
+r5mLBUksARJu9D7Xshhg/sw8RuahCZlccRBTeCe2pqmYi4tEVR/5YtsFifcKGC0X
+/5y2
+-----END CERTIFICATE-----
+`;
+
 // R2-21 entrance E1: a self-signed serving leaf carrying a keyUsage extension
 // that is PRESENT and grants NO bit (`DER:03:01:00`). The readers conflated it
 // with an ABSENT keyUsage, which RFC 5280 reads as unrestricted, so boot
@@ -2464,6 +2577,32 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps).toHaveLength(1);
     expect(gaps[0]).toContain('INVALID_PURPOSE');
     expect(gaps[0]).toContain('server authentication');
+  });
+
+  it.each([
+    ['malformed keyUsage', TEST_TLS_CERT_LEAF_KEY_USAGE_MALFORMED],
+    ['empty extendedKeyUsage', TEST_TLS_CERT_LEAF_EKU_EMPTY],
+  ])('names the depth-0 server-purpose gap for %s', (_label, pem) => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(pem),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('server authentication');
+  });
+
+  it('names the EKU gap for a chain through an empty-EKU CA', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_EKU_EMPTY_CA),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('empty EKU issuing CA');
   });
 
   // R2-21 entrance D1: `declaresNotACa` located basicConstraints by scanning

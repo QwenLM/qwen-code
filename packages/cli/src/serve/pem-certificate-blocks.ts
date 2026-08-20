@@ -59,7 +59,10 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
  * joined below, which is what the decoder does too.
  */
 function normalizePemLine(line: string): string {
-  return line.replace(/^\uFEFF/, '').replace(/[ \t\r]+$/, '');
+  const normalized = line.replace(/^\uFEFF/, '');
+  let end = normalized.length;
+  while (end > 0 && normalized.charCodeAt(end - 1) <= 0x20) end -= 1;
+  return normalized.slice(0, end);
 }
 
 /**
@@ -118,12 +121,21 @@ export function extractCertificateBlocks(
     }
     // Ran off the end without an end line — same `bad end line` stop.
     if (cursor >= lines.length) break;
+    // Interior whitespace in a body line is skipped by the decoder, not an
+    // error, so join first and judge the alphabet afterwards. OpenSSL decodes
+    // every PEM block it walks, including blocks that are not certificates.
+    const encoded = body.join('').replace(/\s/g, '');
+    const decoded = Buffer.from(encoded, 'base64')
+      .toString('base64')
+      .replace(/=+$/, '');
+    if (
+      encoded.length === 0 ||
+      /[^A-Za-z0-9+/=]/.test(encoded) ||
+      decoded !== encoded.replace(/=+$/, '')
+    ) {
+      break;
+    }
     if (label === CERTIFICATE_LABEL) {
-      // Interior whitespace in a body line is skipped by the decoder, not an
-      // error, so join first and judge the alphabet afterwards.
-      const encoded = body.join('').replace(/\s/g, '');
-      // Outside the base64 alphabet is `bad base64 decode`, another stop.
-      if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) break;
       const block = renderCertificateBlock(encoded);
       try {
         // Shape is not loadability: a body made only of base64 *characters*
