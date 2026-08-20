@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import * as path from 'node:path';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
@@ -65,6 +64,7 @@ import {
   GitWorktreeService,
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
+import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { getStartupContextLength } from '../../utils/environmentContext.js';
@@ -267,103 +267,15 @@ function getForkProfileModeError(config: Config): string | undefined {
   return undefined;
 }
 
-/**
- * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
- * caller-owned git worktree that a sub-agent or teammate should be pinned to
- * (e.g. the PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
- * `isolation:'worktree'`, the harness neither creates nor tears down this
- * directory — it only rebinds the child Config's cwd surfaces to it.
- *
- * Git's worktree registry stops a bad path from aiming the sub-agent somewhere
- * it should not be:
- *
- * - It must be a REGISTERED linked worktree of this repository, enforced by
- *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
- *   point back at it, and it must not be the primary working tree. That
- *   rejects arbitrary directories, sibling `git init`s, plain sub-directories
- *   (including a stale registry record whose directory was recreated),
- *   other repositories' worktrees, and a directory carrying a copied `.git`
- *   file.
- *
- * `getRegisteredWorktreeBranch` is consulted only for a best-effort branch
- * label; it is deliberately NOT a gate, since it returns null for a legitimate
- * detached-HEAD worktree.
- *
- * @returns the resolved absolute path + branch, or `{ error }` with a
- *   user-facing reason.
- */
-async function resolveExternalWorktreeDir(
-  config: Config,
-  workingDir: string,
-): Promise<
-  | { path: string; branch: string; slug: string; repoRoot: string }
-  | { error: string }
-> {
-  const parentCwd = config.getTargetDir();
-  const resolvedPath = path.resolve(parentCwd, workingDir);
-
-  const probe = new GitWorktreeService(parentCwd);
-  const gitCheck = await probe.checkGitAvailable();
-  if (!gitCheck.available) {
-    return {
-      error: `Cannot use working_dir: ${gitCheck.error ?? 'git is not available'}.`,
-    };
-  }
-  // Mirror the isolation:'worktree' preflight. Without it, a non-repo parent
-  // dir yields the confusing "not a registered git worktree" error below
-  // (getRepoTopLevel() → null, validation then fails) instead of naming the
-  // real cause.
-  if (!(await probe.isGitRepository())) {
-    return {
-      error: `Cannot use working_dir: ${parentCwd} is not a git repository.`,
-    };
-  }
-  // Anchor at the repo top-level so the common-dir comparison inside
-  // getRegisteredWorktreeBranch is against the repository, not a monorepo
-  // subdirectory the parent happened to launch from.
-  const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
-  const wtService =
-    repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
-
-  // The single authoritative gate: the path must be a REGISTERED linked
-  // worktree of this repository — git's own registry entry for it points back
-  // at exactly this path, and it is not the primary working tree. That one
-  // check rejects the main tree, a plain sub-directory (including a stale
-  // registry record whose directory was recreated), a worktree belonging to
-  // another repo, and a hand-crafted directory carrying a copied `.git` file.
-  if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
-    // Fails closed (returns false) on a git error too, so the cause is either
-    // "not a registered linked worktree" (main tree / unregistered) or "its
-    // git metadata could not be read" — name both rather than assert one.
-    return {
-      error:
-        `working_dir "${resolvedPath}" is not a registered linked worktree of ` +
-        `this repository (it is the main working tree, is absent from \`git ` +
-        `worktree list\`, or its git metadata could not be read) — pinning a ` +
-        `sub-agent there would not isolate it. Pass a worktree created via ` +
-        `\`git worktree add\`.`,
-    };
-  }
-  // Best-effort branch label only — never a gate. A detached-HEAD worktree
-  // (`git worktree add --detach`, or a checkout of a bare commit) is a
-  // legitimate configuration with no branch, and `getRegisteredWorktreeBranch`
-  // returns null for it. `branch` is unused for caller-owned worktrees anyway
-  // (cleanup short-circuits on `externallyManaged`); it is carried only for
-  // parity with the isolation path.
-  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
-  return {
-    path: resolvedPath,
-    branch: info?.branch ?? '',
-    slug: path.basename(resolvedPath),
-    repoRoot,
-  };
-}
-
 const TEAM_AGENT_NAME_PROPERTY = {
   type: 'string',
   description:
     'When provided, spawn as a named teammate via the active team ' +
-    'instead of a one-shot subagent. Requires an active team context.',
+    'instead of a one-shot subagent. Requires an active team context. ' +
+    'Teammates always run concurrently and report through team messaging; ' +
+    'omit run_in_background for them — an explicit false is rejected. For ' +
+    'an inline blocking result, omit name and use a regular agent with ' +
+    'run_in_background: false instead.',
 };
 
 const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
@@ -826,7 +738,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates may run in the background, but must be shut down before their caller-owned worktree is removed.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -914,7 +826,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Named teammates always run concurrently and report through team messaging; omit \`run_in_background\` when spawning one — an explicit \`run_in_background: false\` is rejected, so for an inline blocking result omit \`name\` and use a regular agent instead. Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -1245,6 +1157,24 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    // Named teammates are inherently concurrent: persistent team identity,
+    // messaging, and automatic final-report delivery leave no room for
+    // foreground/inline semantics. Reject the explicitly-foreground
+    // combination before spawning instead of silently ignoring it — an
+    // accepted-but-ignored flag wastes the launch and every token the
+    // teammate spends. The gate mirrors the team-routing branch in
+    // `execute`: without an active team, `name` falls through to a regular
+    // agent, where `run_in_background: false` is a valid foreground request.
+    if (
+      params.run_in_background === false &&
+      params.name &&
+      !isTeammate() &&
+      isTopLevelSession() &&
+      this.config.getTeamManager()
+    ) {
+      return 'Parameter "run_in_background" cannot be false for a named teammate: teammates always run concurrently and report through team messaging. Omit "run_in_background" when spawning a teammate, or omit "name" and keep run_in_background: false to run a regular agent in the foreground and get its result inline.';
+    }
+
     if (params.plan_mode_required !== undefined) {
       if (typeof params.plan_mode_required !== 'boolean') {
         return 'Parameter "plan_mode_required" must be a boolean when set.';
@@ -1527,6 +1457,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : {}),
           ...(typeof event.resultDisplay === 'string'
             ? { resultDisplay: event.resultDisplay }
+            : {}),
+          ...(preserveProtocolPayloads && event.boundaryArtifact
+            ? { boundaryArtifact: event.boundaryArtifact }
             : {}),
         };
 
@@ -2353,6 +2286,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return this.buildSpawnBlockedResult(
           'Error: "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".',
           'isolation is incompatible with a named teammate',
+        );
+      } else if (this.params.run_in_background === false) {
+        // Defense in depth behind validateToolParams: a hallucinated or
+        // wildcard-list call must not spawn a teammate that the caller
+        // believes is running inline.
+        return this.buildSpawnBlockedResult(
+          'Error: "run_in_background" cannot be false for a named teammate: teammates always run concurrently and report through team messaging. Omit "run_in_background" when spawning a teammate, or omit "name" and keep run_in_background: false to run a regular agent in the foreground and get its result inline.',
+          'run_in_background: false is incompatible with a named teammate',
         );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);

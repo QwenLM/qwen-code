@@ -19,12 +19,15 @@
 // `{"comment":{"effective":true}}` to any file and point at it; it cannot
 // retroactively edit the user's own keystrokes.
 
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   skillArgsPath,
   currentSessionId,
+  SKILL_ARGS_DIR,
 } from '../../../services/skill-args-file.js';
 import { parseReviewArgs } from '../parse-args.js';
+import { isOwnerRepo } from './gh.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -86,6 +89,132 @@ export interface WriteAuthorizationRequest {
 }
 
 /**
+ * What the recorded-args lookup found for THIS write's target.
+ * - `host`: the recorded host to bind the refusal on, when one exists.
+ * - `unbound`: a recording naming the same PR exists but yields NO host
+ *   evidence (bare-number spellings without a `--host` flag). The target's
+ *   platform is then unprovable from the recording — for a public,
+ *   irreversible write the gate fails CLOSED on this rather than trusting
+ *   the runtime environment alone (a bare-number Aone review recorded in
+ *   an Aone clone otherwise posts at github.com's same-named repo from a
+ *   non-Aone cwd — the canonical Aone invocation shape carries no URL).
+ */
+interface RecordedHostLookup {
+  host?: string;
+  unbound: boolean;
+}
+
+/** Bound on a recorded-args read: the files are one-line CLI invocations;
+ *  anything bigger is not a recording this code wrote and must not be
+ *  slurped (a planted symlink to an endless source would otherwise hang
+ *  the publish). */
+const RECORDED_ARGS_MAX_BYTES = 64 * 1024;
+
+/**
+ * Lookup of the recorded target's host for the `--user-authorized` fast
+ * path — it must publish without running the full gate, but the write
+ * gate's platform binding must not lose the host the recorded target
+ * names.
+ *
+ * The host is bound to THIS write: only a recording naming the same PR
+ * number AND the same repo supplies a host — a stale recording of a
+ * different target must not supply one (the refusal would fire on the
+ * wrong target, or a stale host would suppress the environment arms). A
+ * bare-number recording of the same PR supplies the recorded `--host`
+ * flag when present — that spelling carries no URL host, and the flag is
+ * the only recorded platform evidence.
+ *
+ * The scan is HARDENED — the store lives under `.qwen/tmp/`, which also
+ * holds review worktrees checked out from the PR's own tree, so the
+ * content there is attacker-influenceable:
+ *  - only `s-*` session directories are scanned (never `review-pr-*`
+ *    worktrees or anything else a reviewed PR can plant);
+ *  - symlinks are skipped at both the directory and the file level
+ *    (mirroring writeSkillArgs' O_NOFOLLOW policy on the write side of
+ *    this same store) — a planted link must not be followed;
+ *  - reads are size-bounded (RECORDED_ARGS_MAX_BYTES).
+ *
+ * Lookup order: the session-scoped args file first, then the sibling
+ * session directories (sorted). The args file is named for the session
+ * that recorded the review, and a `--user-authorized` publish
+ * characteristically runs in a DIFFERENT session ("post the review we
+ * saved") — without the sibling scan the file is simply absent there and
+ * a recorded Aone target posts at github.com's same-named repo. Any
+ * read/parse trouble still degrades gracefully and never blocks a
+ * user-authorised publish.
+ */
+function lookupRecordedHost(
+  req: WriteAuthorizationRequest,
+): RecordedHostLookup {
+  const bindHost = (raw: string): string | undefined | null => {
+    // undefined = matches this write but yields no host (bare number, no
+    // recorded --host); null = not this write's recording.
+    try {
+      const parsed = parseReviewArgs(raw, { comment: req.defaultComment });
+      const t = parsed.target;
+      if (t.type === 'pr-url') {
+        return t.number === req.pr && `${t.owner}/${t.repo}` === req.repo
+          ? t.host
+          : null;
+      }
+      if (t.type === 'pr-number' && t.number === req.pr) {
+        return parsed.host;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+  const isReadableRecording = (path: string): boolean => {
+    try {
+      if (lstatSync(path).isSymbolicLink()) return false;
+      return statSync(path).size <= RECORDED_ARGS_MAX_BYTES;
+    } catch {
+      return false;
+    }
+  };
+  const candidates: string[] = [
+    currentSessionId() === '' && req.skillArgs
+      ? req.skillArgs
+      : defaultSkillArgsPath(),
+  ];
+  try {
+    const entries = readdirSync(SKILL_ARGS_DIR, {
+      withFileTypes: true,
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      // Session directories ONLY — `.qwen/tmp/` also holds review
+      // worktrees materialized from the reviewed PR's own tree; their
+      // content is attacker-controlled and must never supply a host.
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (!/^s-/.test(entry.name)) continue;
+      candidates.push(
+        join(SKILL_ARGS_DIR, entry.name, 'qwen-skill-args-review.txt'),
+      );
+    }
+    candidates.push(join(SKILL_ARGS_DIR, 'qwen-skill-args-review.txt'));
+  } catch {
+    // No recorded-args directory at all — the session-scoped candidate
+    // above is the only one.
+  }
+  let sawSamePrRecording = false;
+  for (const path of candidates) {
+    if (!isReadableRecording(path)) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch {
+      continue;
+    }
+    const bound = bindHost(raw);
+    if (bound === null) continue;
+    sawSamePrRecording = true;
+    if (bound !== undefined) return { host: bound, unbound: false };
+  }
+  return { host: undefined, unbound: sawSamePrRecording };
+}
+
+/**
  * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
  * CLI's verbatim record), the standing `review.comment` setting, or
@@ -96,9 +225,42 @@ export interface WriteAuthorizationRequest {
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
+  /**
+   * The host the recorded target names, when it names one: a pr-url target
+   * carries it; a bare pr-number supplies a recorded `--host` flag or none.
+   * The `--user-authorized` fast path reads it best-effort from the
+   * recorded args (below) for the same reason the slow path does. Write
+   * gates that must reason about the target's PLATFORM read it here
+   * instead of re-deriving the platform from the runtime environment alone
+   * — the effective host can be steered by an ambient GH_HOST export away
+   * from where the recorded review actually lives (submit's Aone refusal
+   * uses it to stay shut in both directions).
+   */
+  recordedHost?: string;
+  /**
+   * A recording naming this PR exists but yields NO host evidence (see
+   * lookupRecordedHost). The platform is unprovable from the recording;
+   * the write gate fails closed on this arm rather than trusting the
+   * runtime environment alone. Absent on the refusal paths.
+   */
+  recordedUnbound?: boolean;
 } {
   if (req.userAuthorized) {
-    return { ok: true, why: 'the user asked for this review to be published' };
+    const lookup = lookupRecordedHost(req);
+    return {
+      ok: true,
+      why: 'the user asked for this review to be published',
+      // The fast path publishes because the user asked — but it must still
+      // surface the recorded target's host: the write gate's platform
+      // binding keys on it, and skipping it here re-opens the exact leak
+      // the binding exists to close (a recorded Aone codereview target,
+      // user-authorised from a non-Aone cwd with no --host/GH_HOST, would
+      // otherwise post at github.com's same-named repo). Best effort: any
+      // read/parse trouble degrades gracefully (see lookupRecordedHost)
+      // and never blocks a user-authorised publish.
+      recordedHost: lookup.host,
+      recordedUnbound: lookup.unbound,
+    };
   }
 
   const sessionScoped = defaultSkillArgsPath();
@@ -195,5 +357,144 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     why: verdict.comment.requested
       ? `\`--comment\` was in the review arguments for #${authorisedPr}`
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
+    // Mirror of the fast-path binding: a bare-number recording supplies
+    // the recorded `--host` flag (its only host evidence). The UNBOUND
+    // fail-closed does NOT ride the slow path: a same-session Aone review
+    // runs inside an Aone clone, so the write gate's cwd arm already
+    // refuses it — marking every bare-number slow-path recording unbound
+    // would refuse the canonical same-session github posting flow instead.
+    recordedHost: t.type === 'pr-url' ? t.host : verdict.host,
   };
+}
+
+/**
+ * Best-effort recovery of the operator's recorded posting floor, shared by
+ * the two boundaries that must resolve the floor from the CLI's verbatim
+ * record rather than the model-written state: `submit` (the posting write)
+ * and `compose-review`'s CLI handler (the archived composed JSON and the
+ * terminal verdict). Both resolving through this ONE function — with the
+ * SAME identity source — is what keeps the registered artifact and the
+ * posted review describing the same floor.
+ *
+ * **The identity is the CALLER'S CLI-typed one first; the plan only fills
+ * the axes the caller did not supply.** The plan's CONTENT is CLI-written,
+ * but its PATH arrives through the model-written state JSON — the same
+ * document whose floor copy this recovery exists to outrank — so a
+ * plan-first precedence let a parseable-but-wrong plan choose which
+ * identity the operator's verbatim record was tested against and silently
+ * stand the recovery down. Caller-first closes that: at submit the caller
+ * pr is additionally gate-bound to the recorded target on the `--comment`
+ * path, and both boundaries are fed the same caller identity by the skill
+ * (`--pr`/`--repo`/`--host` at compose mirroring submit's own flags), so
+ * the two recoveries still resolve one floor for one review.
+ *
+ * The record is bound to that identity at the SAME bar the `--comment`
+ * authorisation applies to the same record: the number always, and — for a
+ * URL-shaped record — the repo (when an identity repo is known) and the
+ * host, both case-insensitive with an absent host reading as github.com.
+ * The record is last-writer-wins (`writeSkillArgs` truncates), so a later
+ * `/review` of a different PR — or the same number in a DIFFERENT repo —
+ * must recover nothing.
+ *
+ * Returns the floor with its source only when the record carries an
+ * operator decision (`severityFloorSource` of `explicit`/`configured`) —
+ * the source rides along so the boundaries' audit notes can name the true
+ * origin instead of claiming a flag the operator never typed. A
+ * default-resolved `auto` (including one produced by silently discarding an
+ * invalid configured value) is not a decision and recovers nothing. Every
+ * failure mode — no plan PR, no record, unreadable, no decision, another
+ * PR's or repo's record — returns undefined and leaves the caller's state
+ * value standing, the same fail-open direction enforcement itself takes.
+ * The path rule is the gate's own: the caller-supplied seam is honoured
+ * only when no session id is present.
+ */
+export function recordedSeverityFloor(opts: {
+  /** The plan of the review being composed or posted — CLI-written content
+   * behind a model-written path, so it only FILLS identity axes the caller
+   * did not supply, never overrides them. */
+  planPath?: string;
+  /** The caller's CLI-typed PR number — the identity's first source. */
+  callerPr?: number;
+  /** The caller's repo — the URL-record bar's first repo source, the plan's
+   * `ownerRepo` filling in when absent. */
+  callerRepo?: string;
+  /** The caller's EFFECTIVE host. Never plan-filled: absent means
+   * github.com by the gate's own rule, so there is no gap to fill — the
+   * axis where absence is meaningful must not read absence as a gap. */
+  callerHost?: string;
+  defaultSeverityFloor?: string;
+  skillArgs?: string;
+}):
+  | {
+      floor: 'critical' | 'suggestion' | 'auto';
+      source: 'explicit' | 'configured';
+    }
+  | undefined {
+  let planPr: number | undefined;
+  let planRepo: string | undefined;
+  try {
+    if (opts.planPath) {
+      const plan = JSON.parse(readFileSync(opts.planPath, 'utf8')) as {
+        prNumber?: unknown;
+        ownerRepo?: unknown;
+      };
+      const n = plan?.prNumber;
+      if (typeof n === 'number' && Number.isInteger(n) && n > 0) planPr = n;
+      else if (typeof n === 'string' && /^\d+$/.test(n)) planPr = Number(n);
+      if (typeof plan?.ownerRepo === 'string' && isOwnerRepo(plan.ownerRepo)) {
+        planRepo = plan.ownerRepo;
+      }
+    }
+  } catch {
+    /* the identity falls back to the caller's, exactly as with no plan */
+  }
+  const pr = opts.callerPr ?? planPr;
+  if (pr === undefined) return undefined;
+  const repo = opts.callerRepo ?? planRepo;
+  // The host axis is NEVER plan-filled: an absent caller host IS github.com
+  // by the gate's own rule ("an absent req.host means the write routes at
+  // github.com — a host like any other, not an exemption"), so there is no
+  // gap for the plan to fill — and a gap-read here handed the model-pathed
+  // plan the one identity axis the mandatory caller flags did not pin.
+  const host = (opts.callerHost ?? 'github.com').toLowerCase();
+  const path =
+    currentSessionId() === '' && opts.skillArgs
+      ? opts.skillArgs
+      : defaultSkillArgsPath();
+  try {
+    const verdict = parseReviewArgs(readFileSync(path, 'utf8'), {
+      severityFloor: opts.defaultSeverityFloor,
+    });
+    const t = verdict.target;
+    if (t.type === 'pr-number') {
+      if (t.number !== pr) return undefined;
+    } else if (t.type === 'pr-url') {
+      if (t.number !== pr) return undefined;
+      // A URL-shaped record NAMES a repo, so the repo bar is part of its
+      // identity — and an unknown identity repo cannot check it. Skipping
+      // the comparison there (the gate's shape, whose only repo-less
+      // caller is publish-assets writing to a DESIGNATED assets repo) let
+      // another repo's record bind on number and host alone: the record is
+      // last-writer-wins, so a `/review other/repo#123` in the session
+      // could hand its floor to this repo's #123. Unknown repo therefore
+      // recovers nothing — the same direction every other doubt state
+      // takes here, leaving the state's floor standing.
+      if (
+        repo === undefined ||
+        `${t.owner}/${t.repo}`.toLowerCase() !== repo.toLowerCase()
+      ) {
+        return undefined;
+      }
+      if (t.host.toLowerCase() !== host) return undefined;
+    } else {
+      return undefined;
+    }
+    if (verdict.severityFloorSource === 'default') return undefined;
+    return {
+      floor: verdict.severityFloor,
+      source: verdict.severityFloorSource,
+    };
+  } catch {
+    return undefined;
+  }
 }

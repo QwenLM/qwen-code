@@ -232,6 +232,7 @@ function makeHarness() {
     sendPrompt,
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    markSessionCatalogChanged: vi.fn(),
     getSessionEventEpoch: vi.fn(() => 'event-epoch'),
     getSessionLastEventId: vi.fn(() => 7),
     async *subscribeEvents(
@@ -522,6 +523,50 @@ describe('LiveTaskService', () => {
     });
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
+  });
+
+  it('reports the later of the live watermark and the persisted transcript timestamp', async () => {
+    // `read_thread` and `wait_threads` read the raw bridge summary while
+    // `list_threads` reads the merged one. The recorder writes the transcript
+    // after the terminal that advanced the watermark, so preferring the live
+    // value here would report the same task as less recent than the list does
+    // and freeze the wait cursor across the transcript flush.
+    const harness = makeHarness();
+    const summary: BridgeSessionSummary = {
+      sessionId: 'task-1',
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:01.000Z',
+      displayName: 'Task one',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set('task-1', summary);
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+
+    const read = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'read_thread',
+      arguments: { threadId: 'task-1', turnLimit: 1 },
+    });
+    // The transcript's 00:00:03 write wins over the 00:00:01 watermark.
+    expect((read['thread'] as { updatedAt: number }).updatedAt).toBe(
+      1_785_369_603,
+    );
+
+    const wait = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 0 },
+    });
+    const poll = (wait['polls'] as Array<Record<string, unknown>>)[0]!;
+    expect(poll['revision']).toBe(1_785_369_603);
+    expect(
+      JSON.parse(
+        Buffer.from(String(poll['cursor']), 'base64url').toString('utf8'),
+      ),
+    ).toMatchObject({ updatedAt: '2026-07-30T00:00:03.000Z' });
   });
 
   it('returns only final assistant text from read and wait results', async () => {
@@ -945,6 +990,33 @@ describe('LiveTaskService', () => {
     expect(removeSessionRuntimeBaseDirs).toEqual([
       path.resolve('/runtime/conversations'),
     ]);
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the catalog when the rollback transcript removal is a no-op', async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.bridge.spawnOrAttach).mockResolvedValueOnce({
+      sessionId: 'new-task',
+      workspaceCwd: '/conversations',
+      attached: false,
+      sourcePersisted: false,
+    });
+    removeSessionMock.mockResolvedValueOnce(false);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'create_thread',
+        arguments: {
+          prompt: 'build a separate report',
+          target: { type: 'projectless' },
+        },
+      }),
+    ).rejects.toThrow('Projectless task metadata was not persisted.');
+
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(harness.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 });

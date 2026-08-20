@@ -45,7 +45,7 @@ export interface DaemonMessageToolCall {
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
-  content?: DaemonMessageToolCallContent[];
+  content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
@@ -142,6 +142,7 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   retryable?: boolean;
   source?: string;
   data?: unknown;
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

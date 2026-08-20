@@ -1663,8 +1663,20 @@ function mergeBatchArtifact(
     delete merged.workspacePath;
     return merged;
   }
+  const refreshDisplay =
+    existing.storage === 'workspace' &&
+    next.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(next, existing);
   return {
     ...existing,
+    title: refreshDisplay ? next.title : existing.title,
+    description: refreshDisplay
+      ? (next.description ?? existing.description)
+      : existing.description,
+    toolName: refreshDisplay ? next.toolName : existing.toolName,
+    source: refreshDisplay ? next.source : existing.source,
+    hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
+    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: mergeMetadata(existing, next),
@@ -1753,6 +1765,20 @@ function mergeArtifact(
     next.description = incoming.description;
     delete next.workspacePath;
     delete next.hideWorkspacePath;
+  } else if (
+    existing.storage === 'workspace' &&
+    incoming.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(incoming, existing)
+  ) {
+    // Workspace re-records keep the same locator identity. Explicit
+    // record_artifact (or the same producer) may refresh the display
+    // name; write_file/hook auto-records must not clobber it.
+    next.title = incoming.title;
+    next.description = incoming.description ?? existing.description;
+    next.toolCallId = incoming.toolCallId;
+    next.toolName = incoming.toolName;
+    next.source = incoming.source;
+    next.hookEventName = incoming.hookEventName;
   }
 
   const changed = !publicArtifactsEqual(
@@ -1775,6 +1801,23 @@ function shouldRecordEphemeralUnpin(
     (existing.retention !== 'ephemeral' ||
       existing.persistedAt !== undefined ||
       existing.durableTombstoneRequired === true)
+  );
+}
+
+function shouldRefreshWorkspaceDisplay(
+  incoming: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
+  existing: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
+): boolean {
+  if (incoming.toolName === 'record_artifact' && incoming.source !== 'hook') {
+    return true;
+  }
+  if (!incoming.toolName) {
+    return true;
+  }
+  return (
+    incoming.toolName === existing.toolName &&
+    incoming.source === existing.source &&
+    incoming.hookEventName === existing.hookEventName
   );
 }
 
