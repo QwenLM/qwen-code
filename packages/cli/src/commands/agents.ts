@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { FatalError } from '@qwen-code/qwen-code-core';
 import type { Argv, CommandModule } from 'yargs';
 import type {
   AgentViewActivityFile,
@@ -14,7 +15,9 @@ import type {
   AgentViewWorkerFile,
 } from '../agent-view/protocol.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
-import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { requireAgentViewEnabled } from '../agent-view/feature.js';
+import type { Settings } from '../config/settingsSchema.js';
+import { writeStdoutLine } from '../utils/stdioHelpers.js';
 import {
   attachCommand,
   killCommand,
@@ -33,9 +36,15 @@ interface AgentsArgs {
 
 export async function handleAgentViewBackgroundPrompt(
   prompt: string,
+  settings?: Settings,
 ): Promise<void> {
+  requireAgentViewEnabled(settings);
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    throw new FatalError('Cannot use --bg/--background without a prompt.', 1);
+  }
   const supervisor = await ensureAgentViewSupervisor();
-  const result = await supervisor.dispatch(prompt, process.cwd());
+  const result = await supervisor.dispatch(normalizedPrompt, process.cwd());
   const sessionId = getSessionId(result);
   const shortId = formatSessionShortId(sessionId);
   writeStdoutLine(`Started background agent ${shortId}.`);
@@ -73,11 +82,13 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
       })
       .option('json', {
         type: 'boolean',
+        nargs: 0,
         default: false,
         description: 'Print machine-readable JSON',
       })
       .option('all', {
         type: 'boolean',
+        nargs: 0,
         default: false,
         description: 'Include completed and stopped agents',
       })
@@ -89,6 +100,7 @@ export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
       })
       .version(false),
   handler: async (argv) => {
+    requireAgentViewEnabled();
     const listCwd = argv.cwd ? path.resolve(argv.cwd) : undefined;
     const supervisor = await ensureAgentViewSupervisor();
     if (argv.json) {
@@ -107,18 +119,11 @@ export const agentsCommand: CommandModule = {
   describe: 'Manage Agent View background agents',
   builder: (yargs: Argv) =>
     yargs
-      .check(() => {
-        const assignedBoolean = process.argv
-          .slice(2)
-          .find((token) => /^--(?:json|all)=/.test(token));
-        if (assignedBoolean) {
-          writeStderrLine(
-            `${assignedBoolean.split('=')[0]} is a boolean flag and does not accept an assigned value.`,
-          );
-          process.exit(1);
-        }
-        return true;
-      })
+      .check((argv) =>
+        argv['background'] === true || argv['continue'] === true
+          ? '`qwen agents` cannot be combined with --bg/--background or --continue/-c.'
+          : true,
+      )
       // Hoisted from the list subcommand so the space form
       // `agents --cwd <dir>` is consumed at this level instead of failing
       // strict mode (the $0 builder only applies once yargs descends).

@@ -10,7 +10,11 @@ import { agentDaemonCommand } from './agent-daemon.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSupervisor = vi.hoisted(() => ({
-  status: vi.fn(async () => ({ pid: 123, socketPath: '/tmp/qwen.sock' })),
+  status: vi.fn(async () => ({
+    running: true,
+    pid: 123,
+    socketPath: '/tmp/qwen.sock',
+  })),
   list: vi.fn(async () => [
     {
       state: {
@@ -25,7 +29,9 @@ const mockSupervisor = vi.hoisted(() => ({
       },
     },
   ]),
-  shutdown: vi.fn(async () => ({ shuttingDown: true })),
+  shutdown: vi.fn(
+    async (): Promise<Record<string, unknown>> => ({ shuttingDown: true }),
+  ),
 }));
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => mockSupervisor),
@@ -86,7 +92,7 @@ describe('agent daemon command', () => {
     expect(mockSupervisor.list).toHaveBeenCalledOnce();
     expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     expect(JSON.parse(String(mockWriteStdoutLine.mock.calls[0]?.[0]))).toEqual({
-      status: { pid: 123, socketPath: '/tmp/qwen.sock' },
+      status: { running: true, pid: 123, socketPath: '/tmp/qwen.sock' },
       sessions: { total: 2, active: 1 },
     });
   });
@@ -163,5 +169,27 @@ describe('agent daemon command', () => {
       shuttingDown: false,
       reason: 'not_running',
     });
+  });
+
+  it('sets a failing exit code when worker shutdowns fail', async () => {
+    process.exitCode = undefined;
+    mockWriteStdoutLine.mockClear();
+    mockSupervisor.shutdown.mockResolvedValueOnce({
+      shuttingDown: true,
+      workersStopped: 1,
+      workersFailed: [{ sessionId: 'session-2', error: 'shutdown failed' }],
+    });
+
+    await yargs('daemon stop --any'.split(' '))
+      .scriptName('qwen')
+      .command(agentDaemonCommand)
+      .exitProcess(false)
+      .fail((message, error) => {
+        throw error ?? new Error(message);
+      })
+      .parseAsync();
+
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
   });
 });

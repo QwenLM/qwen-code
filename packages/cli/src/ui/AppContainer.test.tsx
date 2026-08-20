@@ -822,9 +822,15 @@ describe('AppContainer State Management', () => {
 
     it('exits the foreground runtime after handing it to Agent View', async () => {
       const requestShutdown = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
         requestShutdown,
       } as unknown as GeminiClient);
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        flush,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
       const exit = vi
         .spyOn(process, 'exit')
         .mockImplementation((() => undefined) as never);
@@ -850,6 +856,11 @@ describe('AppContainer State Management', () => {
         expect(requestShutdown).toHaveBeenCalledOnce();
         expect(runExitCleanup).toHaveBeenCalledOnce();
         expect(exit).toHaveBeenCalledWith(0);
+        expect(flush).toHaveBeenCalledOnce();
+        expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        );
         expect(
           agentViewHandoffMocks.detachCurrentSession.mock
             .invocationCallOrder[0],
@@ -885,7 +896,8 @@ describe('AppContainer State Management', () => {
         />,
       );
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
-        { detachAgentViewSession: () => Promise<void> } | undefined;
+        | { detachAgentViewSession: () => Promise<void> }
+        | undefined;
 
       await actions?.detachAgentViewSession();
 

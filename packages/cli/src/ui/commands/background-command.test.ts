@@ -14,7 +14,10 @@ const mockReadAgentViewWorkerSidebandEnv = vi.hoisted(() =>
   vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(() => undefined),
 );
 
-vi.mock('../../agent-view/worker-sideband.js', () => ({
+vi.mock('../../agent-view/worker-sideband.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../../agent-view/worker-sideband.js')
+  >()),
   readAgentViewWorkerSidebandEnv: mockReadAgentViewWorkerSidebandEnv,
 }));
 
@@ -154,6 +157,26 @@ describe('backgroundCommand', () => {
     });
   });
 
+  it('rejects ordinary sessions when Agent View is disabled', async () => {
+    const config = mockConfig({ sessionExists: true });
+    config.isAgentViewEnabled = () => false;
+
+    const result = await backgroundCommand.action?.(
+      createMockCommandContext({
+        services: { config },
+        ui: { isIdleRef: { current: true } },
+      }),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Agent View is disabled. Set `experimental.agentView` to `true` in settings to enable it.',
+    });
+  });
+
   it('rejects before the current session can be resumed', async () => {
     const result = await backgroundCommand.action?.(
       createMockCommandContext({
@@ -173,6 +196,7 @@ describe('backgroundCommand', () => {
 
 function mockConfig(options: { sessionExists: boolean }) {
   return {
+    isAgentViewEnabled: () => true,
     getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
     getSessionService: () => ({
       sessionExists: vi.fn().mockResolvedValue(options.sessionExists),

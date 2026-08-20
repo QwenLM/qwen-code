@@ -143,6 +143,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(handler.shutdown()).resolves.toEqual({
       shuttingDown: true,
       workersStopped: 0,
+      workersFailed: [],
     });
     expect(onShutdown).toHaveBeenCalledOnce();
 
@@ -3845,6 +3846,85 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('releases an exited managed session for foreground continue', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const now = '2026-07-17T00:00:00.000Z';
+    await writeAgentViewSessionState(
+      {
+        schemaVersion: 1,
+        sessionId,
+        ownership: 'managed',
+        sessionState: 'idle',
+        processState: 'exited',
+        attachState: 'detached',
+        projectCwd: globalDir,
+        originalCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+        worktree: { mode: 'none' },
+      },
+      { globalDir },
+    );
+    await upsertAgentViewRosterEntry(
+      {
+        sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { globalDir },
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+    });
+
+    await expect(handler.release?.({ sessionId })).resolves.toMatchObject({
+      sessionId,
+      released: true,
+    });
+    await expect(
+      readAgentViewSessionState(sessionId, { globalDir }),
+    ).resolves.toMatchObject({ ownership: 'unmanaged' });
+    await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
+      sessions: [],
+    });
+
+    await writeAgentViewSessionState(
+      {
+        ...(await readAgentViewSessionState(sessionId, { globalDir }))!,
+        ownership: 'removing',
+      },
+      { globalDir },
+    );
+    await upsertAgentViewRosterEntry(
+      {
+        sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { globalDir },
+    );
+
+    await expect(handler.release?.({ sessionId })).resolves.toMatchObject({
+      sessionId,
+      released: true,
+      resumedRelease: true,
+    });
+    await expect(
+      readAgentViewSessionState(sessionId, { globalDir }),
+    ).resolves.toMatchObject({ ownership: 'unmanaged' });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('finishes an interrupted remove after a daemon restart', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -4757,6 +4837,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(handler.shutdown()).resolves.toEqual({
       shuttingDown: true,
       workersStopped: 1,
+      workersFailed: [],
     });
     expect(hosts[0]?.shutdowns).toBe(1);
     await expect(
@@ -4775,6 +4856,40 @@ describe('Agent View supervisor process helpers', () => {
     expect(hosts).toHaveLength(2);
     expect(hosts[1]?.killedWith).toBeUndefined();
     expect(onShutdown).toHaveBeenCalledTimes(2);
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('stays online and reports workers that fail to stop on shutdown', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const onShutdown = vi.fn();
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      onShutdown,
+      launchPtyHost: async () => {
+        const host = fakePtyHost();
+        host.shutdown = () => {
+          throw new Error('host refused shutdown');
+        };
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+
+    await expect(handler.shutdown()).resolves.toEqual({
+      shuttingDown: false,
+      workersStopped: 0,
+      workersFailed: [
+        { sessionId: result.sessionId, error: 'host refused shutdown' },
+      ],
+    });
+    expect(onShutdown).not.toHaveBeenCalled();
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });

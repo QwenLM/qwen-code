@@ -7,6 +7,7 @@
 import type { Argv, CommandModule } from 'yargs';
 import { AgentViewSupervisorClientError } from '../agent-view/supervisor-client.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
+import { requireAgentViewEnabled } from '../agent-view/feature.js';
 import { writeStderrLineSafe, writeStdoutLine } from '../utils/stdioHelpers.js';
 
 interface SessionArgs {
@@ -90,6 +91,7 @@ export const attachCommand: CommandModule<unknown, SessionArgs> = {
   builder: (yargs: Argv) =>
     yargs.positional('id', { type: 'string', demandOption: true }),
   handler: async (argv) => {
+    requireAgentViewEnabled();
     try {
       // Supervisor errors are reported like RPC failures below.
       const supervisor = await getSessionSupervisor();
@@ -144,6 +146,7 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
         return 'qwen agents respawn requires <id> or --all.';
       }),
   handler: async (argv) => {
+    requireAgentViewEnabled();
     const supervisor = await getSessionSupervisor();
     if (argv.all === true) {
       try {

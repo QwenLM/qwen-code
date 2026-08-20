@@ -77,9 +77,11 @@ const daemonStopCommand: CommandModule<unknown, DaemonStopArgs> = {
       );
       return;
     }
-    writeStdoutLine(
-      JSON.stringify(await supervisor.shutdown(argv['keep-workers']), null, 2),
-    );
+    const result = await supervisor.shutdown(argv['keep-workers']);
+    writeStdoutLine(JSON.stringify(result, null, 2));
+    if (hasWorkerShutdownFailures(result)) {
+      process.exitCode = 1;
+    }
   },
 };
 
@@ -105,5 +107,15 @@ function isActiveSessionSnapshot(value: unknown): boolean {
     state.sessionState !== 'stopped' &&
     state.sessionState !== 'failed' &&
     state.processState !== 'exited'
+  );
+}
+
+function hasWorkerShutdownFailures(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'workersFailed' in value &&
+    Array.isArray(value.workersFailed) &&
+    value.workersFailed.length > 0
   );
 }

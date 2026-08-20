@@ -219,6 +219,7 @@ describe('Agent View supervisor runner', () => {
       logs: vi.fn(() => ({ logs: ['line-1'] })),
       stop: vi.fn(() => ({ stopped: true })),
       kill: vi.fn(() => ({ killed: true })),
+      release: vi.fn(() => ({ released: true })),
       remove: vi.fn(() => ({ removed: true })),
       respawn: vi.fn(() => ({ respawned: true })),
       pin: vi.fn(() => ({ sessionId: 'session-3', pinned: true })),
@@ -317,6 +318,11 @@ describe('Agent View supervisor runner', () => {
     });
     expect(handler.kill).toHaveBeenCalledWith({ sessionId: 'session-3' });
 
+    await expect(handle.release('session-3')).resolves.toEqual({
+      released: true,
+    });
+    expect(handler.release).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
     await expect(handle.remove('session-3')).resolves.toEqual({
       removed: true,
     });
@@ -385,6 +391,7 @@ describe('Agent View supervisor runner', () => {
     ).resolves.toEqual({
       shuttingDown: true,
       workersStopped: 0,
+      workersFailed: [],
     });
     await supervisorPromise;
 

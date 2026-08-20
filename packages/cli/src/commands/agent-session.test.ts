@@ -48,6 +48,10 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
 }));
 
+vi.mock('../agent-view/feature.js', () => ({
+  requireAgentViewEnabled: vi.fn(),
+}));
+
 const jsonSessionCommands = [
   { module: stopCommand, command: 'stop <id>', method: mockSupervisor.stop },
   { module: killCommand, command: 'kill <id>', method: mockSupervisor.kill },

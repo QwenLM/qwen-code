@@ -45,6 +45,7 @@ export interface AgentViewSupervisorHandler {
   stop?: AgentViewSupervisorHandlerMethod<'stop'>;
   kill?: AgentViewSupervisorHandlerMethod<'kill'>;
   respawn?: AgentViewSupervisorHandlerMethod<'respawn'>;
+  release?: AgentViewSupervisorHandlerMethod<'release'>;
   remove?: AgentViewSupervisorHandlerMethod<'remove'>;
   pin?: AgentViewSupervisorHandlerMethod<'pin'>;
   rename?: AgentViewSupervisorHandlerMethod<'rename'>;
@@ -249,9 +250,15 @@ class SupervisorOperationGate {
       this.state = 'draining';
       await Promise.allSettled(this.active);
       try {
-        return await action();
-      } finally {
-        this.state = 'closed';
+        const result = await action();
+        this.state =
+          isRecord(result) && result['shuttingDown'] === false
+            ? 'running'
+            : 'closed';
+        return result;
+      } catch (error) {
+        this.state = 'running';
+        throw error;
       }
     }
     if (isDrainSafeOperation(op)) {
@@ -488,6 +495,7 @@ function isSupervisorOperation(
     value === 'stop' ||
     value === 'kill' ||
     value === 'respawn' ||
+    value === 'release' ||
     value === 'remove' ||
     value === 'pin' ||
     value === 'rename'

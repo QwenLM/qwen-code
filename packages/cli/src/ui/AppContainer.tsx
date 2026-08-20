@@ -1740,6 +1740,7 @@ export const AppContainer = (props: AppContainerProps) => {
       await sendAgentViewWorkerEvent({ type: 'detach' });
       return;
     }
+    await config.getChatRecordingService?.()?.flush?.();
     await detachCurrentSessionToAgentView(config);
     config.getGeminiClient()?.requestShutdown();
     await runExitCleanup();
