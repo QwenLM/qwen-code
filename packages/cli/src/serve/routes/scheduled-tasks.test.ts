@@ -2380,6 +2380,30 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     expect(h.primary.bridge.spawned).toEqual([]);
   });
 
+  it('rejects a session claimed by two runtimes as ambiguous', async () => {
+    addLiveSession(
+      h.primary.bridge,
+      SECONDARY_SESSION_ID,
+      h.primary.workspaceCwd,
+    );
+    addLiveSession(
+      h.secondary.bridge,
+      SECONDARY_SESSION_ID,
+      h.secondary.workspaceCwd,
+    );
+
+    const res = await request(h.app).post('/scheduled-tasks').send({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: SECONDARY_SESSION_ID,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('ambiguous_session_owner');
+    expect(h.primary.bridge.spawned).toEqual([]);
+    expect(h.secondary.bridge.spawned).toEqual([]);
+  });
+
   it('writes to the targeted workspace’s own cron file on disk', async () => {
     await request(h.app)
       .post(qualified(h.secondary.workspaceId))
