@@ -650,7 +650,7 @@ describe('createTranscriptReplayMachine', () => {
           sessionUpdate: 'user_message_chunk',
           content: {
             type: 'text',
-            text: 'check\n\n@attachment:///notes.json',
+            text: 'check',
           },
         },
         {

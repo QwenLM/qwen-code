@@ -404,10 +404,11 @@ export function useQueuedPrompts({
               : {}),
             // Restore images from server content if local row doesn't have
             // them; clearing summary-only makes the restored row editable.
-            ...(serverImages &&
-            contentFullyHydrated &&
-            !next[existingIndex]!.images
-              ? { images: serverImages, payloadCompleteness: undefined }
+            ...(serverImages && !next[existingIndex]!.images
+              ? { images: serverImages }
+              : {}),
+            ...(serverImages && contentFullyHydrated && !serverFiles
+              ? { payloadCompleteness: undefined }
               : {}),
             ...(serverFiles && !next[existingIndex]!.files
               ? { files: serverFiles, payloadCompleteness: 'summary-only' }
@@ -456,9 +457,7 @@ export function useQueuedPrompts({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: serverPrompt.text,
-          ...(serverImages && contentFullyHydrated
-            ? { images: serverImages }
-            : {}),
+          ...(serverImages ? { images: serverImages } : {}),
           ...(serverFiles ? { files: serverFiles } : {}),
           serverPromptId: serverPrompt.promptId,
           serverState: serverPrompt.state,
@@ -1350,6 +1349,16 @@ export function useQueuedPrompts({
         let enqueueDispatched = false;
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
           [];
+        const removeUploadedAttachments = async () => {
+          await Promise.allSettled(
+            uploadedAttachmentReferences.map((reference) =>
+              sessionActions.removeAttachment(reference.attachmentId, {
+                sessionId: targetSessionId,
+              }),
+            ),
+          );
+          uploadedAttachmentReferences = [];
+        };
         void Promise.allSettled(
           imageList.map(
             async (image) =>
@@ -1398,6 +1407,7 @@ export function useQueuedPrompts({
                 enqueueStarted = false;
                 throw new Error('Mid-turn message was not dispatched');
               }
+              await removeUploadedAttachments();
               completionCallbacksRef.current.delete(midTurnMessageId);
               pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               const next = queuedPromptsRef.current.filter(
@@ -1427,6 +1437,7 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (!enqueueStarted) await removeUploadedAttachments();
             if (!targetIsCurrent()) {
               completionCallbacksRef.current.delete(midTurnMessageId);
               const pendingAdmissionStillOwned =

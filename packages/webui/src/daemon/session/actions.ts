@@ -31,6 +31,8 @@ import type {
   PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
 import {
+  DaemonHttpError,
+  DaemonPendingPromptLimitError,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
@@ -112,12 +114,7 @@ function promptFilesForTranscript(
 }
 
 class AttachmentUploadError extends Error {
-  constructor(
-    readonly reason: unknown,
-    readonly fileReferences: ReadonlyArray<
-      DaemonSessionAttachmentReference | undefined
-    >,
-  ) {
+  constructor(readonly reason: unknown) {
     super(reason instanceof Error ? reason.message : String(reason));
   }
 }
@@ -384,16 +381,10 @@ export function createDaemonSessionActions({
         fileReferences,
       };
     }
+    await removeUploadedAttachments(session, references);
     if (extractHttpStatus(failure.reason) === 404) {
-      if (references.length > 0 || uploadableFiles.length > 0) {
-        throw new AttachmentUploadError(
-          failure.reason,
-          results
-            .slice(uploadableImages.length)
-            .map((result) =>
-              result.status === 'fulfilled' ? result.value : undefined,
-            ),
-        );
+      if (uploadableFiles.length > 0) {
+        throw new AttachmentUploadError(failure.reason);
       }
       return {
         content: toDaemonPromptContent(text, images, files),
@@ -401,13 +392,24 @@ export function createDaemonSessionActions({
         fileReferences: [],
       };
     }
-    throw new AttachmentUploadError(
-      failure.reason,
-      results
-        .slice(uploadableImages.length)
-        .map((result) =>
-          result.status === 'fulfilled' ? result.value : undefined,
-        ),
+    throw new AttachmentUploadError(failure.reason);
+  }
+
+  async function removeUploadedAttachments(
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionAttachmentReference[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      references.map((reference) =>
+        session.removeAttachment(reference.attachmentId),
+      ),
+    );
+  }
+
+  function isDefinitePromptAdmissionRejection(error: unknown): boolean {
+    return (
+      error instanceof DaemonHttpError ||
+      error instanceof DaemonPendingPromptLimitError
     );
   }
 
@@ -673,6 +675,9 @@ export function createDaemonSessionActions({
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
         const normalizedFiles = normalizePromptFiles(options?.files);
+        const slashCommand = text.trimStart().startsWith('/');
+        const displayedImages = slashCommand ? [] : normalizedImages;
+        const displayedFiles = slashCommand ? [] : normalizedFiles;
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
@@ -692,40 +697,24 @@ export function createDaemonSessionActions({
           if (options?.optimisticUserMessage !== false) {
             store.appendLocalUserMessage(
               text,
-              normalizedImages,
+              displayedImages,
               inputAnnotations ? { inputAnnotations } : undefined,
-              promptFilesForTranscript(
-                normalizedFiles,
-                error instanceof AttachmentUploadError
-                  ? error.fileReferences
-                  : [],
-                true,
-              ),
+              promptFilesForTranscript(displayedFiles, [], true),
             );
           }
           throw error instanceof AttachmentUploadError ? error.reason : error;
         }
         if (ctrl.signal.aborted) {
+          await removeUploadedAttachments(session, uploaded.references);
           if (options?.optimisticUserMessage !== false) {
             store.appendLocalUserMessage(
               text,
-              normalizedImages,
+              displayedImages,
               inputAnnotations ? { inputAnnotations } : undefined,
-              promptFilesForTranscript(
-                normalizedFiles,
-                uploaded.fileReferences,
-              ),
+              promptFilesForTranscript(displayedFiles, [], true),
             );
           }
           ctrl.signal.throwIfAborted();
-        }
-        if (options?.optimisticUserMessage !== false) {
-          store.appendLocalUserMessage(
-            text,
-            normalizedImages,
-            inputAnnotations ? { inputAnnotations } : undefined,
-            promptFilesForTranscript(normalizedFiles, uploaded.fileReferences),
-          );
         }
         const promptRequest: Record<string, unknown> = {
           prompt: uploaded.content,
@@ -737,10 +726,39 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        const accepted = await session.submitPrompt(
-          promptRequest as Parameters<typeof session.submitPrompt>[0],
-          ctrl.signal,
-        );
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+            ctrl.signal,
+          );
+        } catch (error) {
+          const definiteRejection = isDefinitePromptAdmissionRejection(error);
+          if (definiteRejection) {
+            await removeUploadedAttachments(session, uploaded.references);
+          }
+          if (options?.optimisticUserMessage !== false) {
+            store.appendLocalUserMessage(
+              text,
+              displayedImages,
+              inputAnnotations ? { inputAnnotations } : undefined,
+              promptFilesForTranscript(
+                displayedFiles,
+                definiteRejection ? [] : uploaded.fileReferences,
+                definiteRejection,
+              ),
+            );
+          }
+          throw error;
+        }
+        if (options?.optimisticUserMessage !== false) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
+          );
+        }
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -804,6 +822,9 @@ export function createDaemonSessionActions({
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
       const normalizedFiles = normalizePromptFiles(options?.files);
+      const slashCommand = text.trimStart().startsWith('/');
+      const displayedImages = slashCommand ? [] : normalizedImages;
+      const displayedFiles = slashCommand ? [] : normalizedFiles;
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
@@ -823,26 +844,12 @@ export function createDaemonSessionActions({
         if (options?.optimisticUserMessage !== false) {
           store.appendLocalUserMessage(
             text,
-            normalizedImages,
+            displayedImages,
             inputAnnotations ? { inputAnnotations } : undefined,
-            promptFilesForTranscript(
-              normalizedFiles,
-              error instanceof AttachmentUploadError
-                ? error.fileReferences
-                : [],
-              true,
-            ),
+            promptFilesForTranscript(displayedFiles, [], true),
           );
         }
         throw error instanceof AttachmentUploadError ? error.reason : error;
-      }
-      if (options?.optimisticUserMessage !== false) {
-        store.appendLocalUserMessage(
-          text,
-          normalizedImages,
-          inputAnnotations ? { inputAnnotations } : undefined,
-          promptFilesForTranscript(normalizedFiles, uploaded.fileReferences),
-        );
       }
       const promptRequest: Record<string, unknown> = {
         prompt: uploaded.content,
@@ -854,13 +861,43 @@ export function createDaemonSessionActions({
         promptRequest['retry'] = true;
       }
       options?.onAdmissionStarted?.();
-      const accepted = await session.submitPrompt(
-        promptRequest as Parameters<typeof session.submitPrompt>[0],
-      );
+      let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      try {
+        accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
+        );
+      } catch (error) {
+        const definiteRejection = isDefinitePromptAdmissionRejection(error);
+        if (definiteRejection) {
+          await removeUploadedAttachments(session, uploaded.references);
+        }
+        if (options?.optimisticUserMessage !== false) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            promptFilesForTranscript(
+              displayedFiles,
+              definiteRejection ? [] : uploaded.fileReferences,
+              definiteRejection,
+            ),
+          );
+        }
+        throw error;
+      }
+      if (options?.optimisticUserMessage !== false) {
+        store.appendLocalUserMessage(
+          text,
+          displayedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+          promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
+        );
+      }
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
           if (removal.removed) {
+            await removeUploadedAttachments(session, uploaded.references);
             return { promptId: accepted.promptId, removedAfterAbort: true };
           }
         } catch (err) {

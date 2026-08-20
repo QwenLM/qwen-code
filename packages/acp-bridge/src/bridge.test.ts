@@ -31363,7 +31363,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getMidTurnMessages returns media blocks so a refresh keeps images', async () => {
+  it('getMidTurnMessages returns attachment blocks so a refresh keeps them', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31393,13 +31393,30 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///notes.txt',
+        mimeType: 'text/plain',
+        text: 'notes',
+      },
+    } as const;
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
         'with media',
         { clientId: session.clientId },
         'media-snap',
-        { content: [image] },
+        { content: [image, resource] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'media-snap' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'with media',
+        { clientId: session.clientId },
+        'media-snap',
+        { content: [image, resource] },
       ),
     ).toEqual({ accepted: true, messageId: 'media-snap' });
 
@@ -31412,7 +31429,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         {
           messageId: 'media-snap',
           text: 'with media',
-          content: [image],
+          content: [image, resource],
         },
       ],
       settledMessageIds: [],
@@ -31421,6 +31438,60 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     release?.();
     await prompt;
+    await bridge.shutdown();
+  });
+
+  it('rejects queued inline attachments past the session byte budget', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const busy = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'go' }],
+      },
+      undefined,
+      { clientId: session.clientId },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+    const half = 'x'.repeat(50 * 1024 * 1024 + 1024);
+    const inline = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///large.txt',
+        mimeType: 'text/plain',
+        text: half,
+      },
+    } as const;
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'first half',
+        { clientId: session.clientId },
+        'inline-1',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'inline-1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'second half',
+        { clientId: session.clientId },
+        'inline-2',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: false });
+
+    releases[0]!();
+    await busy;
     await bridge.shutdown();
   });
 

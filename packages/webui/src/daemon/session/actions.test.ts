@@ -1085,7 +1085,7 @@ describe('createDaemonSessionActions', () => {
 
   it('does not upload attachments discarded by slash commands', async () => {
     const session = createMockSession('session-a');
-    const { actions } = createActionsHarness({
+    const { actions, store } = createActionsHarness({
       session,
       connection: {
         status: 'connected',
@@ -1108,6 +1108,12 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).toHaveBeenCalledWith({
       prompt: [{ type: 'text', text: '/help' }],
     });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/help',
+      [],
+      undefined,
+      [],
+    );
   });
 
   it('uploads text attachments and submits attachment references', async () => {
@@ -1464,7 +1470,7 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
-  it('keeps successful attachment uploads when another upload fails', async () => {
+  it('removes successful attachment uploads when another upload fails', async () => {
     const session = createMockSession('session-a');
     session.uploadAttachment
       .mockResolvedValueOnce({
@@ -1499,7 +1505,7 @@ describe('createDaemonSessionActions', () => {
       }),
     ).rejects.toThrow('second upload failed');
 
-    expect(session.removeAttachment).not.toHaveBeenCalled();
+    expect(session.removeAttachment).toHaveBeenCalledWith('first.txt');
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       'look',
       [],
@@ -1509,7 +1515,6 @@ describe('createDaemonSessionActions', () => {
           name: 'first.txt',
           mimeType: 'text/plain',
           data: first,
-          attachmentId: 'first.txt',
         },
         {
           name: 'second.txt',
@@ -1521,12 +1526,12 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
-  it('keeps uploaded attachments when prompt admission is rejected', async () => {
+  it('removes uploaded attachments when prompt admission is rejected', async () => {
     const session = createMockSession('session-a');
     session.submitPrompt.mockRejectedValueOnce(
       new DaemonPendingPromptLimitError('session-a', 20, 20),
     );
-    const { actions } = createActionsHarness({
+    const { actions, store } = createActionsHarness({
       session,
       connection: {
         status: 'connected',
@@ -1546,7 +1551,13 @@ describe('createDaemonSessionActions', () => {
       }),
     ).rejects.toThrow('Pending prompts full');
 
-    expect(session.removeAttachment).not.toHaveBeenCalled();
+    expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'look',
+      [{ data: 'AQID', mimeType: 'image/png' }],
+      undefined,
+      [],
+    );
   });
 
   it('keeps uploaded attachments when prompt admission is uncertain', async () => {
@@ -1575,7 +1586,7 @@ describe('createDaemonSessionActions', () => {
     expect(session.removeAttachment).not.toHaveBeenCalled();
   });
 
-  it('keeps uploaded attachments and the optimistic message when cancelled before prompt admission', async () => {
+  it('removes uploaded attachments when cancelled before prompt admission', async () => {
     const upload = createDeferred<{
       type: 'image';
       attachmentId: string;
@@ -1611,12 +1622,12 @@ describe('createDaemonSessionActions', () => {
     });
 
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
-    expect(session.removeAttachment).not.toHaveBeenCalled();
+    expect(session.removeAttachment).toHaveBeenCalledWith('media-1');
     expect(store.appendLocalUserMessage).toHaveBeenCalled();
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
-  it('keeps uploaded attachments when an admitted pending prompt is removed', async () => {
+  it('removes uploaded attachments when an admitted pending prompt is removed', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
     session.submitPrompt.mockImplementationOnce(async () => {
@@ -1645,7 +1656,7 @@ describe('createDaemonSessionActions', () => {
       }),
     ).resolves.toEqual({ promptId: 'prompt-1', removedAfterAbort: true });
 
-    expect(session.removeAttachment).not.toHaveBeenCalled();
+    expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
   });
 
   it('keeps uploaded attachments when the admitted prompt already started', async () => {

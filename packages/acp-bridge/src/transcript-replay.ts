@@ -199,6 +199,31 @@ function replaceTextPartsForDisplay(
   return projected;
 }
 
+function stripGeneratedAttachmentTokens(
+  displayText: string,
+  payload: Record<string, unknown> | undefined,
+): string {
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
+}
+
 export function toTranscriptEpochMs(
   timestamp?: string | number,
 ): number | undefined {
@@ -594,7 +619,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     ) {
       const displayText =
         payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
+          ? stripGeneratedAttachmentTokens(payload['displayText'], payload)
           : undefined;
       if (record.subtype === 'mid_turn_user_message' && displayText === '') {
         const media = [
@@ -637,16 +662,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const projection = projectUserTranscriptForDisplay(record);
     if (projection.displayText !== undefined) {
+      const displayText = stripGeneratedAttachmentTokens(
+        projection.displayText,
+        payload,
+      );
       yield* this.projectMessageParts(
         record,
         'user',
         emit,
         replayMeta,
         undefined,
-        replaceTextPartsForDisplay(
-          record.message?.parts,
-          projection.displayText,
-        ),
+        replaceTextPartsForDisplay(record.message?.parts, displayText),
       );
       yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
       return;

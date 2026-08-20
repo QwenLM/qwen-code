@@ -2361,6 +2361,25 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // a `BridgeOptions` knob the same way `maxPendingPromptsPerSession` (the
 // analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
+const MAX_QUEUED_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+function inlineAttachmentBlockBytes(
+  blocks: readonly BridgePromptContentBlock[],
+): number {
+  let total = 0;
+  for (const block of blocks) {
+    if (block.type === 'image' && 'data' in block) {
+      total += Buffer.byteLength(block.data);
+      continue;
+    }
+    if (block.type !== 'resource' || !('resource' in block)) continue;
+    const resource = block.resource;
+    if ('blob' in resource) total += Buffer.byteLength(resource.blob);
+    else if ('text' in resource) total += Buffer.byteLength(resource.text);
+  }
+  return total;
+}
+
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -10844,11 +10863,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
       const trimmed = message.trim();
-      // Media blocks travel with the message through drain and promotion;
-      // anything else a caller sneaks into `content` (text/resource blocks)
-      // is dropped here so the drain never duplicates the message text.
+      // Attachment blocks travel with the message through drain and promotion;
+      // text blocks are dropped so the drain never duplicates the message text.
       const mediaBlocks = (options?.content ?? []).filter(
-        (block): block is BridgePromptContentBlock => block.type === 'image',
+        (block): block is BridgePromptContentBlock =>
+          block.type === 'image' || block.type === 'resource',
       );
       if (trimmed.length === 0 && mediaBlocks.length === 0) {
         writeStderrLine(
@@ -10879,11 +10898,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (pending) => pending.promptId === requestedMessageId,
         );
         if (promoted) {
-          const promotedImages = (promoted.content ?? []).filter(
-            (block) => block.type === 'image',
+          const promotedMedia = (promoted.content ?? []).filter(
+            (block) => block.type === 'image' || block.type === 'resource',
           );
           const sameMedia =
-            JSON.stringify(promotedImages) === JSON.stringify(mediaBlocks);
+            JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
           const promotedText =
             promoted.text === '[image]' && trimmed.length === 0
               ? ''
@@ -10917,6 +10936,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // in-flight POST, or a refresh re-enqueueing from the snapshot) must
       // settle idempotently instead of failing with session_attachment_gone.
       entry.attachments.assertReferences(mediaBlocks);
+      const inlineBytes = inlineAttachmentBlockBytes(mediaBlocks);
+      if (inlineBytes > 0) {
+        const queuedInlineBytes = entry.midTurnMessageQueue.reduce(
+          (total, queued) =>
+            total + inlineAttachmentBlockBytes(queued.content ?? []),
+          0,
+        );
+        if (
+          queuedInlineBytes + inlineBytes >
+          MAX_QUEUED_INLINE_ATTACHMENT_BYTES
+        ) {
+          writeStderrLine(
+            `[mid-turn] session=${entry.sessionId} rejected: queued inline attachments exceed the ${MAX_QUEUED_INLINE_ATTACHMENT_BYTES}-byte session budget`,
+          );
+          return { accepted: false };
+        }
+      }
       const messageId = requestedMessageId ?? randomUUID();
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.

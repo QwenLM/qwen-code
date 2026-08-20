@@ -1996,7 +1996,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('keeps uploaded media when mid-turn admission is rejected', async () => {
+  it('removes uploaded media when mid-turn admission is rejected', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
         opts?.onAdmissionStarted?.();
@@ -2015,7 +2015,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
-      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith('media-1', {
+        sessionId: 'session-a',
+      });
       expect(harness.result().queuedPrompts).toEqual([]);
       expect(harness.reportError).toHaveBeenCalledTimes(1);
       expect(harness.editor.restoreImages).not.toHaveBeenCalled();
@@ -2060,7 +2062,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
 
       expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
-      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith('media-a', {
+        sessionId: 'session-a',
+      });
     } finally {
       await harness.dispose();
     }
@@ -2124,7 +2128,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('keeps successful uploads when another image fails', async () => {
+  it('removes successful uploads when another image fails', async () => {
     sdkMock.actions.uploadAttachment
       .mockResolvedValueOnce({
         type: 'image',
@@ -2144,7 +2148,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
-      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'uploaded-before-failure',
+        { sessionId: 'session-a' },
+      );
       expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
       expect(harness.editor.setText).toHaveBeenCalledWith('keep this');
       expect(harness.editor.restoreImages).toHaveBeenCalledWith([
@@ -3124,8 +3131,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(row).toMatchObject({
         serverPromptId: 'p-partial',
         payloadCompleteness: 'summary-only',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
       });
-      expect(row?.images).toBeUndefined();
     } finally {
       await harness.dispose();
     }

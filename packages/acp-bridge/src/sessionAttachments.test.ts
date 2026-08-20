@@ -389,6 +389,27 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('does not delete the original when a long duplicate name is invalid', async () => {
+    const store = new SessionAttachmentStore();
+    const name = `中.${'a'.repeat(251)}`;
+    try {
+      const original = await store.putAttachment(
+        Uint8Array.of(1),
+        'application/octet-stream',
+        name,
+      );
+
+      await expect(
+        store.putAttachment(Uint8Array.of(2), 'application/octet-stream', name),
+      ).rejects.toThrow('Session attachment name is invalid');
+      await expect(store.read(original.attachmentId)).resolves.toMatchObject({
+        data: Buffer.from([1]),
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('retries directory creation after a transient failure', async () => {
     const mkdir = vi
       .spyOn(fs, 'mkdtemp')
@@ -457,6 +478,25 @@ describe('SessionAttachmentStore', () => {
       );
       await expect(store.remove(reference.attachmentId)).resolves.toBe(true);
       await expect(store.read(reference.attachmentId)).resolves.toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('protects an upload name before directory creation settles', async () => {
+    const store = new SessionAttachmentStore();
+    try {
+      const pending = store.putAttachment(
+        Uint8Array.of(1),
+        'application/octet-stream',
+        'same.bin',
+      );
+
+      await expect(store.remove('same.bin')).resolves.toBe(false);
+      const reference = await pending;
+      await expect(store.read(reference.attachmentId)).resolves.toMatchObject({
+        data: Buffer.from([1]),
+      });
     } finally {
       await store.close();
     }
@@ -655,6 +695,69 @@ describe('SessionAttachmentStore', () => {
       await expect(target.copyFrom(source)).resolves.toBeUndefined();
     } finally {
       copy.mockRestore();
+      await source.close();
+      await target.close();
+    }
+  });
+
+  it.each(['source', 'target'] as const)(
+    'waits for copying before deleting the %s store',
+    async (storeToDelete) => {
+      const source = new SessionAttachmentStore();
+      const target = new SessionAttachmentStore();
+      await source.putAttachment(
+        Uint8Array.of(1),
+        'application/octet-stream',
+        'copy.bin',
+      );
+      const originalCopyFile = fs.copyFile.bind(fs);
+      let finishCopy: (() => void) | undefined;
+      const copy = vi.spyOn(fs, 'copyFile').mockImplementationOnce(
+        async (...args) =>
+          await new Promise<void>((resolve, reject) => {
+            finishCopy = () => {
+              void originalCopyFile(...args).then(resolve, reject);
+            };
+          }),
+      );
+      try {
+        const copying = target.copyFrom(source);
+        await vi.waitFor(() => expect(finishCopy).toBeTypeOf('function'));
+        let deleted = false;
+        const deleting = (storeToDelete === 'source' ? source : target)
+          .delete()
+          .then(() => {
+            deleted = true;
+          });
+        await Promise.resolve();
+        expect(deleted).toBe(false);
+
+        finishCopy?.();
+        await Promise.all([copying, deleting]);
+        if (storeToDelete === 'source') {
+          await expect(target.read('copy.bin')).resolves.toMatchObject({
+            data: Buffer.from([1]),
+          });
+        }
+      } finally {
+        finishCopy?.();
+        copy.mockRestore();
+        await source.close();
+        await target.close();
+      }
+    },
+  );
+
+  it('blocks a new copy once deletion starts', async () => {
+    const source = new SessionAttachmentStore();
+    const target = new SessionAttachmentStore();
+    try {
+      const deleting = source.delete();
+      await expect(target.copyFrom(source)).rejects.toThrow(
+        'Session attachment store is closed',
+      );
+      await deleting;
+    } finally {
       await source.close();
       await target.close();
     }

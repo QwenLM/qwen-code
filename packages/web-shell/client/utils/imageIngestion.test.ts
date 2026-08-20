@@ -312,6 +312,40 @@ describe('text file ingestion', () => {
     expect(result.accepted[0]?.name).toBe('notes.png.file');
   });
 
+  it.each([
+    ['notes.png.', 'application/pdf'],
+    [`${'a'.repeat(250)}.png`, 'application/pdf'],
+    ['anim.png', 'image/apng'],
+  ])('shields misleading image name %s with MIME %s', async (name, type) => {
+    const file = new File(['data'], name, { type });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readFileTransfer(extracted.fileCandidates);
+
+    expect(result.accepted[0]?.name.endsWith('.file')).toBe(true);
+    expect(
+      new TextEncoder().encode(result.accepted[0]?.name).byteLength,
+    ).toBeLessThanOrEqual(255);
+    expect(result.accepted[0]?.media_type).toBe(type);
+  });
+
+  it('normalizes image/jpg before reading an image', async () => {
+    const file = new File(['jpeg'], 'photo.jpg', { type: 'image/jpg' });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readImageTransfer(extracted.imageCandidates);
+
+    expect(result.accepted).toEqual([
+      { data: 'anBlZw==', media_type: 'image/jpeg' },
+    ]);
+  });
+
   it('applies the size limit to each text file independently', async () => {
     const files = [
       new File(['one'], 'one.log', { type: 'text/plain' }),
@@ -355,6 +389,10 @@ describe('attachment naming', () => {
     expect(sanitizeAttachmentName('my log(1).log')).toBe('my log(1).log');
     expect(sanitizeAttachmentName('a,b;c.txt')).toBe('a,b;c.txt');
     expect(sanitizeAttachmentName('../weird\nname.log')).toBe('weirdname.log');
+    expect(sanitizeAttachmentName('budget 🚀 report.png')).toBe(
+      'budget 🚀 report.png',
+    );
+    expect(sanitizeAttachmentName('bad\ud800name.txt')).toBe('badname.txt');
   });
 
   it('falls back for names that sanitize to nothing', () => {

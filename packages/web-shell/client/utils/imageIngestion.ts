@@ -65,6 +65,7 @@ export function normalizeImageMediaType(
   fileName = '',
 ): string | undefined {
   const normalized = mediaType.trim().toLowerCase();
+  if (normalized === 'image/jpg') return 'image/jpeg';
   if (normalized === 'image/x-bmp' || normalized === 'image/x-ms-bmp') {
     return 'image/bmp';
   }
@@ -177,7 +178,7 @@ export function normalizeTextMediaType(
 
 /* eslint-disable no-control-regex -- intentionally strips C0/DEL controls and invisible bidi/zero-width format chars from dropped file names */
 const CONTROL_CHAR_RE =
-  /[\u0000-\u001f\u007f\ud800-\udfff\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0000-\u001f\u007f\ud800-\udfff\u200b-\u200f\u202a-\u202e\u2066-\u2069]/gu;
 /* eslint-enable no-control-regex */
 const INVALID_ATTACHMENT_NAME_RE = /[<>:"|?*]/g;
 const WINDOWS_RESERVED_NAME_RE =
@@ -428,13 +429,16 @@ export function readFileTransfer(
       rejected.push({ name: candidate.file.name, reason: 'too-large' });
       continue;
     }
+    const name = sanitizeAttachmentName(candidate.file.name);
+    const nameImageType = normalizeImageMediaType('', name);
+    const declaredImageType = normalizeImageMediaType(candidate.mediaType);
+    const shieldedName =
+      nameImageType && nameImageType !== declaredImageType
+        ? `${truncateUtf8(name, MAX_ATTACHMENT_NAME_BYTES - utf8Length('.file')).replace(/[. ]+$/u, '') || 'attachment'}.file`
+        : name;
     accepted.push({
-      name:
-        normalizeImageMediaType('', candidate.file.name) &&
-        !candidate.mediaType.startsWith('image/')
-          ? `${candidate.file.name}.file`
-          : candidate.file.name,
-      media_type: candidate.mediaType,
+      name: shieldedName,
+      media_type: declaredImageType ?? candidate.mediaType,
       data: candidate.file,
       size: candidate.file.size,
     });

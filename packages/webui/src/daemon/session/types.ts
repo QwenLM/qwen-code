@@ -463,8 +463,8 @@ export interface DaemonSessionActions {
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
    * on an ambiguous transport failure so the caller can reconcile. `content`
-   * carries image blocks — pre-flight the daemon's
-   * `session_attachments` capability before attaching them.
+   * carries attachment blocks — pre-flight the daemon's
+   * `session_attachments` capability before attaching references.
    */
   enqueueMidTurnMessage(
     message: string,

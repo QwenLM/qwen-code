@@ -200,7 +200,9 @@ export class SessionAttachmentStore {
   private pendingItems = 0;
   private readonly pendingNames = new Map<string, number>();
   private readonly pendingDrainWaiters: Array<() => void> = [];
+  private readonly copyDrainWaiters: Array<() => void> = [];
   private copying = false;
+  private closing = false;
   private closed = false;
 
   constructor(
@@ -233,7 +235,9 @@ export class SessionAttachmentStore {
     ) {
       throw new TypeError('Attachment name and Content-Type do not match');
     }
-    if (this.closed) throw new Error('Session attachment store is closed');
+    if (this.closed || this.closing) {
+      throw new Error('Session attachment store is closed');
+    }
     if (this.copying) throw new Error('Session attachments are being copied');
     if (
       (isImage && data.byteLength === 0) ||
@@ -244,7 +248,10 @@ export class SessionAttachmentStore {
       );
     }
     let filePath: string | undefined;
+    let pendingName: string | undefined = safeName;
+    let removeFileOnFailure = false;
     this.pendingItems += 1;
+    this.reservePendingName(safeName);
     try {
       const directory = await this.directory();
       let suffix = 0;
@@ -253,21 +260,26 @@ export class SessionAttachmentStore {
         if (safeAttachmentName(candidateName) !== candidateName) {
           throw new TypeError('Session attachment name is invalid');
         }
+        if (pendingName !== candidateName) {
+          if (pendingName) this.releasePendingName(pendingName);
+          this.reservePendingName(candidateName);
+          pendingName = candidateName;
+        }
         filePath = path.join(directory, candidateName);
-        this.pendingNames.set(
-          candidateName,
-          (this.pendingNames.get(candidateName) ?? 0) + 1,
-        );
+        removeFileOnFailure = true;
         try {
           await fs.writeFile(filePath, data, { flag: 'wx' });
           break;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          removeFileOnFailure = false;
           this.releasePendingName(candidateName);
+          pendingName = undefined;
+          filePath = undefined;
           suffix += 1;
         }
       }
-      if (this.closed) {
+      if (this.closed || this.closing) {
         throw new Error('Session attachment store is closed');
       }
       const name = path.basename(filePath);
@@ -282,10 +294,12 @@ export class SessionAttachmentStore {
       } satisfies SessionAttachmentReference;
       return reference;
     } catch (error) {
-      if (filePath) await fs.rm(filePath, { force: true }).catch(() => {});
+      if (removeFileOnFailure && filePath) {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+      }
       throw error;
     } finally {
-      if (filePath) this.releasePendingName(path.basename(filePath));
+      if (pendingName) this.releasePendingName(pendingName);
       if (!this.closed) {
         this.pendingItems -= 1;
         if (this.pendingItems === 0) {
@@ -433,9 +447,13 @@ export class SessionAttachmentStore {
 
   async copyFrom(source: SessionAttachmentStore): Promise<void> {
     if (source === this) return;
-    if (this.closed) throw new Error('Session attachment store is closed');
+    if (this.closed || this.closing) {
+      throw new Error('Session attachment store is closed');
+    }
     if (this.copying) throw new Error('Session attachments are being copied');
-    if (source.closed) throw new Error('Session attachment store is closed');
+    if (source.closed || source.closing) {
+      throw new Error('Session attachment store is closed');
+    }
     if (source.copying) {
       throw new Error('Session attachments are being copied');
     }
@@ -495,6 +513,8 @@ export class SessionAttachmentStore {
     } finally {
       source.copying = false;
       this.copying = false;
+      source.resolveCopyDrainWaiters();
+      this.resolveCopyDrainWaiters();
     }
   }
 
@@ -522,6 +542,8 @@ export class SessionAttachmentStore {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    await this.waitForCopy();
     if (this.closed) return;
     this.closed = true;
     this.pendingItems = 0;
@@ -534,6 +556,8 @@ export class SessionAttachmentStore {
   }
 
   async delete(): Promise<void> {
+    this.closing = true;
+    await this.waitForCopy();
     if (!this.closed) {
       this.closed = true;
       this.pendingItems = 0;
@@ -580,6 +604,20 @@ export class SessionAttachmentStore {
     const count = this.pendingNames.get(name) ?? 0;
     if (count <= 1) this.pendingNames.delete(name);
     else this.pendingNames.set(name, count - 1);
+  }
+
+  private reservePendingName(name: string): void {
+    this.pendingNames.set(name, (this.pendingNames.get(name) ?? 0) + 1);
+  }
+
+  private async waitForCopy(): Promise<void> {
+    while (this.copying) {
+      await new Promise<void>((resolve) => this.copyDrainWaiters.push(resolve));
+    }
+  }
+
+  private resolveCopyDrainWaiters(): void {
+    for (const resolve of this.copyDrainWaiters.splice(0)) resolve();
   }
 
   private resolvePendingDrainWaiters(): void {
