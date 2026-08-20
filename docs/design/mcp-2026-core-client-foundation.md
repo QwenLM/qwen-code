@@ -69,17 +69,19 @@ unchanged. A missing, oversized, malformed, or unreadable resource falls back
 to the normal text result.
 
 The daemon serves a static sandbox proxy before bearer authentication. It
-contains no session data or credentials. WebShell loads that proxy from a
-different loopback origin, then uses the official AppBridge and postMessage
-transport to deliver the validated HTML, tool input, and tool result to an
-inner sandboxed iframe. The proxy validates parent and child origins, applies
-resource CSP as an HTTP response header, and forwards AppBridge postMessage
-traffic between the two frames. The host AppBridge schema-validates inbound
-messages; the proxy itself does not filter payload shape. The inner App iframe
-deliberately omits
-`allow-same-origin`, giving untrusted HTML an opaque origin that cannot call the
-daemon's loopback API as a same-origin client. The first host slice does not
-advertise privileged App capabilities.
+contains no session data or credentials. WebShell loads that proxy in an
+outer iframe that omits `allow-same-origin`, so even a same-URL `localhost`
+load is an opaque origin and cannot read WebShell `sessionStorage`. When the
+daemon is already on `127.0.0.1` or `[::1]`, the host also swaps onto
+`localhost` for a second loopback origin. AppBridge and postMessage deliver
+the validated HTML, tool input, and tool result to an inner sandboxed iframe.
+The proxy validates parent and child origins, applies resource CSP as an HTTP
+response header, and forwards AppBridge postMessage traffic between the two
+frames. The host AppBridge schema-validates inbound messages; the proxy itself
+does not filter payload shape. The inner App iframe also omits
+`allow-same-origin`, giving untrusted HTML an opaque origin that cannot call
+the daemon's loopback API as a same-origin client. The first host slice does
+not advertise privileged App capabilities.
 
 ## Compatibility and safety
 
@@ -89,8 +91,10 @@ advertise privileged App capabilities.
 - The modern cache is private per client instance; no result is shared across
   workspaces or authorization principals.
 - MCP App HTML is limited to 1 MiB and never enters model context.
-- App HTML runs in a double-iframe sandbox on a different loopback origin with
-  server-declared CSP enforced by the daemon response.
+- App HTML runs in a double-iframe sandbox. Both frames omit
+  `allow-same-origin`, and the outer frame additionally uses a different
+  loopback origin when one is available. Server-declared CSP is enforced by
+  the daemon response.
 - If the isolation origin is unavailable, WebShell displays the ordinary tool
   text rather than rendering the App.
 - Compacted session history keeps `type: 'mcp_app'` with empty `html` and the

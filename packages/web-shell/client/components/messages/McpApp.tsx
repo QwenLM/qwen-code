@@ -254,7 +254,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         title={`${display.serverName} MCP App`}
         className={styles.frame}
         style={{ height, display: error ? 'none' : undefined }}
-        sandbox="allow-scripts allow-same-origin allow-forms"
+        sandbox="allow-scripts allow-forms"
         allow={buildAllowAttribute(display.permissions)}
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}

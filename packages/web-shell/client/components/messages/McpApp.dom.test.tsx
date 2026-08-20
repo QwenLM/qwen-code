@@ -171,6 +171,10 @@ describe('McpApp host lifetime', () => {
       await Promise.resolve();
     });
 
+    const iframe = document.querySelector('iframe');
+    expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts allow-forms');
+    expect(iframe?.getAttribute('sandbox')).not.toContain('allow-same-origin');
+
     expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith(
       expect.objectContaining({ html: '<main>Ready</main>' }),
     );
