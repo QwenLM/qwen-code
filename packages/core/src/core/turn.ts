@@ -381,6 +381,9 @@ export enum CompressionStatus {
 
   /** The compression input could not leave enough room for a usable summary. */
   COMPRESSION_FAILED_INPUT_TOO_LARGE,
+
+  /** The compression side-query failed before producing a summary. */
+  COMPRESSION_FAILED_SIDE_QUERY,
 }
 
 export function isCompressionFailureStatus(status: CompressionStatus): boolean {
@@ -389,7 +392,8 @@ export function isCompressionFailureStatus(status: CompressionStatus): boolean {
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE ||
+    status === CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY
   );
 }
 

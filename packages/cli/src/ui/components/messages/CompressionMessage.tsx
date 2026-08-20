@@ -9,7 +9,10 @@ import type { CompressionProps } from '../../types.js';
 import Spinner from 'ink-spinner';
 import { theme } from '../../semantic-colors.js';
 import { SCREEN_READER_MODEL_PREFIX } from '../../textConstants.js';
-import { CompressionStatus } from '@qwen-code/qwen-code-core';
+import {
+  CompressionStatus,
+  isCompressionFailureStatus,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
 import { ICON } from '../../constants.js';
 
@@ -61,11 +64,16 @@ export function CompressionMessage({
       case CompressionStatus.NOOP:
         return 'Nothing to compress.';
       default:
-        return '';
+        return compressionStatus !== null &&
+          isCompressionFailureStatus(compressionStatus)
+          ? t('Failed to compress chat history.')
+          : '';
     }
   };
 
   const text = getCompressionText();
+  const isFailure =
+    compressionStatus !== null && isCompressionFailureStatus(compressionStatus);
 
   return (
     <Box flexDirection="row">
@@ -79,7 +87,11 @@ export function CompressionMessage({
       <Box flexGrow={1}>
         <Text
           color={
-            compression.isPending ? theme.text.accent : theme.status.success
+            compression.isPending
+              ? theme.text.accent
+              : isFailure
+                ? theme.status.error
+                : theme.status.success
           }
           aria-label={SCREEN_READER_MODEL_PREFIX}
         >

@@ -133,6 +133,79 @@ describe('compressCommand', () => {
     expect(context.ui.setPendingItem).toHaveBeenCalledWith(null);
   });
 
+  it.each([
+    CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+    CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+  ])(
+    'should report compression failure %s instead of displaying it as success',
+    async (compressionStatus) => {
+      mockTryCompressChat.mockResolvedValue({
+        originalTokenCount: 200,
+        compressionStatus,
+        newTokenCount: 200,
+      } satisfies ChatCompressionInfo);
+
+      await compressCommand.action!(context, '');
+
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: 'Failed to compress chat history.',
+        }),
+        expect.any(Number),
+      );
+      expect(context.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.COMPRESSION,
+        }),
+        expect.any(Number),
+      );
+    },
+  );
+
+  it.each([
+    CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+    CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+  ])(
+    'should report compression failure %s in ACP mode',
+    async (compressionStatus) => {
+      mockTryCompressChat.mockResolvedValue({
+        originalTokenCount: 200,
+        compressionStatus,
+        newTokenCount: 200,
+      } satisfies ChatCompressionInfo);
+      const ctx = createMockCommandContext({
+        executionMode: 'acp',
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+      });
+
+      const result = await compressCommand.action!(ctx, '');
+      const messages = [];
+      if (result?.type === 'stream_messages') {
+        for await (const message of result.messages) {
+          messages.push(message);
+        }
+      }
+
+      expect(messages).toContainEqual({
+        messageType: 'error',
+        content: 'Failed to compress chat history.',
+      });
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          content: expect.stringContaining('Context compressed'),
+        }),
+      );
+    },
+  );
+
   it('should add an error message if tryCompressChat throws', async () => {
     const error = new Error('Compression failed');
     mockTryCompressChat.mockRejectedValue(error);

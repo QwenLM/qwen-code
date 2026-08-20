@@ -30587,6 +30587,8 @@ describe('Session', () => {
     it.each([
       core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
       core.CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+      core.CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+      core.CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
     ])(
       'does not count failed Guard compression status %s or block later automatic work',
       async (compressionStatus) => {

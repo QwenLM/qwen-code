@@ -62,6 +62,7 @@ describe('isCompressionFailureStatus', () => {
     CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
     CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
   ])('classifies %s as a compression failure', (status) => {
     expect(isCompressionFailureStatus(status)).toBe(true);
   });
