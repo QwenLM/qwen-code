@@ -98,9 +98,9 @@ async function testMCPConnection(
       `MCP connection for ${serverName}`,
     );
 
-    // Test basic MCP protocol by pinging the server
-    await client.ping();
-
+    // Connect + version negotiation is the liveness proof. `ping` is
+    // absent from the 2026 request registry, so an unconditional ping
+    // marks working modern servers Disconnected.
     await client.close();
     return { status: MCPServerStatus.CONNECTED, timedOut: false };
   } catch (error) {

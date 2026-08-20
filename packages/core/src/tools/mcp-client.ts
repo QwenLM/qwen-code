@@ -64,6 +64,7 @@ import {
   resetDispatcherCache,
 } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { discoveryTimeoutFor } from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
@@ -85,11 +86,13 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 // Auto-negotiation `server/discover` otherwise inherits connect()'s
 // timeout (10 minutes here, 60s SDK default). Silent legacy stdio
 // servers never answer that probe; cap it so fallback fits inside
-// the 30s discovery window. Remote HTTP/SSE/WS skip the probe
+// the discovery window. Remote HTTP/SSE/WS skip the probe
 // entirely (`mode: 'legacy'`): SDK v2 rejects HTTP probe timeouts
-// with no `initialize` fallback, and the remote discovery window
-// is also 5s.
+// with no `initialize` fallback. Modern-only remotes are deferred
+// until that SDK gap closes.
 export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
+/** Leftover initialize budget after a silent stdio `server/discover` probe. */
+export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS = 500;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
@@ -360,17 +363,39 @@ export type DiscoveredMCPResource = Resource & {
   serverName: string;
 };
 
+export type McpVersionNegotiation =
+  | { mode: 'legacy' }
+  | { mode: 'auto'; probe: { timeoutMs: number } };
+
+/**
+ * Stdio clients auto-negotiate, but the `server/discover` probe must
+ * leave initialize headroom inside `discoveryTimeoutFor`. Remotes stay
+ * on `legacy` because SDK v2 has no HTTP probe → initialize fallback.
+ */
+export function mcpVersionNegotiationFor(
+  cfg: MCPServerConfig,
+): McpVersionNegotiation {
+  if (cfg.httpUrl || cfg.url || cfg.tcp) {
+    return { mode: 'legacy' };
+  }
+  const probeTimeoutMs = Math.min(
+    MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
+    discoveryTimeoutFor(cfg) - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+  );
+  if (probeTimeoutMs <= 0) {
+    return { mode: 'legacy' };
+  }
+  return {
+    mode: 'auto',
+    probe: { timeoutMs: probeTimeoutMs },
+  };
+}
+
 export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
-  const remote = !!(cfg.httpUrl || cfg.url || cfg.tcp);
   return new Client(
     { name, version: '0.0.1' },
     {
-      versionNegotiation: remote
-        ? { mode: 'legacy' }
-        : {
-            mode: 'auto',
-            probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
-          },
+      versionNegotiation: mcpVersionNegotiationFor(cfg),
       // Default 64 throws ListPaginationExceeded and discoverTools
       // swallows that into []. 0 disables the cap; the SDK still
       // stops on a repeating cursor.

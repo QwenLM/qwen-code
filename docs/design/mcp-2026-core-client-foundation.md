@@ -14,14 +14,21 @@ that behavior rather than duplicate it.
 
 ## Scope
 
-This slice of #8968 migrates configured MCP sessions to the v2 client, opts them
-into automatic protocol negotiation, and adds the first MCP Apps host for
-daemon-backed WebShell sessions. Tool, prompt, resource-list, and resource-read
-operations use the v2 cache-aware helpers when the negotiated protocol is
-modern.
+This slice of #8968 migrates configured MCP sessions to the v2 client, opts
+stdio sessions into automatic protocol negotiation, and adds the first MCP Apps
+host for daemon-backed WebShell sessions. Tool, prompt, resource-list, and
+resource-read operations use the v2 cache-aware helpers when the negotiated
+protocol is modern.
+
+Remote HTTP / SSE / TCP clients stay on `versionNegotiation.mode = 'legacy'`.
+SDK v2 rejects HTTP `server/discover` probe timeouts with no `initialize`
+fallback, so auto-negotiation would drop working remote servers that ignore
+unknown pre-initialize methods. Connecting to a 2026-07-28-only remote server
+is deferred until that SDK gap closes.
 
 The following remain separate follow-ups:
 
+- modern-only remote (HTTP / SSE / TCP) protocol negotiation;
 - interactive MRTR elicitation and approval across TUI, WebShell, headless, and
   ACP;
 - MCP App initiated tool calls, links, downloads, messages, model-context
@@ -31,11 +38,17 @@ The following remain separate follow-ups:
 
 ## Design
 
-Each configured MCP client uses SDK v2 with `versionNegotiation.mode = 'auto'`
-and a 5s `server/discover` probe timeout. The SDK sends `server/discover`
-first. Definitive modern evidence selects the stateless `2026-07-28`
-protocol; legacy evidence — including a silent stdio server that never
-answers the probe — falls back to the unchanged `initialize` flow.
+Configured stdio MCP clients use SDK v2 with `versionNegotiation.mode = 'auto'`
+and a `server/discover` probe capped at 5s, and further shortened so the probe
+plus initialize fallback still fit inside `discoveryTimeoutMs` (the discovery
+window clamp is `[100ms, 300s]`; a budget that cannot cover both steps skips
+the probe and uses `legacy`). The SDK sends `server/discover` first. Definitive
+modern evidence selects the stateless `2026-07-28` protocol; legacy evidence —
+including a silent stdio server that never answers the probe — falls back to
+the unchanged `initialize` flow.
+
+Remote HTTP / SSE / TCP clients use `versionNegotiation.mode = 'legacy'` and
+never send `server/discover`.
 
 Modern sessions use the typed v2 list/read methods so the SDK can aggregate
 pagination and honor `ttlMs` and `cacheScope`. Legacy sessions keep Qwen Code's
@@ -90,8 +103,9 @@ advertise privileged App capabilities.
 
 - A modern-only control transport must connect through `server/discover`, list
   and call a tool without `initialize`, and carry the modern request metadata.
-- A real Streamable HTTP transport must send the negotiated protocol and method
-  headers, plus the tool name header on `tools/call`.
+- A real Streamable HTTP transport uses the legacy `initialize` handshake and
+  must still send the protocol and method headers, plus the tool name header
+  on `tools/call`. Modern-only remote negotiation is out of scope.
 - A legacy control transport must fall back to `initialize` and retain existing
   discovery and call behavior.
 - A cache-hinted modern list result must be reused without a second wire

@@ -23,7 +23,9 @@ import {
   listMcpPrompts,
   listMcpResources,
   MCP_DEFAULT_TIMEOUT_MSEC,
+  MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
   MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
+  mcpVersionNegotiationFor,
 } from './mcp-client.js';
 
 type RequestMessage = JSONRPCRequest;
@@ -48,6 +50,37 @@ describe('configured MCP SDK v2 negotiation', () => {
     expect(MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS).toBeLessThan(
       MCP_DEFAULT_TIMEOUT_MSEC,
     );
+  });
+
+  it('keeps remotes on legacy and shrinks the stdio probe to the discovery budget', () => {
+    expect(
+      mcpVersionNegotiationFor({
+        httpUrl: 'https://example.com/mcp',
+      } as MCPServerConfig),
+    ).toEqual({ mode: 'legacy' });
+    expect(
+      mcpVersionNegotiationFor({ command: 'node' } as MCPServerConfig),
+    ).toEqual({
+      mode: 'auto',
+      probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
+    });
+    expect(
+      mcpVersionNegotiationFor({
+        command: 'node',
+        discoveryTimeoutMs: 2_000,
+      } as MCPServerConfig),
+    ).toEqual({
+      mode: 'auto',
+      probe: {
+        timeoutMs: 2_000 - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+      },
+    });
+    expect(
+      mcpVersionNegotiationFor({
+        command: 'node',
+        discoveryTimeoutMs: 100,
+      } as MCPServerConfig),
+    ).toEqual({ mode: 'legacy' });
   });
 
   it('connects to a modern-only server and reuses cache-hinted tool lists', async () => {

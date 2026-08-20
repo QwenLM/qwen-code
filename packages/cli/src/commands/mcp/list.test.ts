@@ -80,7 +80,6 @@ const MockedExtensionManager = ExtensionManager as Mock;
 
 interface MockClient {
   connect: Mock;
-  ping: Mock;
   close: Mock;
 }
 
@@ -103,7 +102,6 @@ describe('mcp list command', () => {
     mockTransport = { close: vi.fn() };
     mockClient = {
       connect: vi.fn(),
-      ping: vi.fn(),
       close: vi.fn(),
     };
 
@@ -163,7 +161,6 @@ describe('mcp list command', () => {
     });
 
     mockClient.connect.mockResolvedValue(undefined);
-    mockClient.ping.mockResolvedValue(undefined);
 
     await listMcpServers();
 
@@ -263,7 +260,6 @@ describe('mcp list command', () => {
         },
       });
       mockClient.connect.mockResolvedValue(undefined);
-      mockClient.ping.mockResolvedValue(undefined);
 
       await listMcpServers();
 
@@ -291,7 +287,6 @@ describe('mcp list command', () => {
     ]);
 
     mockClient.connect.mockResolvedValue(undefined);
-    mockClient.ping.mockResolvedValue(undefined);
 
     await listMcpServers();
 
