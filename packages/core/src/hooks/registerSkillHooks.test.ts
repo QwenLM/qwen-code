@@ -307,4 +307,68 @@ describe('registerSkillHooks', () => {
     );
     expect(hooks).toHaveLength(2);
   });
+
+  it('registers same-command hooks that differ only in timeout (R1-1)', () => {
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo hi',
+                timeout: 10,
+              },
+              {
+                type: HookType.Command,
+                command: 'echo hi',
+                timeout: 30,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(2);
+  });
+
+  it('registers same-URL http hooks that differ only in headers (R1-1)', () => {
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://gw.local/hook',
+                headers: { Authorization: 'Bearer a' },
+              },
+              {
+                type: HookType.Http,
+                url: 'http://gw.local/hook',
+                headers: { Authorization: 'Bearer b' },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(2);
+  });
 });

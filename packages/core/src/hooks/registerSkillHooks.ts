@@ -117,19 +117,14 @@ export function registerSkillHooks(
 }
 
 /**
- * Identity key for dedup: two registrations of the same skill hook share
- * type + command/url. (Skill hooks are re-prepared from the same frontmatter
- * on every load, so a structural key is stable across reload cycles.)
+ * Identity key for dedup: the whole prepared config. Keying on only
+ * type + command/url silently drops distinct hooks the frontmatter
+ * admits per matcher (same command with different timeout/shell, same
+ * URL with different headers) — the second of the pair is skipped even
+ * on first registration. Prepared configs from frontmatter carry no
+ * functions, so a structural key is stable across reload cycles.
  */
 function hookConfigKey(hook: HookConfig): string {
-  if (hook.type === HookType.Command) {
-    return `command:${hook.command}`;
-  }
-  if (hook.type === HookType.Http) {
-    return `http:${hook.url}`;
-  }
-  // Function/prompt hooks never come from skill frontmatter (filtered above);
-  // fall back to a best-effort key so a stored entry simply never matches.
   return `${hook.type}:${JSON.stringify(hook)}`;
 }
 
