@@ -371,17 +371,18 @@ silently overriding or silently complying.
   section, the growth brake has been over budget across rounds and the diff is
   still not shrinking — the findings themselves are driving the growth, so
   Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
-  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` and
-  write the handoff into `<workdir>/failure.md` — name the decision, lay out
-  the options (split the PR: land the core and track the remaining findings
-  as follow-up issues; redesign; or accept the current state with the tail
-  deferred) and give your recommendation. `failure.md` is the one stop file
-  the round's output contract accepts; run-agent.mjs wraps it into the
-  workflow's handoff comment. Do not write `handoff.md` yourself — that file
-  belongs to run-agent.mjs, and a bare handoff.md satisfies no output
-  contract, so a correct defer-to-human would still be reported as a round
-  that produced nothing. Continuing to patch, or deciding the split yourself,
-  is exactly the wrong move; the call is the maintainer's.
+  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
+  handoff that names the decision and lays out the options — split the PR (land
+  the core, track the remaining findings as follow-up issues), redesign, or
+  accept the current state with the tail deferred — plus your recommendation.
+  Write that handoff to `<workdir>/handoff.md` — English-only, no details
+  block — naming the decision, the options, your recommendation, and what was
+  tried; then stop without writing anything else: no commit, no
+  `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
+  recognizes a handoff with no fix verdict as a deliberate deferral: the round
+  ends cleanly, the note is posted to the PR, and the item waits for the
+  maintainer instead of being re-run. Continuing to patch, or deciding the
+  split yourself, is exactly the wrong move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -527,5 +528,7 @@ Finish with exactly one outcome:
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
 - No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
+- Stopped by the growth brake: write `<workdir>/handoff.md` per the
+  not-converging rule (English-only, no details block) — and commit nothing.
 - The GitHub Actions Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.
