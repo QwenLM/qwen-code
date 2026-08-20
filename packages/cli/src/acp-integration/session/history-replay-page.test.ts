@@ -603,7 +603,11 @@ describe('history replay page', () => {
         return 'next-cursor';
       },
     });
-    expect(firstPage.updates).toHaveLength(2);
+    expect(firstPage.updates).toHaveLength(3);
+    expect(firstPage.updates[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${goal.objective}` },
+    });
     expect(nextReplay).toMatchObject({ goalCause: 'verifier_reject' });
 
     const recommittedGoal = {

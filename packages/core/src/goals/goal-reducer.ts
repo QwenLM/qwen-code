@@ -268,23 +268,46 @@ export function parseGoalSnapshotV2(
 ): GoalSnapshotV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'goal', 'activity']) ||
+    !hasOnlyKeys(value, ['v', 'goal', 'activity', 'clearedGoal']) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalActivity(value['activity'])
   ) {
     return undefined;
   }
   if (value['goal'] === null) {
+    const clearedGoal = parseGoalOrder(value['clearedGoal']);
+    if (value['clearedGoal'] !== undefined && !clearedGoal) return undefined;
     return {
       v: GOAL_STATE_VERSION,
       goal: null,
       activity: value['activity'],
+      ...(clearedGoal ? { clearedGoal } : {}),
     };
   }
+  if (value['clearedGoal'] !== undefined) return undefined;
   const goal = parseGoalRecord(value['goal']);
   return goal
     ? { v: GOAL_STATE_VERSION, goal, activity: value['activity'] }
     : undefined;
+}
+
+function parseGoalOrder(value: unknown): GoalSnapshotV2['clearedGoal'] {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['goalId', 'revision', 'updatedAt']) ||
+    typeof value['goalId'] !== 'string' ||
+    !value['goalId'] ||
+    !isNonNegativeInteger(value['revision']) ||
+    value['revision'] === 0 ||
+    !isFiniteNumber(value['updatedAt'])
+  ) {
+    return undefined;
+  }
+  return {
+    goalId: value['goalId'],
+    revision: value['revision'],
+    updatedAt: value['updatedAt'],
+  };
 }
 
 export function parseGoalStateCause(
