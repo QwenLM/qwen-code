@@ -525,7 +525,9 @@ describe('useGeminiStream', () => {
             type: ServerGeminiEventType.ChatCompressed,
             value: { originalTokenCount: 100, newTokenCount: 50 },
           };
-          yield { type: ServerGeminiEventType.Retry };
+          // Reactive overflow recovery rebuilds the payload; the retry is
+          // tagged so consumers report a delivery failure authoritatively.
+          yield { type: ServerGeminiEventType.Retry, payloadRebuilt: true };
           yield {
             type: ServerGeminiEventType.Content,
             value: 'compressed retry response',
@@ -581,6 +583,42 @@ describe('useGeminiStream', () => {
       expect(onDeliveryFailed).not.toHaveBeenCalled();
       expect(onDelivered).toHaveBeenCalledOnce();
       expect(onContextAccepted).not.toHaveBeenCalled();
+    });
+
+    it('does not report delivery failure when a transient retry follows pre-send auto-compression', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          // A rate-limit retry after pre-send compression re-sends the
+          // identical payload (no payloadRebuilt tag), so the delivery is
+          // intact and must not be reported as failed — the ordering
+          // [Compressed, Retry] alone cannot prove a rebuilt payload.
+          yield { type: ServerGeminiEventType.Retry };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response after transient retry',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+      expect(onDelivered).toHaveBeenCalledOnce();
     });
 
     it.each([

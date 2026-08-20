@@ -92,6 +92,9 @@ export type ServerGeminiRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+  /** True only when reactive overflow recovery rebuilt the request payload;
+   *  the preceding send's context was not delivered intact. */
+  payloadRebuilt?: boolean;
 };
 
 export type ServerGeminiModelFallbackEvent = {
@@ -592,6 +595,7 @@ export class Turn {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
             isContinuation: streamEvent.isContinuation,
+            payloadRebuilt: streamEvent.payloadRebuilt,
           };
           continue; // Skip to the next event in the stream
         }

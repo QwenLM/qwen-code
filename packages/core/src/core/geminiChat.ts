@@ -441,6 +441,11 @@ export type StreamEvent =
       isContinuation?: boolean;
       /** Set when the retry raised the automatic max output token limit. */
       maxOutputTokensEscalated?: number;
+      /** Set only on the reactive overflow retry: compression rebuilt the
+       *  request payload from scratch, so the preceding send's context was
+       *  never delivered intact. Pre-send auto-compression followed by a
+       *  transient retry leaves the payload identical and does NOT set it. */
+      payloadRebuilt?: boolean;
     }
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
@@ -3249,7 +3254,7 @@ export class GeminiChat {
                       type: StreamEventType.COMPRESSED,
                       info: reactiveInfo,
                     };
-                    yield { type: StreamEventType.RETRY };
+                    yield { type: StreamEventType.RETRY, payloadRebuilt: true };
                     // Compression rebuilt `requestContents` from scratch, so
                     // any continuation staged against the old contents is
                     // stale — and the RETRY above already told the UI to drop

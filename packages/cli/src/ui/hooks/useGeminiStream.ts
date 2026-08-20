@@ -859,6 +859,11 @@ export const useGeminiStream = (
     new Set<AbortController>(),
   );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
+  // The callIds actually included in the most recent accepted tool-result
+  // send (post history-dedup). The deferred-batch flush reads this so it
+  // commits carried proxy-schema presentations only for calls whose result
+  // truly entered the model context (issue #6721).
+  const lastDeliveredToolCallIdsRef = useRef<Set<string> | null>(null);
   /**
    * Commit the pending proxy-schema presentations carried by completed
    * tool_search results once their delivery is accepted (issue #6721).
@@ -3819,13 +3824,14 @@ export const useGeminiStream = (
                 mutatedBeforeAcceptance = true;
               } else if (
                 !accepted &&
-                mutatedBeforeAcceptance &&
-                event.type === ServerGeminiEventType.Retry
+                event.type === ServerGeminiEventType.Retry &&
+                event.payloadRebuilt
               ) {
                 // Only reactive overflow recovery rebuilds the request payload,
-                // and it always emits compression *followed by* a retry. A
-                // pre-send auto-compression emits compression alone and leaves
-                // the carrying send intact, so it must not be reported as a
+                // and it tags that retry with payloadRebuilt. A pre-send
+                // auto-compression followed by a transient retry leaves the
+                // payload intact (no flag), so ordering alone — which is
+                // identical in both cases — must not be used to infer a
                 // delivery failure.
                 reportDeliveryFailure();
               }
@@ -4122,9 +4128,22 @@ export const useGeminiStream = (
               // with `false` (delivery not yet accepted), leaving their
               // pending schema presentations uncommitted. Now that the
               // flush delivered them and the context was accepted, commit
-              // the presentations the flushed results carry.
+              // the presentations the flushed results carry — but only for
+              // calls actually included in the accepted send.
+              // handleCompletedTools dedups any call whose callId already
+              // has a functionResponse in history (e.g. a synthetic
+              // placeholder planted by the inline repair pass), dropping its
+              // real result. Committing a dropped call's presentations would
+              // open the #6721 gate for a schema that never entered the
+              // model context, so filter to the delivered set.
               if (flushedAccepted === true) {
-                commitCarriedProxySchemaPresentations(flushedTools);
+                const deliveredIds = lastDeliveredToolCallIdsRef.current;
+                const deliveredTools = deliveredIds
+                  ? flushedTools.filter((toolCall) =>
+                      deliveredIds.has(toolCall.request.callId),
+                    )
+                  : [];
+                commitCarriedProxySchemaPresentations(deliveredTools);
               }
             }
           }
@@ -4292,6 +4311,9 @@ export const useGeminiStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+      // Reset per invocation: if this send early-returns or delivers a
+      // different set, the flush must not commit against a stale set.
+      lastDeliveredToolCallIdsRef.current = null;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -4861,6 +4883,13 @@ export const useGeminiStream = (
       for (const queue of duplicateQueues.values()) {
         orderedResponses.push(...queue);
       }
+
+      // Record the callIds this send will actually deliver (post dedup),
+      // so the deferred-batch flush commits carried presentations only for
+      // calls whose result enters the model context.
+      lastDeliveredToolCallIdsRef.current = new Set(
+        orderedResponses.map(({ request }) => request.callId),
+      );
 
       const finalizedResponses = await finalizeToolResponses(
         config,
