@@ -4776,6 +4776,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('updates the Session Workflow gate for an initializing session', async () => {
+    const innerConfig = await setupSessionMocks(
+      '11111111-1111-1111-1111-111111111111',
+    );
+    let releaseAuth = () => {};
+    innerConfig.refreshAuth.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseAuth = resolve;
+      }),
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    const newSession = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() => expect(innerConfig.refreshAuth).toHaveBeenCalled());
+
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 0 });
+    releaseAuth();
+    await newSession;
+
+    const provider = vi
+      .mocked(innerConfig.setSessionWorkflowEnabledProvider)
+      .mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('defers MCP discovery for a worktree session until relocation', async () => {
     const innerConfig = await setupSessionMocks('worktree-mcp-session');
     const { agent, agentPromise } = await bootAcpAgent();
@@ -20554,16 +20585,17 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('clears Todo Stop Guard trust when workspace reload enters plan mode', async () => {
+  it('clears plan state when workspace reload changes approval mode', async () => {
     let mergedSettings: Record<string, unknown> = {
       tools: { approvalMode: 'default' },
     };
+    let nextMode = 'plan';
     const settings = {
       get merged() {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { tools: { approvalMode: 'plan' } };
+        mergedSettings = { tools: { approvalMode: nextMode } };
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -20617,7 +20649,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agent.newSession({ cwd: '/reload', mcpServers: [] });
     const approvalModes = APPROVAL_MODES as unknown as string[];
     const originalApprovalModes = [...approvalModes];
-    approvalModes.splice(0, approvalModes.length, 'plan');
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan');
     try {
       const result = await agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceReload,
@@ -20630,6 +20662,15 @@ describe('sessionLanguage multi-session propagation', () => {
           .setApprovalMode,
       ).toHaveBeenCalledWith('plan');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+      expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+
+      nextMode = 'default';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(
+        (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
+          .setApprovalMode,
+      ).toHaveBeenLastCalledWith('default');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);

@@ -3875,6 +3875,7 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private sessionWorkflowEnabledOverride: boolean | undefined;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -10590,6 +10591,7 @@ class QwenAgent implements Agent {
             'Invalid or missing Session Workflow setting',
           );
         }
+        this.sessionWorkflowEnabledOverride = enabled;
         for (const session of this.sessions.values()) {
           session
             .getConfig()
@@ -12262,16 +12264,19 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
 
               const newMode = newMerged.tools?.approvalMode;
+              const previousMode = config.getApprovalMode();
               if (
                 newMode &&
                 APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-                newMode !== config.getApprovalMode()
+                newMode !== previousMode
               ) {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
+                  } else if (previousMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                   }
                 } catch (err) {
                   debugLogger.warn(
@@ -12932,6 +12937,11 @@ class QwenAgent implements Agent {
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
     );
+    if (this.sessionWorkflowEnabledOverride !== undefined) {
+      config.setSessionWorkflowEnabledProvider?.(
+        () => this.sessionWorkflowEnabledOverride === true,
+      );
+    }
     let published = false;
     try {
       options.primeSession?.(session);

@@ -282,6 +282,7 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -293,6 +294,28 @@ export interface WorkspaceSettingsRouteDeps {
     res: Response,
   ) => string | undefined | null;
   includeLiveVoice?: boolean;
+}
+
+async function updateLiveSessionWorkflow(
+  update: (enabled: boolean) => Promise<unknown>,
+  enabled: boolean,
+  workspace: string,
+  res: Response,
+): Promise<boolean> {
+  try {
+    await update(enabled);
+    return true;
+  } catch (err) {
+    if (err instanceof SessionNotFoundError) return true;
+    writeStderrLine(
+      `qwen serve: failed to update the live Session Workflow setting for ${workspace}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    res.status(500).json({
+      error: 'Failed to update the live Session Workflow setting',
+      code: 'runtime_update_error',
+    });
+    return false;
+  }
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -493,6 +516,24 @@ export function registerWorkspaceSettingsRoutes(
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         throw err;
+      }
+      if (key === 'experimental.sessionWorkflow') {
+        if (
+          !(await updateLiveSessionWorkflow(
+            deps.updateSessionWorkflow,
+            value as boolean,
+            boundWorkspace,
+            res,
+          ))
+        ) {
+          return;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
       }
       try {
         broadcastSettingsChanged(key, publicValue, scope, clientId);
@@ -698,22 +739,19 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         throw err;
       }
       if (key === 'experimental.sessionWorkflow') {
-        try {
-          await runtime.bridge.invokeWorkspaceCommand(
-            SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
-            { enabled: value },
-          );
-        } catch (err) {
-          if (!(err instanceof SessionNotFoundError)) {
-            writeStderrLine(
-              `qwen serve: failed to update the live Session Workflow setting for ${runtime.workspaceCwd}: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: 'Failed to update the live Session Workflow setting',
-              code: 'runtime_update_error',
-            });
-            return;
-          }
+        if (
+          !(await updateLiveSessionWorkflow(
+            (enabled) =>
+              runtime.bridge.invokeWorkspaceCommand(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                { enabled },
+              ),
+            value as boolean,
+            runtime.workspaceCwd,
+            res,
+          ))
+        ) {
+          return;
         }
         try {
           assertGenerationOpen();

@@ -38,6 +38,7 @@ function makeApp(
   const persistSetting = vi.fn(async () => {
     overrides.afterPersist?.();
   });
+  const updateSessionWorkflow = vi.fn().mockResolvedValue(undefined);
   const broadcastSettingsChanged = vi.fn();
 
   registerWorkspaceSettingsRoutes(app, {
@@ -46,16 +47,35 @@ function makeApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    updateSessionWorkflow,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
     includeLiveVoice: true,
   });
 
-  return { app, persistSetting, broadcastSettingsChanged };
+  return {
+    app,
+    persistSetting,
+    updateSessionWorkflow,
+    broadcastSettingsChanged,
+  };
 }
 
 describe('POST /workspace/settings', () => {
+  it('updates live sessions when Session Workflow changes', async () => {
+    const { app, updateSessionWorkflow } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+  });
+
   it('exposes the Live shortcut as user-global and rejects generic writes', async () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { experimental: { liveVoice: { shortcut: 'Command+W' } } },

@@ -393,8 +393,11 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         this.config.getSessionWorkflowPlanRevision?.();
       const continuesApprovedWorkflow =
         !approvedWorkflowRevision ||
-        (finalTodos.length > 0 &&
-          resultPlanId === approvedWorkflowRevision.planId);
+        (resultPlanId === approvedWorkflowRevision.planId &&
+          finalTodos.length === approvedWorkflowRevision.todoIds.length &&
+          finalTodos.every((todo) =>
+            approvedWorkflowRevision.todoIds.includes(todo.id),
+          ));
       if (!continuesApprovedWorkflow) {
         this.config.clearSessionWorkflowPlanRevision?.();
       }
