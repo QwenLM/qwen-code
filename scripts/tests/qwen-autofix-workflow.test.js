@@ -22,6 +22,10 @@ import { describe, expect, it } from 'vitest';
 import { getWorkflowJob } from './workflow-helpers.js';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// Long-form rationale moved out of the YAML when the file approached
+// GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
+// than a code line) read it here.
+const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
@@ -371,6 +375,24 @@ describe('qwen-autofix workflow', () => {
     // quote in the script, so bash -n stays green while runtime semantics
     // are scrambled — pin the artifact class directly.
     expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
+  });
+
+  it('keeps the recovery clone byte-identical to the original workflow', () => {
+    // The recovery clone is a byte-identical copy of qwen-autofix.yml under
+    // a new path (its header names its deletion condition), except two
+    // comment blocks: its own RECOVERY CLONE header and the original's
+    // entity-specific no-op re-parse touch. It stages and executes the SAME
+    // shared gate script, so a consumer update to one file (the gate's
+    // handoff outcomes) must land in BOTH — drift once made the live clone
+    // fail rounds the gate deliberately ended green.
+    const recoveryPath = '.github/workflows/qwen-autofix-recovery.yml';
+    if (!existsSync(recoveryPath)) return; // its deletion condition was met
+    const recovery = readFileSync(recoveryPath, 'utf8');
+    const stripCloneHeader = (t) =>
+      t.replace(/^# RECOVERY CLONE[\s\S]*?^#\n/m, '');
+    const stripNoOpTouch = (t) =>
+      t.replace(/^# 2026-08-19: no-op comment[\s\S]*?~12 hours\.\n/m, '');
+    expect(stripCloneHeader(recovery)).toBe(stripNoOpTouch(workflow));
   });
 
   it('keeps the prepare-branch-and-feedback run block bash-parseable', () => {
@@ -1962,7 +1984,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  });
+  }, 30000);
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -3864,13 +3886,11 @@ describe('qwen-autofix workflow', () => {
     // idle candidates hit `continue` before the TARGETS append, so they
     // never contend for it; the real win is inspection budget + walk
     // latency, and the comment says so.
-    expect(reviewScanJob).toContain(
-      'Idle PRs never reach the\n          # 10-target budget',
-    );
+    expect(designDoc).toContain('Idle PRs never reach the\n10-target budget');
     // The two scan-only signals updatedAt cannot see are named, not
     // papered over by an absolute invariant.
-    expect(reviewScanJob).toContain('base conflict');
-    expect(reviewScanJob).toContain('still-red checks');
+    expect(designDoc).toContain('base conflict');
+    expect(designDoc).toContain('still-red checks');
   });
 
   it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {
@@ -8188,12 +8208,15 @@ exit 1
     const skill = readAutofixSkill();
     expect(skill).toContain('this PR is not converging');
     expect(skill).toContain('Diff-growth trajectory');
-    // The brake's handoff must land in failure.md — the one stop file the
-    // run-agent verdict gate accepts. Telling the agent to write handoff.md
-    // instead reproduces run 32076785809: a correct defer-to-human reported
-    // as "finished without required output file(s)".
-    expect(skill).toContain('write the handoff into `<workdir>/failure.md`');
-    expect(skill).toContain('Do not write `handoff.md` yourself');
+    // The brake's handoff must land in handoff.md — the first-class stop
+    // run-agent.mjs accepts (exit 0 with no spec output) and the verify gate
+    // classifies as outcome=handoff. Routing it through failure.md instead
+    // would misreport a deliberate defer-to-human as a failed round — the
+    // run 32076785809 defect the gate-level acceptance supersedes.
+    expect(skill).toContain('Write that handoff to `<workdir>/handoff.md`');
+    expect(skill).toContain(
+      '`address-summary.md`, no `no-action.md`, no `failure.md`',
+    );
   });
 
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
@@ -10812,10 +10835,22 @@ exit 1
     const emitRejected = reviewAddressReportStep.match(
       /HEADLINE="(🤖 Could not (?:address the latest feedback|produce a passing fix)[^"]*)"/,
     )?.[1];
+    const emitHandoff = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix deferred this item to a human under instruction[^"]*)"/,
+    )?.[1];
+    const emitDirtyHandoff = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace[^"]*)"/,
+    )?.[1];
+    const emitCommittedHandoff = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix rejected this round — the agent wrote a handoff but the round HAS a commit[^"]*)"/,
+    )?.[1];
     expect(emitPush).toBeTruthy();
     expect(emitNoop).toBeTruthy();
     expect(emitTimeout).toBeTruthy();
     expect(emitRejected).toBeTruthy();
+    expect(emitHandoff).toBeTruthy();
+    expect(emitDirtyHandoff).toBeTruthy();
+    expect(emitCommittedHandoff).toBeTruthy();
     const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
     const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
     const needleTimeout = digestBlock.match(
@@ -10824,14 +10859,24 @@ exit 1
     const needleRejected = digestBlock.match(
       /N_REJECTED=.*grep -cE '([^']*)'/,
     )?.[1];
+    const needleHandoff = digestBlock.match(
+      /N_HANDOFF=.*grep -c '([^']*)'/,
+    )?.[1];
     expect(needlePushed).toBeTruthy();
     expect(needleNoop).toBeTruthy();
     expect(needleTimeout).toBeTruthy();
     expect(needleRejected).toBeTruthy();
+    expect(needleHandoff).toBeTruthy();
     expect(emitPush).toContain(needlePushed);
     expect(emitNoop).toContain(needleNoop);
     expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
     expect(emitRejected).toMatch(new RegExp(needleRejected));
+    // Both handoff brake violations count as rejected rounds, not
+    // residual crashes — the needle is an alternation, so every
+    // emission must match it.
+    expect(emitDirtyHandoff).toMatch(new RegExp(needleRejected));
+    expect(emitCommittedHandoff).toMatch(new RegExp(needleRejected));
+    expect(emitHandoff).toContain(needleHandoff);
     const HEADS = {
       push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
       noop: '🤖 Reviewed the latest feedback — no changes needed. Why…',
@@ -10844,6 +10889,12 @@ exit 1
       crash:
         '🤖 AutoFix crashed before it could evaluate the feedback (attempt 2/100) — it will retry on the next scan.',
       gate: '🤖 AutoFix hit a verification-gate error before reaching a verdict (attempt 3/100) — it will retry on the next scan.',
+      handoff:
+        "🤖 AutoFix deferred this item to a human under instruction (round 3/100) — the agent's handoff note below names the decision and the options.",
+      dirtyHandoff:
+        "🤖 AutoFix rejected this round — the agent wrote a handoff but left a dirty workspace, violating the brake's commit-nothing stop (round 6/100). Nothing was committed.",
+      committedHandoff:
+        "🤖 AutoFix rejected this round — the agent wrote a handoff but the round HAS a commit, violating the brake's commit-nothing stop (round 7/100). The commit was NOT pushed.",
     };
     const K = '2026-07-01T00:00:00Z';
     const evalC = (head, win, at, login = 'qwen-code-dev-bot') => ({
@@ -10921,7 +10972,7 @@ exit 1
 
     // Mixed healthy history: counts land in the right buckets, an
     // old-window push and a HUMAN quoting a marker verbatim are excluded,
-    // both rejection wordings count, base updates window by timestamp.
+    // every rejection wording counts, base updates window by timestamp.
     const mixed = runDigest([
       evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
       evalC(HEADS.push, K, '2026-07-03T00:00:00Z'),
@@ -10932,13 +10983,16 @@ exit 1
       evalC(HEADS.timeout, K, '2026-07-08T00:00:00Z'),
       evalC(HEADS.rejectedOld, K, '2026-07-09T00:00:00Z'),
       evalC(HEADS.rejectedNew, K, '2026-07-10T00:00:00Z'),
+      evalC(HEADS.handoff, K, '2026-07-11T12:00:00Z'),
+      evalC(HEADS.dirtyHandoff, K, '2026-07-11T13:00:00Z'),
+      evalC(HEADS.committedHandoff, K, '2026-07-11T14:00:00Z'),
       evalC(HEADS.push, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),
       evalC(HEADS.push, K, '2026-07-11T00:00:00Z', 'some-human'),
       baseC('2026-07-12T00:00:00Z'),
       baseC('2026-05-02T00:00:00Z'),
     ]);
     expect(mixed.body).toContain(
-      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 2 rejected attempt(s), 0 other round(s)',
+      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 4 rejected attempt(s), 1 deliberate stop(s) under instruction (deferred to a human), 0 other round(s)',
     );
     expect(mixed.body).toContain('1 base update(s)');
     expect(mixed.body).toContain('round 10/100, in the current window');
@@ -10962,7 +11016,7 @@ exit 1
       evalC(HEADS.gate, K, '2026-07-10T00:00:00Z'),
     ]);
     expect(grim.body).toContain(
-      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 8 other round(s)',
+      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 0 deliberate stop(s) under instruction (deferred to a human), 8 other round(s)',
     );
 
     // Crossing trigger: a digest at round 10 suppresses round 12 but not
@@ -11060,7 +11114,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  });
+  }, 30000);
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -12087,7 +12141,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  });
+  }, 30000);
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -13285,7 +13339,7 @@ exit 1
       // cases; a runnerScript drives the tree-state-proving cases.
       writeFileSync(
         join(tools, 'resolve-owning-packages.sh'),
-        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+        `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
       );
       writeFileSync(
         join(tools, 'bite-runner'),
@@ -13696,6 +13750,18 @@ exit 1
       "needs.route.outputs.dry_run == 'true'",
     );
     expect(reviewAddressReportStep).toContain('failure() || cancelled()');
+    // The handoff outcome also routes here: a green, deliberate stop must
+    // still post its report + eval marker, never go silent. The two
+    // brake-violation rejections are green, published verdicts the same way.
+    expect(reviewAddressReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'handoff'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'dirty_handoff'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'committed_handoff'",
+    );
     expect(reviewAddressReportStep).not.toContain(
       "steps.verify.outputs.outcome == 'failed'",
     );
@@ -13875,6 +13941,28 @@ exit 1
       status: 0,
       written: expect.stringContaining('outcome=noop'),
     });
+    // A handoff is a deliberate verdict like fixed/noop, not a failure: the
+    // job must end green so the red-check scan does not count the stop as
+    // new feedback and re-arm the loop against itself.
+    expect(run({ FIRST_OUTCOME: 'handoff' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=handoff'),
+    });
+    // The two brake-violation rejections are published verdicts too: the
+    // report step posts their honest headline, the handoff note, and the
+    // eval marker. The job must end GREEN like the clean handoff — a red
+    // review-address check completes AFTER the marker's ts, so the next
+    // scan counts the round's own rejection as new feedback and
+    // re-dispatches the item the headline promised not to retry (the
+    // self-feeding loop pinned by the scan-count test below).
+    expect(run({ FIRST_OUTCOME: 'dirty_handoff' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=dirty_handoff'),
+    });
+    expect(run({ FIRST_OUTCOME: 'committed_handoff' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=committed_handoff'),
+    });
     expect(
       run({
         FIRST_OUTCOME: 'failed',
@@ -13919,6 +14007,61 @@ exit 1
         REPAIR_OUTCOME: '',
       }),
     ).toMatchObject({ status: 1 });
+  });
+
+  it("keeps a verdict round's own check out of the next scan's failed-check count", () => {
+    // A brake-verdict round (clean handoff or either violation rejection)
+    // publishes its eval marker with ts=NEWEST — strictly BEFORE its own
+    // check completes. If that check is red, the next scan's
+    // N_FAILED_CHECKS (completedAt > watermark, review-address checks
+    // included) counts the round's OWN rejection as new feedback and
+    // re-dispatches the item the headline promised not to retry, once per
+    // violation. Replay the real finalize case to derive the check color,
+    // then the real scan count over it: every published verdict must
+    // leave the PR unselected by its own check.
+    const caseBlock = finalizeVerificationStep.match(
+      /case "\$\{OUTCOME\}" in\n[\s\S]*?\n\s*esac/,
+    )?.[0];
+    expect(caseBlock).toBeTruthy();
+    const checkColor = (outcome) => {
+      const res = spawnSync('bash', [
+        '-c',
+        `set -u\nOUTCOME='${outcome}'\n${caseBlock}`,
+      ]);
+      return res.status === 0 ? 'SUCCESS' : 'FAILURE';
+    };
+    const countBlock = reviewScanJob.match(
+      /N_FAILED_CHECKS="\$\(jq --arg wm "\$\{EFF_WM\}" '[\s\S]*?<<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(countBlock).toBeTruthy();
+    const MARKER_TS = '2026-08-18T10:00:00Z'; // the eval marker's ts=NEWEST
+    const CHECK_TS = '2026-08-18T11:00:00Z'; // the job completes later
+    const selected = (outcome) =>
+      execFileSync(
+        'bash',
+        ['-c', `${countBlock}\nprintf '%s' "$N_FAILED_CHECKS"`],
+        {
+          env: {
+            ...process.env,
+            EFF_WM: MARKER_TS,
+            CHECKS_JSON: JSON.stringify([
+              {
+                name: 'review-address (1, branch)',
+                workflowName: 'Qwen Autofix',
+                conclusion: checkColor(outcome),
+                completedAt: CHECK_TS,
+              },
+            ]),
+          },
+          encoding: 'utf8',
+        },
+      );
+    expect(selected('handoff')).toBe('0');
+    expect(selected('dirty_handoff')).toBe('0');
+    expect(selected('committed_handoff')).toBe('0');
+    // A genuine failure stays red and therefore selected: the loop is
+    // closed via the green arm, not by blinding the scan to failures.
+    expect(selected('failed')).toBe('1');
   });
 
   it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
@@ -14171,10 +14314,25 @@ exit 1
       ],
       [
         'HEADLINE',
-        'consecutive rounds that failed to push anything',
+        'consecutive rounds that pushed nothing',
         '轮未能推送任何内容',
       ],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
+      [
+        'HEADLINE',
+        'deferred this item to a human under instruction',
+        '已按指示将此项移交人工处理',
+      ],
+      [
+        'HEADLINE',
+        'wrote a handoff but left a dirty workspace',
+        '写了 handoff 却留下了脏工作区',
+      ],
+      [
+        'HEADLINE',
+        'wrote a handoff but the round HAS a commit',
+        '写了 handoff 但本轮存在提交',
+      ],
       ['CAUSE', 'could not reach the model', '无法连接模型'],
       ['CAUSE', 'ran out of time before finishing', '在完成前耗尽了时间'],
       [
@@ -14462,7 +14620,13 @@ exit 1
       expect(statusStep).toContain('^[0-9]+$');
     }
     // Tells a round that published a report from one that died before it.
-    expect(finalizeStatusCommentStep).toContain("== 'fixed'");
+    // handoff publishes one too (the handoff note + eval marker), and so do
+    // the two brake-violation rejections (their note + marker post from the
+    // report step), so all five read "finished", never "ended without
+    // publishing a report" above their own report.
+    expect(finalizeStatusCommentStep).toContain(
+      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ]]',
+    );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
     );
@@ -15215,7 +15379,7 @@ exit 1
     // — an `if true` mutation on the timeout guard flips the headline and
     // must fail here.
     expect(bothCapped.headline).toContain(
-      'consecutive rounds that failed to push',
+      'consecutive rounds that pushed nothing',
     );
     expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
@@ -16791,6 +16955,40 @@ exit 1
         JOB_STATUS: 'failure',
       }),
     ).toBe('false');
+    // A handoff round ends GREEN (a deliberate verdict), so the trigger must
+    // key on the outcome itself — without that clause nothing would post and
+    // the loop would go silent on exactly the rounds that need a human.
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'handoff', JOB_STATUS: 'success' }),
+    ).toBe('true');
+    // A dirty-handoff rejection ends RED but must still post: it triggers
+    // via JOB_STATUS != success, so the honest-headline report lands.
+    expect(
+      runPostHandoff({
+        ...base,
+        OUTCOME: 'dirty_handoff',
+        JOB_STATUS: 'failure',
+      }),
+    ).toBe('true');
+    // Both brake-violation rejections are GREEN, published verdicts (the
+    // finalize case passes them so their own red check cannot re-select
+    // the PR), so they must key on the outcome exactly like the clean
+    // handoff — without these clauses nothing would post and the loop
+    // would go silent on exactly the rounds that need a human.
+    expect(
+      runPostHandoff({
+        ...base,
+        OUTCOME: 'dirty_handoff',
+        JOB_STATUS: 'success',
+      }),
+    ).toBe('true');
+    expect(
+      runPostHandoff({
+        ...base,
+        OUTCOME: 'committed_handoff',
+        JOB_STATUS: 'success',
+      }),
+    ).toBe('true');
     expect(reviewAddressReportStep).toContain(
       "STALE: '${{ steps.prepare.outputs.stale }}'",
     );
@@ -16866,6 +17064,28 @@ exit 1
     expect(
       runMark({ NEWEST: '', WATERMARK: '', PREPARE_OUTCOME: 'failure' }),
     ).toBe(`${SENTINEL}|5`);
+    // 4. A deliberate handoff (the brake's BLOCKED stop): the feedback WAS
+    //    read, so the watermark advances and the round stays NON-terminal —
+    //    the loop stays engaged for new feedback and base conflicts.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/handoff.md',
+        OUTCOME: 'handoff',
+        JOB_STATUS: 'success',
+      }),
+    ).toBe('2026-07-16T00:00:00Z|3');
+    // 5. A dirty-handoff rejection (the brake violation): like the clean
+    //    handoff the feedback WAS read, so the watermark advances and the
+    //    round stays NON-terminal — no retry sentinel, no terminal stamp.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/handoff.md',
+        OUTCOME: 'dirty_handoff',
+        JOB_STATUS: 'failure',
+      }),
+    ).toBe('2026-07-16T00:00:00Z|3');
 
     // The no-output-crash HEADLINE must only promise a retry when one will
     // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
@@ -16887,6 +17107,78 @@ exit 1
         },
         encoding: 'utf8',
       });
+    const handoffHead = runHeadline({
+      ROUND: '2',
+      DETAIL_FILE: '/tmp/handoff.md',
+      OUTCOME: 'handoff',
+      JOB_STATUS: 'success',
+    });
+    expect(handoffHead).toContain(
+      'deferred this item to a human under instruction',
+    );
+    expect(handoffHead).toContain('The loop stays engaged');
+    // Wording guard: no "🤖 AutoFix stopped" prefix — the fleet shepherd's
+    // REASON regex reads that as a TERMINAL stop reason, and this stop is
+    // transient. The shepherd contract test pins the same distinction.
+    expect(handoffHead).not.toContain('AutoFix stopped');
+    // A dirty-handoff rejection gets its own honest headline — never the
+    // failed-fix wording, never a retry promise, and (same wording guard)
+    // no "AutoFix stopped" prefix.
+    const dirtyHandoffHead = runHeadline({
+      ROUND: '2',
+      DETAIL_FILE: '/tmp/handoff.md',
+      OUTCOME: 'dirty_handoff',
+      JOB_STATUS: 'failure',
+    });
+    expect(dirtyHandoffHead).toContain('rejected this round');
+    expect(dirtyHandoffHead).toContain(
+      'wrote a handoff but left a dirty workspace',
+    );
+    expect(dirtyHandoffHead).toContain('Nothing was committed');
+    expect(dirtyHandoffHead).not.toContain('Could not produce a passing fix');
+    expect(dirtyHandoffHead).not.toContain('will retry');
+    expect(dirtyHandoffHead).not.toContain('AutoFix stopped');
+    // The stale-base probe must NOT run for this shape: there is no fix to
+    // re-attempt. Replay the behind-main arm with a stubbed gh that flips
+    // a failed fix to the stale-base retry — the rejection headline must
+    // hold, and the probe's update-branch mutation must never happen.
+    const ghDir = mkdtempSync(join(tmpdir(), 'dirty-handoff-gh-'));
+    try {
+      const ghBin = join(ghDir, 'bin');
+      mkdirSync(ghBin);
+      const ghCalls = join(ghDir, 'calls.log');
+      writeFileSync(
+        join(ghBin, 'gh'),
+        `#!/usr/bin/env bash
+echo "$*" >> ${JSON.stringify(ghCalls)}
+for a in "$@"; do
+  case "$a" in
+    repos/*/compare/*) echo behind; exit 0 ;;
+    repos/*/commits/*) echo abc123def; exit 0 ;;
+    repos/*/pulls/*/update-branch) exit 0 ;;
+  esac
+done
+exit 0
+`,
+      );
+      chmodSync(join(ghBin, 'gh'), 0o755);
+      const behindMain = runHeadline({
+        ROUND: '2',
+        DETAIL_FILE: '/tmp/handoff.md',
+        OUTCOME: 'dirty_handoff',
+        JOB_STATUS: 'failure',
+        PATH: `${ghBin}:${process.env.PATH}`,
+        REPO: 'o/r',
+        PR: '1',
+        REPORT_HEAD: 'deadbeef',
+      });
+      expect(behindMain).toBe(dirtyHandoffHead);
+      expect(
+        existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+      ).not.toContain('update-branch');
+    } finally {
+      rmSync(ghDir, { recursive: true, force: true });
+    }
     const midCrash = runHeadline({ ROUND: '2' }); // MARK_ROUND=3 < 5
     expect(midCrash).toContain('it will retry on the next scan');
     expect(midCrash).not.toContain('Run log:');
@@ -17477,7 +17769,7 @@ exit 1
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  });
+  }, 30000);
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -17777,6 +18069,162 @@ exit 1
     });
   });
 
+  it('logs handoff.md content when the agent writes it and exits 0', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, '::error::forged\\nneeds a maintainer decision\\n');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('handoff.md:');
+      expect(result.stderr).toContain('needs a maintainer decision');
+      // Agent-written content reaches the privileged job's step log: pin
+      // the `::` workflow-command neutralization (removing it must fail).
+      expect(result.stderr).toContain(';;error;;forged');
+      expect(result.stderr).not.toContain('::error::forged');
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+    });
+  });
+
+  it('treats an empty handoff.md as no verdict, like the gate', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, '');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('keeps an API-error tail from reclassifying a handoff verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('preserves an agent-written handoff when qwen dies after it', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        'process.exit(1);',
+      ]);
+
+      // The handoff is a verdict: a crash after it must not shadow the
+      // note with a synthesized failure.md (the gate reads failure.md
+      // first and would report a failed fix), and the runner exits 0 so
+      // the check color matches the handoff outcome the gate reports.
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('preserving agent-written handoff.md');
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-timeout'))).toBe(false);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'needs a maintainer decision',
+      );
+    });
+  });
+
+  it('preserves an agent-written handoff when the budget kills qwen after it', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        'setTimeout(() => {}, 30_000);',
+      ]);
+
+      // The timeout shape of the same window: the kill path must not
+      // write failure.md or the retry sentinel — the sentinel ts would
+      // re-hand the item the brake stopped on the next scan.
+      const previousTimeout = process.env.QWEN_TIMEOUT_MS;
+      const previousIdle = process.env.QWEN_IDLE_TIMEOUT_MS;
+      process.env.QWEN_TIMEOUT_MS = '600';
+      delete process.env.QWEN_IDLE_TIMEOUT_MS;
+      try {
+        const result = runAddressReview(dir, stub);
+        expect(result.status).toBe(0);
+        expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+        expect(existsSync(join(dir, 'agent-timeout'))).toBe(false);
+        expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+          'needs a maintainer decision',
+        );
+      } finally {
+        if (previousTimeout === undefined) delete process.env.QWEN_TIMEOUT_MS;
+        else process.env.QWEN_TIMEOUT_MS = previousTimeout;
+        if (previousIdle === undefined) delete process.env.QWEN_IDLE_TIMEOUT_MS;
+        else process.env.QWEN_IDLE_TIMEOUT_MS = previousIdle;
+      }
+    });
+  });
+
+  it('preserves an agent-written handoff across the loop guard', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'turn_tool_call_cap: too many tool calls',
+            isError: true,
+          }),
+        )});`,
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        'process.exit(1);',
+      ]);
+
+      // The loop guard is a real defect, but a handoff written before it
+      // fired is still the round's verdict — it must not be reclassified
+      // as a failed fix or overwritten with the generic note.
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'needs a maintainer decision',
+      );
+    });
+  });
+
+  it('never overwrites an agent-written handoff with a synthesized note', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'agent failure detail\\n');",
+        "writeFileSync(`${workdir}/handoff.md`, 'agent handoff note\\n');",
+        'process.exit(1);',
+      ]);
+
+      // failure.md keeps the failed classification, but the agent's
+      // handoff note must survive verbatim — a verdict is never
+      // overwritten by a synthesized one.
+      const result = runAddressReview(dir, stub);
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'agent failure detail',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toBe(
+        'agent handoff note\n',
+      );
+    });
+  });
+
   it('rejects mutually exclusive address-review output files', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -17870,7 +18318,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     noIdentity = false,
     baselineNoIdentity = false,
     trackedDirt = false,
+    dirtyTree = '',
     commFail = false,
+    workdirFiles = { 'address-summary.md': 'summary\n' },
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -17913,6 +18363,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
+      }
+      if (dirtyTree === 'tracked') {
+        // Uncommitted tracked edit left beside the verdict files — the
+        // ref-level commit diff is blind to it.
+        g('echo dirt >> f.txt');
+      } else if (dirtyTree === 'untracked') {
+        g('echo leftover > leftover.txt');
       }
       const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
       const failShas = failAt.map(shaOf).join(' ');
@@ -18015,7 +18472,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       );
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
-      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      for (const [name, content] of Object.entries(workdirFiles)) {
+        writeFileSync(join(workdir, name), content);
+      }
       const outFile = join(dir, 'gh-output');
       writeFileSync(outFile, '');
 
@@ -18320,6 +18779,147 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('classifies an unchanged branch by its verdict files (handoff contract)', () => {
+    // The no-commit decision table, in the gate's own precedence order: a
+    // handoff outranks a co-written no-action verdict (a BLOCKED stop must
+    // not close silently as "no changes needed"), failure.md keeps the crash
+    // classification, and a 0-byte handoff.md is not a verdict — the same
+    // non-empty convention the runner's missing() helper applies.
+    const handoff = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(handoff.status).toBe(0);
+    expect(handoff.outputs).toContain('outcome=handoff');
+
+    const handoffBeatsNoAction = runGate({
+      agentCommit: false,
+      workdirFiles: {
+        'handoff.md': 'needs a maintainer decision\n',
+        'no-action.md': 'nothing to change\n',
+      },
+    });
+    expect(handoffBeatsNoAction.status).toBe(0);
+    expect(handoffBeatsNoAction.outputs).toContain('outcome=handoff');
+
+    const failureBeatsHandoff = runGate({
+      agentCommit: false,
+      workdirFiles: {
+        'handoff.md': 'needs a maintainer decision\n',
+        'failure.md': 'crashed before finishing\n',
+      },
+    });
+    expect(failureBeatsHandoff.status).toBe(1);
+    expect(failureBeatsHandoff.outputs).toContain('outcome=failed');
+
+    const emptyHandoff = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': '' },
+    });
+    expect(emptyHandoff.status).toBe(1);
+    expect(emptyHandoff.outputs).toContain('outcome=failed');
+
+    const noAction = runGate({
+      agentCommit: false,
+      workdirFiles: { 'no-action.md': 'nothing to change\n' },
+    });
+    expect(noAction.status).toBe(0);
+    expect(noAction.outputs).toContain('outcome=noop');
+
+    const nothing = runGate({ agentCommit: false, workdirFiles: {} });
+    expect(nothing.status).toBe(1);
+    expect(nothing.outputs).toContain('outcome=failed');
+
+    // Pins the guard's committed-side clause: with a round commit present,
+    // the no-commit handoff branch must NOT fire — the round is a brake
+    // VIOLATION (the brake says commit nothing), classified
+    // outcome=committed_handoff before the structural checks. Falling
+    // through to them would reject retryable, and the repair pass deletes
+    // handoff.md and may commit again against the brake. Deleting the
+    // committed-side guard flips this to outcome=handoff, skipping every
+    // structural check on the committed diff; routing it through the checks
+    // instead flips it to outcome=failed with retryable left unset ONLY if
+    // the fixture trips nothing — the shape this pin exists to prevent.
+    const committedWithHandoff = runGate({
+      agentCommit: true,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(committedWithHandoff.status).toBe(1);
+    expect(committedWithHandoff.outputs).toContain('outcome=committed_handoff');
+    expect(committedWithHandoff.outputs).not.toContain('outcome=handoff');
+    expect(committedWithHandoff.outputs).not.toContain('retryable');
+
+    // The handoff note is agent-written and lands in the privileged job's
+    // step log: a line-start `::` would parse as a workflow command, so the
+    // gate neutralizes it. Pin the mutation — removing the sed must fail.
+    const neutralized = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': '::error::forged\n' },
+    });
+    expect(neutralized.status).toBe(0);
+    expect(neutralized.outputs).toContain('outcome=handoff');
+    expect(neutralized.stdout).toContain(';;error;;forged');
+    expect(neutralized.stdout).not.toContain('::error::forged');
+    // Eight runGate arms, each a fixture repo plus a full gate-script
+    // replay under bash — this outgrows the 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head); the suite's convention is
+    // an explicit per-test budget for tests that spawn subprocesses.
+  }, 30000);
+
+  it('rejects a handoff written over a dirty workspace, non-retryably', () => {
+    // A handoff claims the round deliberately changed NOTHING; dirt beside
+    // it is a brake-violating partial patch that would otherwise be
+    // reported as a clean stop and die silently with the runner. Both dirt
+    // shapes matter: the ref-level commit diff is blind to uncommitted
+    // tracked edits AND untracked files.
+    for (const dirtyTree of ['tracked', 'untracked']) {
+      const r = runGate({
+        agentCommit: false,
+        dirtyTree,
+        workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+      });
+      expect(r.status).toBe(1);
+      // Its OWN outcome, not plain failed: the report step gives the brake
+      // violation an honest headline instead of dressing it as a failed
+      // fix or a stale-base retry promise.
+      expect(r.outputs).toContain('outcome=dirty_handoff');
+      expect(r.outputs).not.toContain('outcome=failed');
+      expect(r.outputs).not.toContain('outcome=handoff');
+      // The rejection must stay non-retryable: retryable=true engages the
+      // repair pass, which deletes handoff.md and may commit against the
+      // brake's stop.
+      expect(r.outputs).not.toContain('retryable=true');
+    }
+
+    // Without handoff.md the dirt still takes the ordinary dirty assert —
+    // retryable, so the new guard has not swallowed that path.
+    const dirtWithoutHandoff = runGate({
+      agentCommit: false,
+      dirtyTree: 'tracked',
+      workdirFiles: {},
+    });
+    expect(dirtWithoutHandoff.status).toBe(1);
+    expect(dirtWithoutHandoff.outputs).toContain('retryable=true');
+    expect(dirtWithoutHandoff.outputs).not.toContain('outcome=handoff');
+  });
+
+  it('classifies a no-commit handoff before the structural checks', () => {
+    // The growth brake fires on red, non-converging PRs — exactly the
+    // diffs that trip the structural pre-checks (a stale schema here). A
+    // compliant handoff commits nothing, so classifying it AFTER those
+    // checks would let the stale schema reject the round as retryable and
+    // engage the repair pass — committing after the brake said commit
+    // nothing.
+    const r = runGate({
+      agentCommit: false,
+      schemaFail: true,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=handoff');
+    expect(r.outputs).not.toContain('retryable=true');
   });
 
   it('never A/Bs the dist-coupled and stdin-fed checks', () => {

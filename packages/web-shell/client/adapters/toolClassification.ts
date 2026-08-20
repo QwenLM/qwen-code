@@ -1,4 +1,4 @@
-import type { ACPToolCall } from './types';
+import type { ACPToolCall } from './types.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {

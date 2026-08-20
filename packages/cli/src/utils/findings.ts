@@ -42,9 +42,9 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AnchorRequest } from './lib/anchors.js';
-import { isSameFile } from './lib/same-file.js';
+import { writeStdoutLine, writeStderrLine } from './stdioHelpers.js';
+import type { AnchorRequest } from '../commands/review/lib/anchors.js';
+import { isSameFile } from '../commands/review/lib/same-file.js';
 
 // These four lists have a second consumer: the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
