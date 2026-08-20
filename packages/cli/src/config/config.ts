@@ -52,6 +52,7 @@ import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getLaunchProcessEnv } from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1581,10 +1582,17 @@ export async function loadCliConfig(
     process.env['https_proxy'] ||
     process.env['HTTP_PROXY'] ||
     process.env['http_proxy'];
+  // Test-runner detection uses the process-launch env snapshot, not live
+  // process.env: by the time this runs, loadSettings → loadEnvironment has
+  // merged a trusted workspace's .env into process.env, and a project
+  // .env with NODE_ENV=test must not disable the catalog for the live
+  // session while the daemon status path (gated on the daemon boot env)
+  // keeps it. Mirrors the workspace-providers-status boot-env gate.
+  const launchEnv = getLaunchProcessEnv();
   const modelMetadataCatalogPromise =
-    process.env['NODE_ENV'] === 'test' ||
-    process.env['VITEST'] !== undefined ||
-    process.env['VITEST_WORKER_ID'] !== undefined
+    launchEnv['NODE_ENV'] === 'test' ||
+    launchEnv['VITEST'] !== undefined ||
+    launchEnv['VITEST_WORKER_ID'] !== undefined
       ? Promise.resolve({})
       : loadModelMetadataCatalog({ proxyUrl: proxy });
 

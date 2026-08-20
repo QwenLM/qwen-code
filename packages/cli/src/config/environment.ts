@@ -71,6 +71,33 @@ function isReloadExcludedKey(key: string): boolean {
   );
 }
 
+/**
+ * The process environment as observed at process launch, frozen at module
+ * evaluation — before any `loadEnvironment` call can merge workspace
+ * `.env`/`settings.env` contents into `process.env`. Test-runner gates (the
+ * model metadata catalog gate in `config.ts`) must consult this snapshot
+ * instead of live `process.env`: a trusted project `.env` may set
+ * `NODE_ENV=test` (common in Node projects), which must not disable the
+ * catalog for live sessions while the daemon status path — gated on the
+ * daemon boot env — keeps it. Consult `getLaunchProcessEnv()` there.
+ */
+let launchProcessEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+  ...process.env,
+});
+
+export function getLaunchProcessEnv(): Readonly<NodeJS.ProcessEnv> {
+  return launchProcessEnv;
+}
+
+/**
+ * Re-capture the launch-env snapshot from the current `process.env`.
+ * Test-only: unit tests mutate `process.env` to simulate launch conditions
+ * the gate must respond to.
+ */
+export function resetLaunchProcessEnvForTesting(): void {
+  launchProcessEnv = Object.freeze({ ...process.env });
+}
+
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
 const lastReloadSnapshot = new Map<string, string>();

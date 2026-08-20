@@ -3980,6 +3980,11 @@ async function runQwenServeImpl(
       runtime.createWorkspaceProvidersStatusProvider({
         env: runtimeEffectiveEnv,
         workspaceTrusted: trustedWorkspace,
+        // Gate the catalog on the daemon boot env: by provider-creation
+        // time the live process.env may carry a workspace .env merge
+        // (NODE_ENV=test) that must not disable the catalog here while
+        // session-side gates keep it.
+        processEnv: daemonRuntimeBaseEnv,
       });
     const workspaceSkillsStatusProvider =
       runtime.createWorkspaceSkillsStatusProvider({
@@ -4810,6 +4815,7 @@ async function runQwenServeImpl(
           runtime.createWorkspaceProvidersStatusProvider({
             env: secondaryEnv.effectiveEnv,
             workspaceTrusted: secondaryTrusted,
+            processEnv: daemonRuntimeBaseEnv,
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider({
@@ -5376,6 +5382,7 @@ async function runQwenServeImpl(
             runtime.createWorkspaceProvidersStatusProvider({
               env: wsEnv.effectiveEnv,
               workspaceTrusted: trusted,
+              processEnv: daemonRuntimeBaseEnv,
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider({

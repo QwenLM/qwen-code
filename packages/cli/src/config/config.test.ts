@@ -25,6 +25,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { resetLaunchProcessEnvForTesting } from './environment.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -1162,6 +1163,9 @@ describe('loadCliConfig', () => {
     process.env['NODE_ENV'] = 'production';
     delete process.env['VITEST'];
     delete process.env['VITEST_WORKER_ID'];
+    // The gate consults the process-launch snapshot, so re-capture it from
+    // the mutated env to simulate a production launch.
+    resetLaunchProcessEnvForTesting();
     const catalogSpy = vi
       .spyOn(ServerConfig, 'loadModelMetadataCatalog')
       .mockResolvedValue({
@@ -1209,6 +1213,49 @@ describe('loadCliConfig', () => {
       } else {
         process.env['VITEST_WORKER_ID'] = originalVitestWorkerId;
       }
+      // Restore the launch snapshot from the real (vitest) env so later
+      // tests see the test-runner gate active again.
+      resetLaunchProcessEnvForTesting();
+    }
+  });
+
+  it('loads the catalog when a merged .env pollutes NODE_ENV after launch', async () => {
+    // Simulates a production launch whose trusted project .env sets
+    // NODE_ENV=test: loadSettings → loadEnvironment merges it into live
+    // process.env before loadCliConfig runs, but the gate must keep
+    // consulting the process-launch snapshot (mirrors the daemon
+    // workspace-status boot-env gate).
+    const originalNodeEnv = process.env['NODE_ENV'];
+    const originalVitest = process.env['VITEST'];
+    const originalVitestWorkerId = process.env['VITEST_WORKER_ID'];
+    process.env['NODE_ENV'] = 'production';
+    delete process.env['VITEST'];
+    delete process.env['VITEST_WORKER_ID'];
+    resetLaunchProcessEnvForTesting();
+    const catalogSpy = vi
+      .spyOn(ServerConfig, 'loadModelMetadataCatalog')
+      .mockResolvedValue({});
+    process.argv = ['node', 'script.js'];
+
+    try {
+      // The .env merge lands AFTER launch: it must not flip the gate.
+      process.env['NODE_ENV'] = 'test';
+
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+
+      expect(catalogSpy).toHaveBeenCalled();
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = originalNodeEnv;
+      if (originalVitest === undefined) delete process.env['VITEST'];
+      else process.env['VITEST'] = originalVitest;
+      if (originalVitestWorkerId === undefined) {
+        delete process.env['VITEST_WORKER_ID'];
+      } else {
+        process.env['VITEST_WORKER_ID'] = originalVitestWorkerId;
+      }
+      resetLaunchProcessEnvForTesting();
     }
   });
 
