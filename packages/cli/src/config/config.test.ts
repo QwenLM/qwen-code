@@ -236,10 +236,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     },
     loadEnvironment: vi.fn(),
     loadServerHierarchicalMemory: vi.fn(
-      (cwd, dirs, debug, fileService, extensionPaths, _maxDirs) =>
+      // Match the real signature: (cwd, includeDirs, fileService,
+      // extensionContextFilePaths, folderTrust, importFormat,
+      // contextRuleExcludes, options)
+      (cwd, _dirs, _fileService, extensionContextFilePaths) =>
         Promise.resolve({
-          memoryContent: extensionPaths?.join(',') || '',
-          fileCount: extensionPaths?.length || 0,
+          memoryContent: extensionContextFilePaths?.join(',') || '',
+          fileCount: extensionContextFilePaths?.length || 0,
+          contextFilePaths: extensionContextFilePaths || [],
           ruleCount: 0,
           conditionalRules: [],
           projectRoot: cwd || '/tmp',

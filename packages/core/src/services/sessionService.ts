@@ -1972,20 +1972,19 @@ export class SessionService {
    * @param titleSource Where the title came from. Defaults to `'manual'` so
    *   existing callers are unchanged — pass `'auto'` only for titles produced
    *   by the auto-title generator.
+   * @param archiveState Which session store to rename. Defaults to active.
    * @returns true if renamed successfully, false if session not found
-   * @remarks Only checks active sessions. Use `getSessionLocation()` or
-   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async renameSession(
     sessionId: string,
     title: string,
     titleSource: TitleSource = 'manual',
+    archiveState: SessionArchiveState = 'active',
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
 
     try {
       // Verify the file exists and belongs to this project
@@ -2129,6 +2128,7 @@ export class SessionService {
           record.type === 'system' &&
           (record.subtype === 'parent_session' ||
             record.subtype === 'session_source' ||
+            record.subtype === 'turn_result' ||
             (options.source && record.subtype === 'custom_title'))
         ),
     );

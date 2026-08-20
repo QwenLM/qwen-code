@@ -1001,6 +1001,18 @@ export class AcpDispatcher {
     });
   }
 
+  // Combined invalidate-and-mark for catalog mutations whose conservative
+  // finally-semantics match (delete/archive/unarchive). The revision advance
+  // always follows the cache invalidation so a newly exposed version never
+  // precedes it. Exact no-op paths (e.g. metadata rename) gate the mark on
+  // an actual change via the bridge instead of using this helper.
+  private invalidateSessionListsAndMarkCatalog(
+    archiveStates: readonly SessionArchiveState[],
+  ): void {
+    this.invalidateSessionLists(archiveStates);
+    this.bridge.markSessionCatalogChanged();
+  }
+
   private async runWithSessionListInvalidation<T>(
     archiveStates: readonly SessionArchiveState[],
     mutation: () => Promise<T>,
@@ -1008,7 +1020,7 @@ export class AcpDispatcher {
     try {
       return await mutation();
     } finally {
-      this.invalidateSessionLists(archiveStates);
+      this.invalidateSessionListsAndMarkCatalog(archiveStates);
     }
   }
 
@@ -2961,6 +2973,7 @@ export class AcpDispatcher {
                 ? { color: params['color'] as SessionGroupPresetColor | null }
                 : {}),
             });
+            this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
             this.replyConn(conn, id, { sessionId, ...organization });
           });
           return;
@@ -2982,6 +2995,7 @@ export class AcpDispatcher {
             name: params['name'] as string,
             color: params['color'] as SessionGroupColor,
           });
+          this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
           assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
@@ -3002,6 +3016,7 @@ export class AcpDispatcher {
               : {}),
             ...('order' in params ? { order: params['order'] as number } : {}),
           });
+          this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
           assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
@@ -3017,6 +3032,11 @@ export class AcpDispatcher {
             await createSessionOrganizationService(workspaceCwd).deleteGroup(
               groupId,
             );
+          // A delete that reports `deleted: false` changed nothing and must
+          // not advance the catalog version.
+          if (deleted) {
+            this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
+          }
           assertGenerationOpen?.();
           this.replyConn(conn, id, { deleted });
           return;

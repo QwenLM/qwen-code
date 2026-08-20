@@ -497,7 +497,7 @@ export async function deleteDaemonSessions(params: {
 export async function deleteDaemonSessionIfOrphan(params: {
   sessionId: string;
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'killSession'>;
+  bridge: Pick<AcpSessionBridge, 'killSession' | 'markSessionCatalogChanged'>;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
   const { sessionId, service, bridge, coordinator } = params;
@@ -523,6 +523,10 @@ export async function deleteDaemonSessionIfOrphan(params: {
   if (result.kind === 'error') {
     throw result.error;
   }
+  // The persisted removal succeeded. A live removal already advanced the
+  // catalog revision through the lifecycle choke point; this conservative
+  // extra mark covers the never-live orphan case and is protocol-permitted.
+  bridge.markSessionCatalogChanged();
   return true;
 }
 

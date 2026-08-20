@@ -45,7 +45,13 @@ import {
 } from '../conversations/session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
-import type { Application, Request, RequestHandler, Response } from 'express';
+import express, {
+  type Application,
+  type ErrorRequestHandler,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -53,6 +59,7 @@ import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
+  InvalidSessionMetadataError,
   PromptQueueFullError,
   SessionArtifactValidationError,
   SessionArchivedError,
@@ -61,6 +68,8 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
+  type BridgePromptContentBlock,
+  type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -206,6 +215,78 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+// Media blocks are resolved into inline bytes at dispatch, so an unbounded
+// content array lets one small request fan out into gigabytes of heap (a
+// repeated reference resolves to the same 8 MiB image once per occurrence).
+// 256 matches the session media store's item cap, so a message can still
+// reference every stored item.
+const MEDIA_CONTENT_MAX_BLOCKS = 256;
+
+// SVG can carry scripts; this origin also hosts the daemon API and Web
+// Shell UI, and stored bytes are served back to browsers — raster formats
+// only. Compare the normalized media type: standards-conformant spelling
+// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
+// past an exact-string match.
+function isSvgMimeType(mimeType: string | undefined): boolean {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
+}
+
+// Shared per-block validation for the prompt and mid-turn routes. SVG can
+// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
+// stored bytes are served back to browsers — raster formats only, matching
+// the upload route's policy.
+type MediaBlockParseResult =
+  | { valid: true; block: BridgePromptContentBlock }
+  | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
+
+function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) {
+    return { valid: false, code: 'not-object' };
+  }
+  const record = block as Record<string, unknown>;
+  const type = record['type'];
+  const data = record['data'];
+  const mediaId = record['mediaId'];
+  const mimeType = record['mimeType'];
+  const size = record['size'];
+  const inline = typeof data === 'string' && data.length > 0;
+  const reference =
+    typeof mediaId === 'string' &&
+    mediaId.length > 0 &&
+    typeof size === 'number' &&
+    Number.isSafeInteger(size) &&
+    size > 0;
+  if (
+    type !== 'image' ||
+    inline === reference ||
+    typeof mimeType !== 'string' ||
+    !mimeType.startsWith(`${type}/`)
+  ) {
+    return { valid: false, code: 'invalid-shape' };
+  }
+  if (isSvgMimeType(mimeType)) {
+    return { valid: false, code: 'svg' };
+  }
+  return {
+    valid: true,
+    block: inline
+      ? ({ type, data, mimeType } as BridgePromptContentBlock)
+      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+  };
+}
+
+function mediaBlockParseError(
+  code: 'not-object' | 'invalid-shape' | 'svg',
+  entryLabel: string,
+): string {
+  if (code === 'not-object') {
+    return `each ${entryLabel} must be a media content block`;
+  }
+  if (code === 'svg') {
+    return 'SVG images are not supported';
+  }
+  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+}
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
@@ -500,6 +581,19 @@ export function registerSessionRoutes(
       archiveStates,
     });
   };
+  // Combined operation for catalog mutations whose conservative
+  // finally-semantics match (delete/archive/unarchive/close): invalidate the
+  // persisted cache scopes, then advance the runtime bridge's catalog
+  // revision. The ordering guarantees a newly exposed version never precedes
+  // the invalidation. Paths with exact no-op semantics (rename, group
+  // delete) gate the mark on an actual change instead of using this helper.
+  const invalidateSessionListsAndMarkCatalog = (
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+  ): void => {
+    invalidateSessionLists(runtime, archiveStates);
+    runtime.bridge.markSessionCatalogChanged();
+  };
   const runWithSessionListInvalidation = async <T>(
     runtime: WorkspaceRuntime,
     archiveStates: readonly SessionArchiveState[],
@@ -508,7 +602,7 @@ export function registerSessionRoutes(
     try {
       return await mutation();
     } finally {
-      invalidateSessionLists(runtime, archiveStates);
+      invalidateSessionListsAndMarkCatalog(runtime, archiveStates);
     }
   };
   const requestedSessionIdAdmission =
@@ -3558,9 +3652,12 @@ export function registerSessionRoutes(
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .catch(() => false);
             if (killed) {
-              await createWorkspaceRuntimeSessionService(runtime)
+              const removed = await createWorkspaceRuntimeSessionService(
+                runtime,
+              )
                 .removeSession(result.sessionId)
-                .catch(() => {});
+                .catch(() => false);
+              if (removed) runtime.bridge.markSessionCatalogChanged();
             }
           } else {
             await runtime.bridge
@@ -3573,11 +3670,12 @@ export function registerSessionRoutes(
           if (!result.attached) {
             runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
-              .then((killed) => {
-                if (!killed) return undefined;
-                return createWorkspaceRuntimeSessionService(
+              .then(async (killed) => {
+                if (!killed) return;
+                const removed = await createWorkspaceRuntimeSessionService(
                   runtime,
                 ).removeSession(result.sessionId);
+                if (removed) runtime.bridge.markSessionCatalogChanged();
               })
               .catch(() => {});
           } else {
@@ -4253,6 +4351,123 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/media',
+    mutate(),
+    express.raw({ type: 'image/*', limit: '8mb' }),
+    ((error, _req, res, next) => {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        error.status === 413
+      ) {
+        res.status(413).json({ error: 'Request body too large (max 8 MiB)' });
+        return;
+      }
+      next(error);
+    }) satisfies ErrorRequestHandler,
+    withOwnerMutableSession(
+      'POST /session/:id/media',
+      async (req, res, sessionId, runtime) => {
+        const contentType = req.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase();
+        // SVG can carry scripts; this origin also hosts the daemon API and
+        // Web Shell UI, and the bytes are served back to browsers, so an
+        // inline SVG would run same-origin. Raster formats only.
+        if (isSvgMimeType(contentType)) {
+          res.status(415).json({ error: 'SVG uploads are not supported' });
+          return;
+        }
+        if (
+          !contentType ||
+          !contentType.startsWith('image/') ||
+          !Buffer.isBuffer(req.body) ||
+          req.body.byteLength === 0
+        ) {
+          res.status(400).json({
+            error:
+              'request body must contain image/* bytes with a matching Content-Type',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const reference = await runtime.bridge.storeSessionMedia(
+            sessionId,
+            req.body,
+            contentType,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(201).json(reference);
+        } catch (error) {
+          if (error instanceof RangeError) {
+            res.status(413).json({ error: error.message });
+            return;
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/media/:mediaId',
+    withOwnerReadSession(
+      'GET /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const media = await runtime.bridge.readSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        if (!media) {
+          res.status(404).json({ error: 'session media not found' });
+          return;
+        }
+        res.setHeader('Content-Type', media.mimeType);
+        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Content-Disposition', 'attachment');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.status(200).send(media.data);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/media/:mediaId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const removed = await runtime.bridge.removeSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ removed });
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/prompt',
     mutate(),
     withOwnerMutableSession(
@@ -4278,6 +4493,31 @@ export function registerSessionRoutes(
             error: 'each `prompt` element must be an object (content block)',
           });
           return;
+        }
+        const mediaBlockCount = prompt.filter(
+          (item: unknown) =>
+            (item as Record<string, unknown>)['type'] !== 'text',
+        ).length;
+        if (mediaBlockCount > MEDIA_CONTENT_MAX_BLOCKS) {
+          res.status(400).json({
+            error: `\`prompt\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+          });
+          return;
+        }
+        // Same per-block validation as the mid-turn route, scoped to image
+        // blocks: a malformed image admitted here only fails the ACP child's
+        // schema parse later, surfacing an async turn error instead of a
+        // synchronous 400. Other non-text blocks (legacy inline audio,
+        // embedded resources) keep their pre-existing child-side validation.
+        for (const item of prompt) {
+          if ((item as Record<string, unknown>)['type'] !== 'image') continue;
+          const parsed = parseMediaContentBlock(item);
+          if (!parsed.valid) {
+            res.status(400).json({
+              error: mediaBlockParseError(parsed.code, '`prompt` image block'),
+            });
+            return;
+          }
         }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
@@ -4914,6 +5154,129 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.patch(
+    '/workspaces/:workspace/session/:id/metadata',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session/:id/metadata';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const rawDisplayName = safeBody(req)['displayName'];
+      if (typeof rawDisplayName !== 'string') {
+        res.status(400).json({
+          error: '`displayName` must be a string',
+          code: 'invalid_metadata',
+          field: 'displayName',
+        });
+        return;
+      }
+      try {
+        const displayName = rawDisplayName.slice(0, 256);
+        if (displayName.trim() === '') {
+          // An empty name would append an empty custom_title record to
+          // persisted sessions, which the title readers disagree on.
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not be empty',
+          );
+        }
+        if (
+          Array.from(displayName).some((character) => {
+            const code = character.charCodeAt(0);
+            return code <= 31 || code === 127;
+          })
+        ) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        }
+        await archiveCoordinator.runExclusiveMany([sessionId], async () => {
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return;
+          }
+          if (
+            liveOwner.kind === 'found' &&
+            liveOwner.runtime.workspaceCwd !== runtime.workspaceCwd
+          ) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return;
+          }
+          await runWithWorkspaceRuntimeStorage(runtime, async () => {
+            let effective: { displayName?: string };
+            try {
+              effective = runtime.bridge.updateSessionMetadata(
+                sessionId,
+                { displayName },
+                clientId !== undefined ? { clientId } : undefined,
+              );
+              assertRuntimeGenerationOpen?.();
+            } catch (err) {
+              if (!(err instanceof SessionNotFoundError)) throw err;
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const location = await service.getSessionLocation(sessionId);
+              assertRuntimeGenerationOpen?.();
+              if (location === 'conflict') {
+                throw new SessionConflictError(sessionId);
+              }
+              const renamed = location
+                ? await service.renameSession(
+                    sessionId,
+                    displayName,
+                    'manual',
+                    location,
+                  )
+                : false;
+              assertRuntimeGenerationOpen?.();
+              if (!renamed) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              // The persisted rename appends a custom_title record the next
+              // catalog scan serves, so this fallback must advance the same
+              // catalog revision the live rename marks — otherwise
+              // version-watching clients keep the stale name.
+              runtime.bridge.markSessionCatalogChanged();
+              effective = { displayName: displayName || undefined };
+            }
+            invalidateSessionLists(runtime, ['active', 'archived']);
+            res.status(200).json({ sessionId, ...effective });
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route,
+          sessionId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+      }
+    },
+  );
+
   type SessionOrganizationTarget = {
     runtime?: WorkspaceRuntime;
     resolveRuntime?: (
@@ -5013,6 +5376,10 @@ export function registerSessionRoutes(
                 ? { color: rawColor as SessionGroupPresetColor | null }
                 : {}),
             });
+            invalidateSessionListsAndMarkCatalog(runtime, [
+              'active',
+              'archived',
+            ]);
             res.status(200).json({ sessionId, ...organization });
           });
         })(),
@@ -5085,6 +5452,7 @@ export function registerSessionRoutes(
           color: body['color'] as SessionGroupColor,
         }),
       );
+      invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
       res.status(201).json({ group });
     } catch (err) {
       if (sendSessionOrganizationError(res, err)) return;
@@ -5118,6 +5486,7 @@ export function registerSessionRoutes(
             },
           ),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(200).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5140,6 +5509,11 @@ export function registerSessionRoutes(
             req.params['groupId'] ?? '',
           ),
         );
+        // A delete that reports `deleted: false` changed nothing and must
+        // not advance the catalog version.
+        if (deleted) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
+        }
         res.status(200).json({ deleted });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5182,6 +5556,7 @@ export function registerSessionRoutes(
             color: body['color'] as SessionGroupColor,
           }),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(201).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5215,6 +5590,7 @@ export function registerSessionRoutes(
             },
           ),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(200).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5236,6 +5612,11 @@ export function registerSessionRoutes(
             req.params['groupId'] ?? '',
           ),
         );
+        // A delete that reports `deleted: false` changed nothing and must
+        // not advance the catalog version.
+        if (deleted) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
+        }
         res.status(200).json({ deleted });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5482,6 +5863,60 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  // Last catalog version successfully exposed per bridge by the live-state
+  // route. A newly observed version synchronously invalidates the persisted
+  // catalog cache scopes before the version is answered, so a client that
+  // reconciles with the `live A -> full catalog -> live B` handshake can
+  // never load a catalog snapshot that predates the version it observed.
+  // WeakMap: replaced bridges (runtime replacement) drop with the instance.
+  const lastExposedCatalogVersions = new WeakMap<
+    AcpSessionBridge,
+    BridgeSessionCatalogVersion
+  >();
+
+  app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/sessions/live-state';
+    // Strict trust gate: live state is never read from an untrusted
+    // runtime, and an unknown selector never falls back to primary.
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (runtime === null) return;
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    try {
+      assertRuntimeOpen?.();
+      const catalogVersion = bridge.getSessionCatalogVersion();
+      const lastExposed = lastExposedCatalogVersions.get(bridge);
+      if (
+        lastExposed === undefined ||
+        lastExposed.generation !== catalogVersion.generation ||
+        lastExposed.revision !== catalogVersion.revision
+      ) {
+        invalidateSessionLists(runtime, ['active', 'archived']);
+      }
+      const sessions = bridge
+        .listWorkspaceSessions(runtime.workspaceCwd)
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount,
+          hasActivePrompt: session.hasActivePrompt,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+          // Bridge-local activity watermark, absent until a running prompt in
+          // this bridge publishes its first terminal. Reading it costs nothing
+          // extra: the summary is already in memory.
+          ...(session.updatedAt !== undefined
+            ? { updatedAt: session.updatedAt }
+            : {}),
+        }));
+      assertRuntimeOpen?.();
+      lastExposedCatalogVersions.set(bridge, catalogVersion);
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ v: 1, catalogVersion, sessions });
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
   const workspaceSessionInfoHandler =
     (paramName: 'id' | 'workspace'): RequestHandler =>
     async (req, res) => {
@@ -5689,9 +6124,42 @@ export function registerSessionRoutes(
         // stores the trimmed string, so checking the raw length would reject input
         // whose real content fits but is padded with whitespace.
         const trimmed = typeof message === 'string' ? message.trim() : '';
-        if (trimmed.length === 0) {
+        // Optional image blocks injected mid-turn alongside the
+        // text. Validate strictly here — the ACP child silently drops blocks
+        // that fail its own `isContentBlock` check, so a malformed block would
+        // vanish from the turn without any error. Media size is bounded by the
+        // global request body limit.
+        const rawContent = body['content'];
+        let mediaBlocks: BridgePromptContentBlock[] | undefined;
+        if (rawContent !== undefined) {
+          if (!Array.isArray(rawContent) || rawContent.length === 0) {
+            res.status(400).json({
+              error: '`content` must be a non-empty array of media blocks',
+            });
+            return;
+          }
+          if (rawContent.length > MEDIA_CONTENT_MAX_BLOCKS) {
+            res.status(400).json({
+              error: `\`content\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+            });
+            return;
+          }
+          mediaBlocks = [];
+          for (const block of rawContent) {
+            const parsed = parseMediaContentBlock(block);
+            if (!parsed.valid) {
+              res.status(400).json({
+                error: mediaBlockParseError(parsed.code, '`content` entry'),
+              });
+              return;
+            }
+            mediaBlocks.push(parsed.block);
+          }
+        }
+        if (trimmed.length === 0 && mediaBlocks === undefined) {
           res.status(400).json({
-            error: '`message` is required and must be a non-empty string',
+            error:
+              '`message` must be a non-empty string, or `content` must carry at least one media block',
           });
           return;
         }
@@ -5724,6 +6192,7 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
+          mediaBlocks ? { content: mediaBlocks } : undefined,
         );
         res.status(200).json(result);
       },
@@ -5828,6 +6297,76 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Register `current` before the parameter route so it is not a promptId.
+  app.get('/session/:id/turns/current', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/current',
+    );
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/current',
+          sessionId,
+        });
+      }
+    })();
+  });
+
+  app.get('/session/:id/turns/:promptId', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/:promptId',
+    );
+    if (!runtime) return;
+    const promptId = req.params['promptId'];
+    if (!promptId) {
+      res.status(400).json({ error: '`promptId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+          promptId,
+        );
+        if (!status) {
+          res.status(404).json({
+            error: `Prompt ${promptId} not found in session ${sessionId}`,
+            code: 'prompt_not_found',
+            sessionId,
+            promptId,
+          });
+          return;
+        }
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/:promptId',
+          sessionId,
+        });
+      }
+    })();
+  });
 
   app.post(
     '/session/:id/shell',

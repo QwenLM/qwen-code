@@ -1,0 +1,4 @@
+{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Inspect the contract"}}
+{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Checking identity"}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The contract is stable."}}
+{"sessionUpdate":"tool_call","toolCallId":"read-1","title":"Read file","status":"completed","rawInput":{"path":"src/index.ts"},"_meta":{"toolName":"read"}}

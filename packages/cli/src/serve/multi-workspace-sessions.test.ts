@@ -420,6 +420,10 @@ function makeBridge(
   const cwdChangeCalls: FakeBridge['cwdChangeCalls'] = [];
   const killCalls: string[] = [];
   const operationLog = options.operationLog ?? [];
+  let catalogRevision = 0;
+  const catalogGeneration = `fake-catalog-gen-${workspaceCwd}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -558,6 +562,12 @@ function makeBridge(
       return [...live.values()].filter(
         (summary) => summary.workspaceCwd === cwd,
       );
+    },
+    getSessionCatalogVersion() {
+      return { generation: catalogGeneration, revision: catalogRevision };
+    },
+    markSessionCatalogChanged() {
+      catalogRevision += 1;
     },
     getSessionSummary(sessionId: string) {
       summaryCalls.push(sessionId);
@@ -5779,5 +5789,477 @@ describe('multi-workspace session dispatch', () => {
       ).toEqual(['secondary-c']);
       expect(second.body.nextCursor).toBeUndefined();
     });
+  });
+});
+
+describe('workspace session live-state route', () => {
+  const liveStatePath = (selector: string) =>
+    `/workspaces/${selector}/sessions/live-state`;
+
+  it('returns the exact v1 shape with projected volatile fields and no-store', async () => {
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          displayName: 'Visible name',
+          updatedAt: '2026-07-08T00:02:00.000Z',
+          clientCount: 2,
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 1,
+          hasTurnError: true,
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body.v).toBe(1);
+    expect(res.body.catalogVersion).toEqual({
+      generation: expect.any(String),
+      revision: expect.any(Number),
+    });
+    // Exactly the volatile overlay plus the activity watermark — the static
+    // catalog field (displayName) and the deliberately excluded volatile
+    // extras (pendingInteractionCount, hasTurnError) all stay out.
+    expect(res.body.sessions).toEqual([
+      {
+        sessionId: 'primary-session',
+        clientCount: 2,
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-07-08T00:02:00.000Z',
+      },
+    ]);
+  });
+
+  it('omits updatedAt when the bridge summary has no activity watermark', async () => {
+    // A live entry that has not settled a running turn in this bridge (fresh
+    // spawn, restore) legitimately carries no watermark. The key must be
+    // absent rather than null so old clients decode the response unchanged.
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, { updatedAt: undefined }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions).toHaveLength(1);
+    expect(res.body.sessions[0]).not.toHaveProperty('updatedAt');
+  });
+
+  it('defaults both wait flags to false when the bridge omits them', async () => {
+    // BridgeSessionSummary types both wait flags optional; a bridge that omits
+    // them must not serialize a missing key where the SDK snapshot promises a
+    // boolean.
+    const { app } = makeHarness({
+      primarySummaries: [makeSummary('primary-session', PRIMARY_CWD)],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions).toEqual([
+      {
+        sessionId: 'primary-session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-07-08T00:01:00.000Z',
+      },
+    ]);
+  });
+
+  it('returns an empty complete snapshot for an empty live runtime', async () => {
+    const { app } = makeHarness({ primarySummaries: [] });
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+    expect(res.body.sessions).toEqual([]);
+    expect(res.body.catalogVersion.revision).toBe(0);
+  });
+
+  it('reads only the selected workspace bridge for trusted selectors', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          updatedAt: '2026-07-08T00:05:00.000Z',
+        }),
+      ],
+      secondarySummaries: [
+        makeSummary('secondary-a', SECONDARY_CWD),
+        makeSummary('secondary-b', SECONDARY_CWD, {
+          hasActivePrompt: true,
+          updatedAt: '2026-07-08T00:03:00.000Z',
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('secondary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(
+      res.body.sessions.map((s: { sessionId: string }) => s.sessionId).sort(),
+    ).toEqual(['secondary-a', 'secondary-b']);
+    // The watermark comes from the selected bridge only; the primary's value
+    // must not leak into a secondary response.
+    expect(
+      res.body.sessions.find(
+        (s: { sessionId: string }) => s.sessionId === 'secondary-b',
+      ).updatedAt,
+    ).toBe('2026-07-08T00:03:00.000Z');
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+    expect(primaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects an untrusted runtime with 403 before any bridge read', async () => {
+    const { app, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      secondarySummaries: [makeSummary('secondary-session', SECONDARY_CWD)],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('secondary-id'))
+      .set('Host', host())
+      .expect(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects an unknown selector with 400 and never falls back to primary', async () => {
+    const { app, primaryBridge } = makeHarness();
+    const res = await request(app)
+      .get(liveStatePath('not%3Aa%3Aselector'))
+      .set('Host', host())
+      .expect(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+    expect(primaryBridge.listCalls).toEqual([]);
+  });
+
+  it('keeps the 503 semantics for a transitioning runtime generation', async () => {
+    const { app, registry } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id');
+    expect(entry).toBeDefined();
+    registry.beginReplacement(entry!, 'policy-2');
+
+    const res = await request(app)
+      .get(liveStatePath('secondary-id'))
+      .set('Host', host())
+      .expect(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(res.headers['retry-after']).toBeDefined();
+  });
+
+  it('exposes a new version only after invalidating both catalog cache scopes', async () => {
+    await withRuntimeDir(async () => {
+      const activeOne = '550e8400-e29b-41d4-a716-446655440201';
+      const archivedOne = '550e8400-e29b-41d4-a716-446655440202';
+      await writeStoredSession({
+        sessionId: activeOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'active one',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'archived one',
+        mtime: new Date('2026-07-08T01:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedOne);
+      const { app, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const organized = (query: string) =>
+        request(app)
+          .get(`/workspaces/secondary-id/sessions?view=organized${query}`)
+          .set('Host', host())
+          .expect(200);
+      const ids = (body: { sessions: Array<{ sessionId: string }> }) =>
+        body.sessions.map((s) => s.sessionId);
+
+      // Pin the bridge's first live-state exposure BEFORE the caches fill,
+      // so the invalidation asserted below can only come from the
+      // version-comparison arm — never the first-exposure arm.
+      await request(app)
+        .get(liveStatePath('secondary-id'))
+        .set('Host', host())
+        .expect(200);
+
+      // Populate both cache scopes inside the two-second TTL.
+      expect(ids((await organized('')).body)).toEqual([activeOne]);
+      expect(ids((await organized('&archiveState=archived')).body)).toEqual([
+        archivedOne,
+      ]);
+
+      // A daemon-observed mutation lands and advances the catalog clock.
+      const activeTwo = '550e8400-e29b-41d4-a716-446655440203';
+      const archivedTwo = '550e8400-e29b-41d4-a716-446655440204';
+      await writeStoredSession({
+        sessionId: activeTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'active two',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'archived two',
+        mtime: new Date('2026-07-08T01:03:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedTwo);
+      secondaryBridge.markSessionCatalogChanged();
+
+      // The live-state exposure invalidates both scopes before answering.
+      const live = await request(app)
+        .get(liveStatePath('secondary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(live.body.catalogVersion.revision).toBe(1);
+      expect(ids((await organized('')).body).sort()).toEqual([
+        activeOne,
+        activeTwo,
+      ]);
+      expect(
+        ids((await organized('&archiveState=archived')).body).sort(),
+      ).toEqual([archivedOne, archivedTwo]);
+
+      // An unchanged high-frequency poll must not invalidate again: a third
+      // direct write stays hidden behind the still-fresh cache generation.
+      const activeThree = '550e8400-e29b-41d4-a716-446655440205';
+      await writeStoredSession({
+        sessionId: activeThree,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:04:00.000Z',
+        prompt: 'active three',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+      await request(app)
+        .get(liveStatePath('secondary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(ids((await organized('')).body).sort()).toEqual([
+        activeOne,
+        activeTwo,
+      ]);
+    });
+  });
+
+  it('invalidates both organized cache scopes on the first live-state exposure, revision unchanged', async () => {
+    await withRuntimeDir(async () => {
+      const activeOne = '550e8400-e29b-41d4-a716-446655440211';
+      const archivedOne = '550e8400-e29b-41d4-a716-446655440212';
+      await writeStoredSession({
+        sessionId: activeOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'active one',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'archived one',
+        mtime: new Date('2026-07-08T01:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedOne);
+      const { app, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const organized = (query: string) =>
+        request(app)
+          .get(`/workspaces/secondary-id/sessions?view=organized${query}`)
+          .set('Host', host())
+          .expect(200);
+      const ids = (body: { sessions: Array<{ sessionId: string }> }) =>
+        body.sessions.map((s) => s.sessionId);
+
+      // Deliberately fill both organized scopes BEFORE any live-state request:
+      // the invalidation asserted below can only come from the first-exposure
+      // arm (no lastExposed entry for this bridge yet), not version comparison.
+      expect(ids((await organized('')).body)).toEqual([activeOne]);
+      expect(ids((await organized('&archiveState=archived')).body)).toEqual([
+        archivedOne,
+      ]);
+
+      // A direct write lands WITHOUT advancing the catalog clock.
+      const activeTwo = '550e8400-e29b-41d4-a716-446655440213';
+      const archivedTwo = '550e8400-e29b-41d4-a716-446655440214';
+      await writeStoredSession({
+        sessionId: activeTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'active two',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'archived two',
+        mtime: new Date('2026-07-08T01:03:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedTwo);
+
+      // The revision is unchanged, yet the first exposure must still
+      // invalidate both scopes before answering.
+      const live = await request(app)
+        .get(liveStatePath('secondary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(live.body.catalogVersion.revision).toBe(0);
+      expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(0);
+      expect(ids((await organized('')).body).sort()).toEqual([
+        activeOne,
+        activeTwo,
+      ]);
+      expect(
+        ids((await organized('&archiveState=archived')).body).sort(),
+      ).toEqual([archivedOne, archivedTwo]);
+    });
+  });
+
+  it('advances the version for REST archive, organization, and group writes with exact no-op semantics', async () => {
+    await withRuntimeDir(async () => {
+      const storedId = '550e8400-e29b-41d4-a716-446655440210';
+      await writeStoredSession({
+        sessionId: storedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'mutation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+      const revision = () =>
+        secondaryBridge.getSessionCatalogVersion().revision;
+      const primaryRevision = () =>
+        primaryBridge.getSessionCatalogVersion().revision;
+
+      const v0 = revision();
+      await request(app)
+        .patch(`/workspaces/secondary-id/session/${storedId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: true })
+        .expect(200);
+      const v1 = revision();
+      expect(v1).toBeGreaterThan(v0);
+
+      await request(app)
+        .post('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'group-a', color: 'red' })
+        .expect(201);
+      const v2 = revision();
+      expect(v2).toBeGreaterThan(v1);
+
+      // A group delete that reports `deleted: false` changes nothing.
+      await request(app)
+        .delete('/workspaces/secondary-id/session-groups/missing-group')
+        .set('Host', host())
+        .expect(200);
+      expect(revision()).toBe(v2);
+
+      const groups = await request(app)
+        .get('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .expect(200);
+      const groupId = groups.body.groups[0]?.id as string;
+      expect(groupId).toBeTruthy();
+      await request(app)
+        .delete(`/workspaces/secondary-id/session-groups/${groupId}`)
+        .set('Host', host())
+        .expect(200);
+      const v3 = revision();
+      expect(v3).toBeGreaterThan(v2);
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [storedId] })
+        .expect(200);
+      expect(revision()).toBeGreaterThan(v3);
+
+      // The plural group update marks too.
+      const recreated = await request(app)
+        .post('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'group-b', color: 'blue' })
+        .expect(201);
+      const v4 = revision();
+      await request(app)
+        .patch(
+          `/workspaces/secondary-id/session-groups/${recreated.body.group.id}`,
+        )
+        .set('Host', host())
+        .send({ name: 'group-b-renamed' })
+        .expect(200);
+      expect(revision()).toBeGreaterThan(v4);
+
+      // Legacy singular group routes mark the primary runtime's clock.
+      const p0 = primaryRevision();
+      const legacyCreated = await request(app)
+        .post('/workspace/primary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'legacy-group', color: 'red' })
+        .expect(201);
+      const p1 = primaryRevision();
+      expect(p1).toBeGreaterThan(p0);
+      await request(app)
+        .patch(
+          `/workspace/primary-id/session-groups/${legacyCreated.body.group.id}`,
+        )
+        .set('Host', host())
+        .send({ color: 'blue' })
+        .expect(200);
+      const p2 = primaryRevision();
+      expect(p2).toBeGreaterThan(p1);
+      await request(app)
+        .delete(
+          `/workspace/primary-id/session-groups/${legacyCreated.body.group.id}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(primaryRevision()).toBeGreaterThan(p2);
+    });
+  });
+
+  it('does not mark the version from the metadata route — the bridge owns exact rename semantics', async () => {
+    // `mutate({ strict: true })` on this route requires a bearer token.
+    const { app, primaryBridge } = makeHarness({ token: 'secret' });
+    const v0 = primaryBridge.getSessionCatalogVersion().revision;
+    await request(app)
+      .patch('/session/primary-session/metadata')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .send({ displayName: 'Renamed' })
+      .expect(200);
+    // The fake bridge never marks on its own, so any revision change here
+    // would be an unconditional route-layer mark — which must not exist.
+    expect(primaryBridge.getSessionCatalogVersion().revision).toBe(v0);
+    expect(primaryBridge.metadataCalls).toHaveLength(1);
   });
 });

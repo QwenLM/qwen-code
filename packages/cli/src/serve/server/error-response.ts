@@ -236,6 +236,17 @@ export function sendBridgeError(
     return;
   }
   if (sendGenerationClosedError(res, err)) return;
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    (err.code === 'session_media_gone' ||
+      err.code === 'invalid_session_media_reference')
+  ) {
+    res
+      .status(err.code === 'session_media_gone' ? 410 : 400)
+      .json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,

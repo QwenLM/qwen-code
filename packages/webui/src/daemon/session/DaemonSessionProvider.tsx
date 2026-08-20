@@ -20,8 +20,10 @@ import {
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   extractServerTimestamp,
+  isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -32,6 +34,7 @@ import {
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
+  type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -157,6 +160,7 @@ interface TranscriptHistoryMaterialization {
   nextOrdinal: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -274,6 +278,11 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  for (const diagnostic of current.unrecognizedDiagnostics) {
+    for (const recordId of diagnostic.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -298,6 +307,10 @@ function materializeTranscriptHistory(
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: history.toolBlockByCallId,
     permissionBlockByRequestId: history.permissionBlockByRequestId,
+    // History pages can carry frames recorded by newer daemon versions, exactly
+    // forward-compat case the sidechannel exists for (#8823); keep them
+    // instead of dropping the throwaway store's diagnostics.
+    unrecognizedDiagnostics: history.unrecognizedDiagnostics,
   };
 }
 
@@ -317,6 +330,12 @@ function applyTranscriptHistory(
       ...history.permissionBlockByRequestId,
       ...current.permissionBlockByRequestId,
     },
+    // History entries are older than anything received live, so they go
+    // first; the slice keeps the newest entries within the sidechannel cap.
+    unrecognizedDiagnostics: [
+      ...history.unrecognizedDiagnostics,
+      ...current.unrecognizedDiagnostics,
+    ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
   };
 }
 
@@ -344,6 +363,8 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const workingDir = boundedString(rawInput?.['working_dir'], 240);
+  const agentName = boundedString(rawInput?.['name'], 120);
   const todoId =
     typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
@@ -357,9 +378,11 @@ function projectSubagentToolUpdate(
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
         ...(todoId ? { todo_id: todoId } : {}),
-        ...(rawInput['run_in_background'] === true
-          ? { run_in_background: true }
+        ...(typeof rawInput['run_in_background'] === 'boolean'
+          ? { run_in_background: rawInput['run_in_background'] }
           : {}),
+        ...(workingDir ? { working_dir: workingDir } : {}),
+        ...(agentName ? { name: agentName } : {}),
       }
     : undefined;
   const projectedOutput = rawOutput
@@ -496,6 +519,7 @@ interface HeartbeatFailureState {
 // is a history-preservation tradeoff rather than a claim that large transcripts
 // are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
 const DEFAULT_MAX_BLOCKS = 200_000;
+const TRANSCRIPT_DISPATCH_BATCH_MS = 16;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -633,6 +657,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   >(new WeakSet());
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
+  // Aborts the reconnect backoff wait so a caller can force an immediate SSE
+  // rebuild (e.g. a prompt submitted while the stream is down).
+  const reconnectAbortRef = useRef<AbortController | undefined>(undefined);
   const loadWarningsRef = useRef(loadWarnings);
   const historyPageSizeRef = useRef(historyPageSize);
   const subagentTranscriptModeRef = useRef(subagentTranscriptMode);
@@ -742,6 +769,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, []);
 
+  const sessionEffectWorkspaceCwd = restoreWorkspaceCwd ?? workspaceCwd;
+
   useEffect(() => {
     if (!autoConnect) return undefined;
     if (!workspaceClientRef.current && !resolvedBaseUrl) {
@@ -775,8 +804,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // drains already-buffered events back-to-back via microtasks, so a
     // microtask flush would run between every event and never coalesce. A
     // macrotask only runs once the generator blocks on a genuinely new network
-    // event, so a whole burst collapses into a single dispatch while steady
-    // streaming stays at ~one dispatch per network chunk.
+    // event. Holding the batch for one frame also coalesces steady streaming:
+    // copying a 50k-block immutable snapshot once per token otherwise consumes
+    // the main thread before the render throttle can help. Control and terminal
+    // paths call flushTranscriptSync below, so ordering and completion are not
+    // delayed by the window.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
     const runTranscriptFlush = (force = false) => {
@@ -813,7 +845,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (events.length === 0) return;
       for (const event of events) pendingTranscriptEvents.push(event);
       if (transcriptFlushTimer === undefined) {
-        transcriptFlushTimer = setTimeout(runTranscriptFlush, 0);
+        transcriptFlushTimer = setTimeout(
+          runTranscriptFlush,
+          TRANSCRIPT_DISPATCH_BATCH_MS,
+        );
       }
     };
     // Apply buffered transcript events immediately. Called before any control
@@ -2175,25 +2210,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              const hasBlockPathDebugEvent = uiEvents.some(
+                (e) =>
+                  e.type === 'debug' &&
+                  !isUnrecognizedDiagnosticReason(e.debugReason),
+              );
               // The debug guard below reads the committed store's active
               // assistant block, but batching leaves earlier chunks from this
               // same burst in the pending buffer until the macrotask flush. An
               // observer burst that interleaves a debug event between assistant
               // chunks would otherwise miss the still-pending assistant block
               // and let the debug event split it. Commit the buffer first so the
-              // guard sees the effective state. Scoped to observer-mode debug
-              // events (rare) so steady streaming keeps batching.
-              if (
-                !hasSessionActivePrompt() &&
-                uiEvents.some((e) => e.type === 'debug')
-              ) {
+              // guard sees the effective state. Scoped to block-path debug events
+              // because unrecognized diagnostics route to the sidechannel.
+              if (!hasSessionActivePrompt() && hasBlockPathDebugEvent) {
                 flushTranscriptSync();
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
+              // `unrecognized_*` debug events route to the sidechannel
+              // instead of `blocks[]` (#8823), so they cannot split the
+              // streaming assistant block and must not be dropped here;
+              // only block-path debug events still need the guard.
               const eventsToDispatch = shouldGuardAssistant
-                ? transcriptUiEvents.filter((e) => e.type !== 'debug')
+                ? transcriptUiEvents.filter(
+                    (e) =>
+                      e.type !== 'debug' ||
+                      isUnrecognizedDiagnosticReason(e.debugReason),
+                  )
                 : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
@@ -2696,7 +2741,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           status: 'disconnected',
           error: undefined,
         }));
-        await delay(delayMs, abort.signal);
+        reconnectAbortRef.current?.abort();
+        const reconnectAbort = new AbortController();
+        reconnectAbortRef.current = reconnectAbort;
+        const onEffectAbort = () => reconnectAbort.abort();
+        abort.signal.addEventListener('abort', onEffectAbort, { once: true });
+        await delay(delayMs, reconnectAbort.signal);
+        abort.signal.removeEventListener('abort', onEffectAbort);
       }
     };
 
@@ -2764,7 +2815,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoReconnect,
     resolvedBaseUrl,
     resolvedToken,
-    workspaceCwd,
+    sessionEffectWorkspaceCwd,
     modelServiceId,
     sessionScope,
     maxQueued,
@@ -2950,11 +3001,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
-          if (!restartEventStreamOnPrompt) return;
           const eventStream = eventStreamRef.current;
-          if (eventStream?.sessionId !== sessionId) return;
-          eventStream.restartRequested = true;
-          eventStream.controller.abort();
+          if (eventStream?.sessionId === sessionId) {
+            // Live stream: restart it only in the opt-in prompt-restart mode.
+            if (!restartEventStreamOnPrompt) return;
+            eventStream.restartRequested = true;
+            eventStream.controller.abort();
+            return;
+          }
+          // The stream is already down (reconnecting with backoff): a prompt
+          // was submitted, so skip the remaining wait and rebuild the SSE
+          // immediately so the response events land without the backoff delay.
+          if (sessionRef.current?.sessionId === sessionId) {
+            reconnectAbortRef.current?.abort();
+          }
         },
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
@@ -3067,18 +3127,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       });
       let terminalFailure = false;
       try {
-        const page = await activeSession.client.getSessionTranscriptPage(
-          activeSession.sessionId,
-          {
-            ...(history.cursor !== undefined
-              ? { cursor: history.cursor }
-              : history.beforeRecordId !== undefined
-                ? { beforeRecordId: history.beforeRecordId }
-                : {}),
-            limit: historyPageSizeRef.current ?? 100,
-            clientId: activeSession.clientId,
-          },
-        );
+        const page = await activeSession.getTranscriptPage({
+          ...(history.cursor !== undefined
+            ? { cursor: history.cursor }
+            : history.beforeRecordId !== undefined
+              ? { beforeRecordId: history.beforeRecordId }
+              : {}),
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
         if (
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history

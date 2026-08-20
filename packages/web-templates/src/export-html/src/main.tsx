@@ -22,6 +22,7 @@ declare const QwenCodeWebUI: {
     messages: unknown[];
     autoScroll: boolean;
     theme: string;
+    showExpandControl?: boolean;
   }) => React.ReactNode;
   PlatformProvider: (props: {
     value: unknown;
@@ -76,7 +77,12 @@ const App = () => {
       <div className="content-wrapper">
         <div className="chat-container">
           <PlatformProvider value={platformContext}>
-            <ChatViewer messages={messages} autoScroll={false} theme={theme} />
+            <ChatViewer
+              messages={messages}
+              autoScroll={false}
+              theme={theme}
+              showExpandControl
+            />
           </PlatformProvider>
         </div>
         {metadata && <MetadataSidebar metadata={metadata} />}

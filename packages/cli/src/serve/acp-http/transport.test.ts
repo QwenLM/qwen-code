@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -79,6 +79,8 @@ import {
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
+import { CredentialStore } from '../local-control/credentials.js';
+import { tagListener } from '../local-control/listener-identity.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -181,6 +183,17 @@ class FakeBridge {
   cancelled: string[] = [];
   workspaceEvents: BridgeEvent[] = [];
   knownClientIdSet = new Set<string>();
+  catalogRevision = 0;
+  readonly catalogGeneration = 'transport-fake-catalog-generation';
+  getSessionCatalogVersion() {
+    return {
+      generation: this.catalogGeneration,
+      revision: this.catalogRevision,
+    };
+  }
+  markSessionCatalogChanged() {
+    this.catalogRevision += 1;
+  }
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -5429,6 +5442,112 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('ACP catalog mutations advance the bridge catalog revision with exact no-op semantics', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+      await writeStoredSession(sessionId);
+      const revision = () => bridge.getSessionCatalogVersion().revision;
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const v0 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 230,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 230,
+        result: { archived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v0);
+
+      const v1 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 231,
+        method: '_qwen/sessions/unarchive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 231,
+        result: { unarchived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v1);
+
+      const v2 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 232,
+        method: '_qwen/session/update_organization',
+        params: { sessionId, isPinned: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 232,
+        result: { sessionId, isPinned: true },
+      });
+      expect(revision()).toBeGreaterThan(v2);
+
+      const v3 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 233,
+        method: '_qwen/workspace/session_groups/create',
+        params: { name: 'acp-group', color: 'blue' },
+      });
+      const created = (await reader.next()) as {
+        result?: { group?: { id?: string } };
+      };
+      const groupId = created.result?.group?.id;
+      expect(typeof groupId).toBe('string');
+      expect(revision()).toBeGreaterThan(v3);
+
+      const v4 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 236,
+        method: '_qwen/workspace/session_groups/update',
+        params: { groupId, name: 'acp-group-renamed' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 236,
+        result: { group: { id: groupId, name: 'acp-group-renamed' } },
+      });
+      expect(revision()).toBeGreaterThan(v4);
+
+      // A group delete that reports `deleted: false` changes nothing.
+      const v5 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 234,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId: 'missing-group' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 234,
+        result: { deleted: false },
+      });
+      expect(revision()).toBe(v5);
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 235,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 235,
+        result: { deleted: true },
+      });
+      expect(revision()).toBeGreaterThan(v5);
+
+      reader.close();
+    });
+  });
+
   it('session/load allows concurrent restores for the same session', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440126';
@@ -10199,7 +10318,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 // ── WebSocket transport security tests ────────────────────────────────
 describe('ACP WebSocket transport security', () => {
   let server: Server;
+  let lanServer: Server | undefined;
+  let acpHandle: AcpHttpHandle | undefined;
   let port: number;
+  let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
 
@@ -10218,6 +10340,7 @@ describe('ACP WebSocket transport security', () => {
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+      localControlToken?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -10225,12 +10348,19 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
+      const credentials = opts.localControlToken
+        ? new CredentialStore(opts.token)
+        : undefined;
+      if (opts.localControlToken) {
+        credentials!.addPairingToken('test-pairing', opts.localControlToken);
+      }
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
         boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
         enabled: true,
         daemonEnv: opts.daemonEnv,
         token: opts.token,
+        credentials,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
@@ -10258,13 +10388,33 @@ describe('ACP WebSocket transport security', () => {
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
         handle?.attachServer(listeningServer);
-        resolve();
+        acpHandle = handle;
+        if (!opts.localControlToken) {
+          resolve();
+          return;
+        }
+        const localServer = createServer(app);
+        localServer.listen(0, '127.0.0.1', () => {
+          lanPort = (localServer.address() as AddressInfo).port;
+          const authority = `127.0.0.1:${lanPort}`;
+          tagListener(localServer, {
+            kind: 'local-control',
+            authority,
+            origin: `http://${authority}`,
+          });
+          handle?.attachServer(localServer);
+          lanServer = localServer;
+          resolve();
+        });
       });
       server = listeningServer;
     });
   }
 
   afterEach(async () => {
+    lanServer?.closeAllConnections?.();
+    await new Promise<void>((r) => lanServer?.close(() => r()) ?? r());
+    lanServer = undefined;
     server?.closeAllConnections?.();
     await new Promise<void>((r) => server?.close(() => r()) ?? r());
     if (previousCdpMcpCommand === undefined) {
@@ -10309,6 +10459,30 @@ describe('ACP WebSocket transport security', () => {
       ws.once('unexpected-response', (_req, res) => {
         resolve({ code: res.statusCode ?? 0 });
       });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
+  function wsConnectLocalControl(
+    token: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ code: number; socket?: WebSocket }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${lanPort}/acp`,
+        ['qwen-ws', bearerProto(token)],
+        {
+          headers: {
+            Origin: `http://127.0.0.1:${lanPort}`,
+            ...headers,
+          },
+          handshakeTimeout: 2000,
+        },
+      );
+      ws.once('open', () => resolve({ code: 101, socket: ws }));
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
       ws.once('error', () => resolve({ code: 0 }));
     });
   }
@@ -10707,6 +10881,54 @@ describe('ACP WebSocket transport security', () => {
   // Non-secret marker the web-shell offers alongside the bearer subprotocol so
   // the daemon can select it (never the secret) and the handshake completes.
   const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
+
+  it('accepts the pairing token and advertised Origin only on the LAN listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+    });
+
+    const paired = await wsConnectLocalControl('pairing-token');
+    expect(paired.code).toBe(101);
+    paired.socket?.terminate();
+
+    expect((await wsConnectLocalControl('runtime-token')).code).toBe(401);
+    expect(
+      (
+        await wsConnectLocalControl('pairing-token', {
+          Origin: 'http://evil.example',
+        })
+      ).code,
+    ).toBe(403);
+    expect(
+      (
+        await wsConnectLocalControl('pairing-token', {
+          Host: 'evil.example',
+        })
+      ).code,
+    ).toBe(403);
+  });
+
+  it('terminates LAN WebSockets when their listener is detached', async () => {
+    await startServer({ localControlToken: 'pairing-token' });
+    const paired = await wsConnectLocalControl('pairing-token');
+    expect(paired.code).toBe(101);
+
+    // The detach must be SELECTIVE: a client on the primary listener (the
+    // operator's own loopback Web Shell / desktop session) stays connected
+    // while only the LAN (phone) sockets are cut.
+    const primary = await wsConnect();
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+
+    const closed = new Promise<void>((resolve) =>
+      paired.socket!.once('close', () => resolve()),
+    );
+    acpHandle!.detachServer(lanServer!);
+    await closed;
+    expect(paired.socket!.readyState).toBe(WebSocket.CLOSED);
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.close();
+  });
 
   function wsConnectWithSubprotocols(
     protocols: string[],
