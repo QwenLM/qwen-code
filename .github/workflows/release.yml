@@ -386,6 +386,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
