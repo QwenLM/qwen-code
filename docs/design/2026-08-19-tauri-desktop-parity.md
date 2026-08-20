@@ -28,7 +28,7 @@ On macOS the main window uses the overlay title-bar style, hides the native titl
 
 The host initialization script adds desktop-only top padding and a drag strip inside the sidebar, marks the populated chat header as draggable except for interactive descendants, and injects a narrow right-side drag strip when no chat header exists. It observes Web Shell DOM changes so SPA navigation and empty/populated session transitions keep the drag regions correct. No full-width spacer is introduced.
 
-The same script observes the Web Shell theme and reports light or dark to a narrowly gated Tauri command. The native window theme and fallback background follow that value, while the visible title-bar color remains the Web Shell `--sidebar-background` itself.
+The same script observes the Web Shell theme and reports light or dark plus the computed sidebar color to a narrowly gated Tauri command. The native window theme and fallback background follow those values, while the visible title-bar color remains the Web Shell `--sidebar-background` itself.
 
 Other platforms keep their existing native title bar because macOS overlay and traffic-light behavior have no direct cross-platform equivalent. The in-app browser remains available on supported desktop platforms.
 

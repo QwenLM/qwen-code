@@ -66,6 +66,7 @@ async function testWebShellBrowserPanel() {
       this.hidden = false;
       this.isConnected = false;
       this.listeners = {};
+      this.classList = { contains: () => false };
       this.style = {
         setProperty: (name, value) => {
           this.style[name] = value;
@@ -85,6 +86,42 @@ async function testWebShellBrowserPanel() {
       }
       this.children ??= [];
       this.children.push(...children);
+    }
+
+    prepend(...children) {
+      for (const child of children) {
+        child.parentElement = this;
+        child.isConnected = this.isConnected;
+      }
+      this.children ??= [];
+      this.children.unshift(...children);
+    }
+
+    getAttribute(name) {
+      return this.attributes?.[name] ?? null;
+    }
+
+    querySelector(selector) {
+      if (this.querySelectorHandler) return this.querySelectorHandler(selector);
+      const datasetName = selector.match(
+        /^:scope > \[data-qwen-desktop-([a-z-]+)\]$/,
+      )?.[1];
+      if (!datasetName) return null;
+      const suffix = datasetName.replace(/-([a-z])/g, (_match, letter) =>
+        letter.toUpperCase(),
+      );
+      const key = `qwenDesktop${suffix[0].toUpperCase()}${suffix.slice(1)}`;
+      return this.children?.find((child) => key in child.dataset) ?? null;
+    }
+
+    remove() {
+      if (this.parentElement?.children) {
+        this.parentElement.children = this.parentElement.children.filter(
+          (child) => child !== this,
+        );
+      }
+      this.parentElement = undefined;
+      this.isConnected = false;
     }
 
     setAttribute(name, value) {
@@ -109,15 +146,44 @@ async function testWebShellBrowserPanel() {
   const commands = [];
   const shell = new FakeElement();
   shell.isConnected = true;
+  const sidebarShell = new FakeElement('div');
+  sidebarShell.parentElement = shell;
+  sidebarShell.isConnected = true;
   const sidebar = new FakeElement('aside');
-  sidebar.parentElement = shell;
   sidebar.isConnected = true;
+  const contextShell = new FakeElement('main');
+  contextShell.isConnected = true;
+  const contextBody = new FakeElement();
+  contextBody.parentElement = contextShell;
+  contextBody.isConnected = true;
+  const chatPane = new FakeElement();
+  chatPane.isConnected = true;
+  let chatHeader = new FakeElement('header');
+  chatHeader.isConnected = true;
+  let lightTheme = false;
+  let emptyChat = false;
+  const webShellRoot = new FakeElement();
+  webShellRoot.isConnected = true;
+  webShellRoot.querySelectorHandler = (selector) => {
+    if (selector === '[data-sidebar-shell] > aside') return sidebar;
+    if (selector === "[data-testid='chat-context-header']") {
+      return chatHeader;
+    }
+    if (selector === "[data-testid='context-body']") return contextBody;
+    if (selector === "[data-testid='chat-pane-container']") return chatPane;
+    return null;
+  };
   const documentElement = new FakeElement('html');
   documentElement.isConnected = true;
   documentElement.lang = 'en';
+  documentElement.classList = {
+    contains: (name) => name === 'theme-light' && lightTheme,
+  };
   const document = {
     body: new FakeElement('body'),
     documentElement,
+    head: new FakeElement('head'),
+    readyState: 'complete',
     addEventListener(event, listener) {
       documentListeners[event] = listener;
     },
@@ -125,11 +191,15 @@ async function testWebShellBrowserPanel() {
       return new FakeElement(tagName);
     },
     querySelector(selector) {
-      assert.equal(selector, '[data-web-shell-root] [data-sidebar-shell]');
-      return sidebar;
+      if (selector === '[data-web-shell-root]') return webShellRoot;
+      if (selector === '[data-web-shell-root] [data-sidebar-shell]') {
+        return sidebarShell;
+      }
+      throw new Error(`Unexpected selector: ${selector}`);
     },
   };
   const navigator = { platform: 'MacIntel' };
+  let mutationCallback;
   const window = {
     __TAURI__: {
       core: {
@@ -154,6 +224,19 @@ async function testWebShellBrowserPanel() {
       document,
       Element: FakeElement,
       HTMLAnchorElement: FakeAnchor,
+      getComputedStyle: (element) => ({
+        backgroundColor:
+          element === sidebar && lightTheme
+            ? 'rgb(250, 250, 250)'
+            : 'rgb(13, 13, 13)',
+        justifyContent: element === chatPane && emptyChat ? 'center' : 'normal',
+      }),
+      MutationObserver: class {
+        constructor(callback) {
+          mutationCallback = callback;
+        }
+        observe() {}
+      },
       navigator,
       requestAnimationFrame: (callback) => callback(),
       URL,
@@ -161,6 +244,35 @@ async function testWebShellBrowserPanel() {
     },
     { timeout: 5000 },
   );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(commands[0].command, 'desktop_set_theme');
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[0].args)), {
+    theme: 'dark',
+    background: [13, 13, 13],
+  });
+  assert.equal(sidebar.dataset.qwenDesktopTitlebarSidebar, '');
+  assert.equal(
+    sidebar.children[0].getAttribute('data-tauri-drag-region'),
+    'deep',
+  );
+  assert.equal(chatHeader.getAttribute('data-tauri-drag-region'), 'deep');
+
+  chatHeader = null;
+  emptyChat = true;
+  mutationCallback();
+  assert.equal(
+    contextShell.children[0].getAttribute('data-tauri-drag-region'),
+    'deep',
+  );
+  lightTheme = true;
+  mutationCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(commands.at(-1))), {
+    command: 'desktop_set_theme',
+    args: { theme: 'light', background: [250, 250, 250] },
+  });
+  commands.length = 0;
 
   const click = (anchor, overrides = {}) => {
     const event = {

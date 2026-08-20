@@ -1,4 +1,4 @@
-/* global document, Element, HTMLAnchorElement, navigator, requestAnimationFrame, ResizeObserver, URL, window */
+/* global document, Element, getComputedStyle, HTMLAnchorElement, MutationObserver, navigator, requestAnimationFrame, ResizeObserver, URL, window */
 
 (() => {
   const tauri = window.__TAURI__;
@@ -7,6 +7,8 @@
   const MIN_PANEL_WIDTH = 360;
   const MIN_WEB_SHELL_WIDTH = 480;
   const STATE_EVENT = 'qwen-desktop-browser-state';
+  const isMacOS = () => /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+  const IS_MACOS = isMacOS();
   let elements;
   let panelWidth = Math.max(
     MIN_PANEL_WIDTH,
@@ -19,6 +21,8 @@
     canGoForward: false,
   };
   let boundsObserver;
+  let desktopSyncFrame;
+  let lastNativeTheme = '';
 
   const invoke = (command, args = {}) => tauri.core.invoke(command, args);
   const ignoreFailure = () => undefined;
@@ -267,8 +271,7 @@
 
   const shouldOpenInApp = (event, anchor) => {
     if (event.button !== 0) return false;
-    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
-    if (isMac ? !event.metaKey : !event.ctrlKey) return false;
+    if (isMacOS() ? !event.metaKey : !event.ctrlKey) return false;
     const url = normalizeUrl(anchor.href);
     if (!url) return false;
     try {
@@ -276,6 +279,99 @@
     } catch {
       return false;
     }
+  };
+
+  const parseRgb = (value) => {
+    const match = value.match(
+      /^rgba?\(\s*(\d+)\s*[, ]\s*(\d+)\s*[, ]\s*(\d+)/i,
+    );
+    if (!match) return undefined;
+    return match.slice(1, 4).map((part) => Number(part));
+  };
+
+  const syncNativeTheme = (root, sidebar) => {
+    const theme = document.documentElement.classList.contains('theme-light')
+      ? 'light'
+      : 'dark';
+    const background =
+      (sidebar && parseRgb(getComputedStyle(sidebar).backgroundColor)) ||
+      (theme === 'light' ? [250, 250, 250] : [13, 13, 13]);
+    const key = `${theme}:${background.join(',')}`;
+    if (key === lastNativeTheme || !root.isConnected) return;
+    lastNativeTheme = key;
+    void invoke('desktop_set_theme', { theme, background }).catch(() => {
+      if (lastNativeTheme === key) lastNativeTheme = '';
+    });
+  };
+
+  const syncTitleBar = (root, sidebar) => {
+    if (!IS_MACOS) return;
+    if (sidebar) {
+      sidebar.dataset.qwenDesktopTitlebarSidebar = '';
+      let drag = sidebar.querySelector(
+        ':scope > [data-qwen-desktop-sidebar-drag]',
+      );
+      if (!drag) {
+        drag = document.createElement('div');
+        drag.dataset.qwenDesktopSidebarDrag = '';
+        drag.setAttribute('aria-hidden', 'true');
+        drag.setAttribute('data-tauri-drag-region', 'deep');
+        sidebar.prepend(drag);
+      }
+    }
+
+    const header = root.querySelector("[data-testid='chat-context-header']");
+    if (header) {
+      header.dataset.qwenDesktopTitlebarHeader = '';
+      header.setAttribute('data-tauri-drag-region', 'deep');
+    }
+
+    const contextBody = root.querySelector("[data-testid='context-body']");
+    const chatPane = root.querySelector("[data-testid='chat-pane-container']");
+    const contextShell = contextBody?.parentElement;
+    if (!contextShell || !chatPane) return;
+    contextShell.dataset.qwenDesktopContextShell = '';
+    let emptyDrag = contextShell.querySelector(
+      ':scope > [data-qwen-desktop-empty-drag]',
+    );
+    const isEmptyChat =
+      !header && getComputedStyle(chatPane).justifyContent === 'center';
+    if (isEmptyChat && !emptyDrag) {
+      emptyDrag = document.createElement('div');
+      emptyDrag.dataset.qwenDesktopEmptyDrag = '';
+      emptyDrag.setAttribute('aria-hidden', 'true');
+      emptyDrag.setAttribute('data-tauri-drag-region', 'deep');
+      contextShell.append(emptyDrag);
+    } else if (!isEmptyChat) {
+      emptyDrag?.remove();
+    }
+  };
+
+  const syncDesktopSurface = () => {
+    const root = document.querySelector('[data-web-shell-root]');
+    if (!root) return;
+    const sidebar = root.querySelector('[data-sidebar-shell] > aside');
+    syncNativeTheme(root, sidebar);
+    syncTitleBar(root, sidebar);
+  };
+
+  const scheduleDesktopSync = () => {
+    if (desktopSyncFrame !== undefined) return;
+    desktopSyncFrame = requestAnimationFrame(() => {
+      desktopSyncFrame = undefined;
+      syncDesktopSurface();
+    });
+  };
+
+  const startDesktopSync = () => {
+    syncDesktopSurface();
+    const observer = new MutationObserver(scheduleDesktopSync);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+      childList: true,
+      subtree: true,
+    });
   };
 
   document.addEventListener(
@@ -295,6 +391,13 @@
     }
   });
   window.addEventListener('resize', syncBounds);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startDesktopSync, {
+      once: true,
+    });
+  } else {
+    startDesktopSync();
+  }
 
   const style = document.createElement('style');
   style.dataset.qwenDesktopBrowserStyle = '';
@@ -389,6 +492,39 @@
       min-height: 0;
       min-width: 0;
       position: relative;
+    }
+    ${
+      IS_MACOS
+        ? `
+    [data-qwen-desktop-titlebar-sidebar] {
+      padding-top: 40px !important;
+    }
+    [data-qwen-desktop-sidebar-drag] {
+      height: 32px;
+      left: 0;
+      position: absolute;
+      right: 0;
+      top: 0;
+      user-select: none;
+      z-index: 3;
+    }
+    [data-qwen-desktop-titlebar-header] {
+      user-select: none;
+    }
+    [data-qwen-desktop-context-shell] {
+      position: relative;
+    }
+    [data-qwen-desktop-empty-drag] {
+      height: 28px;
+      left: 0;
+      position: absolute;
+      right: 0;
+      top: 0;
+      user-select: none;
+      z-index: 4;
+    }
+    `
+        : ''
     }
   `;
   const styleRoot = document.head || document.documentElement;

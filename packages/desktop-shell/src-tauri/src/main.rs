@@ -20,9 +20,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::utils::config::Color;
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
-    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, Listener, Manager, RunEvent, State, Theme, WebviewUrl, WebviewWindow,
+    WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -118,6 +122,7 @@ fn main() {
             browser_panel::browser_panel_reload,
             browser_panel::browser_panel_open_external,
             browser_panel::browser_panel_close,
+            desktop_set_theme,
         ])
         .setup(setup_app);
 
@@ -249,14 +254,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     let (width, height) = default_window_size();
 
-    let window = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
-        .title("Qwen Code")
-        .inner_size(width, height)
-        .min_inner_size(900.0, 600.0)
-        .initialization_script(include_str!("../web-shell-computer-use.js"))
-        .initialization_script(include_str!("../web-shell-desktop.js"))
-        .initialization_script(include_str!("../web-shell-computer-use.js"))
-        .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
+    let window_builder =
+        WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
+            .title("Qwen Code")
+            .inner_size(width, height)
+            .min_inner_size(900.0, 600.0)
+             .background_color(Color(13, 13, 13, 255))
+             .initialization_script(include_str!("../web-shell-desktop.js"))
+             .initialization_script(include_str!("../web-shell-computer-use.js"))
+             .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin));
+    #[cfg(target_os = "macos")]
+    let window_builder = window_builder
+         .title_bar_style(TitleBarStyle::Overlay)
+         .hidden_title(true);
+     let window = window_builder
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
                 let _ = open::that_detached(url.as_str());
@@ -830,6 +841,32 @@ fn require_runtime_origin(
     } else {
         Err("This command is only available to the active Web Shell.".to_string())
     }
+}
+
+#[tauri::command]
+fn desktop_set_theme(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    theme: String,
+    background: [u8; 3],
+) -> Result<(), String> {
+    require_runtime_origin(&webview, &state)?;
+    let theme = match theme.as_str() {
+        "dark" => Theme::Dark,
+        "light" => Theme::Light,
+        _ => return Err("Unsupported desktop theme.".to_string()),
+    };
+    webview
+        .set_theme(Some(theme))
+        .map_err(|error| format!("Failed to set the desktop theme: {error}"))?;
+    webview
+        .set_background_color(Some(Color(
+            background[0],
+            background[1],
+            background[2],
+            255,
+        )))
+        .map_err(|error| format!("Failed to set the desktop background: {error}"))
 }
 
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
