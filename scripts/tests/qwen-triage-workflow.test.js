@@ -1992,56 +1992,57 @@ describe('qwen-triage verify hardening', () => {
       // both predicates: `[ -L "$WS/" ]` is false and `[ ! -d "$WS/" ]`
       // resolves through the link, so one trailing slash hides the
       // corruption entirely.
-      const stepName = WIPE_STEPS[0];
-      const parent = mkdtempSync(join(tmpdir(), 'verify-heal-file-'));
-      const ws = join(parent, 'workspace');
-      writeFileSync(ws, 'not a directory');
-      try {
-        const res = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: ws,
-              RUNNER_WORKSPACE: parent,
-              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-file-'));
+        const ws = join(parent, 'workspace');
+        writeFileSync(ws, 'not a directory');
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
             },
-          },
-        );
-        expect(res.status, res.stdout + res.stderr).toBe(0);
-        expect(res.stdout + res.stderr).toContain('it was not a directory');
-        expect(lstatSync(ws).isDirectory()).toBe(true);
-      } finally {
-        rmSync(parent, { recursive: true, force: true });
-      }
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          expect(res.stdout + res.stderr).toContain('it was not a directory');
+          expect(lstatSync(ws).isDirectory()).toBe(true);
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+        }
 
-      const linkParent = mkdtempSync(join(tmpdir(), 'verify-heal-slash-'));
-      const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
-      const linkWs = join(linkParent, 'workspace');
-      writeFileSync(join(outside, 'canary'), 'x');
-      symlinkSync(outside, linkWs);
-      try {
-        const res = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: `${linkWs}/`,
-              RUNNER_WORKSPACE: linkParent,
-              GITHUB_STEP_SUMMARY: join(linkParent, 'summary'),
+        const linkParent = mkdtempSync(join(tmpdir(), 'verify-heal-slash-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const linkWs = join(linkParent, 'workspace');
+        writeFileSync(join(outside, 'canary'), 'x');
+        symlinkSync(outside, linkWs);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: `${linkWs}/`,
+                RUNNER_WORKSPACE: linkParent,
+                GITHUB_STEP_SUMMARY: join(linkParent, 'summary'),
+              },
             },
-          },
-        );
-        expect(res.status, res.stdout + res.stderr).toBe(0);
-        expect(lstatSync(linkWs).isSymbolicLink()).toBe(false);
-        expect(readdirSync(outside)).toEqual(['canary']);
-      } finally {
-        rmSync(linkParent, { recursive: true, force: true });
-        rmSync(outside, { recursive: true, force: true });
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          expect(lstatSync(linkWs).isSymbolicLink()).toBe(false);
+          expect(readdirSync(outside)).toEqual(['canary']);
+        } finally {
+          rmSync(linkParent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
       }
     },
   );
@@ -2053,34 +2054,36 @@ describe('qwen-triage verify hardening', () => {
       // the runner parses `::` at the start of ANY stdout line as a workflow
       // command — so a target of $'…\n::error::forged' would forge an
       // annotation from the very step reporting the corruption.
-      const parent = mkdtempSync(join(tmpdir(), 'verify-heal-inject-'));
-      const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
-      const ws = join(parent, 'workspace');
-      symlinkSync(`${outside}\n::error::forged-annotation`, ws);
-      try {
-        const res = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', extractRun(WIPE_STEPS[0])],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: ws,
-              RUNNER_WORKSPACE: parent,
-              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-inject-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const ws = join(parent, 'workspace');
+        symlinkSync(`${outside}\n::error::forged-annotation`, ws);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
             },
-          },
-        );
-        expect(res.status, res.stdout + res.stderr).toBe(0);
-        const out = res.stdout + res.stderr;
-        expect(out).toContain('healing workspace');
-        expect(out).toContain('pointed at');
-        for (const line of out.split('\n')) {
-          expect(line.startsWith('::error::')).toBe(false);
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          const out = res.stdout + res.stderr;
+          expect(out).toContain('healing workspace');
+          expect(out).toContain('pointed at');
+          for (const line of out.split('\n')) {
+            expect(line.startsWith('::error::')).toBe(false);
+          }
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
         }
-      } finally {
-        rmSync(parent, { recursive: true, force: true });
-        rmSync(outside, { recursive: true, force: true });
       }
     },
   );
@@ -2124,34 +2127,36 @@ describe('qwen-triage verify hardening', () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
       // a path that is still a symlink. Root bypasses the mode bits, so the
       // fixture cannot produce the refusal there.
-      const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
-      const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
-      const ws = join(parent, 'workspace');
-      writeFileSync(join(outside, 'canary'), 'x');
-      symlinkSync(outside, ws);
-      chmodSync(parent, 0o555);
-      try {
-        const res = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', extractRun(WIPE_STEPS[0])],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: ws,
-              RUNNER_WORKSPACE: parent,
-              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const ws = join(parent, 'workspace');
+        writeFileSync(join(outside, 'canary'), 'x');
+        symlinkSync(outside, ws);
+        chmodSync(parent, 0o555);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
             },
-          },
-        );
-        expect(res.status).not.toBe(0);
-        expect(res.stdout + res.stderr).toContain('could not remove');
-        expect(lstatSync(ws).isSymbolicLink()).toBe(true);
-        expect(readdirSync(outside)).toEqual(['canary']);
-      } finally {
-        chmodSync(parent, 0o755);
-        rmSync(parent, { recursive: true, force: true });
-        rmSync(outside, { recursive: true, force: true });
+          );
+          expect(res.status, stepName).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain('could not remove');
+          expect(lstatSync(ws).isSymbolicLink()).toBe(true);
+          expect(readdirSync(outside)).toEqual(['canary']);
+        } finally {
+          chmodSync(parent, 0o755);
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
       }
     },
   );
