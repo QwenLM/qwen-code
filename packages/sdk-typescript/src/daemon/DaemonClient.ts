@@ -3301,16 +3301,10 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionAttachmentReference> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments?name=${urlEncode(name)}`,
       {
         method: 'POST',
-        headers: this.headers(
-          {
-            'Content-Type': mimeType,
-            'X-Qwen-Attachment-Name': encodeURIComponent(name),
-          },
-          opts?.clientId,
-        ),
+        headers: this.headers({ 'Content-Type': mimeType }, opts?.clientId),
         body: data,
         signal: opts?.signal,
       },

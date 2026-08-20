@@ -9576,10 +9576,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'notes 你好.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', encodeURIComponent('notes 你好.txt'))
         .send(Buffer.from('hello'));
 
       expect(uploaded.status).toBe(201);
@@ -9599,10 +9599,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'empty.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'empty.txt')
         .set('Content-Length', '0')
         .send(Buffer.alloc(0));
 
@@ -9623,10 +9623,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'empty.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'empty.png')
         .set('Content-Length', '0')
         .send(Buffer.alloc(0));
 
@@ -9644,10 +9644,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/SESSION/s-1/ATTACHMENTS')
+        .query({ name: 'notes.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'notes.txt')
         .send(Buffer.from('hello'));
 
       expect(uploaded.status).toBe(201);
@@ -9665,10 +9665,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'data.json' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'application/json')
-        .set('X-Qwen-Attachment-Name', 'data.json')
         .send('{"enabled":true}');
 
       expect(uploaded.status).toBe(201);
@@ -9689,10 +9689,10 @@ describe('createServeApp', () => {
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
 
       expect(uploaded.status).toBe(201);
@@ -9742,7 +9742,7 @@ describe('createServeApp', () => {
       expect(response.status).toBe(400);
     });
 
-    it('rejects malformed encoded attachment names', async () => {
+    it('rejects repeated attachment name query parameters', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
@@ -9750,14 +9750,17 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: ['one.txt', 'two.txt'] })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', '%E0%A4%A')
         .send('hello');
 
       expect(response.status).toBe(400);
-      expect(response.body).toEqual({ error: 'attachment name is invalid' });
+      expect(response.body).toEqual({
+        error:
+          'request body, Content-Type, and name query parameter are required',
+      });
     });
 
     it('maps attachment name and Content-Type mismatches to 400', async () => {
@@ -9772,10 +9775,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'screenshot.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'screenshot.png')
         .send('hello');
 
       expect(response.status).toBe(400);
@@ -9792,10 +9795,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.svg' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/svg+xml')
-        .set('X-Qwen-Attachment-Name', 'image.svg')
         .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
 
       expect(response.status).toBe(201);
@@ -9818,10 +9821,10 @@ describe('createServeApp', () => {
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
       expect(uploaded.status).toBe(201);
 
@@ -9843,10 +9846,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(Buffer.alloc(8 * 1024 * 1024 + 1));
 
       expect(response.status).toBe(413);
