@@ -1621,9 +1621,14 @@ export async function registerCreateSubSessionTool(
   // snapshotted the chat's tool declarations, and the tool is deferred — so it
   // stays filtered out of the declarations until revealed. Reveal it and
   // refresh the snapshot so the model is actually offered the tool this
-  // session; otherwise only a `/clear`-style `startChat` re-run would pick it
-  // up (via the startup preload), silently defeating the registration.
+  // session. Pin the reveal so a `/clear`-style `startChat` re-run
+  // re-declares it: the startup preload that would otherwise restore it is
+  // all-or-nothing on a schema-size budget (and off entirely when the
+  // operator threshold is ≤ 0 / non-finite), so an unpinned reveal would
+  // silently drop the tool from the declarations on the first `/clear` in
+  // those configurations.
   toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
+  toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
   await config.getGeminiClient().setTools();
 }
 

@@ -482,6 +482,7 @@ describe('Session', () => {
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
+    pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
@@ -753,6 +754,7 @@ describe('Session', () => {
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
       revealDeferredTool: vi.fn(),
+      pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         names.map((name) => ({ name })),
@@ -6771,6 +6773,12 @@ describe('Session', () => {
       await registerCreateSubSessionTool(mockConfig);
 
       expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+      // The reveal is session-setup state, not ToolSearch discovery: it must
+      // be pinned so a `/clear` re-run re-declares the tool even when the
+      // budget-based startup preload withholds it.
+      expect(mockToolRegistry.pinDeferredToolReveal).toHaveBeenCalledWith(
         'create_sub_session',
       );
       expect(mockGeminiClient.setTools).toHaveBeenCalledTimes(1);
