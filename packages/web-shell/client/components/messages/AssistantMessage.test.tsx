@@ -147,6 +147,55 @@ describe('AssistantMessage thinking logic', () => {
     expect(container.textContent).not.toContain('private chain of thought');
   });
 
+  it('does not recreate the elapsed timer on every streamed chunk', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const tree = (content: string, isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <ThinkingMessage
+          content={content}
+          isStreaming={isStreaming}
+          timestamp={0}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(tree('first', true)));
+    const intervalCountAfterMount = setIntervalSpy.mock.calls.length;
+
+    act(() => root.render(tree('first second', true)));
+    act(() => root.render(tree('first second third', true)));
+
+    expect(setIntervalSpy.mock.calls.length).toBe(intervalCountAfterMount);
+  });
+
+  it('does not start the elapsed timer for undefined content', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const intervalCountBeforeRender = setIntervalSpy.mock.calls.length;
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ThinkingMessage
+            content={undefined as unknown as string}
+            isStreaming
+            timestamp={0}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(setIntervalSpy.mock.calls.length).toBe(intervalCountBeforeRender);
+  });
+
   it('only translates completed thinking and reuses the in-memory result', async () => {
     const generateContent = vi.fn(async function* () {
       yield {

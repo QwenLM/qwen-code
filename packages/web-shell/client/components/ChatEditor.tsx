@@ -31,8 +31,6 @@ import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
-import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
-import { SpecularComposerEffect } from './SpecularComposerEffect';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -172,7 +170,6 @@ interface ChatEditorProps {
   cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
-  animatePlaceholder?: boolean;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
@@ -470,63 +467,89 @@ function QuickActionsIcon() {
   );
 }
 
-function TypewriterPlaceholder({ text }: { text: string }) {
-  const totalRuns = 2;
-  const replayDelay = 3000;
-  const reducedMotion = usePrefersReducedMotion();
-  const [visibleText, setVisibleText] = useState(reducedMotion ? text : '');
-  const [finished, setFinished] = useState(false);
+function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
+  let glowRaf: number | undefined;
+  let pulseRaf: number | undefined;
+  let pulseDecayTimer: number | undefined;
+  let typingTimer: number | undefined;
+  let glowCurrent = 0;
+  let pulseCurrent = 0;
 
-  useEffect(() => {
-    if (reducedMotion) {
-      setVisibleText(text);
-      setFinished(false);
-      return undefined;
+  const apply = (on: number, pulse: number) => {
+    glowRootEl.style.setProperty('--dac-glow-on', on.toFixed(4));
+    glowRootEl.style.setProperty('--dac-glow-pulse', pulse.toFixed(4));
+  };
+
+  const animateGlow = (target: number) => {
+    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
+    const start = glowCurrent;
+    const diff = target - start;
+    if (Math.abs(diff) < 0.001) {
+      glowCurrent = target;
+      apply(target, pulseCurrent);
+      return;
     }
-
-    let run = 0;
-    let timer = 0;
-    const startRun = () => {
-      let index = 0;
-      setVisibleText('');
-      setFinished(false);
-      const typeNextCharacter = () => {
-        index += 1;
-        setVisibleText(text.slice(0, index));
-        if (index === text.length) {
-          run += 1;
-          setFinished(true);
-          if (run < totalRuns) {
-            timer = window.setTimeout(startRun, replayDelay);
-          }
-          return;
-        }
-        timer = window.setTimeout(typeNextCharacter, 45);
-      };
-      timer = window.setTimeout(typeNextCharacter, 45);
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min((now - t0) / 220, 1);
+      glowCurrent = start + diff * (1 - (1 - t) ** 2);
+      apply(glowCurrent, pulseCurrent);
+      glowRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
     };
-    startRun();
-    return () => window.clearTimeout(timer);
-  }, [reducedMotion, text]);
+    glowRaf = window.requestAnimationFrame(tick);
+  };
 
-  return (
-    <span
-      className={styles.typewriterPlaceholder}
-      data-web-shell-composer-typewriter
-      aria-hidden="true"
-    >
-      {visibleText}
-      {!reducedMotion && (
-        <span
-          className={`${styles.typewriterCaret} ${
-            finished ? styles.typewriterCaretFinished : ''
-          }`}
-        >
-          _
-        </span>
-      )}
-    </span>
-  );
+  const animatePulseDecay = () => {
+    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
+    const start = pulseCurrent;
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min((now - t0) / 300, 1);
+      pulseCurrent = start * (1 - t);
+      apply(glowCurrent, pulseCurrent);
+      pulseRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
+    };
+    pulseRaf = window.requestAnimationFrame(tick);
+  };
+
+  const setTyping = (on: boolean) => {
+    if (on) glowRootEl.setAttribute('data-dac-typing', '');
+    else glowRootEl.removeAttribute('data-dac-typing');
+  };
+
+  const onFocus = () => animateGlow(1);
+  const onBlur = () => {
+    animateGlow(0);
+    setTyping(false);
+    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
+  };
+  const onKeydown = () => {
+    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
+    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
+    pulseCurrent = 1;
+    apply(glowCurrent, 1);
+    pulseDecayTimer = window.setTimeout(animatePulseDecay, 100);
+    setTyping(true);
+    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
+    typingTimer = window.setTimeout(() => setTyping(false), 650);
+  };
+
+  inputEl.addEventListener('focus', onFocus);
+  inputEl.addEventListener('blur', onBlur);
+  inputEl.addEventListener('keydown', onKeydown);
+  if (document.activeElement === inputEl) animateGlow(1);
+
+  return () => {
+    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
+    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
+    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
+    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
+    inputEl.removeEventListener('focus', onFocus);
+    inputEl.removeEventListener('blur', onBlur);
+    inputEl.removeEventListener('keydown', onKeydown);
+    apply(0, 0);
+    setTyping(false);
+  };
 }
 
 function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
@@ -1412,7 +1435,6 @@ export const ChatEditor = memo(
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
-      animatePlaceholder = true,
       commands,
       skills = [],
       slashCommandCategoryOrder,
@@ -1484,9 +1506,12 @@ export const ChatEditor = memo(
       builtinAtProviders: contextBuiltinAtProviders,
       atProviders: contextAtProviders,
       fileUploadEnabled,
+      fileUploadDirectory,
     } = useWebShellCustomization();
-    // Props win when set (main composer). Split-view ChatPane omits them and
-    // falls back to the App-level customization context.
+    // At-mention provider props win when set (main composer). Split-view
+    // ChatPane omits them and falls back to the App-level customization
+    // context. (Unlike the providers, file upload control comes ONLY from
+    // the customization context — no prop override exists.)
     const resolvedBuiltinAtProviders =
       builtinAtProviders ?? contextBuiltinAtProviders;
     const resolvedAtProviders = atProviders ?? contextAtProviders;
@@ -1579,6 +1604,7 @@ export const ChatEditor = memo(
       onCycleMode,
       onToggleShortcuts,
       disabled,
+      fileDragEnabled: fileUploadEnabled !== false,
       placeholderText,
       commands,
       skills,
@@ -1727,6 +1753,13 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
+        if (fileUploadEnabled === false) {
+          // Host force-disables file drag-in entirely: cancel the drop so
+          // the browser cannot navigate to the file, but ingest nothing on
+          // any lane (the image lane is gated off too).
+          event.preventDefault();
+          return;
+        }
         if (
           !uploadEnabled ||
           files.length === 0 ||
@@ -1738,12 +1771,14 @@ export const ChatEditor = memo(
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        uploadFiles(files, '.', insertUploadReference);
+        uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
+        fileUploadEnabled,
+        fileUploadDirectory,
         uploadEnabled,
         uploadFiles,
         insertUploadReference,
@@ -1817,7 +1852,6 @@ export const ChatEditor = memo(
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
-    const [typewriterSuppressed, setTypewriterSuppressed] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const slashDetailRef = useRef<HTMLDivElement>(null);
@@ -1845,14 +1879,7 @@ export const ChatEditor = memo(
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
-    const showTypewriterPlaceholder =
-      animatePlaceholder &&
-      !disabled &&
-      Boolean(placeholderText) &&
-      !core.hasInput() &&
-      !typewriterSuppressed &&
-      !core.shellMode &&
-      !followupState?.isVisible;
+    const editorViewRef = core.viewRef;
 
     useEffect(() => {
       if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -1891,6 +1918,17 @@ export const ChatEditor = memo(
         window.removeEventListener('touchstart', onPointerOutside);
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
+
+    // editorViewRef is stable for the component's lifetime, so this effect
+    // runs once and the glow stays attached to the initial contentDOM; it
+    // re-attaches only if the view ref itself is replaced (CodeMirror
+    // recreates contentDOM on view swap, which is uncommon).
+    useEffect(() => {
+      const glowRoot = containerRef.current;
+      const inputEl = editorViewRef.current?.contentDOM;
+      if (!glowRoot || !inputEl) return undefined;
+      return attachComposerGlow(glowRoot, inputEl);
+    }, [editorViewRef]);
 
     useEffect(() => {
       const container = containerRef.current;
@@ -2508,7 +2546,6 @@ export const ChatEditor = memo(
           className={styles.container}
           data-web-shell-composer-surface
           data-upload-drag-active={uploadDragActive || undefined}
-          data-typewriter-visible={showTypewriterPlaceholder || undefined}
           data-image-drag-active={
             (core.imageDragActive && !uploadDragActive) || undefined
           }
@@ -2518,6 +2555,10 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
+          // Legacy marker from the pre-#8098 glow implementation; no CSS or
+          // script consumes it today, kept as-is to stay faithful to the
+          // restored original.
+          data-dac-glow
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -2525,7 +2566,8 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <SpecularComposerEffect targetRef={containerRef} />
+          <div className={styles.dacAura} aria-hidden="true" />
+          <div className={styles.dacHalo} aria-hidden="true" />
           {uploadEnabled && (
             <input
               ref={fileInputRef}
@@ -2776,19 +2818,7 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            <div
-              className={styles.editorArea}
-              onPointerDownCapture={() => setTypewriterSuppressed(true)}
-              onKeyDownCapture={() => setTypewriterSuppressed(true)}
-              onBlurCapture={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget)) {
-                  setTypewriterSuppressed(false);
-                }
-              }}
-            >
-              {showTypewriterPlaceholder && (
-                <TypewriterPlaceholder text={placeholderText} />
-              )}
+            <div className={styles.editorArea}>
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
                   !

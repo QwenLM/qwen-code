@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   saveCacheSafeParams,
   getCacheSafeParams,
+  getCacheSafeParamsSessionId,
   clearCacheSafeParams,
   createForkedChat,
   runForkedAgent,
@@ -69,6 +70,20 @@ describe('CacheSafeParams', () => {
       expect(params!.version).toBeGreaterThan(0);
     });
 
+    it('stores session id', () => {
+      saveCacheSafeParams({}, [], 'model', 'session-a');
+
+      expect(getCacheSafeParams()?.sessionId).toBe('session-a');
+    });
+
+    it('returns the current session id without reading full params', () => {
+      saveCacheSafeParams({}, [], 'model', 'session-a');
+
+      expect(getCacheSafeParamsSessionId()).toBe('session-a');
+      clearCacheSafeParams();
+      expect(getCacheSafeParamsSessionId()).toBeUndefined();
+    });
+
     it('deep clones generationConfig', () => {
       const config: GenerateContentConfig = {
         systemInstruction: 'test',
@@ -96,11 +111,24 @@ describe('CacheSafeParams', () => {
       expect(rereadTools[0].functionDeclarations).toHaveLength(1);
     });
 
-    it('copies history containers without cloning part payloads', () => {
+    it('copies history containers and Part objects', () => {
       const historyPart = { text: 'large history entry' };
+      const nestedPart = {
+        inlineData: { mimeType: 'image/png', data: 'screenshot' },
+      };
       const historyEntry: Content = {
         role: 'user',
-        parts: [historyPart],
+        parts: [
+          historyPart,
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'screenshot',
+              response: {},
+              parts: [nestedPart],
+            },
+          },
+        ],
       };
       const historyEntryWithoutParts: Content = { role: 'model' };
       const history: Content[] = [historyEntry, historyEntryWithoutParts];
@@ -113,9 +141,14 @@ describe('CacheSafeParams', () => {
       expect(params!.history).toHaveLength(2);
       expect(params!.history).not.toBe(history);
       expect(params!.history[0]).not.toBe(historyEntry);
-      expect(params!.history[0]!.parts).toHaveLength(1);
+      expect(params!.history[0]!.parts).toHaveLength(2);
       expect(params!.history[0]!.parts).not.toBe(historyEntry.parts);
-      expect(params!.history[0]!.parts![0]).toBe(historyPart);
+      expect(params!.history[0]!.parts![0]).not.toBe(historyPart);
+      expect(params!.history[0]!.parts![0]).toEqual(historyPart);
+      const copiedNested = params!.history[0]!.parts![1]!.functionResponse
+        ?.parts as Array<typeof nestedPart>;
+      expect(copiedNested[0]).not.toBe(nestedPart);
+      expect(copiedNested[0]).toEqual(nestedPart);
       expect(params!.history[1]).not.toBe(historyEntryWithoutParts);
       expect('parts' in params!.history[1]!).toBe(false);
 
@@ -125,7 +158,7 @@ describe('CacheSafeParams', () => {
       });
       params!.history[0]!.parts!.push({ text: 'returned part mutation' });
       expect(getCacheSafeParams()!.history).toHaveLength(2);
-      expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(1);
+      expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(2);
     });
   });
 

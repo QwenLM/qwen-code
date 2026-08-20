@@ -5831,6 +5831,12 @@ export function registerSessionRoutes(
           hasActivePrompt: session.hasActivePrompt,
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+          // Bridge-local activity watermark, absent until a running prompt in
+          // this bridge publishes its first terminal. Reading it costs nothing
+          // extra: the summary is already in memory.
+          ...(session.updatedAt !== undefined
+            ? { updatedAt: session.updatedAt }
+            : {}),
         }));
       assertRuntimeOpen?.();
       lastExposedCatalogVersions.set(bridge, catalogVersion);
@@ -6221,6 +6227,76 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Register `current` before the parameter route so it is not a promptId.
+  app.get('/session/:id/turns/current', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/current',
+    );
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/current',
+          sessionId,
+        });
+      }
+    })();
+  });
+
+  app.get('/session/:id/turns/:promptId', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/:promptId',
+    );
+    if (!runtime) return;
+    const promptId = req.params['promptId'];
+    if (!promptId) {
+      res.status(400).json({ error: '`promptId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+          promptId,
+        );
+        if (!status) {
+          res.status(404).json({
+            error: `Prompt ${promptId} not found in session ${sessionId}`,
+            code: 'prompt_not_found',
+            sessionId,
+            promptId,
+          });
+          return;
+        }
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/:promptId',
+          sessionId,
+        });
+      }
+    })();
+  });
 
   app.post(
     '/session/:id/shell',

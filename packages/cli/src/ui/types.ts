@@ -102,6 +102,14 @@ export interface CompressionProps {
   originalTokenCount: number | null;
   newTokenCount: number | null;
   compressionStatus: CompressionStatus | null;
+  /**
+   * Which compression path produced this item. 'summarize' replaces the
+   * pre-marker history with a synthetic summary prefix; 'fast' (rule-based,
+   * no LLM summary) removes no user prompts from the API history, so its
+   * marker must not be treated as a rewind boundary. Absent on items from
+   * older sessions, which are treated as 'summarize'.
+   */
+  compressionKind?: 'summarize' | 'fast';
 }
 
 export interface SummaryProps {

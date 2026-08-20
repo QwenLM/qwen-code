@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +22,10 @@ import { describe, expect, it } from 'vitest';
 import { getWorkflowJob } from './workflow-helpers.js';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// Long-form rationale moved out of the YAML when the file approached
+// GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
+// than a code line) read it here.
+const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
@@ -108,6 +113,10 @@ const reviewAddressReportStep =
 const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
+  )?.[0] ?? '';
+const showRunArtifactsStep =
+  workflow.match(
+    /- name: 'Show run artifacts'[\s\S]*?(?=\n[ ]{6}- name: 'Upload run artifacts')/,
   )?.[0] ?? '';
 const prepareQwenCliSteps =
   workflow.match(
@@ -590,6 +599,7 @@ describe('qwen-autofix workflow', () => {
             ...process.env,
             PENDING_CUTOFF: '2026-07-21T00:00:00Z',
             NON_BLOCKING_CHECKS: JSON.stringify(nonBlocking),
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
           },
           encoding: 'utf8',
         },
@@ -2115,6 +2125,119 @@ describe('qwen-autofix workflow', () => {
     expect(failed.log).toContain('metadata fetch failed (API error)');
   });
 
+  it('releases the dispatch-pending marker when the recheck discards a target', () => {
+    // The discard exits BEFORE checkout, where the leg-side release lives, so
+    // a discarded same-repo head would otherwise keep being skipped as
+    // dispatch-pending for the full TTL with no leg coming — against the
+    // re-emit promise its own comment makes. Replay the recheck block
+    // VERBATIM with a recording gh stub: the release must fire on same-repo
+    // discards and never where it cannot (fork heads were never stamped;
+    // dry runs stamp nothing; a missing head sha has nothing to stamp).
+    const recheck = prepareBranchAndFeedbackStep.match(
+      /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
+    )?.[1];
+    expect(recheck).toBeTruthy();
+    // The live fetch carries the head sha the release stamps.
+    expect(recheck).toContain(',headRefOid');
+    expect(recheck).toContain(
+      'LIVE_HEAD_OID="$(jq -r \'.headRefOid // ""\' <<< "${PR_LIVE}")"',
+    );
+    expect(recheck).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${LIVE_XREPO}" == "false" && -n "${LIVE_HEAD_OID}" ]]; then',
+    );
+    const runReleaseRecheck = (prJson, { dryRun = 'false' } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-release-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `if [[ "$*" == *"/collaborators/"* ]]; then printf '%s' 'write';`,
+            `elif [[ "$1" == "api" && "$2" == repos/*/statuses/* ]]; then echo "API $*" >> '${join(dir, 'writes.log')}';`,
+            `else printf '%s' '${JSON.stringify(prJson)}'; fi`,
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${recheck.replace(/\n {10}/g, '\n')}\nprintf 'PASSED'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              PR: '7163',
+              REPO: 'QwenLM/qwen-code',
+              BRANCH: 'ci/some-branch',
+              HEAD_REPO: 'QwenLM/qwen-code',
+              WATERMARK: '2026-07-18T08:00:00Z',
+              ROUND: '2',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+              DRY_RUN: dryRun,
+              GITHUB_OUTPUT: out,
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          passed: stdout.endsWith('PASSED'),
+          out: readFileSync(out, 'utf8'),
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (over = {}) => ({
+      state: 'OPEN',
+      author: { login: 'qwen-code-dev-bot' },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      headRefName: 'ci/some-branch',
+      headRefOid: 'deadbeefcafe',
+      labels: [],
+      ...over,
+    });
+    // Same-repo discard → the marker is released on the live head.
+    const closed = runReleaseRecheck(pr({ state: 'CLOSED' }));
+    expect(closed.passed).toBe(false);
+    expect(closed.out).toContain('stale=true');
+    expect(closed.writes).toContain(
+      'API api repos/QwenLM/qwen-code/statuses/deadbeefcafe -X POST',
+    );
+    expect(closed.writes).toContain('state=success');
+    expect(closed.writes).toContain('context=qwen-autofix/dispatch-pending');
+    // A skip-label discard releases too (same-repo).
+    expect(
+      runReleaseRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).writes,
+    ).toContain('statuses/deadbeefcafe');
+    // Fork discard → no release: fork heads were never stamped.
+    expect(
+      runReleaseRecheck(
+        pr({ isCrossRepository: true, author: { login: 'human' } }),
+      ).writes,
+    ).toBe('');
+    // Dry run → no release: no stamp was ever written.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED' }), { dryRun: 'true' }).writes,
+    ).toBe('');
+    // Missing head sha → nothing to stamp.
+    expect(
+      runReleaseRecheck(pr({ state: 'CLOSED', headRefOid: '' })).writes,
+    ).toBe('');
+    // Healthy target passes through WITHOUT a release here — the
+    // checkout-path release owns that stamp.
+    const ok = runReleaseRecheck(pr());
+    expect(ok.passed).toBe(true);
+    expect(ok.writes).toBe('');
+  });
+
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
     // Anchor the job `if` opening: a bare toContain('always()') is also
@@ -2124,7 +2247,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
-      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
+      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')",
     );
     expect(findCandidateIssuesStep).toContain('OPEN_AUTOFIX_PR_COUNT');
     expect(findCandidateIssuesStep).toContain('MAX_OPEN_AUTOFIX_PRS');
@@ -2283,7 +2406,7 @@ describe('qwen-autofix workflow', () => {
     // run-unique suffix appended as a continuation line would also become
     // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     // The group identity and the scan step's FORCED_ISSUE env are
@@ -2931,7 +3054,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(10) green.
-    expect(workflow.split('--paginate').length - 1).toBe(18);
+    expect(workflow.split('--paginate').length - 1).toBe(19);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) = ten normalized fetch sites. The
@@ -2945,7 +3068,11 @@ describe('qwen-autofix workflow', () => {
     // The R11-2 engaged-stale guard's comments/events reads in
     // takeover-ack are the same class too: captured into shell variables
     // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
-    // over a single flat array), never a WORKDIR file.
+    // over a single flat array), never a WORKDIR file. The review-thread
+    // fetch in resolve_and_reply_threads is the same class again — a GraphQL
+    // paginate whose `--jq '…nodes[]'` stream is slurped straight into
+    // THREADS_JSON — so it bumps the total pin above without joining the
+    // normalizer count below.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -3741,13 +3868,326 @@ describe('qwen-autofix workflow', () => {
     // idle candidates hit `continue` before the TARGETS append, so they
     // never contend for it; the real win is inspection budget + walk
     // latency, and the comment says so.
-    expect(reviewScanJob).toContain(
-      'Idle PRs never reach the\n          # 10-target budget',
-    );
+    expect(designDoc).toContain('Idle PRs never reach the\n10-target budget');
     // The two scan-only signals updatedAt cannot see are named, not
     // papered over by an absolute invariant.
-    expect(reviewScanJob).toContain('base conflict');
-    expect(reviewScanJob).toContain('still-red checks');
+    expect(designDoc).toContain('base conflict');
+    expect(designDoc).toContain('still-red checks');
+  });
+
+  it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {
+    // Measured 2026-08-16 (#9296): a swallowed enumeration failure
+    // re-dispatched PRs with live legs. The fail-closed block must (a) empty
+    // the candidate set, (b) keep ONLY explicit workflow_dispatch dispatches
+    // (FORCED_PR is also set for trusted pull_request_review scans — those
+    // stay fail-closed), (c) emit enum_failed so the scheduled issue phase
+    // cannot flip ON over an emptied set (the scan exits 0, so has_targets
+    // alone would read exactly like "no PR needs work"), and (d) carry the
+    // underlying error tail — transient API instability and PAT decay need
+    // different oncall responses. Replay the block VERBATIM with a stubbed
+    // gh: the string pins alone would stay green on a flipped carve-out or a
+    // dropped enum_failed echo.
+    expect(reviewScanJob).toContain('BUSY_ENUM_OK=1');
+    expect(reviewScanJob).toContain(
+      "enum_failed: '${{ steps.scan.outputs.enum_failed }}'",
+    );
+    const enumBlock = reviewScanJob.match(
+      /BUSY_PRS=' '\n[\s\S]*?rm -f "\$\{BUSY_ENUM_ERR\}"/,
+    )?.[0];
+    expect(enumBlock).toBeTruthy();
+    // The carve-out is bounded to explicit dispatches (the cap-refused gate
+    // splits on EVENT_NAME the same way).
+    expect(enumBlock).toContain(
+      'if [[ -z "${FORCED_PR}" || "${EVENT_NAME}" != \'workflow_dispatch\' ]]; then',
+    );
+    // The warning and the fleet row carry the captured error tail.
+    expect(enumBlock).toContain(
+      'failing closed: no scan targets dispatched this pass${BUSY_ENUM_ERR_TAIL:+ — last error: ${BUSY_ENUM_ERR_TAIL}}',
+    );
+    const runEnum = ({
+      listAnswer = '',
+      listError = '',
+      viewAnswer = '',
+      viewError = '',
+      forcedPr = '',
+      eventName = 'schedule',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-enum-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            '# Emulate the gh CLI contract: answer with the fixture payload,',
+            '# applying the --jq filter when one is passed (like real gh).',
+            "jq_filter=''",
+            'positional=()',
+            'while [[ $# -gt 0 ]]; do',
+            '  case "$1" in',
+            '    --jq) jq_filter="$2"; shift 2 ;;',
+            '    *) positional+=("$1"); shift ;;',
+            '  esac',
+            'done',
+            'set -- "${positional[@]}"',
+            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_LIST_ANSWER}"',
+            'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
+            '  if [[ -n "${ENUM_VIEW_ERROR}" ]]; then printf \'%s\' "${ENUM_VIEW_ERROR}" >&2; exit 1; fi',
+            '  payload="${ENUM_VIEW_ANSWER}"',
+            'else',
+            '  exit 0',
+            'fi',
+            'if [[ -n "$jq_filter" ]]; then printf \'%s\' "$payload" | jq -r "$jq_filter"; else printf \'%s\' "$payload"; fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const outFile = join(dir, 'out.txt');
+        const fleetFile = join(dir, 'fleet.tsv');
+        writeFileSync(outFile, '');
+        writeFileSync(fleetFile, '');
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `FLEET_FILE='${fleetFile}'`,
+              'fleet_row() { printf \'%s\\t%s\\t%s\\n\' "$1" "$2" "$3" >> "${FLEET_FILE}"; }',
+              "CANDIDATES='101 102'",
+              enumBlock.replace(/\n {10}/g, '\n'),
+              'printf \'CANDIDATES=[%s]|BUSY=[%s]\' "${CANDIDATES}" "${BUSY_PRS}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              FORCED_PR: forcedPr,
+              EVENT_NAME: eventName,
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_OUTPUT: outFile,
+              ENUM_LIST_ANSWER: listAnswer,
+              ENUM_LIST_ERROR: listError,
+              ENUM_VIEW_ANSWER: viewAnswer,
+              ENUM_VIEW_ERROR: viewError,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          candidates: stdout.match(/CANDIDATES=\[(.*)\]\|/)?.[1],
+          busy: stdout.match(/BUSY=\[(.*)\]/)?.[1],
+          out: readFileSync(outFile, 'utf8'),
+          fleet: readFileSync(fleetFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // A run-list failure empties the candidates on a scheduled scan and
+    // emits the issue-phase signal with the error tail attached.
+    const listFailed = runEnum({ listError: 'HTTP 502: bad gateway' });
+    expect(listFailed.candidates).toBe('');
+    expect(listFailed.out).toContain('enum_failed=true');
+    expect(listFailed.fleet).toContain('fail-closed');
+    expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
+    // A jobs-view failure mid-enumeration fails closed the same way.
+    const viewFailed = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewError: 'HTTP 500',
+    });
+    expect(viewFailed.candidates).toBe('');
+    expect(viewFailed.out).toContain('enum_failed=true');
+    expect(viewFailed.fleet).toContain('HTTP 500');
+    // A healthy enumeration accumulates the busy set and keeps candidates.
+    const ok = runEnum({
+      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      viewAnswer: JSON.stringify({
+        jobs: [
+          { name: 'review-address (101, round 2)', status: 'in_progress' },
+        ],
+      }),
+    });
+    expect(ok.candidates).toBe('101 102');
+    expect(ok.busy).toBe(' 101 ');
+    expect(ok.out).not.toContain('enum_failed');
+    expect(ok.fleet).not.toContain('fail-closed');
+    // ONLY an explicit workflow_dispatch dispatch keeps its candidates
+    // through an enumeration failure...
+    const explicit = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'workflow_dispatch',
+    });
+    expect(explicit.candidates).toBe('101 102');
+    expect(explicit.out).toContain('enum_failed=true');
+    // ...a trusted pull_request_review scan ALSO carries FORCED_PR but is
+    // not an explicit dispatch and stays fail-closed.
+    const reviewEvent = runEnum({
+      listError: 'x',
+      forcedPr: '77',
+      eventName: 'pull_request_review',
+    });
+    expect(reviewEvent.candidates).toBe('');
+  });
+
+  it('pins the dispatch-pending marker lifecycle across its check, stamp, and release sites', () => {
+    // The marker closes the dispatch→leg visibility window (#9296). Its
+    // reader and writers live in three different steps; a context mismatch
+    // between them leaves the marker permanently unread, and a flipped TTL
+    // comparison re-opens the duplicate window — pin both behaviorally, and
+    // pin the HAS_PENDING_CHECKS exemption that keeps a stranded marker from
+    // blocking past its TTL.
+    expect(workflow).toContain(
+      "DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending'",
+    );
+    expect(workflow).toContain("DISPATCH_STATUS_TTL_MINUTES: '30'");
+    expect(reviewScanJob).toContain(
+      'DISPATCH_CUTOFF="$(date -u -d "${DISPATCH_STATUS_TTL_MINUTES} minutes ago"',
+    );
+    // The freshness predicate's comparison direction: flipped, fresh markers
+    // would pass and stale markers block.
+    expect(reviewScanJob).toContain('select((.startedAt // "") > $cut)');
+    // Behavioral replay of the scan-side skip predicate over fixture
+    // rollups.
+    const markerCheck = reviewScanJob.match(
+      /if jq -e --arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}" --arg cut "\$\{DISPATCH_CUTOFF\}" '[\s\S]*?' <<< "\$\{PR_META\}" > \/dev\/null; then/,
+    )?.[0];
+    expect(markerCheck).toBeTruthy();
+    const runMarkerCheck = (rollup) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${markerCheck.replace(/\n {12}/g, '\n')} printf skip; else printf pass; fi`,
+        ],
+        {
+          env: {
+            ...process.env,
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            DISPATCH_CUTOFF: '2026-08-17T06:00:00Z',
+            PR_META: JSON.stringify({ statusCheckRollup: rollup }),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const marker = (
+      state,
+      startedAt,
+      context = 'qwen-autofix/dispatch-pending',
+    ) => ({
+      __typename: 'StatusContext',
+      context,
+      state,
+      startedAt,
+    });
+    // Fresh PENDING marker → busy.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z')])).toBe(
+      'skip',
+    );
+    // Stale PENDING marker (past the TTL) → dispatchable again.
+    expect(runMarkerCheck([marker('PENDING', '2026-08-17T05:00:00Z')])).toBe(
+      'pass',
+    );
+    // The leg materialized (SUCCESS re-stamp) → dispatchable.
+    expect(runMarkerCheck([marker('SUCCESS', '2026-08-17T06:30:00Z')])).toBe(
+      'pass',
+    );
+    // A foreign status context → dispatchable (the marker is keyed exactly).
+    expect(
+      runMarkerCheck([marker('PENDING', '2026-08-17T06:30:00Z', 'other-ci')]),
+    ).toBe('pass');
+    // No rollup entries → dispatchable.
+    expect(runMarkerCheck([])).toBe('pass');
+
+    // A stranded marker must NOT keep blocking through the 330-minute
+    // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
+    // over fixture rollups.
+    const pendingGate = reviewScanJob.match(
+      /HAS_PENDING_CHECKS="\$\(jq -r --arg cut "\$\{PENDING_CUTOFF\}" \\[\s\S]*?' <<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(pendingGate).toBeTruthy();
+    expect(pendingGate).toContain('--arg ctx "${DISPATCH_STATUS_CONTEXT}"');
+    expect(pendingGate).toContain('select((.context // "") != $ctx)');
+    const runPendingGate = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${pendingGate.replace(/\n {12}/g, '\n')}\nprintf '%s' "$HAS_PENDING_CHECKS"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_CUTOFF: '2026-08-17T02:30:00Z',
+            NON_BLOCKING_CHECKS: '["review-pr"]',
+            DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
+            CHECKS_JSON: JSON.stringify(checks),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const checkRun = (name, status, startedAt) => ({
+      name,
+      workflowName: 'CI',
+      status,
+      startedAt,
+    });
+    // A stranded marker ALONE blocks nobody...
+    expect(runPendingGate([marker('PENDING', '2026-08-17T07:00:00Z')])).toBe(
+      'false',
+    );
+    // ...a genuine in-flight check still blocks...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...including alongside the marker...
+    expect(
+      runPendingGate([
+        marker('PENDING', '2026-08-17T07:00:00Z'),
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
+      ]),
+    ).toBe('true');
+    // ...a check stuck past the 330-minute horizon is aged out...
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
+      ]),
+    ).toBe('false');
+    // ...and a foreign PENDING status context still blocks (the exemption is
+    // exactly the marker's own context).
+    expect(
+      runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
+    ).toBe('true');
+
+    // Writer/reader identity: all three status writes and both readers bind
+    // the SAME context variable — a mismatch on any site leaves the marker
+    // permanently unread (the fork-bridge tests pin their cross-site signal
+    // the same way).
+    const stampSites =
+      workflow.match(
+        /gh api "repos\/\$\{REPO\}\/statuses\/[^"]+" -X POST \\\n\s*-f state="\w+" -f context="\$\{DISPATCH_STATUS_CONTEXT\}"/g,
+      ) ?? [];
+    expect(stampSites).toHaveLength(3);
+    expect(
+      (reviewScanJob.match(/--arg ctx "\$\{DISPATCH_STATUS_CONTEXT\}"/g) ?? [])
+        .length,
+    ).toBe(2);
+    // Every write site is guarded same-repo and dry-run: fork head shas are
+    // absent from this repo's object store, and a dry run must leave no
+    // real, PR-visible status behind.
+    expect(reviewScanJob).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO_FULL}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO:-${REPO}}" == "${REPO}" ]]; then',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      "DRY_RUN: '${{ needs.route.outputs.dry_run }}'",
+    );
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {
@@ -7750,6 +8190,12 @@ exit 1
     const skill = readAutofixSkill();
     expect(skill).toContain('this PR is not converging');
     expect(skill).toContain('Diff-growth trajectory');
+    // The brake's handoff must land in failure.md — the one stop file the
+    // run-agent verdict gate accepts. Telling the agent to write handoff.md
+    // instead reproduces run 32076785809: a correct defer-to-human reported
+    // as "finished without required output file(s)".
+    expect(skill).toContain('write the handoff into `<workdir>/failure.md`');
+    expect(skill).toContain('Do not write `handoff.md` yourself');
   });
 
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
@@ -8308,6 +8754,13 @@ exit 1
     expect(skill).toContain(
       'Keep `failure.md` and `handoff.md` English-only WITHOUT a details block',
     );
+    // The Chinese for a failure.md handoff lives in a SEPARATE companion file
+    // the workflow wraps in its own <details> — never inside failure.md.
+    expect(skill).toContain('failure.zh.md');
+    expect(skill).toContain('ALSO write');
+    // The companion is byte-truncated inside the workflow's wrapper, so it
+    // must not carry markup that could break the wrapper.
+    expect(skill).toContain('NO HTML tags at');
   });
 
   it('includes issue-level comments in review feedback scanning', () => {
@@ -9781,11 +10234,21 @@ exit 1
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');
     }
+    // Full-line pins: the zh sibling must sit in the SAME rm -f. Substring
+    // pins that stop at failure.md stay green when the zh argument is
+    // dropped (mutation-verified), and a stale assess-phase translation
+    // surviving into a develop-issue invocation pairs an old Chinese report
+    // with a fresh English failure.md in the withdraw comment — the exact
+    // mispairing the repair-step pin's comment names.
     expect(assessCandidatesStep).toContain(
-      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"',
+      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
     );
-    expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
-    expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(developFixStep).toContain(
+      'rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
+    );
+    expect(triageAndAddressStep).toContain(
+      'rm -f "${WORKDIR}/failure.md" "${WORKDIR}/failure.zh.md"',
+    );
     expect(repairDeterministicRejectionStep).toContain(
       '"${WORKDIR}/failure.md"',
     );
@@ -10830,6 +11293,7 @@ exit 1
       'pr-body.md',
       'e2e-report.md',
       'failure.md',
+      'failure.zh.md',
     ]) {
       expect(issueAutofixReportStep).toContain(filename);
     }
@@ -12823,7 +13287,7 @@ exit 1
       // cases; a runnerScript drives the tree-state-proving cases.
       writeFileSync(
         join(tools, 'resolve-owning-packages.sh'),
-        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+        `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
       );
       writeFileSync(
         join(tools, 'bite-runner'),
@@ -13545,13 +14009,19 @@ exit 1
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL NINE workflow publish sites
-    // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
-    // gate-rejection body, the comment-reply body whose content is agent
-    // stdout that can echo external comment text, the two
-    // deferred-feedback report sections, and the gate-advisories section,
-    // which render untrusted review-comment/branch paths into a
-    // bot-authored comment), and it
+    // Token-breaking neutralization at ALL TWELVE workflow publish sites:
+    // ten single-expression (address-summary, no-action, DETAIL_FILE,
+    // API_ERROR_DETAIL, the gate-rejection body, the comment-reply body
+    // whose content is agent stdout that can echo external comment text,
+    // the two deferred-feedback report sections, the gate-advisories
+    // section, which render untrusted review-comment/branch paths into a
+    // bot-authored comment, and the issue-lane withdraw failure.md
+    // excerpt), plus the two failure.zh.md excerpt sites (PR-lane report,
+    // issue-lane withdraw), which escape in a multi-`-e` sed whose FIRST
+    // expression the `(?: -e)?` below matches — the 'posts failure-path
+    // handoff comments bilingually' test pins their full pipelines
+    // per-site. Dropping the `<!--` expression from either zh site drops
+    // this count and fails here. The escaping
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
@@ -13559,9 +14029,10 @@ exit 1
     // Counting alone is not enough: a fifth site added with `\-\-` (single
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
-    const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(9);
-    // The tenth agent-derived publish site lives in
+    const escapeSiteRe = /sed(?: -e)? 's\/<!--\/[^']*\/g'/g;
+    const escapeSites = workflow.match(escapeSiteRe) ?? [];
+    expect(escapeSites).toHaveLength(12);
+    // The next agent-derived publish site lives in
     // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
     // sed afterwards: the rv/ic dedupe identity is the rendered line, so
     // escaping after the corpus comparison meant a reason containing `<!--`
@@ -13578,11 +14049,14 @@ exit 1
       upsertDeferredScript.indexOf('index($r.key)'),
     );
     for (const site of escapeSites) {
-      expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
+      expect([
+        "sed 's/<!--/<!\\\\-\\\\-/g'",
+        "sed -e 's/<!--/<!\\\\-\\\\-/g'",
+      ]).toContain(site);
     }
     const forged =
       '<!-- autofix-eval ts=2099-01-01T00:00:00Z\nx acted=true round=99 -->';
-    const sedCmd = workflow.match(/sed 's\/<!--\/[^']*\/g'/)?.[0];
+    const sedCmd = workflow.match(escapeSiteRe)?.[0];
     expect(sedCmd).toBeTruthy();
     const scrubbed = execFileSync(
       'bash',
@@ -13602,6 +14076,314 @@ exit 1
         ),
       ),
     ).toBe(0);
+  });
+
+  it('posts failure-path handoff comments bilingually', () => {
+    // The repo convention is English first with a collapsed Chinese block,
+    // and the handoff comments are the ones that ask a maintainer to decide —
+    // the Chinese block lets a Chinese-speaking maintainer act without
+    // translating the English body. failure.md itself stays English-only (a
+    // byte-truncated excerpt of it is embedded inline); the Chinese lives in
+    // the agent-written failure.zh.md, which the workflow wraps in its OWN
+    // <details>: the wrapper tags are emitted by the workflow, so a truncated
+    // translation can lose content but never swallow the markers that follow.
+    expect(reviewAddressReportStep).toContain("echo '<details>'");
+    expect(reviewAddressReportStep).toContain(
+      "echo '<summary>中文说明</summary>'",
+    );
+    expect(reviewAddressReportStep).toContain("echo '</details>'");
+    expect(reviewAddressReportStep).toContain('${HEADLINE_ZH}');
+    expect(reviewAddressReportStep).toContain(
+      'head -c 3000 "${WORKDIR}/failure.zh.md"',
+    );
+    // Wrapper-defense escaping: a pathological translation quoting markup
+    // must not be able to open or close a <details>/<summary> of its own.
+    expect(reviewAddressReportStep).toContain(
+      's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g',
+    );
+    expect(reviewAddressReportStep).toContain(
+      's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g',
+    );
+    expect(reviewAddressReportStep).toContain(
+      's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g',
+    );
+    // Pin the FULL sanitization pipeline, anchored on the zh excerpt. The
+    // three tag substitutions above were pinned only for THIS lane and the
+    // `<!--` expression for NEITHER: dropping `-e 's/<!--/…'` from both zh
+    // sites, or `s/<details/…` from the withdraw site, left 177/177 green
+    // (mutation-verified) — the exact false-green class the nine-site count
+    // test documents. Both lanes share the identical pipeline.
+    const zhPipeline =
+      "head -c 3000 \"${WORKDIR}/failure.zh.md\" | iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true";
+    expect(reviewAddressReportStep).toContain(zhPipeline);
+    // The eval markers stay AFTER the closing tag: the next scan parses them
+    // out of the raw comment body.
+    expect(reviewAddressReportStep.indexOf("echo '</details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf('<!-- autofix-eval ts=${MARK_TS}'),
+    );
+    // EVERY headline variant (model-error retry/terminal, stale base,
+    // needs-human, could-not-start, both breakers) carries a Chinese
+    // counterpart, and so do the clause variables composed into them.
+    // Scoped to this step: other steps (the growth-brake feedback builder)
+    // have their own *_ZH variables with different pairing shapes.
+    const headlineAssignments =
+      reviewAddressReportStep.match(/^\s*HEADLINE="/gm) ?? [];
+    const headlineZhAssignments =
+      reviewAddressReportStep.match(/^\s*HEADLINE_ZH="/gm) ?? [];
+    expect(headlineAssignments.length).toBeGreaterThan(0);
+    expect(headlineZhAssignments).toHaveLength(headlineAssignments.length);
+    for (const name of [
+      'CAUSE',
+      'LAST_FIX',
+      'GATE_CLAUSE',
+      'IDLE_CLAUSE',
+      'REMEDY',
+    ]) {
+      const en =
+        reviewAddressReportStep.match(new RegExp(`^\\s*${name}=`, 'gm')) ?? [];
+      const zh =
+        reviewAddressReportStep.match(new RegExp(`^\\s*${name}_ZH=`, 'gm')) ??
+        [];
+      expect(zh.length, `${name}_ZH pairing`).toBe(en.length);
+    }
+    // Counts pin PRESENCE, not CORRESPONDENCE: swapping two adjacent
+    // HEADLINE_ZH values (retry <-> terminal) kept 177/177 green while a
+    // Chinese-reading maintainer saw the wrong loop-state headline on
+    // exactly the decision-relevant distinction (mutation-verified). The
+    // same hole holds for every clause variable below. Pin the pairing:
+    // each Chinese value on the line directly under the English branch it
+    // translates — one distinctive anchor pair per assignment site. (The
+    // empty GATE_CLAUSE/IDLE_CLAUSE branches pair '' with '' — nothing to
+    // swap.)
+    for (const [name, enAnchor, zhAnchor] of [
+      ['HEADLINE', 'it will retry on the next scan', '将在下次扫描时重试'],
+      [
+        'HEADLINE',
+        'this was the last automatic attempt',
+        '这是最后一次自动尝试',
+      ],
+      ['HEADLINE', 'updated a stale base', '更新了一个过期的 base'],
+      ['HEADLINE', 'This item now needs a human', '此项现在需要人工处理'],
+      ['HEADLINE', 'the run was cancelled', '或本次运行被取消'],
+      ['HEADLINE', 'reached the round cap', '已达到轮次上限'],
+      [
+        'HEADLINE',
+        'crashed or timed out before reading the feedback',
+        '在读取反馈之前崩溃或超时',
+      ],
+      [
+        'HEADLINE',
+        'consecutive rounds that failed to push anything',
+        '轮未能推送任何内容',
+      ],
+      ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
+      ['CAUSE', 'could not reach the model', '无法连接模型'],
+      ['CAUSE', 'ran out of time before finishing', '在完成前耗尽了时间'],
+      [
+        'CAUSE',
+        'crashed before it could evaluate the feedback',
+        '在评估反馈之前崩溃',
+      ],
+      [
+        'CAUSE',
+        'hit a verification-gate error before reaching a verdict',
+        '在得出结论之前遇到验证门错误',
+      ],
+      [
+        'LAST_FIX',
+        'check the autofix model key/access',
+        '检查 autofix 模型密钥/访问权限',
+      ],
+      [
+        'LAST_FIX',
+        'check the sandbox image and runner docker daemon, then re-arm',
+        '检查 sandbox 镜像与 runner 的 docker daemon，然后重新武装',
+      ],
+      [
+        'LAST_FIX',
+        'split the PR or raise the agent time budget',
+        '拆分 PR，或同时提高 agent 时间预算',
+      ],
+      ['LAST_FIX', 'a human should take over this PR', '接管此 PR'],
+      ['LAST_FIX', 'check the gate logs', '查看验证门日志'],
+      [
+        'GATE_CLAUSE',
+        'the verification gate rejected the attempt',
+        '验证门拒绝了该尝试',
+      ],
+      ['GATE_CLAUSE', 'the branch needs a base update', '该分支需要更新 base'],
+      [
+        'GATE_CLAUSE',
+        'the base state could not be compared',
+        'base 状态未能比较',
+      ],
+      [
+        'GATE_CLAUSE',
+        'own pre-round code needs attention',
+        '自身本轮之前的代码需要处理',
+      ],
+      ['IDLE_CLAUSE', 'no budget increase can cure', '提高预算也治不了'],
+      ['REMEDY', 'split or reduce the PR', '拆分或缩减该 PR'],
+      ['REMEDY', 'investigate the sandbox image', '排查 sandbox 镜像'],
+    ]) {
+      expect(
+        reviewAddressReportStep,
+        `${name} pairing: "${enAnchor}" must carry "${zhAnchor}"`,
+      ).toMatch(
+        new RegExp(
+          `${name}=['"][^\\n]*${enAnchor}[^\\n]*\\n\\s*${name}_ZH=['"][^\\n]*${zhAnchor}`,
+        ),
+      );
+    }
+    // A missing companion (run-agent.mjs wrote failure.md itself, or the
+    // agent skipped it) degrades to the headline translation alone — never
+    // fails the round.
+    expect(reviewAddressReportStep).toContain(
+      '[[ -s "${WORKDIR}/failure.zh.md" ]]',
+    );
+    // The develop-issue withdraw comment carries the same block, running
+    // the identical pipeline (pinned above for the PR lane).
+    expect(withdrawClaimStep).toContain(zhPipeline);
+    expect(withdrawClaimStep).toContain('<summary>中文说明</summary>');
+    // The zh block is appended after the English failure.md excerpt, which
+    // must therefore be escaped too: a failure.md quoting an HTML comment
+    // whose opener lands before the 1500-byte cut and closer after it opens
+    // an unterminated comment that swallows the <details> block this test
+    // pins (probe-verified). iconv -c also fixes mid-character byte
+    // truncation from a raw head -c. The full four-expression form (not
+    // just `<!--`): the wrapper appended below is exposed to a
+    // contract-violating `<details` in the excerpt the same way the PR-lane
+    // DETAIL_FILE site is.
+    const wrapperDefensePipeline =
+      "iconv -f utf-8 -t utf-8 -c | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true";
+    expect(withdrawClaimStep).toContain(
+      'DETAIL="$(head -c 1500 "${WORKDIR}/failure.md" | ' +
+        wrapperDefensePipeline +
+        ')"',
+    );
+    // Same pipeline on the PR-lane DETAIL_FILE excerpt: address-summary /
+    // no-action files are mandated by SKILL to END with their own collapsed
+    // <details> 中文说明 tail, so a mid-size summary whose tail straddles
+    // the 1500-byte cut leaves a severed live opener that swallows the
+    // wrapper this step appends (trigger is contract-COMPLIANT).
+    expect(reviewAddressReportStep).toContain(
+      'head -c 1500 "${DETAIL_FILE}" | ' + wrapperDefensePipeline,
+    );
+    // API_ERROR_DETAIL flows into CAUSE_ZH -> HEADLINE_ZH, which renders
+    // INSIDE the wrapper — a bare `</details` in the first 200 bytes of
+    // agent stdout (which can echo contributor-authored comment text) would
+    // close the wrapper early, so it needs the same four substitutions.
+    expect(reviewAddressReportStep).toContain(
+      "API_ERROR_DETAIL=\"$(head -n 1 \"${WORKDIR}/agent-api-error\" | sed -e 's/<!--/<!\\\\-\\\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' -e 's/<\\/[dD][eE][tT][aA][iI][lL][sS]/＜\\/details/g' -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)\"",
+    );
+    // The two branch-selected Chinese section labels inside the block must
+    // sit under THEIR branches — the same wrong-label-on-the-decision-
+    // distinction class the pairing pins above catch, one block lower.
+    // Contiguous pin: swapping the two echo bodies ships green against
+    // position-independent substring pins (mutation-verified).
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${COMMITTED}" == "true" ]]; then\n' +
+        '                  echo "⚠️ 此改动未被推送 —— 下文引用的任何提交都只存在于 runner 工作区，已被丢弃。以下是 agent 的报告："\n' +
+        '                else\n' +
+        '                  echo "**停止前我了解到的情况：**"',
+    );
+    // The zh gate-note and ITS condition, contiguous: deleting the block or
+    // swapping the condition for the always-true `-s failure.zh.md` sibling
+    // both shipped green with looser pins (mutation-verified). The note
+    // must stay after the gate section it points at.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then\n' +
+        '                echo\n' +
+        '                echo "验证门的拒绝原因与日志证据见上方英文部分（gate-rejection 不翻译）。"\n' +
+        '              fi',
+    );
+    expect(
+      reviewAddressReportStep.indexOf('autofix-gate-rejection-end'),
+    ).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        '验证门的拒绝原因与日志证据见上方英文部分',
+      ),
+    );
+    // Wrapper internal ordering: position-independent toContain pins let a
+    // reordering ship green (mutation-verified) — an empty collapsed block
+    // with the headline/excerpt spilled uncollapsed into the comment.
+    expect(reviewAddressReportStep.indexOf("echo '<details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        'head -c 3000 "${WORKDIR}/failure.zh.md"',
+      ),
+    );
+    expect(reviewAddressReportStep.indexOf("echo '<details>'")).toBeLessThan(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    );
+    expect(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    ).toBeLessThan(reviewAddressReportStep.indexOf('echo "${HEADLINE_ZH}"'));
+    expect(
+      reviewAddressReportStep.indexOf('echo "${HEADLINE_ZH}"'),
+    ).toBeLessThan(reviewAddressReportStep.indexOf("echo '</details>'"));
+    expect(
+      reviewAddressReportStep.indexOf("echo '<summary>中文说明</summary>'"),
+    ).toBeLessThan(reviewAddressReportStep.indexOf("echo '</details>'"));
+    // The English body must SURVIVE the zh append (a future edit rewriting
+    // `BODY="${BODY}` to `BODY="` ships green without this pin, dropping
+    // the withdrawal reason and excerpt whenever failure.zh.md exists —
+    // mutation-verified).
+    expect(withdrawClaimStep).toContain('BODY="${BODY}');
+    // The ZH_DETAIL guard stays conditional...
+    expect(withdrawClaimStep).toContain('if [[ -n "${ZH_DETAIL}" ]]; then');
+    // ...but the 中文说明 block itself renders UNCONDITIONALLY, mirroring
+    // the PR lane's floor: on the crash shapes run-agent.mjs writes
+    // failure.md itself with no zh companion, and this lane must still show
+    // the translated REASON instead of degrading to zero Chinese. The
+    // contiguous `fi` -> BODY append shape pins the block OUTSIDE the
+    // ZH_DETAIL guard; re-wrapping it breaks the adjacency.
+    expect(withdrawClaimStep.match(/^\s*REASON=/gm)).toHaveLength(3);
+    expect(withdrawClaimStep.match(/^\s*REASON_ZH=/gm)).toHaveLength(3);
+    expect(withdrawClaimStep).toMatch(
+      /REASON='no further automated attempts will be made on this issue\.'\n\s*REASON_ZH='不会对该 issue 再做自动尝试。'/,
+    );
+    expect(withdrawClaimStep).toMatch(
+      /REASON='the issue will require the `autofix\/approved` label to be re-added before any future automated attempt\.'\n\s*REASON_ZH='该 issue 需要重新添加 `autofix\/approved` 标签才能再次自动尝试。'/,
+    );
+    // Branches 2 and 3 carry IDENTICAL REASON text, so both pairing pins
+    // above are satisfied by branch 2's first occurrence — nothing pins
+    // branch 3's REASON_ZH unless it is keyed on its unique neighbour (its
+    // DETAIL differs); swapping in branch 1's value shipped green
+    // (mutation-verified).
+    expect(withdrawClaimStep).toMatch(
+      /REASON_ZH='该 issue 需要重新添加[^']*'\n\s*DETAIL='The run failed before producing a verified fix\.'/,
+    );
+    expect(withdrawClaimStep).toContain('ZH_BLOCK="${REASON_ZH}"');
+    expect(withdrawClaimStep).toContain(
+      'fi\n          BODY="${BODY}\n\n          <details>\n          <summary>中文说明</summary>\n\n          ${ZH_BLOCK}\n\n          </details>"',
+    );
+    // The issue-lane run-log dump echoes agent-written files to step
+    // STDOUT, where a line-start `::` parses as a workflow command — it
+    // must neutralize like the PR-lane dump loop does, and carry the zh
+    // report: these loops are the only full-copy echo of it (the handoff
+    // comment carries a 3000-byte excerpt).
+    expect(showRunArtifactsStep).toContain(
+      'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
+    );
+    expect(showRunArtifactsStep).toMatch(
+      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+    );
+    expect(issueAutofixReportStep).toContain(
+      'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
+    );
+    expect(reviewAddressJob).toContain(
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
+    );
+    // A repair re-run must not inherit a stale companion from the rejected
+    // attempt: run 2's success would leave run 1's translation behind, and
+    // run 2's failure-without-failure.md would pair run 1's Chinese with
+    // run 2's English.
+    expect(repairDeterministicRejectionStep).toContain(
+      '"${WORKDIR}/failure.zh.md"',
+    );
   });
 
   it('announces a working round up front and closes the same status comment', () => {
@@ -15199,9 +15981,18 @@ exit 1
         '  [[ "$a" == query=* ]] && query="${a#query=}"',
         '  [[ "$a" == threadId=* ]] && thread_id="${a#threadId=}"',
         'done',
-        'if [[ "$query" == *"reviewThreads(first:100)"* ]]; then',
+        'if [[ "$query" == *"reviewThreads(first:100, after:\\$endCursor)"* ]]; then',
+        '  [[ " $* " == *" --paginate "* ]] || exit 3',
         '  printf \'%s\' "$THREADS_RAW_STUB"',
-        '  exit 0',
+        '  if [[ "${THREADS_FETCH_EXIT:-0}" != 0 ]]; then',
+        "    # On a failing page real gh skips --jq and appends that page's raw",
+        '    # response body to stdout, after the good nodes.',
+        '    [[ -z "${THREADS_ERROR_BODY_STUB:-}" ]] || printf \'\\n%s\' "$THREADS_ERROR_BODY_STUB"',
+        '    # Real gh writes the reason to stderr; the workflow folds its tail',
+        '    # into the warning, so the stub must produce one to assert on.',
+        '    printf \'%s\\n\' "${THREADS_STDERR_STUB:-threads-fetch stub failure}" >&2',
+        '  fi',
+        '  exit "${THREADS_FETCH_EXIT:-0}"',
         'fi',
         'if [[ "$query" == *PullRequestReviewThread* ]]; then',
         '  saw_jq=false; saw_guard_filter=false',
@@ -15238,31 +16029,45 @@ exit 1
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
     }).trim();
-    const threadsRaw = JSON.stringify({
-      nodes: [
-        {
-          id: 'T_open_1',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 111 }] },
+    // The real `gh --paginate --jq '...nodes[]'` emits ONE node per line,
+    // concatenated across every page — so the stub stands in for gh's output
+    // after its own jq, not for the raw GraphQL envelope. Two "pages" worth
+    // are interleaved deliberately: the block must treat them as one stream.
+    const threadNodes = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_2',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 222 }] },
+      },
+      {
+        id: 'T_open_2',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 222 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_open_3',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 444 }] },
+      },
+      {
+        id: 'T_open_3',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 444 }],
+          pageInfo: { hasNextPage: false },
         },
-        {
-          id: 'T_done',
-          isResolved: true,
-          comments: { nodes: [{ databaseId: 333 }] },
+      },
+      {
+        id: 'T_done',
+        isResolved: true,
+        comments: {
+          nodes: [{ databaseId: 333 }],
+          pageInfo: { hasNextPage: false },
         },
-      ],
-      pageInfo: { hasNextPage: false },
-    });
+      },
+    ];
+    const threadsRaw = threadNodes.map((n) => JSON.stringify(n)).join('\n');
     const headReadCount = join(dir, 'head-read-count');
     const threadStateFile = join(dir, 'thread-state');
     const runResolve = (env = {}) => {
@@ -15304,6 +16109,23 @@ exit 1
     expect(block).toContain(
       'node(id:$threadId){... on PullRequestReviewThread{isResolved}}',
     );
+
+    // The fix this block exists for: GitHub returns reviewThreads in
+    // ASCENDING creation order, so an unpaginated first-100 page is the
+    // OLDEST hundred — precisely not the threads the current round answers.
+    // Ask for pagination, and ask for it in the shape gh's --paginate needs
+    // (an $endCursor variable plus pageInfo), or the stub gh exits 3.
+    expect(block).toContain('--paginate');
+    expect(block).toContain('reviewThreads(first:100, after:$endCursor)');
+    // Field order, not just presence: gh's cursor scanner carries its flags
+    // across pageInfo objects and breaks at the first one yielding both
+    // fields, so pageInfo{endCursor hasNextPage} would break on the outer
+    // endCursor while hasNextPage still carries the last INNER page's value —
+    // almost always false, and the outer page's own hasNextPage is read only
+    // after the break. gh then returns no cursor and stops after page one with
+    // exit 0 and no warning, restoring the oldest-hundred bug silently. Do not
+    // "fix" this pin by reordering it.
+    expect(block).toContain('pageInfo{hasNextPage endCursor}');
 
     const matching = runResolve();
     expect(matching.status).toBe(0);
@@ -15436,6 +16258,166 @@ exit 1
     );
     expect(movedBeforeSecondMutation.out).toContain(
       'confirmed 1 selected review thread(s) resolved',
+    );
+
+    // A thread far past the old first-100 cap must resolve like any other:
+    // #8403 carries 1256 threads, and one page reached 8% of them. The target
+    // sits at index 400 of the stream, so any surviving hundred-item ceiling
+    // in the slurp would drop it.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:900001\n');
+    const deepStream = [
+      ...Array.from({ length: 400 }, (_, i) => ({
+        id: `T_filler_${i}`,
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 800000 + i }],
+          pageInfo: { hasNextPage: false },
+        },
+      })),
+      {
+        id: 'T_page_five',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 900001 }],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const pastFirstPage = runResolve({ THREADS_RAW_STUB: deepStream });
+    expect(pastFirstPage.status).toBe(0);
+    expect(pastFirstPage.resolved).toEqual(['resolve:T_page_five']);
+
+    // A pagination that dies partway (rate limit on a later page) USES what it
+    // got rather than discarding it — throwing away twelve good pages to fail
+    // on the thirteenth would resolve nothing at all — and says so.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const partialFetch = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(partialFetch.status).toBe(0);
+    expect(partialFetch.resolved).toEqual(['resolve:T_open_1']);
+    expect(partialFetch.out).toContain(
+      'review-thread pagination did not complete',
+    );
+    // …and carries gh's own stderr, the only text that separates a transient
+    // rate limit (back off) from an expired PAT (rotate credentials).
+    expect(partialFetch.out).toContain('threads-fetch stub failure');
+
+    // …and the failing page's own response body, which gh appends to stdout
+    // after the good nodes (it skips --jq on an error response), must not
+    // survive the slurp as a stray thread: both consumers below iterate
+    // .comments.nodes[], so a stray element exits 5 and — under errexit —
+    // aborts this step AFTER a good push, dropping the report and markers.
+    for (const errorBody of [
+      '{"message": "API rate limit exceeded for user \'x\'."}',
+      '{"data": null, "errors": [{"message": "Something went wrong while executing your query."}]}',
+    ]) {
+      const poisoned = runResolve({
+        THREADS_FETCH_EXIT: '1',
+        THREADS_ERROR_BODY_STUB: errorBody,
+      });
+      expect(poisoned.status).toBe(0);
+      expect(poisoned.resolved).toEqual(['resolve:T_open_1']);
+      // 4 stub threads, not 5: the error body was dropped, not counted.
+      expect(poisoned.out).toContain(
+        'review-thread pagination did not complete; 4 thread(s) fetched',
+      );
+    }
+
+    // The folded reason must land ON the annotation. Actions parses workflow
+    // commands line by line, and gh's stderr for a secondary rate limit spans
+    // two lines, so an unflattened fold keeps only the first — cutting off
+    // the very words that separate a back-off from a credential rotation.
+    const multiLineReason = runResolve({
+      THREADS_FETCH_EXIT: '1',
+      THREADS_STDERR_STUB:
+        "gh: API rate limit exceeded for user 'x'.\nYou have exceeded a secondary rate limit. Please wait a few minutes.",
+    });
+    expect(multiLineReason.status).toBe(0);
+    const paginationWarning = multiLineReason.out
+      .split('\n')
+      .find((line) =>
+        line.includes('review-thread pagination did not complete'),
+      );
+    expect(paginationWarning).toContain(
+      "gh: API rate limit exceeded for user 'x'.",
+    );
+    expect(paginationWarning).toContain(
+      'You have exceeded a secondary rate limit.',
+    );
+
+    // R4-1: gh's stderr must not go to a NAMED path under WORKDIR. WORKDIR is
+    // bind-mounted read-write into the agent sandbox, and the round that just
+    // ran executes branch code inside it, so anything at a predictable name
+    // here is attacker-chosen by the time this step runs. A planted FIFO makes
+    // bash block on the O_WRONLY open before gh execs — and the only reader is
+    // the tail AFTER gh returns — so the step hangs to the job timeout with
+    // the push already landed, losing the report and the round markers. A
+    // planted symlink instead truncates its target and folds 300 bytes of it
+    // into a public ::warning::. Probe both plants; the fix (a fresh mktemp
+    // regular file) makes the named path irrelevant, so neither can bite.
+    const canaryTarget = join(dir, 'canary-secret');
+    writeFileSync(canaryTarget, 'CANARY-MUST-SURVIVE\n');
+    const plantedPath = join(dir, 'threads-fetch.err');
+    rmSync(plantedPath, { force: true });
+    symlinkSync(canaryTarget, plantedPath);
+    const symlinkPlant = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(symlinkPlant.status).toBe(0);
+    // Still reports, and still carries gh's own reason — the plant changed
+    // nothing about the diagnostic.
+    expect(symlinkPlant.out).toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(symlinkPlant.out).toContain('threads-fetch stub failure');
+    // …and the symlink's target was never opened for write. Under the
+    // pre-fix `2> "${WORKDIR}/threads-fetch.err"` this file is truncated and
+    // overwritten with gh's stderr.
+    expect(readFileSync(canaryTarget, 'utf8')).toBe('CANARY-MUST-SURVIVE\n');
+    // …and the canary's bytes were never read back out into the annotation.
+    expect(symlinkPlant.out).not.toContain('CANARY-MUST-SURVIVE');
+    rmSync(plantedPath, { force: true });
+
+    // The named path is not written at all — the assertion that kills the
+    // mutation directly, and the same property that defuses the FIFO plant
+    // (a FIFO test cannot be written as a plain assertion: under the pre-fix
+    // code it hangs rather than fails).
+    const noNamedFile = runResolve({ THREADS_FETCH_EXIT: '1' });
+    expect(noNamedFile.status).toBe(0);
+    expect(noNamedFile.out).toContain('threads-fetch stub failure');
+    expect(existsSync(plantedPath)).toBe(false);
+
+    // The residual cap the fix does NOT close: a thread carrying more than
+    // 100 comments still truncates, so a comment past that page is unmapped.
+    // Unobserved in the live pool, and announced rather than hidden.
+    const innerTruncated = [
+      {
+        id: 'T_open_1',
+        isResolved: false,
+        comments: {
+          nodes: [{ databaseId: 111 }],
+          pageInfo: { hasNextPage: true },
+        },
+      },
+    ]
+      .map((n) => JSON.stringify(n))
+      .join('\n');
+    const deepThread = runResolve({ THREADS_RAW_STUB: innerTruncated });
+    expect(deepThread.status).toBe(0);
+    expect(deepThread.out).toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
+    );
+
+    // Both warnings must be ABSENT on a clean run. Asserted only in the
+    // positive, either could be made unconditional and ship green — and a
+    // warning that always fires is a warning nobody reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const cleanRun = runResolve();
+    expect(cleanRun.status).toBe(0);
+    expect(cleanRun.out).not.toContain(
+      'review-thread pagination did not complete',
+    );
+    expect(cleanRun.out).not.toContain(
+      'carries more than 100 comments; a comment past that page is not mapped',
     );
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
@@ -15992,6 +16974,9 @@ exit 1
           '--argjson',
           'nonblocking',
           '[]',
+          '--arg',
+          'ctx',
+          'qwen-autofix/dispatch-pending',
           jqFilter,
         ],
         { input: JSON.stringify(checks), encoding: 'utf8' },
