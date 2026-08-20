@@ -124,6 +124,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let clientInitializationAttempted = false;
       // The incoming session's stored telemetry is replayed by the client's
       // `initialize()` below, straight into the process-wide usage aggregate.
       // The service has no subtraction API, so a resume abandoned after that
@@ -186,14 +187,19 @@ export function useResumeCommand(
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-        // Resuming the session that is already current replays nothing —
-        // `initialize()` early-returns for an already-initialized session id —
-        // so there is nothing to roll back and no snapshot to take.
-        if (sessionId !== oldSessionId) {
-          telemetryReplaySnapshot =
-            uiTelemetryService.snapshotForReplay(sessionId);
-        }
+        const resumingCurrentSession = sessionId === oldSessionId;
+        telemetryReplaySnapshot =
+          uiTelemetryService.snapshotForReplay(sessionId);
+        clientInitializationAttempted = true;
         await config.getGeminiClient()?.initialize?.();
+        // A same-session resume normally initializes nothing. If client and
+        // config state were desynchronized, initialize() replayed history that
+        // is already in the live aggregate, so undo that duplicate even though
+        // the resume itself can still commit.
+        if (resumingCurrentSession) {
+          uiTelemetryService.restoreFromReplaySnapshot(telemetryReplaySnapshot);
+          telemetryReplaySnapshot = undefined;
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
@@ -235,23 +241,12 @@ export function useResumeCommand(
           // yet — put core back on the old session, otherwise the
           // recorder would keep writing new user messages into the
           // orphaned session JSONL while UI still shows the old session.
-          if (telemetryReplaySnapshot) {
-            try {
-              uiTelemetryService.restoreFromReplaySnapshot(
-                telemetryReplaySnapshot,
-              );
-            } catch (restoreErr) {
-              config
-                .getDebugLogger()
-                .warn(
-                  `Telemetry rollback after failed /resume init failed: ${restoreErr}`,
-                );
-            }
-            telemetryReplaySnapshot = undefined;
-          }
           try {
             resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
+            if (clientInitializationAttempted) {
+              await config.getGeminiClient()?.initialize?.();
+            }
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,
             // ~L158) before swapping core. After rolling core back to the old
@@ -270,6 +265,23 @@ export function useResumeCommand(
               .warn(
                 `Rollback after failed /resume init failed: ${rollbackErr}`,
               );
+          }
+          // Restore after the rollback re-initializes: that initialize may
+          // replay the old session, and restoring first would leave that
+          // duplicate in the aggregate.
+          if (telemetryReplaySnapshot) {
+            try {
+              uiTelemetryService.restoreFromReplaySnapshot(
+                telemetryReplaySnapshot,
+              );
+            } catch (restoreErr) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Telemetry rollback after failed /resume init failed: ${restoreErr}`,
+                );
+            }
+            telemetryReplaySnapshot = undefined;
           }
         }
         addItem(

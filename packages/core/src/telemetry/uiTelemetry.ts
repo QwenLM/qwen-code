@@ -209,10 +209,10 @@ const createInitialMetrics = (): SessionMetrics => ({
 /**
  * The slice of telemetry state a session-swap replay overwrites.
  *
- * `/resume` and `/branch` replay the incoming session's stored history into
- * the aggregate *before* the steps that can still fail (the Goal-runtime
- * wait, client init), because the Goal meter has to open on the restored
- * totals. Their catch blocks roll core back to the old session, but the
+ * `/resume` and `/branch` take this snapshot immediately before client
+ * initialization replays the incoming session's stored history. The rest of
+ * initialization and background-agent recovery can still fail after that
+ * replay. Their catch blocks roll core back to the old session, but the
  * service has no subtraction API — `resetSession` clears one bucket and
  * `reset()` would take the surviving session's live data with it — so an
  * abandoned swap would otherwise leak a full copy of the dead session's
@@ -221,7 +221,8 @@ const createInitialMetrics = (): SessionMetrics => ({
  *
  * Take one with {@link UiTelemetryService.snapshotForReplay} immediately
  * before replaying and hand it back to
- * {@link UiTelemetryService.restoreFromReplaySnapshot} on the rollback path.
+ * {@link UiTelemetryService.restoreFromReplaySnapshot} whenever that replay
+ * must be undone, including rollback and duplicate same-session replay paths.
  */
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
