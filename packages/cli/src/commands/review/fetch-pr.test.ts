@@ -1260,6 +1260,14 @@ describe('fetch-pr report assembly', () => {
   ].join('\n');
   /** Just `a.ts`'s section of FULL_TWO, byte-for-byte. */
   const SLICE_A = FULL_TWO.split('diff --git a/b.ts')[0];
+  /**
+   * Just `b.ts`'s section — the full range a repository ACTUALLY renders when
+   * `a.ts` is restored. A file whose tree entry is identical at both ends of
+   * the PR has no hunks there, so a fixture pairing "restored" with a section
+   * of its own describes a state git cannot produce.
+   */
+  const FULL_B_ONLY =
+    'diff --git a/b.ts' + FULL_TWO.split('diff --git a/b.ts')[1];
   const DELTA_A = [
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
@@ -1517,7 +1525,7 @@ describe('fetch-pr report assembly', () => {
       baseFetchFailed: false,
       probeUnavailable: false,
     });
-    servesBothRanges(FULL_TWO, DELTA_A);
+    servesBothRanges(FULL_B_ONLY, DELTA_A);
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (String(path).endsWith('b.ts')) return "import './a.js';\n";
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1530,8 +1538,10 @@ describe('fetch-pr report assembly', () => {
     expect(scope['interaction']).toEqual([
       { path: 'b.ts', importsChanged: ['a.ts'] },
     ]);
-    // Only the importer's section is published \u2014 the undone file has none
-    // of its own worth reading.
+    // Only the importer's section is published. With an honest full range
+    // that is structural rather than a filter doing work — git renders no
+    // section for a file identical at both ends — so the load-bearing
+    // assertions are the three above, not this one.
     expect(writtenDiff()).not.toContain('a/a.ts');
     expect(writtenDiff()).toContain('a/b.ts');
   });
