@@ -2515,6 +2515,43 @@ describe('describeWorkerTlsTrustGaps', () => {
     ).toEqual([]);
   });
 
+  it('reports the self-signed leaf the workers never receive', () => {
+    // R8-1: the fingerprint check upstream only decides whether to PREPEND
+    // the boot-parsed leaf to the modeled worker store. Once prepended, a
+    // SELF-SIGNED leaf self-anchored the walk at path length 1 — anchored
+    // unconditionally, because the CA constraint is waived at leaf depth —
+    // and boot reported zero gaps for a certificate the workers do not hold.
+    //
+    // A self-signed certificate verifies only when it is ITSELF in the trust
+    // store, so this is the silent-green outage the diagnostic exists to
+    // catch. Measured on Node v22.23.0 for exactly this shape (a self-signed
+    // loopback leaf under `openssl x509 -trustout`'s TRUSTED CERTIFICATE
+    // label, plus an unrelated plain root): `new X509Certificate` parses it
+    // and `tls.createSecureContext` serves it, while a worker handshake with
+    // the same file as NODE_EXTRA_CA_CERTS fails DEPTH_ZERO_SELF_SIGNED_CERT
+    // with an EMPTY stderr — no warning anywhere.
+    const trustLabelled = TEST_TLS_CERT_SELF_SIGNED_NON_CA.replace(
+      /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+      '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+    );
+    const unrelatedRoot = TEST_TLS_CERT_FULLCHAIN.slice(
+      TEST_TLS_CERT_FULLCHAIN.indexOf('-----END CERTIFICATE-----\n') +
+        '-----END CERTIFICATE-----\n'.length,
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(`${trustLabelled}${unrelatedRoot}`),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('DEPTH_ZERO_SELF_SIGNED_CERT');
+    expect(gaps[0]).toContain('TRUSTED CERTIFICATE');
+    // Not the wrong diagnosis: this leaf is self-signed, so the generic
+    // unanchored message ("is issued by another CA") would send the operator
+    // after a CA that does not exist.
+    expect(gaps[0]).not.toContain('issued by another CA');
+  });
+
   it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
     // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
     // its OWN trust store is verified at depth 0 and handshakes fine

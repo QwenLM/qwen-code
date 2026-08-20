@@ -147,8 +147,26 @@ function decodesAsBase64(encoded: string): boolean {
 export function extractCertificateBlocks(
   contents: string,
 ): string[] | undefined {
+  const scanned = scanCertificateBlocks(contents);
+  return scanned.length > 0 ? scanned.map((entry) => entry.block) : undefined;
+}
+
+/** A block the loader takes, in canonical PEM and as its parsed certificate. */
+interface ScannedCertificateBlock {
+  block: string;
+  certificate: X509Certificate;
+}
+
+/**
+ * One walk of the file, shared by both exports.
+ *
+ * The certificate each block parsed to is carried out with the block rather
+ * than re-derived from it: the gate below judges the DECODED bytes, so a block
+ * the loader takes need not parse a second time as PEM.
+ */
+function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
   const lines = contents.split('\n').map(normalizePemLine);
-  const blocks: string[] = [];
+  const blocks: ScannedCertificateBlock[] = [];
   let index = 0;
   scan: while (index < lines.length) {
     const label = beginMarkerLabel(lines[index]!);
@@ -158,6 +176,32 @@ export function extractCertificateBlocks(
     }
     const body: string[] = [];
     let cursor = index + 1;
+    /**
+     * Set when a BEGIN marker — not an end line — closed this body.
+     *
+     * The loader does not read on past it and does not resume at it: it
+     * decodes what it collected SO FAR as this block's data and takes nothing
+     * from the rest of the file. Measured on Node v22.23.0 / OpenSSL 3.5.7
+     * through real `NODE_EXTRA_CA_CERTS` handshakes, four shapes that pin
+     * both halves of that rule:
+     *
+     * - `[root without its END line][full root]` -> `authorized: true`, no
+     *   warning (the truncated body IS taken);
+     * - `[leaf without its END line][full root]` -> `authorized: false`
+     *   UNABLE_TO_VERIFY_LEAF_SIGNATURE, no warning (the root BEHIND it is
+     *   not — so the loader stops rather than resuming at the inner marker);
+     * - `[full leaf][leaf without its END line][full root]` -> likewise
+     *   `authorized: false`, confirming the stop is not about which block
+     *   came first;
+     * - `[root without its END line]` at EOF -> `bad end line`, nothing.
+     *
+     * Folding the inner marker into the body instead made the base64
+     * judgment below fail on its `-` characters and dropped the WHOLE file:
+     * `resolveWorkerCaCertPath` then fired the no-operator-blocks fallback
+     * and discarded a CA the workers' own loader reads, while the boot
+     * diagnostic predicted an outage the workers do not have.
+     */
+    let truncatedByBeginMarker = false;
     for (; cursor < lines.length; cursor += 1) {
       const line = lines[cursor]!;
       if (line.startsWith(END_PREFIX)) {
@@ -166,10 +210,15 @@ export function extractCertificateBlocks(
         if (pemMarkerLabel(line, END_PREFIX) !== label) break scan;
         break;
       }
+      if (beginMarkerLabel(line) !== undefined) {
+        truncatedByBeginMarker = true;
+        break;
+      }
       body.push(line);
     }
-    // Ran off the end without an end line — same `bad end line` stop.
-    if (cursor >= lines.length) break;
+    // Ran off the end without an end line — same `bad end line` stop. A body
+    // closed by a BEGIN marker is NOT that shape: the loader took it.
+    if (!truncatedByBeginMarker && cursor >= lines.length) break;
     // Everything between the markers is `header CRLF CRLF data`, not data
     // alone: the loader splits a block on its FIRST blank line and reads what
     // precedes it as RFC 1421 headers. Folding the header lines into the
@@ -222,25 +271,41 @@ export function extractCertificateBlocks(
       // undecodable body is `bad base64 decode` and stops the file (measured
       // for `!!!!` and for `AAAAA` under `Proc-Type:`/`DEK-Info:`), and a
       // header section with no body at all takes nothing either.
+      if (truncatedByBeginMarker) break;
       index = cursor + 1;
       continue;
     }
     if (CERTIFICATE_LABELS.has(label)) {
-      const block = renderCertificateBlock(encoded);
+      let certificate: X509Certificate;
       try {
         // Shape is not loadability: a body made only of base64 *characters*
         // still frames correctly while failing to decode (one misplaced `=` in
-        // a truncated or hand-edited cert). `X509Certificate` is the loader's
-        // own parser, so let it decide, and stop where the loader stops.
-        new X509Certificate(block);
+        // a truncated or hand-edited cert), so something has to parse it.
+        //
+        // The DECODED BYTES are what the loader parses, and judging the
+        // re-rendered PEM instead was stricter than the loader by exactly one
+        // shape: a body carrying a complete DER certificate followed by extra
+        // bytes. `new X509Certificate(<that PEM>)` throws `wrong tag`, while
+        // the loader TAKES the block — measured `authorized: true` with no
+        // `Ignoring extra certs` warning for a root with trailing bytes
+        // appended. The DER-buffer path accepts the same bytes the loader
+        // accepts and still throws on truncated or invalid DER, so it is the
+        // gate that answers the loader's question. Judging the PEM dropped
+        // that block AND every block behind it, and the operator was told
+        // their file holds no certificate block Node can load.
+        certificate = new X509Certificate(Buffer.from(encoded, 'base64'));
       } catch {
         break;
       }
-      blocks.push(block);
+      // The canonical re-render keeps a merged bundle byte-stable; it carries
+      // the same body bytes, so the loader takes it exactly as it took the
+      // original.
+      blocks.push({ block: renderCertificateBlock(encoded), certificate });
     }
+    if (truncatedByBeginMarker) break;
     index = cursor + 1;
   }
-  return blocks.length > 0 ? blocks : undefined;
+  return blocks;
 }
 
 /** Canonical PEM for `encoded`, so a merged bundle is byte-stable. */
@@ -263,8 +328,8 @@ function renderCertificateBlock(encoded: string): string {
 export function loadableCertificates(
   contents: string,
 ): X509Certificate[] | undefined {
-  const blocks = extractCertificateBlocks(contents);
-  if (!blocks) return undefined;
-  // `extractCertificateBlocks` already parsed each block, so this cannot throw.
-  return blocks.map((block) => new X509Certificate(block));
+  const scanned = scanCertificateBlocks(contents);
+  return scanned.length > 0
+    ? scanned.map((entry) => entry.certificate)
+    : undefined;
 }

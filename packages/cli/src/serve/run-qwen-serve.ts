@@ -795,6 +795,13 @@ export function describeWorkerTlsTrustGaps(opts: {
           )
         ? servingBlocks
         : [x509, ...servingBlocks];
+  // Whether the leaf the walk starts from is one the workers' loader actually
+  // gives them. It is not when the block the daemon serves is a block the
+  // loader skips and the leaf had to be prepended above — a distinction that
+  // only bites a SELF-SIGNED leaf, which anchors nothing it is absent from.
+  const leafHeldByWorkers =
+    servingBlocks !== undefined &&
+    servingBlocks.some((block) => block.fingerprint256 === x509.fingerprint256);
   const workerTrustStore =
     operatorChain && servingBlocks
       ? [...servingChain, ...operatorChain]
@@ -804,7 +811,13 @@ export function describeWorkerTlsTrustGaps(opts: {
   // leaf (what the `mkcert` flow this project documents produces) never
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
-  const anchorPath = walkWorkerAnchorPath(workerTrustStore);
+  const anchorPath = walkWorkerAnchorPath(
+    workerTrustStore,
+    // The `servingBlocks === undefined` fallback prepends the leaf too, but
+    // that file already reports its own gap below and the workers receive it
+    // verbatim; only the partial-read case needs the distinction.
+    servingBlocks === undefined || leafHeldByWorkers,
+  );
   // R7-2: this gap is pushed only after the anchor walk, because the read
   // error alone does not decide the outcome. `resolveWorkerCaCertPath`'s catch
   // hands the workers the SERVING file as their extra-CA store, and a
@@ -922,6 +935,19 @@ export function describeWorkerTlsTrustGaps(opts: {
         `PATH_LENGTH_EXCEEDED even though every certificate in the bundle ` +
         `verifies. Reissue that CA with a pathlen that covers the chain, or ` +
         `shorten the chain, and restart.`,
+    );
+  } else if (anchorPath.unheldSelfSignedLeaf) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" serves a self-signed certificate whose ` +
+        `own PEM block is not one Node's NODE_EXTRA_CA_CERTS loader takes ` +
+        `(a -----BEGIN TRUSTED CERTIFICATE----- block, as \`openssl x509 ` +
+        `-trustout\` writes, is the usual cause), so the channel workers ` +
+        `never receive that certificate — and a self-signed certificate ` +
+        `verifies only when it is itself in the trust store. The daemon ` +
+        `serves it fine, but every worker handshake will fail ` +
+        `DEPTH_ZERO_SELF_SIGNED_CERT with nothing logged. Re-export ` +
+        `--tls-cert with a plain -----BEGIN CERTIFICATE----- block and ` +
+        `restart.`,
     );
   } else if (!anchorPath.anchored) {
     gaps.push(
@@ -1267,7 +1293,15 @@ function pathLengthConstraint(cert: X509Certificate): number | undefined {
  * though the leaf never could alone — and every member the walk leaned on is
  * a member whose own validity window the handshake will enforce.
  */
-function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
+function walkWorkerAnchorPath(
+  chain: readonly X509Certificate[],
+  /**
+   * Whether `chain[0]` is a certificate the workers' loader actually hands
+   * them. It is not when the caller had to PREPEND the boot-parsed leaf
+   * because the serving file's own block is not one the loader takes.
+   */
+  leafHeldByWorkers = true,
+): {
   anchored: boolean;
   path: readonly X509Certificate[];
   /** Set when the walk terminated on a self-signed cert that is not a CA. */
@@ -1276,6 +1310,11 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   incapableIssuer?: X509Certificate;
   /** Set when a CA's basicConstraints pathLenConstraint is exceeded. */
   pathLengthViolation?: { cert: X509Certificate; constraint: number };
+  /**
+   * Set when the walk would have terminated on a self-signed LEAF the workers
+   * do not hold — an anchor that exists only in this model.
+   */
+  unheldSelfSignedLeaf?: X509Certificate;
 } {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
@@ -1306,6 +1345,20 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
       // INVALID_PURPOSE — so the constraint binds only past the leaf.
       if (path.length > 1 && cannotIssueCertificates(current)) {
         return { anchored: false, path, nonCaTerminator: current };
+      }
+      // R8-1: a self-signed certificate verifies only when it is ITSELF in
+      // the trust store, so a leaf the workers never receive cannot terminate
+      // their walk — however completely it terminates this one. The
+      // fingerprint check upstream only decides whether to prepend it; once
+      // prepended it self-anchored at path length 1 and boot reported zero
+      // gaps. Measured on Node v22.23.0: a self-signed loopback leaf exported
+      // with `openssl x509 -trustout` (a `TRUSTED CERTIFICATE` block, which
+      // `createSecureContext` accepts and the loader skips) plus an unrelated
+      // root is served green while every worker handshake fails
+      // DEPTH_ZERO_SELF_SIGNED_CERT with an EMPTY stderr — the silent-green
+      // outage this diagnostic exists to catch.
+      if (path.length === 1 && !leafHeldByWorkers) {
+        return { anchored: false, path, unheldSelfSignedLeaf: current };
       }
       return pathLengthViolation
         ? { anchored: false, path, pathLengthViolation }

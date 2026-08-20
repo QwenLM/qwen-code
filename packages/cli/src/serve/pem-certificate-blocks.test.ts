@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   extractCertificateBlocks,
@@ -64,6 +65,16 @@ v6SP3sMzDfFDdKbveQk7uRIdMfMMkyDuApZHDuW1YRlQBISLn3G66YOo
 /** The certificate body lines of `pem`, markers stripped. */
 const bodyLines = (pem: string): string[] =>
   pem.trim().split('\n').slice(1, -1);
+
+/** `der` as a canonical `CERTIFICATE` block, whatever it decodes to. */
+const renderBlock = (der: Buffer): string => {
+  const body = der.toString('base64');
+  const wrapped: string[] = [];
+  for (let at = 0; at < body.length; at += 64) {
+    wrapped.push(body.slice(at, at + 64));
+  }
+  return `-----BEGIN CERTIFICATE-----\n${wrapped.join('\n')}\n-----END CERTIFICATE-----\n`;
+};
 
 describe('extractCertificateBlocks', () => {
   it('takes a canonical single-certificate file verbatim', () => {
@@ -135,6 +146,47 @@ describe('extractCertificateBlocks', () => {
     expect(
       extractCertificateBlocks('-----BEGIN CERTIFICATE-----\nAAAA\n'),
     ).toBeUndefined();
+  });
+
+  it('takes a body carrying a certificate followed by extra bytes', () => {
+    // R4-2. Oracle: authorized=true with no `Ignoring extra certs` warning —
+    // the loader parses the DECODED BYTES and tolerates trailing content past
+    // a complete DER certificate, while `new X509Certificate(<this PEM>)`
+    // throws `wrong tag`. Judging the re-rendered PEM instead made this gate
+    // stricter than the loader, so the block and everything behind it were
+    // dropped and the operator was told the file holds nothing loadable.
+    const padded = renderBlock(
+      Buffer.concat([
+        new X509Certificate(ROOT_PEM).raw,
+        Buffer.from([0, 0, 0]),
+      ]),
+    );
+    expect(extractCertificateBlocks(padded)).toEqual([padded.trim()]);
+    expect(() => new X509Certificate(padded)).toThrow();
+  });
+
+  it('takes the truncated body a BEGIN marker closes', () => {
+    // R4-2. Oracle: authorized=true, no warning. A BEGIN marker inside a body
+    // ends that block, and what was collected so far IS the block the loader
+    // takes — folding the marker into the body failed the base64 judgment on
+    // its `-` characters and dropped the whole file.
+    const file = `${ROOT_PEM.replace('-----END CERTIFICATE-----\n', '')}${LEAF_PEM}`;
+    expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('takes nothing behind the block a BEGIN marker closed', () => {
+    // R4-2. The half that says the loader STOPS there rather than resuming at
+    // the inner marker. Oracle for `[leaf without its END line][root]`:
+    // authorized=FALSE (UNABLE_TO_VERIFY_LEAF_SIGNATURE) with no warning —
+    // the leaf is taken, the root behind it is not. Resuming at the marker
+    // would report an anchor the workers never receive.
+    const file = `${LEAF_PEM.replace('-----END CERTIFICATE-----\n', '')}${ROOT_PEM}`;
+    expect(extractCertificateBlocks(file)).toEqual([LEAF_PEM.trim()]);
+    const behind = `${LEAF_PEM}${LEAF_PEM.replace('-----END CERTIFICATE-----\n', '')}${ROOT_PEM}`;
+    expect(extractCertificateBlocks(behind)).toEqual([
+      LEAF_PEM.trim(),
+      LEAF_PEM.trim(),
+    ]);
   });
 
   it('returns undefined for a file with no block at all', () => {
@@ -445,5 +497,22 @@ describe('loadableCertificates', () => {
 
   it('returns undefined when the loader would take nothing', () => {
     expect(loadableCertificates('not a certificate\n')).toBeUndefined();
+  });
+
+  it('parses a block whose body carries extra bytes past the certificate', () => {
+    // R4-2. The scan's gate reads the decoded bytes, so this function must
+    // carry the certificate the scan already parsed rather than re-parsing
+    // the rendered PEM — which throws `wrong tag` for exactly this shape and
+    // would have turned a block the loader takes into an unhandled throw at
+    // boot.
+    const padded = renderBlock(
+      Buffer.concat([
+        new X509Certificate(ROOT_PEM).raw,
+        Buffer.from([0, 0, 0]),
+      ]),
+    );
+    expect(loadableCertificates(padded)?.map((cert) => cert.subject)).toEqual([
+      'CN=Probe Root CA',
+    ]);
   });
 });

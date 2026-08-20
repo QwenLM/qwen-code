@@ -924,18 +924,28 @@ describe('createChannelWorkerSupervisor', () => {
     // `no-daemon-blocks` arm had no test at all — returning `existing`
     // instead of the daemon cert, dropping the warning, or filing it under
     // the `no-operator-blocks` family key (which also silently merges the
-    // two families' dedup) all shipped green. The arm is reachable: a serving
-    // PEM whose first block lacks its END line and is followed by a complete
-    // block is accepted by `tls.createSecureContext` (measured on Node
-    // v22.23.0), so the daemon boots and serves, while Node's
-    // NODE_EXTRA_CA_CERTS loader takes nothing from it.
+    // two families' dedup) all shipped green.
+    //
+    // R4-2: the arm is reachable, but NOT through the shape this test used to
+    // use. `[block without its END line][complete block]` was measured again
+    // on Node v22.23.0: the loader TAKES the truncated block (`authorized:
+    // true`, no warning), so that file was never a `no-daemon-blocks` file —
+    // the fixture was pinning this module's own divergence from the loader as
+    // if it were the loader's behavior.
+    //
+    // A `TRUSTED CERTIFICATE` block is the real shape, and the same probe
+    // settles both halves: `tls.createSecureContext` ACCEPTS it (the daemon
+    // boots and serves), while the workers' `NODE_EXTRA_CA_CERTS` loader
+    // takes nothing from it and says nothing — a handshake against a daemon
+    // serving one fails DEPTH_ZERO_SELF_SIGNED_CERT with an empty stderr.
+    // `openssl x509 -trustout` writes exactly this label.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-nodaemon-'));
     const operatorCa = path.join(dir, 'operator.pem');
     const daemonCa = path.join(dir, 'daemon.pem');
     fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
     fs.writeFileSync(
       daemonCa,
-      `${DAEMON_CERT_PEM.replace('-----END CERTIFICATE-----\n', '')}${DAEMON_CERT_PEM}`,
+      DAEMON_CERT_PEM.replace(/CERTIFICATE-----/g, 'TRUSTED CERTIFICATE-----'),
     );
     const warnings: string[] = [];
     const onWarning = (warning: Error) => warnings.push(warning.message);
