@@ -147,6 +147,23 @@ interface PendingPlanApproval {
   onAbort?: () => void;
 }
 
+interface ShutdownOutstandingToken {
+  kind: 'delivered' | 'marker';
+  reservations: number;
+  consumed: boolean;
+}
+
+interface ShutdownLedger {
+  inFlightWrites: number;
+  outstandingTokens: ShutdownOutstandingToken[];
+  responsesInFlight: number;
+}
+
+interface ShutdownResponseReservation {
+  ledger: ShutdownLedger;
+  token: ShutdownOutstandingToken;
+}
+
 /**
  * The stable tag wrapping teammate→leader messages in the leader's
  * conversation. No secret/nonce: forgery is prevented structurally by
@@ -220,24 +237,8 @@ export class TeamManager {
     | ((message: string, display: string) => void)
     | null = null;
 
-  /** Names of teammates with a pending leader-requested shutdown.
-   *  Gates both the per-idle mailbox read in flushNextMessage and
-   *  the shutdown_approved abort path in sendMessage. Tracked
-   *  per-agent (rather than as a sticky boolean) so a free-text
-   *  match in an unrelated teammate's reply cannot abort them, and
-   *  so an impersonation-forged shutdown can't widen the blast
-   *  radius across the rest of the session. */
-  private readonly _shutdownPending = new Set<string>();
-
-  /** Tracks writes separately from delivered requests so one failed retry
-   *  cannot clear another request's pending state. */
-  private readonly shutdownRequestStates = new Map<
-    string,
-    { inFlight: number; delivered: boolean }
-  >();
-
-  /** Test-only shutdown markers installed without requestShutdown(). */
-  private readonly markedShutdownRequests = new Set<string>();
+  /** Outstanding shutdown tokens and their response reservations. */
+  private readonly shutdownLedgers = new Map<string, ShutdownLedger>();
 
   /** Per-agent last activity timestamp (updated on events). */
   private readonly lastActivityAt = new Map<string, number>();
@@ -554,61 +555,58 @@ export class TeamManager {
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      // Classify a shutdown response up front, but only for a teammate
-      // the leader actually asked to shut down (the gate) and only when
-      // the reply *leads* with the structured token — not merely
-      // mentions it in prose. The resulting type is carried on the
-      // message and drives the abort decision below, instead of
-      // re-scanning the free-text body. This is what keeps a
-      // pending-shutdown teammate that mentions "shutdown_approved"
-      // mid-report (e.g. while reviewing shutdown code) from being
-      // aborted, and a non-requested teammate from ever triggering one.
       const sender = from
         ? findMemberByName(this.teamFile.members, from)
         : undefined;
-      const shutdownResponse =
-        sender && !automatic && this._shutdownPending.has(sender.name)
-          ? classifyShutdownResponse(message)
+      const responseCandidate =
+        sender && !automatic ? classifyShutdownResponse(message) : undefined;
+      const shutdownReservation =
+        sender && responseCandidate
+          ? this.reserveShutdownResponse(sender.name)
           : undefined;
+      const shutdownResponse = shutdownReservation
+        ? responseCandidate
+        : undefined;
+      let consumedShutdownToken = false;
 
-      await writeMessage(this.teamFile.name, LEADER_NAME, {
-        from: from ?? 'unknown',
-        text: message,
-        summary,
-        timestamp: new Date().toISOString(),
-        read: false,
-        type: shutdownResponse,
-      });
+      try {
+        await writeMessage(this.teamFile.name, LEADER_NAME, {
+          from: from ?? 'unknown',
+          text: message,
+          summary,
+          timestamp: new Date().toISOString(),
+          read: false,
+          type: shutdownResponse,
+        });
+      } catch (error) {
+        if (sender && shutdownReservation) {
+          this.settleShutdownResponse(sender.name, shutdownReservation, false);
+        }
+        throw error;
+      }
+      if (sender && shutdownResponse && shutdownReservation) {
+        consumedShutdownToken = this.settleShutdownResponse(
+          sender.name,
+          shutdownReservation,
+          true,
+        );
+      }
       if (sender && !automatic) {
         this.explicitLeaderReports.add(sender.agentId);
       }
-      this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-        from: from ?? 'unknown',
-        to: LEADER_NAME,
-        message,
-        timestamp: Date.now(),
-      });
-
-      // Act on the typed shutdown response. Approval aborts the
-      // teammate so it actually retires; rejection just clears the
-      // pending flag — leaving it set would keep the teammate excluded
-      // from auto-claim (scanIdleAgentsForTasks skips pending-shutdown
-      // members) and kill-armed. Either way the reply text still
-      // reaches the leader through the inbox write above.
-      //
-      // Re-check the pending flag here, after the await: the response
-      // was classified before `writeMessage`, so a concurrent reply from
-      // the same teammate could have cleared the flag in between. Acting
-      // on the stale capture would abort a teammate whose latest reply
-      // was a rejection — so gate the act on the flag still being set,
-      // keeping check-and-act atomic as the pre-refactor path was.
-      if (
-        sender &&
-        shutdownResponse &&
-        this._shutdownPending.has(sender.name)
-      ) {
-        this.clearDeliveredShutdownRequest(sender.name);
-        if (shutdownResponse === 'shutdown_approved') {
+      try {
+        this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
+          from: from ?? 'unknown',
+          to: LEADER_NAME,
+          message,
+          timestamp: Date.now(),
+        });
+      } finally {
+        if (
+          sender &&
+          shutdownResponse === 'shutdown_approved' &&
+          consumedShutdownToken
+        ) {
           this.getAgentFromBackend(sender.agentId)?.abort();
         }
       }
@@ -700,16 +698,8 @@ export class TeamManager {
       throw new Error(`Teammate "${name}" not found.`);
     }
 
-    let requestState = this.shutdownRequestStates.get(member.name);
-    if (!requestState) {
-      requestState = {
-        inFlight: 0,
-        delivered: false,
-      };
-      this.shutdownRequestStates.set(member.name, requestState);
-    }
-    requestState.inFlight += 1;
-    this._shutdownPending.add(member.name);
+    const ledger = this.getOrCreateShutdownLedger(member.name);
+    ledger.inFlightWrites += 1;
     try {
       await sendStructuredMessage(this.teamFile.name, member.name, {
         from: LEADER_NAME,
@@ -721,18 +711,17 @@ export class TeamManager {
           '"shutdown_approved" or "shutdown_rejected: <reason>".',
         summary: 'Shutdown requested by leader',
       });
-      requestState.delivered = true;
+      if (this.shutdownLedgers.get(member.name) === ledger) {
+        ledger.outstandingTokens.push({
+          kind: 'delivered',
+          reservations: 0,
+          consumed: false,
+        });
+      }
     } finally {
-      requestState.inFlight -= 1;
-      if (
-        requestState.inFlight === 0 &&
-        !requestState.delivered &&
-        this.shutdownRequestStates.get(member.name) === requestState
-      ) {
-        this.shutdownRequestStates.delete(member.name);
-        if (!this.markedShutdownRequests.has(member.name)) {
-          this._shutdownPending.delete(member.name);
-        }
+      if (this.shutdownLedgers.get(member.name) === ledger) {
+        ledger.inFlightWrites -= 1;
+        this.cleanupShutdownLedger(member.name, ledger);
       }
     }
 
@@ -1355,22 +1344,87 @@ export class TeamManager {
    *  that inject the structured shutdown message directly without
    *  going through `requestShutdown`. */
   markShutdownRequested(name: string): void {
-    this.markedShutdownRequests.add(name);
-    this._shutdownPending.add(name);
+    const ledger = this.getOrCreateShutdownLedger(name);
+    const hasMarker = ledger.outstandingTokens.some(
+      (token) => token.kind === 'marker' && !token.consumed,
+    );
+    if (!hasMarker) {
+      ledger.outstandingTokens.push({
+        kind: 'marker',
+        reservations: 0,
+        consumed: false,
+      });
+    }
   }
 
-  private clearDeliveredShutdownRequest(name: string): void {
-    this.markedShutdownRequests.delete(name);
-    const requestState = this.shutdownRequestStates.get(name);
-    if (!requestState) {
-      this._shutdownPending.delete(name);
-      return;
+  private getOrCreateShutdownLedger(name: string): ShutdownLedger {
+    let ledger = this.shutdownLedgers.get(name);
+    if (!ledger) {
+      ledger = {
+        inFlightWrites: 0,
+        outstandingTokens: [],
+        responsesInFlight: 0,
+      };
+      this.shutdownLedgers.set(name, ledger);
     }
+    return ledger;
+  }
 
-    requestState.delivered = false;
-    if (requestState.inFlight === 0) {
-      this.shutdownRequestStates.delete(name);
-      this._shutdownPending.delete(name);
+  private hasShutdownWork(name: string): boolean {
+    const ledger = this.shutdownLedgers.get(name);
+    return Boolean(
+      ledger &&
+        (ledger.inFlightWrites > 0 ||
+          ledger.outstandingTokens.some((token) => !token.consumed) ||
+          ledger.responsesInFlight > 0),
+    );
+  }
+
+  private reserveShutdownResponse(
+    name: string,
+  ): ShutdownResponseReservation | undefined {
+    const ledger = this.shutdownLedgers.get(name);
+    if (!ledger) return undefined;
+
+    const token =
+      ledger.outstandingTokens.find(
+        (candidate) => !candidate.consumed && candidate.reservations === 0,
+      ) ?? ledger.outstandingTokens.find((candidate) => !candidate.consumed);
+    if (!token) return undefined;
+
+    token.reservations += 1;
+    ledger.responsesInFlight += 1;
+    return { ledger, token };
+  }
+
+  private settleShutdownResponse(
+    name: string,
+    reservation: ShutdownResponseReservation,
+    succeeded: boolean,
+  ): boolean {
+    if (this.shutdownLedgers.get(name) !== reservation.ledger) return false;
+
+    reservation.ledger.responsesInFlight -= 1;
+    reservation.token.reservations -= 1;
+    const consumed = succeeded && !reservation.token.consumed;
+    if (consumed) {
+      reservation.token.consumed = true;
+    }
+    this.cleanupShutdownLedger(name, reservation.ledger);
+    return consumed;
+  }
+
+  private cleanupShutdownLedger(name: string, ledger: ShutdownLedger): void {
+    ledger.outstandingTokens = ledger.outstandingTokens.filter(
+      (token) => !token.consumed || token.reservations > 0,
+    );
+    if (
+      this.shutdownLedgers.get(name) === ledger &&
+      ledger.inFlightWrites === 0 &&
+      ledger.outstandingTokens.length === 0 &&
+      ledger.responsesInFlight === 0
+    ) {
+      this.shutdownLedgers.delete(name);
     }
   }
 
@@ -1577,9 +1631,7 @@ export class TeamManager {
         this.explicitLeaderReports.delete(agentId);
         this.lastActivityAt.delete(agentId);
         this.agentIdentities.delete(agentId);
-        this._shutdownPending.delete(agentName);
-        this.shutdownRequestStates.delete(agentName);
-        this.markedShutdownRequests.delete(agentName);
+        this.shutdownLedgers.delete(agentName);
         this.rejectPendingPlanApprovalsForTeammate(
           agentName,
           new Error(
@@ -1716,7 +1768,7 @@ export class TeamManager {
     //    Only read the mailbox if this specific teammate has had
     //    a shutdown queued — avoids a per-idle inbox round-trip
     //    for everyone whenever any shutdown is in flight.
-    if (this._shutdownPending.has(agentName)) {
+    if (this.hasShutdownWork(agentName)) {
       const shutdowns = await consumeUnread(
         this.teamFile.name,
         agentName,
@@ -1798,7 +1850,7 @@ export class TeamManager {
     if (!agent) return;
     if (agent.getStatus() !== AgentStatus.IDLE) return;
     if (findMemberByName(this.teamFile.members, agentName)?.readOnly) return;
-    if (this._shutdownPending.has(agentName)) return;
+    if (this.hasShutdownWork(agentName)) return;
 
     const pendingTasks =
       pending ??
@@ -1811,7 +1863,7 @@ export class TeamManager {
     for (const task of pendingTasks) {
       if (task.owner) continue;
       if (task.blockedBy.length > 0) continue;
-      if (this._shutdownPending.has(agentName)) return;
+      if (this.hasShutdownWork(agentName)) return;
 
       const claimed = await claimTask(this.teamFile.name, task.id, agentId, {
         checkAgentBusy: true,
@@ -1886,7 +1938,7 @@ export class TeamManager {
         `Spawn the teammate first or choose an existing one.`
       );
     }
-    if (this._shutdownPending.has(member.name)) {
+    if (this.hasShutdownWork(member.name)) {
       return (
         `Cannot assign to "${ownerName}": shutdown is already pending ` +
         `for that teammate.`
@@ -1916,7 +1968,7 @@ export class TeamManager {
     if (task.status !== 'in_progress' || !task.owner) return false;
     const member = findMemberByName(this.teamFile.members, task.owner);
     if (!member) return false;
-    if (this._shutdownPending.has(member.name)) return false;
+    if (this.hasShutdownWork(member.name)) return false;
     const agent = this.getAgentFromBackend(member.agentId);
     if (!agent) return false;
     if (isTerminalStatus(agent.getStatus())) return false;
@@ -1938,7 +1990,7 @@ export class TeamManager {
       // Don't auto-claim a task for a teammate the leader is shutting
       // down — it would start work it's about to abandon. tryAutoClaimTask
       // repeats this check after async task reads for both claim paths.
-      if (this._shutdownPending.has(member.name)) return false;
+      if (this.hasShutdownWork(member.name)) return false;
       const queue = this.pendingMessages.get(member.agentId) ?? [];
       return queue.length === 0;
     });
