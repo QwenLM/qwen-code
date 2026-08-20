@@ -686,7 +686,7 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain('changed since the age reference');
     expect(body).toContain('you can state the causal link in one clause');
-    // The three guardrails. The first keeps attribution from becoming a way
+    // The first three guardrails. The first keeps attribution from becoming a way
     // to not report something, the second keeps a Critical id from quietly
     // becoming a Suggestion, and the third fixes the fail direction at
     // "mint a new id" — the behaviour every round had before the rule.
@@ -697,6 +697,11 @@ describe('bundled review skill', () => {
       'only when the new defect is at least as severe and as confident as the entry it carries',
     );
     expect(body).toContain('**mint the fresh id**');
+    // The fourth guardrail: two distinct new defects tracing to the same
+    // previous entry cannot both take its id — the artifact validator
+    // refuses a duplicate id and with it the whole round's findings.
+    expect(body).toContain('**one re-report per original id per round**');
+    expect(body).toContain('Count the second in `fresh` but not `induced`');
   });
 
   it('pins the census contract and the module-owns-the-verdict split', () => {

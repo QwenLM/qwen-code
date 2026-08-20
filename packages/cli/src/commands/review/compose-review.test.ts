@@ -40,6 +40,7 @@ import {
   CHURN_STREAK_TO_FILE,
   churnCensusOf,
   composeReview,
+  nonConvergenceCritical,
   isNonDiffDimensionGap,
   buildLedger,
   repositoryContextGate,
@@ -8975,18 +8976,22 @@ describe('convergence telemetry — volume, carried in the marker', () => {
 describe('the convergence census and the non-convergence finding', () => {
   // The reviewer-side half of #9578. The loop's largest single source of its
   // own next round is the fix round before it; this is the machinery that
-  // MEASURES that and, after two consecutive rounds of it, says so as a
-  // blocker instead of filing a third round of derived findings.
+  // MEASURES that and, after two rounds counted against the bar, says so as
+  // a blocker instead of filing a third round of derived findings.
   const prevLedger = (over: Record<string, unknown>) =>
     writeFileSync(
       join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
       JSON.stringify({ v: 1, findings: [], ...over }),
     );
+  // The census's denominator is cross-checked against everything the round
+  // reports, so a fixture claiming `fresh` findings must REPORT them: one
+  // drafted comment per first-appearing finding.
   const round = (
     convergence: unknown,
     planOpts: Record<string, unknown> = {},
-  ) =>
-    composeReview({
+  ) => {
+    const fresh = (convergence as { fresh?: number } | undefined)?.fresh;
+    return composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {
         prNumber: 8255,
         ...planOpts,
@@ -8998,10 +9003,16 @@ describe('the convergence census and the non-convergence finding', () => {
       ...(convergence === undefined
         ? {}
         : { convergence: convergence as { fresh: number; induced: number } }),
-      draftedComments: [
-        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** one' },
-      ],
+      draftedComments: Array.from(
+        { length: Math.max(fresh ?? 1, 1) },
+        (_, i) => ({
+          path: 'src/a.ts',
+          line: i + 1,
+          body: `**[Suggestion]** finding ${i + 1}`,
+        }),
+      ),
     });
+  };
 
   it('reads a census only when it can be one', () => {
     expect(churnCensusOf({ fresh: 10, induced: 5 })).toEqual({
@@ -9025,15 +9036,20 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(churnCensusOf(undefined)).toBeNull();
   });
 
-  it('sets the bar at a majority, over a round big enough to have one', () => {
+  it('sets the bar at half or more, over a round big enough to have one', () => {
     // A ratio over two or three findings is rounding, not a trend: 2/2 is
     // 100% and says nothing, which is what the minimum exists to refuse.
     expect(aboveChurnBar({ fresh: CHURN_MIN_FRESH - 1, induced: 3 })).toBe(
       false,
     );
-    // And the bar itself is a MAJORITY, not the measured baseline: roughly a
-    // third of an ordinary re-review's findings are fix-induced, so a bar set
-    // there would fire on every pull request that ever gets a second round.
+    // Exactly the minimum is the weakest statement that is still a statement
+    // — pinned from BOTH sides, or a raised constant silently disarms the
+    // streak at exactly four first-appearing findings.
+    expect(aboveChurnBar({ fresh: CHURN_MIN_FRESH, induced: 2 })).toBe(true);
+    // And the bar itself is half or more, not the measured baseline: roughly
+    // a third of an ordinary re-review's findings are fix-induced, so a bar
+    // set there would fire on every pull request that ever gets a second
+    // round.
     expect(aboveChurnBar({ fresh: 12, induced: 4 })).toBe(false);
     expect(aboveChurnBar({ fresh: 10, induced: 4 })).toBe(false);
     expect(aboveChurnBar({ fresh: 10, induced: 5 })).toBe(true);
@@ -9053,14 +9069,21 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(r.body).not.toContain('is not converging');
   });
 
-  it('files the blocker on the second consecutive round above the bar', () => {
+  it('files the blocker on the second round counted against the bar', () => {
     prevLedger({ round: 3, churnRounds: 1 });
     const r = round({ fresh: 11, induced: 7 });
     expect(parseLedger(r.body)!.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    // Pins the WHOLE corrected claim: the counted-rounds phrasing (a
+    // reversion to "consecutive" reds) and the half-or-more premise (a
+    // reversion to "most" reds at the even-fresh boundary the bar allows).
     expect(r.body).toContain(
       'This pull request is not converging. Of the 11 findings first filed ' +
         "in round 4, 7 were introduced by the previous round's fixes for " +
-        "this review's own findings — the 2nd consecutive round",
+        "this review's own findings — the 2nd round counted against the " +
+        'churn bar (rounds that could not measure carry the count rather ' +
+        'than reset it), and in every counted round at least half of its ' +
+        'first-appearing findings were introduced by the previous ' +
+        "round's fixes.",
     );
     // It blocks. A claim that the loop cannot close itself is worth nothing
     // if the review then approves the pull request anyway.
@@ -9100,6 +9123,13 @@ describe('the convergence census and the non-convergence finding', () => {
       criticalsInline: 0,
       suggestionsInline: 0,
       convergence: { fresh: 11, induced: 7 },
+      // The census's denominator is cross-checked against the round's own
+      // reports, so the fixture must report what its census claims.
+      draftedComments: Array.from({ length: 11 }, (_, i) => ({
+        path: 'src/a.ts',
+        line: i + 1,
+        body: `**[Suggestion]** finding ${i + 1}`,
+      })),
     });
     expect(filed.body).toContain('is not converging');
     expect(filed.cappedBy).not.toContain('criticals-unverified');
@@ -9169,5 +9199,59 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(l.round).toBe(1);
     expect(l.churnRounds).toBe(1);
     expect(r.body).not.toContain('is not converging');
+  });
+
+  it('refuses a census that out-counts the round’s own reports', () => {
+    // The census is model-written, and the module holds the cross-check
+    // that needs no verifier: a FRESH finding only exists as something the
+    // round reports — inline, body or deferred — so a denominator past all
+    // three channels combined cannot be describing this round. Without the
+    // bound, a round that reports nothing files the blocker on the model's
+    // say-so alone.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 11, induced: 7 },
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toContain('is not converging');
+    const l = parseLedger(r.body)!;
+    // The refused census writes nothing; the streak carries, exactly as an
+    // absent census does.
+    expect(l.fresh).toBeUndefined();
+    expect(l.induced).toBeUndefined();
+    expect(l.churnRounds).toBe(1);
+  });
+
+  it('keeps filing on every counted round past the streak bar', () => {
+    // Pins the `>=` in the filing condition: every other filing test lands
+    // the streak at exactly the bar, so mutating `>=` to `===` keeps them
+    // green while a genuinely churning pull request — blocker already
+    // filed, next round above the bar again — silently never receives it
+    // again. The ordinal assertion doubles as the `rd` pin for
+    // `ordinalSuffix`.
+    prevLedger({ round: 4, churnRounds: CHURN_STREAK_TO_FILE });
+    const r = round({ fresh: 12, induced: 8 });
+    expect(r.body).toContain('the 3rd round counted against the churn bar');
+    expect(parseLedger(r.body)!.churnRounds).toBe(3);
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('renders the ordinal past the filing bar — rd, teen th, and st', () => {
+    // `ordinalSuffix` is exercised at streak 2 only by the filing tests;
+    // the `rd` branch, the teens guard and the `st` branch are reachable on
+    // a genuinely churning pull request (the streak caps at
+    // LEDGER_MAX_ROUND), and a "11st" inside the blocker must not ship with
+    // the suite green.
+    const body = (streak: number) =>
+      nonConvergenceCritical({ fresh: 11, induced: 7 }, streak, streak + 2);
+    expect(body(3)).toContain('the 3rd round counted');
+    expect(body(11)).toContain('the 11th round counted');
+    expect(body(12)).toContain('the 12th round counted');
+    expect(body(21)).toContain('the 21st round counted');
   });
 });

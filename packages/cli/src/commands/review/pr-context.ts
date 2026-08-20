@@ -1155,12 +1155,21 @@ export function persistRecoveredLedger(
         // foreign round 5 that won recovery — one fabricated point on a trend
         // whose whole value is that its points are real. Absence is already
         // the "not recorded" reading downstream, so dropping them degrades
-        // exactly as a pre-telemetry predecessor does.
+        // exactly as a pre-telemetry predecessor does. The churn fields are
+        // the same class: the census describes the round being advanced past,
+        // and a streak re-dated across a round this account never ran would
+        // arm the non-convergence blocker one round early — and silently
+        // discard the foreign winner's own streak state, a below-bar reset
+        // included. Dropped, the streak re-arms from scratch: a round of
+        // lateness on a genuinely churning pull request, never earliness.
         const {
           sha: _droppedSha,
           commitId: _droppedCommitId,
           posted: _droppedPosted,
           prevPosted: _droppedPrevPosted,
+          fresh: _droppedFresh,
+          induced: _droppedInduced,
+          churnRounds: _droppedChurnRounds,
           ...kept
         } = existing;
         mkdirSync(dirname(sideFilePath), { recursive: true });

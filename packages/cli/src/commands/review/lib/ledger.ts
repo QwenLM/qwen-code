@@ -125,11 +125,13 @@ export interface Ledger {
   fresh?: number;
   induced?: number;
   /**
-   * How many consecutive rounds — this one included — have come in above the
-   * churn bar. This is the ONE field here that is neither telemetry nor a
-   * gate on scope: it is the review's own standing claim about the pull
-   * request, carried exactly the way a finding id is, and `compose-review`
-   * reads it back to decide whether to file the non-convergence finding.
+   * How many rounds — this one included — have been counted against the
+   * churn bar since the last round measured converging; a round that could
+   * not measure carries the count without adding to it. This is the ONE
+   * field here that is neither telemetry nor a gate on scope: it is the
+   * review's own standing claim about the pull request, carried exactly the
+   * way a finding id is, and `compose-review` reads it back to decide
+   * whether to file the non-convergence finding.
    *
    * So it does NOT ride in the volume tier that sheds first. It is a single
    * small integer, and the pull request most likely to be churning is also
@@ -538,8 +540,15 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // when the census beside it did not, because it is the field the
     // non-convergence rule reads and the census is only what the body
     // quotes. Clamped on read as on write; a shape the serializer would not
-    // have written does not survive.
-    const churnRounds = streakOf(raw.churnRounds);
+    // have written does not survive. Clamped to the marker's own ROUND too:
+    // the streak counts rounds INSIDE the round it rides, and the pipeline's
+    // own writes advance it at most once per round, so a legitimate marker
+    // can never carry more counted rounds than rounds it claims. The marker
+    // body is any GitHub user's writable surface, and an unclamped streak
+    // inflates the posted ordinal ("the 10000th round…") past everything the
+    // pull request ever ran. Same invariant the finding-id filter enforces
+    // above: a claim about rounds that did not exist is not read.
+    const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
     return {
       v: 1,
       round: raw.round,
@@ -550,9 +559,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
       ...(census ? { fresh, induced } : {}),
-      ...(churnRounds === undefined || churnRounds === 0
-        ? {}
-        : { churnRounds }),
+      ...(churnRounds === 0 ? {} : { churnRounds }),
     };
   } catch {
     return null;

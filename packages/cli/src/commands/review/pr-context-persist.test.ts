@@ -59,6 +59,39 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('round-trips the churn fields on the plain recovery path', () => {
+    // The identity-known write keeps the recovered ledger WHOLE: the streak
+    // and its census are this account's own certified state for the round
+    // it recovered, and `compose-review` reads the streak back out of this
+    // file to decide whether the non-convergence finding files. A future
+    // edit field-picking this write the way the anonymous branch does must
+    // red here first.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, churnRounds: 2, fresh: 10, induced: 6 },
+          commitId: 'a'.repeat(40),
+          reviewId: 43,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written).toEqual({
+        ...ledger,
+        churnRounds: 2,
+        fresh: 10,
+        induced: 6,
+        commitId: 'a'.repeat(40),
+        reviewId: 43,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a recovery that THREW strips the age reference but keeps round and sha', () => {
     // A transient failure must not reset the id space or lose the anchor;
     // it must also not keep an age reference this run could not re-vouch —
@@ -230,9 +263,15 @@ describe('persistRecoveredLedger', () => {
           // past it, so they must go the way the anchor and the age
           // reference go — kept, they would attribute this account's round-7
           // posting count to the foreign round that won recovery, and the
-          // next compose would stamp it as `prevPosted`.
+          // next compose would stamp it as `prevPosted`. The churn fields
+          // are the same class of round-specific fact — kept, they would
+          // re-date this account's streak across the foreign round and
+          // discard the foreign winner's own streak state.
           posted: 4,
           prevPosted: 2,
+          churnRounds: 2,
+          fresh: 10,
+          induced: 6,
         }),
       );
       persistRecoveredLedger(
@@ -258,6 +297,12 @@ describe('persistRecoveredLedger', () => {
       });
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
+      // The drop witness: the fixture carries a streak and a census, and
+      // the written file must not — keeping them arms the blocker one
+      // round early across a round this account never ran.
+      expect(written.churnRounds).toBeUndefined();
+      expect(written.fresh).toBeUndefined();
+      expect(written.induced).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

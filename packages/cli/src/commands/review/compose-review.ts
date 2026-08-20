@@ -1191,7 +1191,25 @@ export function composeReview(
   // predating the field, an age reference the round could not validate — and
   // reading it as "converging" would let one unmeasurable round wipe a
   // standing claim about the pull request.
-  const churnCensus = churnCensusOf(input.convergence);
+  // The census is the model-written half of this trigger, so it gets the
+  // module's one-sided cross-check before it can arm anything: a FRESH
+  // finding only exists as something this round REPORTS — an inline draft, a
+  // body Critical, a deferral — so a denominator past everything reported,
+  // all three channels counted together, is a census this round cannot have
+  // measured. Refused as no census at all — the streak carries, exactly as
+  // absence does — or a round that reported nothing could file the
+  // non-convergence blocker on the model's say-so alone.
+  const reportedThisRound =
+    (Array.isArray(input.draftedComments) ? input.draftedComments.length : 0) +
+    (Array.isArray(input.bodyCriticals) ? input.bodyCriticals.length : 0) +
+    (Array.isArray(input.deferredSuggestions)
+      ? input.deferredSuggestions.length
+      : 0);
+  const readCensus = churnCensusOf(input.convergence);
+  const churnCensus =
+    readCensus !== null && readCensus.fresh > reportedThisRound
+      ? null
+      : readCensus;
   const churnAbove = aboveChurnBar(churnCensus);
   const churnRounds = churnAbove
     ? Math.min(prevFacts.churnRounds + 1, LEDGER_MAX_ROUND)
@@ -1331,15 +1349,15 @@ export function composeReview(
 export const CHURN_MIN_FRESH = 4;
 
 /**
- * How many consecutive rounds above the bar are needed before the finding is
- * filed.
+ * How many rounds counted against the churn bar are needed before the finding
+ * is filed.
  *
  * One round above the bar is an ordinary re-review: the fix round touched the
  * code, so of course this round's findings are on it, and the measured
- * baseline for that is roughly a third. Two consecutive rounds is the
- * shortest window in which "each round is reviewing the last round's answer
- * to it" is an observation rather than a single step — the same argument
- * `prevPosted` makes for the volume trend.
+ * baseline for that is roughly a third. Two counted rounds is the shortest
+ * window in which "each round is reviewing the last round's answer to it" is
+ * an observation rather than a single step — the same argument `prevPosted`
+ * makes for the volume trend.
  */
 export const CHURN_STREAK_TO_FILE = 2;
 
@@ -1364,13 +1382,15 @@ export function churnCensusOf(
 
 /**
  * Is this round above the churn bar? Half or more of its first-appearing
- * findings anchored on lines pushed since the previous review.
+ * findings attributed by the fix-induced rule to the previous round's fixes
+ * — the ATTRIBUTED count, not findings on newly pushed lines.
  *
  * Half, not the measured third: the third IS the baseline — the rate an
  * ordinary, healthy re-review runs at — and a bar set at the baseline fires
- * on every pull request that ever gets a second round. The claim this arms is
- * that the round did MORE work on the previous round's answer than on the
- * change itself, and that claim needs a majority to be worth making.
+ * on every pull request that ever gets a second round. The claim this arms
+ * is that at least half the round's first-appearing findings were work the
+ * previous round created — below that, the round is still mostly reviewing
+ * the change itself.
  *
  * Integer arithmetic on purpose (`induced * 2 >= fresh`): a float ratio
  * compared against 0.5 puts the bar's behaviour at 5/10 at the mercy of
@@ -1400,12 +1420,15 @@ export function nonConvergenceCritical(
     `This pull request is not converging. Of the ${census.fresh} findings ` +
     `first filed in round ${thisRound}, ${census.induced} were introduced by ` +
     `the previous round's fixes for this review's own findings — the ` +
-    `${streak}${ordinalSuffix(streak)} ` +
-    `consecutive round in which most of the review's new work was work the ` +
-    `previous round created. Filing more findings will not close this: split ` +
-    `the change into separately reviewable pieces, or reconsider the approach ` +
-    `under review, and re-request review after. (Counted by the review from ` +
-    `its own ledger and diff; it blocks so the decision is a person's.)`
+    `${streak}${ordinalSuffix(streak)} round counted against the churn bar ` +
+    `(rounds that could not measure carry the count rather than reset it), ` +
+    `and in every counted round at least half of its first-appearing ` +
+    `findings were introduced by the previous round's fixes. Filing more ` +
+    `findings will not close this: split the change into separately ` +
+    `reviewable pieces, or ` +
+    `reconsider the approach under review, and re-request review after. ` +
+    `(Counted by the review from its own ledger and diff; it blocks so the ` +
+    `decision is a person's.)`
   );
 }
 
@@ -2076,12 +2099,14 @@ function composeReviewBody(
     unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
   // The non-convergence finding rides the SAME channel as the gates above,
-  // and for the same reason: it is deterministic by provenance. This module
-  // counted it, from its own marker and the census the orchestrator measured
-  // — there is no verifier for it and there never will be, so routing it
-  // through `modelBodyCriticals` would demand one and cap the verdict on a
-  // gap no repair can close. It is pushed AFTER that capture on purpose;
-  // moving this line above it silently converts the finding into an
+  // and for the same reason: it is deterministic by provenance — this module
+  // counted the streak from its own marker and side file, and the census
+  // beside it is the orchestrator-supplied half, checked in `composeReview`
+  // for shape and against everything this round reports before it could arm
+  // the streak. There is no verifier for it and there never will be, so
+  // routing it through `modelBodyCriticals` would demand one and cap the
+  // verdict on a gap no repair can close. It is pushed AFTER that capture on
+  // purpose; moving this line above it silently converts the finding into an
   // unsatisfiable cap.
   if (nonConvergence) bodyCriticals.push(nonConvergence);
 

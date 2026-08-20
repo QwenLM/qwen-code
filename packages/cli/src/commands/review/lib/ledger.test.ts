@@ -822,8 +822,29 @@ describe('the convergence census and the churn streak', () => {
     const written = serializeLedger({ ...base, churnRounds: over });
     expect(written).toContain(`"churnRounds":${LEDGER_MAX_ROUND}`);
     expect(written).not.toContain(String(over));
-    expect(parseLedger(handCrafted({ churnRounds: over }))?.churnRounds).toBe(
-      LEDGER_MAX_ROUND,
-    );
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, churnRounds: over }))
+        ?.churnRounds,
+    ).toBe(LEDGER_MAX_ROUND);
+  });
+
+  it('clamps a recovered streak to the marker’s own round', () => {
+    // The streak counts rounds INSIDE the round it rides, so a legitimate
+    // marker can never carry more counted rounds than rounds it claims.
+    // The marker body is any GitHub user's writable surface: unclamped,
+    // `{round: 2, churnRounds: 9999}` beside one honest above-bar round
+    // posts "the 10000th round…" on a pull request in its third. Same
+    // invariant the finding-id squat filter enforces — a claim about rounds
+    // that did not exist is not read.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      churnRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.churnRounds).toBe(2);
+    // A streak AT the round rides untouched — the clamp strips nothing a
+    // legitimate marker can carry (round 5 is the handCrafted default).
+    expect(parseLedger(handCrafted({ churnRounds: 5 }))?.churnRounds).toBe(5);
   });
 });
