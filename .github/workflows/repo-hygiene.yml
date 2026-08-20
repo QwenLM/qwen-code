@@ -144,6 +144,7 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -152,6 +153,9 @@ jobs:
         id: 'scan'
         timeout-minutes: 70
         env:
+          # Step-level env outranks $GITHUB_ENV: bind the resolver's pinned
+          # digest output, not the appendable env value it also writes.
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -347,6 +351,7 @@ jobs:
           echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
@@ -357,6 +362,7 @@ jobs:
         id: 'agent'
         timeout-minutes: 80
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -649,6 +655,8 @@ jobs:
       - name: 'Independent verification'
         if: "${{ steps.gate.outputs.result == 'fixes' }}"
         id: 'verify'
+        env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
         run: |-
           # Each code-touching check below runs inside the network-less sandbox
           # image using the docker args below, bound to the workspace so it sees

@@ -1341,6 +1341,7 @@ jobs:
           echo "has_candidates=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
         run: |-
@@ -1379,6 +1380,9 @@ jobs:
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' && steps.fasttrack.outputs.fast_tracked != 'true' }}
         env:
+          # Step-level env outranks $GITHUB_ENV: bind the resolver's pinned
+          # digest output, not the appendable env value it also writes.
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -1538,6 +1542,7 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -4677,6 +4682,7 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -5781,6 +5787,7 @@ jobs:
         #                                  is 360.
         timeout-minutes: 130
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -5933,6 +5940,7 @@ jobs:
           ${{ always() && steps.verify.outputs.retryable == 'true' }}
         timeout-minutes: 20
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'

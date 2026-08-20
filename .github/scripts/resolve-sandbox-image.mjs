@@ -137,7 +137,7 @@ export function parsePullDigest(pullOutput) {
   return pullOutput.match(/^Digest: (sha256:[0-9a-f]{64})\s*$/m)?.[1] ?? '';
 }
 
-export function pullImage(command, image) {
+export function pullImage(command, image, timeoutMs = PULL_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const child = spawn(command, ['pull', image], {
       stdio: ['ignore', 'pipe', 'inherit'],
@@ -154,11 +154,11 @@ export function pullImage(command, image) {
     };
     timer = setTimeout(() => {
       console.error(
-        `::error::Timed out pulling ${image} after ${PULL_TIMEOUT_MS / 1000}s.`,
+        `::error::Timed out pulling ${image} after ${timeoutMs / 1000}s.`,
       );
       child.kill('SIGKILL');
       finish({ ok: false, digest: '' });
-    }, PULL_TIMEOUT_MS);
+    }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
@@ -210,14 +210,14 @@ export function repoOfImage(image) {
 export function repoDigestOf(
   command,
   image,
-  expectedDigest = '',
+  expectedDigest,
   timeoutMs = FETCH_TIMEOUT_MS,
 ) {
   return new Promise((resolve) => {
     const child = spawn(
       command,
       ['image', 'inspect', '--format', '{{json .RepoDigests}}', image],
-      { stdio: ['ignore', 'pipe', 'pipe'], env: sandboxSpawnEnv() },
+      { stdio: ['ignore', 'pipe', 'inherit'], env: sandboxSpawnEnv() },
     );
     let stdout = '';
     let settled = false;
@@ -246,6 +246,11 @@ export function repoDigestOf(
       finish('');
     });
     child.on('close', (code) => {
+      if (code !== 0) {
+        console.error(
+          `::error::'${command} image inspect ${image}' exited with code ${code}.`,
+        );
+      }
       finish(code === 0 ? stdout.trim() : '');
     });
   }).then((raw) => {
@@ -261,16 +266,19 @@ export function repoDigestOf(
     } catch {
       // Non-JSON output carries no digests.
     }
-    const repo = repoOfImage(image);
-    const digest = expectedDigest
-      ? (digests.find((entry) => entry === `${repo}@${expectedDigest}`) ?? '')
-      : (digests.find((entry) => entry.startsWith(`${repo}@sha256:`)) ?? '');
+    // Docker records Hub repos in canonical short form in RepoDigests —
+    // `docker.io/library/busybox` is stored as `busybox@sha256:…` — so fold
+    // those prefixes before matching, or a fully-qualified Hub reference
+    // fails closed on its own correct digest.
+    const repo = repoOfImage(image).replace(/^docker\.io\/(library\/)?/, '');
+    const digest =
+      digests.find((entry) => entry === `${repo}@${expectedDigest}`) ?? '';
     if (digest.includes('@sha256:')) {
       return digest;
     }
     if (digests.length > 0) {
       throw new Error(
-        `Pulled image ${image} resolved to digests none of which is '${repo}@${expectedDigest || 'sha256:…'}' (${digests.join(', ')}); refusing to export a foreign or mutable reference.`,
+        `Pulled image ${image} resolved to digests none of which is '${repo}@${expectedDigest}' (${digests.join(', ')}); refusing to export a foreign or mutable reference.`,
       );
     }
     throw new Error(
@@ -292,20 +300,24 @@ export function exportImage(image) {
   console.log(`QWEN_SANDBOX_IMAGE=${image}`);
 }
 
+// The refusal policy is the same for both export paths: no `Digest:` line
+// from the pull means nothing binds the export to the pulled content.
+async function exportDigestBoundImage(command, image, pull) {
+  if (!pull.digest) {
+    throw new Error(
+      `'${command} pull ${image}' reported no Digest line; refusing to export an unbound image reference.`,
+    );
+  }
+  exportImage(await repoDigestOf(command, image, pull.digest));
+}
+
 async function main() {
   const requestedImage = validateRequestedImage(process.argv[2]);
 
   const command = process.env.SANDBOX_COMMAND || 'docker';
   const requestedPull = await pullImage(command, requestedImage);
   if (requestedPull.ok) {
-    if (!requestedPull.digest) {
-      throw new Error(
-        `'${command} pull ${requestedImage}' reported no Digest line; refusing to export an unbound image reference.`,
-      );
-    }
-    exportImage(
-      await repoDigestOf(command, requestedImage, requestedPull.digest),
-    );
+    await exportDigestBoundImage(command, requestedImage, requestedPull);
     return;
   }
 
@@ -324,12 +336,7 @@ async function main() {
   if (!fallbackPull.ok) {
     throw new Error(`Fallback sandbox image failed to pull: ${fallbackImage}`);
   }
-  if (!fallbackPull.digest) {
-    throw new Error(
-      `'${command} pull ${fallbackImage}' reported no Digest line; refusing to export an unbound image reference.`,
-    );
-  }
-  exportImage(await repoDigestOf(command, fallbackImage, fallbackPull.digest));
+  await exportDigestBoundImage(command, fallbackImage, fallbackPull);
 }
 
 if (

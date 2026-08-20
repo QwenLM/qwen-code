@@ -3,14 +3,20 @@ import test from 'node:test';
 
 import {
   chmodSync,
+  closeSync,
+  constants,
+  existsSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 import {
   latestSemverTag,
   validateRequestedImage,
@@ -114,7 +120,11 @@ test('repoDigestOf resolves a pulled image to its content digest', async () => {
       // image was pulled under can be retagged by any co-resident process
       // with daemon access before the gate runs.
       assert.equal(
-        await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+        await repoDigestOf(
+          stub,
+          'ghcr.io/qwenlm/qwen-code:1.2.3',
+          'sha256:0123456789abcdef',
+        ),
         'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef',
       );
     },
@@ -129,7 +139,11 @@ test('withDockerStub keeps the stub alive until the async body settles', async (
       "printf '%s\\n' '[\"ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef\"]'",
       async (stub) => {
         assert.equal(
-          await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+          await repoDigestOf(
+            stub,
+            'ghcr.io/qwenlm/qwen-code:1.2.3',
+            'sha256:0123456789abcdef',
+          ),
           'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef',
         );
       },
@@ -144,7 +158,7 @@ test('repoDigestOf refuses an image without a repository digest', async () => {
   for (const shape of ['null', '<no value>', '[]']) {
     await withDockerStub(`printf "%s\\n" "${shape}"`, async (stub) => {
       await assert.rejects(
-        repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+        repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
         /no repository digest/,
       );
     });
@@ -154,7 +168,7 @@ test('repoDigestOf refuses an image without a repository digest', async () => {
 test('repoDigestOf fails closed when the inspect fails', async () => {
   await withDockerStub('exit 1', async (stub) => {
     await assert.rejects(
-      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
       /no repository digest/,
     );
   });
@@ -210,6 +224,28 @@ test('repoDigestOf keeps the pulled repo when a same-content tag sorts first', a
       );
     },
   );
+});
+
+test('repoDigestOf matches Docker Hub canonical short-form RepoDigests', async () => {
+  // docker records Hub repos in canonical short form — a pull of
+  // docker.io/library/busybox:stable stores RepoDigests as busybox@sha256:…
+  // (measured live, docker 24.0.9) — so the match must fold the same
+  // prefixes or a fully-qualified Hub reference fails closed on its own
+  // correct digest.
+  for (const requested of [
+    'docker.io/library/busybox:stable',
+    'docker.io/busybox:stable',
+  ]) {
+    await withDockerStub(
+      `printf '%s\\n' '["busybox@${GENUINE}"]'`,
+      async (stub) => {
+        assert.equal(
+          await repoDigestOf(stub, requested, GENUINE),
+          `busybox@${GENUINE}`,
+        );
+      },
+    );
+  }
 });
 
 test('repoOfImage strips tag and digest but keeps a registry port', () => {
@@ -294,7 +330,11 @@ test('the inspect runs against the pinned endpoint too', async () => {
         `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef"]'`,
       async (stub) => {
         assert.equal(
-          await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+          await repoDigestOf(
+            stub,
+            'ghcr.io/qwenlm/qwen-code:1.2.3',
+            'sha256:0123456789abcdef',
+          ),
           'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef',
         );
       },
@@ -333,7 +373,7 @@ test('repoDigestOf gives up on an inspect that never returns', async () => {
   const started = Date.now();
   await withDockerStub('exec sleep 30', async (stub) => {
     await assert.rejects(
-      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', '', 200),
+      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE, 200),
       /no repository digest/,
     );
   });
@@ -357,6 +397,23 @@ test('pullImage accumulates stdout across chunk boundaries', async () => {
           'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       });
     },
+  );
+});
+
+test('pullImage gives up on a pull that never returns', async () => {
+  // Mirrors the repoDigestOf timeout pin: without an injectable bound a
+  // wedged registry holds the step until the job timeout instead of
+  // failing closed and taking the fallback path.
+  const started = Date.now();
+  await withDockerStub('exec sleep 30', async (stub) => {
+    assert.deepEqual(
+      await pullImage(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', 200),
+      { ok: false, digest: '' },
+    );
+  });
+  assert.ok(
+    Date.now() - started < 10_000,
+    'the pull timeout must fire well before the step timeout',
   );
 });
 
@@ -414,11 +471,146 @@ test('appendStepFile refuses a planted FIFO instead of blocking on it', () => {
   assert.match(String(error.stderr), /ENXIO|not a regular file/);
 });
 
+test('appendStepFile refuses a FIFO whose reader is held open', () => {
+  // With a reader already holding the FIFO open, the write-side open
+  // SUCCEEDS and only the post-open type check refuses the write — the
+  // exact guard the no-reader test never reaches (that one dies in
+  // openSync with ENXIO first). Without the check the `image=` line is
+  // swallowed by the attacker's reader and the gate sees an empty image.
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-fifo-reader-'));
+  const fifo = join(dir, 'github_output');
+  let reader;
+  try {
+    try {
+      execFileSync('mkfifo', [fifo]);
+    } catch {
+      return; // no mkfifo on this platform — nothing to assert
+    }
+    reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+    assert.throws(
+      () => appendStepFile(fifo, 'image=x\n'),
+      /not a regular file/,
+    );
+  } finally {
+    if (reader !== undefined) closeSync(reader);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('appendStepFile refuses a directory at the step-file path', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-dir-'));
   try {
     assert.throws(() => appendStepFile(dir, 'image=x\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the resolver refuses to export when the pull reports no Digest line', () => {
+  // End-to-end pin of main()'s headline refusal: pull exits 0 without a
+  // Digest line while inspect happily reports a same-repo digest — the shape
+  // an attacker-retagged image presents. The resolver must exit non-zero and
+  // leave BOTH step files untouched; deleting the refusal exports the
+  // unbound content (mutant probe in the #9527 review).
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-main-'));
+  const stub = join(dir, 'docker-stub');
+  const envFile = join(dir, 'env');
+  const outFile = join(dir, 'out');
+  writeFileSync(
+    stub,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "pull" ]; then',
+      "  printf '%s\\n' 'Status: Downloaded newer image'",
+      '  exit 0',
+      'fi',
+      `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const scriptPath = fileURLToPath(
+    new URL('./resolve-sandbox-image.mjs', import.meta.url),
+  );
+  let error;
+  try {
+    execFileSync(
+      process.execPath,
+      [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
+      {
+        env: {
+          ...process.env,
+          SANDBOX_COMMAND: stub,
+          GITHUB_ENV: envFile,
+          GITHUB_OUTPUT: outFile,
+        },
+        timeout: 15_000,
+        stdio: 'pipe',
+      },
+    );
+  } catch (thrown) {
+    error = thrown;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.ok(error, 'the resolver must exit non-zero');
+  assert.match(String(error.stderr), /reported no Digest line/);
+  assert.equal(existsSync(envFile), false, 'GITHUB_ENV must stay untouched');
+  assert.equal(existsSync(outFile), false, 'GITHUB_OUTPUT must stay untouched');
+});
+
+// Workflow contract: the resolver's step OUTPUT is the value every agent and
+// gate must consume — $GITHUB_ENV is appendable by later steps, so a consumer
+// that inherits QWEN_SANDBOX_IMAGE from it can be steered after resolution.
+// Every 'Resolve sandbox image' step must therefore carry an id, and every
+// sandbox-consuming step in the job must bind that step's image output.
+const SANDBOX_WORKFLOWS = [
+  'qwen-autofix.yml',
+  'qwen-autofix-recovery.yml',
+  'repo-hygiene.yml',
+];
+
+test('every sandbox-image consumer binds the resolver step output', () => {
+  const workflowsDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '..',
+    'workflows',
+  );
+  for (const name of SANDBOX_WORKFLOWS) {
+    const doc = parse(readFileSync(join(workflowsDir, name), 'utf8'));
+    for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
+      const steps = job.steps ?? [];
+      const consumers = steps.filter(
+        (step) =>
+          (typeof step.run === 'string' &&
+            step.run.includes('QWEN_SANDBOX_IMAGE')) ||
+          (typeof step.env?.SETTINGS_JSON === 'string' &&
+            step.env.SETTINGS_JSON.includes('"sandbox": "docker"')),
+      );
+      if (consumers.length === 0) continue;
+      const resolvers = steps.filter(
+        (step) =>
+          typeof step.run === 'string' &&
+          step.run.includes('resolve-sandbox-image.mjs'),
+      );
+      assert.ok(
+        resolvers.length > 0,
+        `${name} job '${jobName}': consumes the sandbox image but has no resolver step`,
+      );
+      for (const resolver of resolvers) {
+        assert.ok(
+          resolver.id,
+          `${name} job '${jobName}': the resolver step needs an id so its image output is addressable`,
+        );
+      }
+      const bindings = resolvers.map(
+        (resolver) => `\${{ steps.${resolver.id}.outputs.image }}`,
+      );
+      for (const step of consumers) {
+        assert.ok(
+          bindings.includes(step.env?.QWEN_SANDBOX_IMAGE),
+          `${name} job '${jobName}' step '${step.name}': bind QWEN_SANDBOX_IMAGE to the resolver step output, not the appendable $GITHUB_ENV value`,
+        );
+      }
+    }
   }
 });
