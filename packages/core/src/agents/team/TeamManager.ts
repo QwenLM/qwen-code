@@ -690,8 +690,6 @@ export class TeamManager {
       throw new Error(`Teammate "${name}" not found.`);
     }
 
-    this._shutdownPending.add(member.name);
-
     await sendStructuredMessage(this.teamFile.name, member.name, {
       from: LEADER_NAME,
       type: 'shutdown_request',
@@ -702,6 +700,8 @@ export class TeamManager {
         '"shutdown_approved" or "shutdown_rejected: <reason>".',
       summary: 'Shutdown requested by leader',
     });
+
+    this._shutdownPending.add(member.name);
 
     // If agent is idle, flush immediately (shutdown has
     // highest priority and will be picked up from mailbox).
