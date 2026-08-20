@@ -612,6 +612,9 @@ describe('TodoWriteTool', () => {
 
       expect(clearRevision).toHaveBeenCalledOnce();
       expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
     });
 
     it('ends an approved Workflow when active Todo IDs change', async () => {
@@ -651,6 +654,9 @@ describe('TodoWriteTool', () => {
 
       expect(clearRevision).toHaveBeenCalledOnce();
       expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
     });
 
     it('should handle file write errors', async () => {

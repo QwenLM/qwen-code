@@ -305,6 +305,14 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const validationError = validateTodos(candidateTodos);
       if (validationError) throw new Error(validationError);
       const finalTodos = candidateTodos as TodoItem[];
+      const approvedWorkflowRevision =
+        this.config.getSessionWorkflowPlanRevision?.();
+      const matchesApprovedTodoIds =
+        !approvedWorkflowRevision ||
+        (finalTodos.length === approvedWorkflowRevision.todoIds.length &&
+          finalTodos.every((todo) =>
+            approvedWorkflowRevision.todoIds.includes(todo.id),
+          ));
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
@@ -378,7 +386,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
           (oldTodos.every((todo) => todo.status === 'completed') &&
-            !isDeepStrictEqual(finalTodos, oldTodos)));
+            !isDeepStrictEqual(finalTodos, oldTodos)) ||
+          (previousPlan.planId === approvedWorkflowRevision?.planId &&
+            !matchesApprovedTodoIds));
       const activePlanId =
         finalTodos.length === 0
           ? undefined
@@ -389,15 +399,10 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, activePlanId, sessionId);
-      const approvedWorkflowRevision =
-        this.config.getSessionWorkflowPlanRevision?.();
       const continuesApprovedWorkflow =
         !approvedWorkflowRevision ||
         (resultPlanId === approvedWorkflowRevision.planId &&
-          finalTodos.length === approvedWorkflowRevision.todoIds.length &&
-          finalTodos.every((todo) =>
-            approvedWorkflowRevision.todoIds.includes(todo.id),
-          ));
+          matchesApprovedTodoIds);
       if (!continuesApprovedWorkflow) {
         this.config.clearSessionWorkflowPlanRevision?.();
       }
