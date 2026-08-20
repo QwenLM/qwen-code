@@ -97,6 +97,40 @@ describe('QueuedPromptDisplay', () => {
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('renders attached files after the text and opens their preview', () => {
+    const onAttachmentPreview = vi.fn();
+    const file = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      attachmentId: 'attachment-1',
+    };
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '带附件消息',
+          files: [file],
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+      onAttachmentPreview,
+    });
+
+    const text = container.querySelector('[class*="queuedPromptText"]');
+    const fileButton = container.querySelector<HTMLButtonElement>(
+      '[class*="queuedPromptFile"]',
+    );
+    expect(text?.nextElementSibling).toContain(fileButton);
+    expect(fileButton?.textContent).toContain('notes.txt');
+    act(() => fileButton?.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'attachment-1',
+    });
+  });
+
   it('does not render unsafe image data URIs', () => {
     const { container } = setup({
       prompts: [
