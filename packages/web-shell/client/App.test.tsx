@@ -10517,6 +10517,57 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
+  it('keeps the manual name when a repeated /clear arrives during deferred creation (#8977)', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    const creation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      const result = await creation.promise;
+      mockConnection.sessionId = result.sessionId;
+      return result;
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // Deferred creation starts and captures the carry.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    // A second /clear mid-creation re-arms the carry with a NEW object
+    // holding the SAME name. The rename gate must compare values, not object
+    // identity, or the name is silently dropped.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    await act(async () => {
+      creation.resolve({ sessionId: 'session-2' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
   it('focuses the composer after loading an existing session', async () => {
     const { container, rerender } = renderApp();
     await flush();

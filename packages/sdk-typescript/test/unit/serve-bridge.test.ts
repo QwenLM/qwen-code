@@ -324,6 +324,47 @@ describe('serve-bridge', () => {
       });
     });
 
+    describe('session_update_metadata', () => {
+      it('stamps an explicit name manual and an absent name auto', async () => {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'session-1',
+          fetchReply: () =>
+            jsonResponse(200, {
+              sessionId: 'session-1',
+              displayName: 'Agent rename',
+            }),
+        });
+
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const metadataTool = sessionTools(state).find(
+          (t: { name: string }) => t.name === 'session_update_metadata',
+        );
+        expect(metadataTool).toBeDefined();
+
+        // An explicitly provided name is user-chosen and must survive the
+        // web-shell /clear carry-over gate (titleSource === 'manual').
+        await metadataTool.handler({ display_name: 'Agent rename' }, {});
+        // An absent name is machine handling.
+        await metadataTool.handler({}, {});
+
+        const patches = calls.filter(
+          (call) =>
+            call.url.endsWith('/session/session-1/metadata') &&
+            call.method === 'PATCH',
+        );
+        expect(patches).toHaveLength(2);
+        expect(JSON.parse(patches[0]!.body!)).toEqual({
+          displayName: 'Agent rename',
+          titleSource: 'manual',
+        });
+        expect(JSON.parse(patches[1]!.body!)).toEqual({
+          titleSource: 'auto',
+        });
+      });
+    });
+
     describe('workspace read tools', () => {
       it('should register all 10 read tools', async () => {
         const { state } = makeMockState();

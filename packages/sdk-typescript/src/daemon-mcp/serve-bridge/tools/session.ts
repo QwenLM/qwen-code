@@ -143,9 +143,12 @@ export function sessionTools(state: BridgeState): any[] {
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
+        // Mirror the ACP branch convention: an explicitly provided name is
+        // user-chosen ('manual' — survives the web-shell /clear carry-over),
+        // while a cleared/absent name is machine handling ('auto').
         const result = await state.client.updateSessionMetadata(sessionId, {
           displayName: args.display_name,
-          titleSource: 'auto',
+          titleSource: args.display_name?.trim() ? 'manual' : 'auto',
         });
         return formatJsonResult(result);
       }),

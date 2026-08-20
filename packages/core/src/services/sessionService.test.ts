@@ -3782,6 +3782,29 @@ describe('SessionService', () => {
       ).toBe(true);
     });
 
+    it('defaults a forked title provenance to manual when omitted', async () => {
+      const oldId = '44444444-4444-1444-9444-444444444401';
+      const newId = '44444444-4444-1444-9444-444444444402';
+      seedSession(oldId);
+
+      const result = await service.forkSession(oldId, newId, {
+        title: 'Default provenance branch',
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written.at(-1)).toMatchObject({
+        subtype: 'custom_title',
+        systemPayload: {
+          customTitle: 'Default provenance branch',
+          titleSource: 'manual',
+        },
+      });
+    });
+
     it('keeps a checkpoint valid when its creation-metadata boundary is filtered', async () => {
       const oldId = '11111111-1111-1111-1111-111111111115';
       const newId = '22222222-2222-2222-2222-222222222226';

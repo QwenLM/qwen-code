@@ -25178,6 +25178,85 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('invalid_metadata');
     });
 
+    it('400 when titleSource is invalid on both metadata routes', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ displayName: 'Renamed', titleSource: 'bogus' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('titleSource');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+
+      const secondaryBridge = fakeBridge();
+      const { app: workspaceApp } = createWorkspaceMetadataApp(secondaryBridge);
+      const workspaceRes = await auth(
+        request(workspaceApp).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Renamed', titleSource: 'bogus' });
+      expect(workspaceRes.status).toBe(400);
+      expect(workspaceRes.body.code).toBe('invalid_metadata');
+      expect(workspaceRes.body.field).toBe('titleSource');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('persists the requested titleSource through the workspace fallback', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-source-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440034';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+
+      try {
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Machine rename', titleSource: 'auto' });
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+          sessionId,
+          displayName: 'Machine rename',
+          titleSource: 'auto',
+        });
+        // The provenance must reach the persisted custom_title record, not
+        // just the response body.
+        expect(await fsp.readFile(filePath, 'utf8')).toContain(
+          '"titleSource":"auto"',
+        );
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
+
     it('updates the selected workspace runtime with client identity', async () => {
       const secondaryBridge = fakeBridge();
       const { app, primaryBridge } =
@@ -25350,6 +25429,9 @@ describe('createServeApp', () => {
           expect(res.body).toEqual({
             sessionId,
             displayName: 'Persisted rename',
+            // The persisted path receives no titleSource, so the response
+            // defaults to 'manual'.
+            titleSource: 'manual',
           });
           expect(await fsp.readFile(filePath, 'utf8')).toContain(
             'Persisted rename',

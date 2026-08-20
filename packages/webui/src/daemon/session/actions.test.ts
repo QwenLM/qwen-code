@@ -259,6 +259,59 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('forwards rename options into updateMetadata', async () => {
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockResolvedValueOnce({
+      displayName: 'Side-task name',
+      titleSource: 'auto',
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        displayName: 'Before',
+        titleSource: 'manual',
+      },
+      session,
+    });
+
+    await actions.renameSession('Side-task name', { titleSource: 'auto' });
+
+    expect(session.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'Side-task name',
+      titleSource: 'auto',
+    });
+  });
+
+  it('rethrows without a notice when a silent rename fails', async () => {
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockRejectedValueOnce(new Error('runtime warming'));
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    await expect(
+      actions.renameSession('Carried name', { silent: true }),
+    ).rejects.toThrow('runtime warming');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('rethrows without a notice when a silent rename has no session', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      connection: { status: 'disconnected', workspaceCwd: '/workspace' },
+    });
+
+    await expect(
+      actions.renameSession('Carried name', { silent: true }),
+    ).rejects.toThrow('Daemon session is not connected');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{
@@ -2060,7 +2113,10 @@ function createMockSession(
     removeMedia: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
     updateMetadata: vi.fn(
-      async (metadata: { displayName?: string }) => metadata,
+      async (metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      }) => metadata,
     ),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),

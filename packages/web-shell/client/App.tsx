@@ -4993,7 +4993,13 @@ export function App({
           void sessionActions
             .loadSession(firstPane)
             .then(() => {
-              pendingManualTitleRef.current = undefined;
+              // …and only when no deferred creation has captured the carry:
+              // an in-flight creation manages the token's lifecycle itself
+              // (identity-checked rename + post-success clear), and clearing
+              // here mid-flight would race the name away from it.
+              if (!createSessionPromiseRef.current) {
+                pendingManualTitleRef.current = undefined;
+              }
             })
             .catch(() => undefined);
         }
@@ -5479,9 +5485,14 @@ export function App({
               ? { name: gitModeIntentRef.current.name }
               : undefined,
           onSessionCreated: async (sessionId) => {
+            // Gate on value, not object identity: a repeated /clear during an
+            // in-flight creation re-arms the ref with a *new* object carrying
+            // the same name, which must still rename. /new sets the ref to
+            // undefined, so value comparison still invalidates it.
             if (
               pendingManualTitle &&
-              pendingManualTitleRef.current === pendingManualTitle
+              pendingManualTitleRef.current?.displayName ===
+                pendingManualTitle.displayName
             ) {
               // Best-effort internal rename the user never initiated: keep
               // it silent so a failure (e.g. a still-warming runtime) tears
@@ -5518,7 +5529,10 @@ export function App({
           if (result.branch) {
             setSessionBranch(result.branch);
           }
-          if (pendingManualTitleRef.current === pendingManualTitle) {
+          if (
+            pendingManualTitleRef.current?.displayName ===
+            pendingManualTitle?.displayName
+          ) {
             pendingManualTitleRef.current = undefined;
           }
           // Clear the pending intent only on success. On failure the

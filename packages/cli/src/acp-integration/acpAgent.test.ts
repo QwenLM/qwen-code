@@ -15503,7 +15503,11 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
-      { title: 'Source session (Branch)', atRecordId: checkpoint },
+      {
+        title: 'Source session (Branch)',
+        titleSource: 'auto',
+        atRecordId: checkpoint,
+      },
     );
     expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
     expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
