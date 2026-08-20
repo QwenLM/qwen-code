@@ -415,6 +415,7 @@ const {
     qualifiedSetWorkspaceSetting,
     sessionCatalogController: {
       invalidateWorkspace: vi.fn(),
+      refreshWorkspace: vi.fn(),
       sessionCreated: vi.fn(),
       promptAdmitted: vi.fn(),
       promptAdmissionUncertain: vi.fn(),
