@@ -14,6 +14,26 @@ import { ToolNames } from '../../tools/tool-names.js';
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
+// Matches the FULL placeholder shape this module emits
+// (`${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${mime}]`; the mime is sanitized
+// to contain no `]` and may be EMPTY — sanitizeMimeForPlaceholder returns
+// '' for empty/whitespace-only/bracket-only mimeTypes, and the producer's
+// `??` fallback only covers null/undefined), not just the prefix. The
+// interior also rejects \r/\n/\t because sanitizeMimeForPlaceholder
+// normalizes them to spaces, so the producer can never emit them inside
+// the placeholder — accepting them would let multi-line user text that
+// merely starts with the prefix be misclassified as a placeholder. Derived
+// from the constant above so producer and consumer cannot drift. A genuine
+// user prompt that merely *begins* with the prefix is NOT a placeholder and
+// must keep counting as user text wherever this predicate is used.
+const CLEARED_MEDIA_PLACEHOLDER_RE = new RegExp(
+  `^${MICROCOMPACT_CLEARED_IMAGE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} [^\\]\\r\\n\\t]*\\]$`,
+);
+
+export function isClearedMediaPlaceholder(text: string): boolean {
+  return CLEARED_MEDIA_PLACEHOLDER_RE.test(text);
+}
+
 // IMPORTANT: any new file-touching tool added here MUST also be added
 // to FILE_PATH_TOOLS below, or microcompaction will blank its output
 // without reporting the eviction — silently reintroducing issue #4239.

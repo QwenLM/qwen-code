@@ -15,6 +15,7 @@ import {
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
   useMessages,
+  useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
 
@@ -96,6 +97,87 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       { content: 'localized:error.loopDetected' },
     ]);
   });
+
+  it('preserves projected history identity for a streaming tail update only', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    let latest: Message[] = [];
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: 'a',
+      streaming: true,
+      serverTimestamp: 1_001,
+    });
+    function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+      latest = useMessagesFromBlocks(t, blocks);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(createElement(Consumer, { blocks: [user, assistant] })),
+    );
+    const firstProjection = latest;
+    const grownAssistant = {
+      ...assistant,
+      text: 'ab',
+      updatedAt: 2,
+      serverTimestamp: 1_002,
+    };
+    await act(async () =>
+      root.render(createElement(Consumer, { blocks: [user, grownAssistant] })),
+    );
+
+    expect(latest[0]).toBe(firstProjection[0]);
+    expect(latest[1]).not.toBe(firstProjection[1]);
+    expect(latest[1]).toMatchObject({ content: 'ab', isStreaming: true });
+
+    const changedUser = { ...user, text: 'changed', updatedAt: 2 };
+    await act(async () =>
+      root.render(
+        createElement(Consumer, { blocks: [changedUser, grownAssistant] }),
+      ),
+    );
+    expect(latest[0]).not.toBe(firstProjection[0]);
+
+    await act(async () => root.unmount());
+  });
+
+  it.each([undefined, ''])(
+    'falls back safely when a streaming block has empty text (%j)',
+    async (text) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      let latest: Message[] = [];
+      const assistant = baseBlock({
+        id: 'assistant',
+        kind: 'assistant',
+        text: text as unknown as string,
+        streaming: true,
+      });
+      function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+        latest = useMessagesFromBlocks(t, blocks);
+        return null;
+      }
+
+      await act(async () =>
+        root.render(createElement(Consumer, { blocks: [assistant] })),
+      );
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [{ ...assistant, updatedAt: 2 }],
+          }),
+        ),
+      );
+
+      expect(latest).toEqual([]);
+      await act(async () => root.unmount());
+    },
+  );
 });
 
 function backgroundAgentMessage(status: 'pending' | 'completed' = 'pending') {
@@ -601,6 +683,442 @@ describe('background agent task reconciliation', () => {
 
     await act(async () => unmount());
     warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not fail an agent while its launch approval is unanswered', async () => {
+    vi.useFakeTimers();
+    // The agent call is pending with an unresolved permission request for the
+    // same callId; its subagent session cannot exist yet, so the
+    // reconciliation 404 probe must be skipped rather than accumulating
+    // missing-agent misses and painting a failure.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-block-agent-call',
+        kind: 'tool',
+        toolCallId: 'agent-call',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // The pending-permission agent is excluded from reconciliation, so the
+    // probe never fires and the card cannot be marked failed.
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Even after several retry windows of wall-clock time it stays active.
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Once the launch approval resolves, the reconciliation must resume
+    // probing: the subagent session may now register, and a missing session
+    // crosses the grace into a visible failure exactly like any other
+    // background agent.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // First 404 miss keeps the card pending.
+    expect(container.textContent).toBe('pending');
+    // The retry's second miss crosses the missing-agent grace → failed.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('probes only the healthy agent while a sibling launch approval is pending', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      baseBlock({
+        id: 'agent-b',
+        kind: 'tool',
+        toolCallId: 'agent-call-b',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue({
+      status: 'running',
+      sessionId: 'sub-agent-b',
+    });
+    const { render, unmount } = mountStatusConsumer({ allTools: true });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalled(),
+    );
+    // Exclusion is per callId: the healthy sibling keeps probing while the
+    // approved agent is skipped.
+    const probed = hookState.resolveSubagentSession.mock.calls.map(
+      (call) => call[1],
+    );
+    expect(probed).toContain('agent-call-b');
+    expect(probed).not.toContain('agent-call-a');
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('resets accumulated missing-agent misses when an approval engages', async () => {
+    vi.useFakeTimers();
+    // Phase 1: no permission yet — one probe fires and 404s (miss 1).
+    hookState.blocks = [
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call-a' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: the launch approval arrives — exclusion engages and must reset
+    // the accumulated miss, so no further probe fires while it is open.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      hookState.blocks[0],
+    ];
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // Phase 3: the approval resolves — probing resumes with a fresh grace;
+    // the pre-exclusion miss must not carry over, so the second post-approval
+    // 404 still leaves the card pending, and a third marks it failed.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('ignores a permanent failure that settles after approval engages', async () => {
+    const probe = deferred<BackgroundAgentResolution>();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockReturnValueOnce(probe.promise);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => {
+      probe.reject(
+        new DaemonHttpError(
+          400,
+          { code: 'invalid_subagent_ref' },
+          'bad request',
+        ),
+      );
+    });
+
+    expect(container.textContent).toBe('pending');
+    await act(async () => unmount());
+  });
+
+  it('does not count a late 404 after approval engages', async () => {
+    vi.useFakeTimers();
+    const probe = deferred<BackgroundAgentResolution>();
+    const missing = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(probe.promise)
+      .mockRejectedValue(missing);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => probe.reject(missing));
+    expect(container.textContent).toBe('pending');
+
+    hookState.blocks = [
+      { ...hookState.blocks[0], resolved: 'selected:proceed_once' },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('paces transient-error attempts across permission churn', async () => {
+    vi.useFakeTimers();
+    const agent = backgroundAgentBlock('agent-call');
+    const permission = baseBlock({
+      id: 'perm-file',
+      kind: 'permission',
+      requestId: 'req-file',
+      sessionId: 'session-1',
+      title: 'Write file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'file-call',
+        kind: 'other',
+        status: 'pending',
+        title: 'Write file',
+        rawInput: {},
+      },
+      preview: { kind: 'generic' as const },
+    });
+    hookState.blocks = [agent];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    for (let index = 0; index < 8; index += 1) {
+      hookState.blocks = index % 2 === 0 ? [permission, agent] : [agent];
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(
+          index + 2,
+        ),
+      );
+    }
+
+    expect(container.textContent).toBe('pending');
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      expect.anything(),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the missing-agent grace when an unrelated permission re-probes', async () => {
+    vi.useFakeTimers();
+    // Phase 1: a background agent probes and 404s once (miss 1).
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: an unrelated permission appears inside the retry window. The
+    // effect re-runs and probes again immediately; that second 404 must not
+    // count toward the grace because the base backoff has not elapsed — the
+    // ladder is wall-clock paced, not round-paced.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-file',
+        kind: 'permission',
+        requestId: 'req-file',
+        sessionId: 'session-1',
+        title: 'Write file',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'file-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Write file',
+          rawInput: {},
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // Two immediate 404s inside the backoff window must leave the miss count
+    // at 1, so the card stays pending.
+    expect(container.textContent).toBe('pending');
+
+    // Phase 3: the next probe after the base backoff crosses the grace.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
     vi.useRealTimers();
   });
 
@@ -1161,13 +1679,15 @@ describe('background agent task reconciliation', () => {
       );
       expect(container.textContent).toBe('pending');
 
-      // The double-count must not shorten the documented budget: failure
-      // still takes eight erroring rounds in total.
-      for (const delay of [6_000, 12_000, 24_000, 48_000, 60_000, 60_000]) {
+      // The immediate identity-triggered round is inside the pacing window,
+      // so only wall-clock-paced errors consume the documented budget.
+      for (const delay of [
+        6_000, 12_000, 24_000, 48_000, 60_000, 60_000, 60_000,
+      ]) {
         await act(async () => vi.advanceTimersByTimeAsync(delay));
       }
       await vi.waitFor(() => {
-        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9);
         expect(container.textContent).toBe('failed');
       });
     } finally {
