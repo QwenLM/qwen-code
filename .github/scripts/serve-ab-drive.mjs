@@ -56,14 +56,16 @@ export function isPlainObject(v) {
  *
  * `_status` is always recorded, and always the HTTP status the harness saw: a
  * status-only change (404 → 409, say) under an otherwise similar body is
- * exactly the admission difference these scenarios exist to catch, so a body
- * carrying its own `_status` key must not be able to overwrite it. A non-object
- * body (scalar, null, array) is nested rather than spread — spreading would
- * drop a scalar and re-key an array — because the capture has to survive
- * whatever a future scenario probes.
+ * exactly the admission difference these scenarios exist to catch, so neither
+ * a body nor a scenario projection can overwrite it with its own `_status`
+ * key. A non-object body (scalar, null, array) is nested rather than spread —
+ * spreading would drop a scalar and re-key an array — because the capture has
+ * to survive whatever a future scenario probes.
  */
 export function composeCapture(scenario, json, res) {
-  if (scenario.project) return scenario.project(json, res);
+  if (scenario.project) {
+    return { ...scenario.project(json, res), _status: res.status };
+  }
   return isPlainObject(json)
     ? { ...json, _status: res.status }
     : { _status: res.status, _body: json };
@@ -208,7 +210,12 @@ export function assertCanaryStatus(scenario, status, bodyText = '', captured) {
  * why `session-restore-healthy` below is a hard-failing canary.
  */
 export function chatsDirFor(home, workspaceCwd) {
-  const projectId = workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-');
+  // sanitizeCwd lowercases on Windows only; the mirror must take the same
+  // branch, or fixtures staged on one platform land where the daemon built
+  // for the other one will never read them.
+  const normalized =
+    process.platform === 'win32' ? workspaceCwd.toLowerCase() : workspaceCwd;
+  const projectId = normalized.replace(/[^a-zA-Z0-9]/g, '-');
   return join(home, '.qwen', 'projects', projectId, 'chats');
 }
 

@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -33,18 +33,34 @@ import {
 } from './serve-ab-drive.mjs';
 
 test('chatsDirFor mirrors the daemon project-dir layout', () => {
+  // The expectation is built with join(), like the function and the daemon's
+  // Storage.getProjectDir — a hardcoded separator only passes on POSIX.
   assert.equal(
     chatsDirFor('/home/runner/work/tmp', '/srv/my project'),
-    '/home/runner/work/tmp/.qwen/projects/-srv-my-project/chats',
+    join(
+      '/home/runner/work/tmp',
+      '.qwen',
+      'projects',
+      '-srv-my-project',
+      'chats',
+    ),
   );
 });
 
 test('chatsDirFor sanitizes every non-alphanumeric character, like sanitizeCwd', () => {
   const dir = chatsDirFor('/h', '/a_b.c/d-e');
-  assert.equal(dir, '/h/.qwen/projects/-a-b-c-d-e/chats');
+  assert.equal(dir, join('/h', '.qwen', 'projects', '-a-b-c-d-e', 'chats'));
   // No path separators survive from the workspace path: the whole workspace
   // collapses into ONE directory name.
-  assert.equal(dir.split('/').filter(Boolean).length, 5);
+  assert.equal(dir.split(sep).filter(Boolean).length, 5);
+  // sanitizeCwd lowercases on Windows ONLY; the mirror must take the same
+  // branch — an unconditional lowercase would strand fixtures on the Linux
+  // runners this harness actually drives.
+  const casedProjectId = process.platform === 'win32' ? '-abc' : '-AbC';
+  assert.equal(
+    chatsDirFor('/h', '/AbC'),
+    join('/h', '.qwen', 'projects', casedProjectId, 'chats'),
+  );
 });
 
 test('the transcript fixture is a genuine user + assistant record pair', () => {
@@ -330,6 +346,17 @@ test('composeCapture defers to a scenario projection when one is declared', () =
   );
 });
 
+test('composeCapture keeps the harness status when a projection supplies its own', () => {
+  // The invariant is about the capture, not about who composes it: a
+  // projection-supplied `_status` must not win over the one the harness saw,
+  // or a status-only regression can hide behind it.
+  const scenario = { project: () => ({ _status: 999, code: 'x' }) };
+  assert.deepEqual(composeCapture(scenario, {}, { status: 409 }), {
+    _status: 409,
+    code: 'x',
+  });
+});
+
 test('clearCaptureDir empties a capture dir and refuses anything else', () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'sad-clear-')), 'captures');
   mkdirSync(dir, { recursive: true });
@@ -486,13 +513,20 @@ test('captureScenarios aborts when a setup request fails', async () => {
   // ran, and a marker here would certify a truncated baseline as complete.
   assert.deepEqual(readdirSync(outDir), []);
 
-  // A setup that succeeds runs the scenario as normal.
+  // A setup that succeeds runs the scenario as normal — and strictly BEFORE
+  // the probe: the probe must capture the daemon the setup created state on,
+  // so the two requests cannot trade places without the test noticing.
   const okDir = mkdtempSync(join(tmpdir(), 'sad-setup-'));
+  const order = [];
   await captureScenarios(scenarios, {
-    request: () => ({ ok: true, status: 200, text: async () => '{"ok":true}' }),
+    request: (spec) => {
+      order.push(spec.path);
+      return { ok: true, status: 200, text: async () => '{"ok":true}' };
+    },
     ctx: {},
     outDir: okDir,
   });
+  assert.deepEqual(order, ['/session', '/health?deep=1']);
   assert.deepEqual(readdirSync(okDir).sort(), [
     DRIVE_COMPLETE_MARKER,
     'health-deep-with-session.json',
