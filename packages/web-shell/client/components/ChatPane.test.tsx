@@ -60,6 +60,7 @@ const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const readAttachment = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -68,6 +69,7 @@ const daemonActions = {
   setModel,
   loadArtifacts,
   getTasks,
+  readAttachment,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -183,6 +185,16 @@ vi.mock('./MessageList', () => ({
             artifactId: 'turn-artifact',
             artifact: { id: 'turn-artifact', title: 'Turn artifact' },
             workspaceCwd: '/w',
+          })
+        }
+      />
+      <button
+        data-testid="pane-open-attachment"
+        type="button"
+        onClick={() =>
+          props.onAttachmentPreview?.({
+            name: 'data.json',
+            attachmentId: 'attachment-1',
           })
         }
       />
@@ -383,6 +395,11 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  readAttachment.mockReset();
+  readAttachment.mockResolvedValue({
+    data: 'eyJoaSI6IuS9oOWlvSJ9',
+    mimeType: 'application/json',
+  });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -581,6 +598,38 @@ describe('ChatPane', () => {
 
     expect(latestChatEditorProps.disabled).toBe(true);
     expect(footerProps.at(-1)?.disabled).toBe(true);
+  });
+
+  it('hides the pane composer while an approval is pending', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('pane-approval')).not.toBeNull();
+    // The streaming status and the editor share the approval-hidden wrapper,
+    // so neither lingers below the dialog.
+    expect(testid('pane-streaming')?.parentElement?.className).toContain(
+      'composerHidden',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+  });
+
+  it('restores the pane composer after the approval resolves', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+
+    pendingPermission = null;
+    rerender();
+    expect(testid('pane-approval')).toBeNull();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).not.toContain('composerHidden');
   });
 
   it('adds no composer footer DOM when omitted or returning null', () => {
@@ -856,6 +905,28 @@ describe('ChatPane', () => {
     });
   });
 
+  it('reads daemon attachments through the pane session before previewing', async () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    await act(async () => {
+      testid('pane-open-attachment')?.click();
+      await Promise.resolve();
+    });
+
+    expect(readAttachment).toHaveBeenCalledWith('attachment-1');
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'attachment:attachment-1',
+      kind: 'attachment',
+      title: 'data.json',
+      turnId: 'sess-1',
+      mimeType: 'application/json',
+      data: expect.any(Blob),
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
+  });
+
   it('suppresses the rotating loading phrase in its compact status', () => {
     render();
     expect(testid('pane-streaming')?.getAttribute('data-show-phrase')).toBe(
@@ -1122,7 +1193,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
   });
 
   it('does not duplicate turn completion owned by the outer session', () => {
@@ -1156,7 +1230,10 @@ describe('ChatPane', () => {
     streamingStateValue = 'idle';
     rerender();
 
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-late',
+    );
   });
 
   it('captures a pane workspace that becomes available mid-turn', () => {
@@ -1170,9 +1247,13 @@ describe('ChatPane', () => {
     rerender();
 
     expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
-    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/secondary');
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/secondary',
+      'sess-1',
+    );
     expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
       '/primary',
+      'sess-1',
     );
   });
 
