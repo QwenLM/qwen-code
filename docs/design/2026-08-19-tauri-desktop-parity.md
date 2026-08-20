@@ -18,7 +18,7 @@ The Tauri host owns one child webview attached to the native main window. An ini
 
 Rust validates the calling webview, URL, and logical bounds before creating or controlling the child. Only HTTP and HTTPS top-level navigation is allowed. Downloads are denied. `mailto:` requests are handed to the system, while other unsafe schemes are rejected. The child uses an incognito data store and receives no Tauri capability entry, preload script, daemon token, or Web Shell bridge.
 
-Tauri does not expose a cross-platform child-webview navigation-history API. The host therefore records finished top-level URLs in a bounded in-memory history and uses direct navigation for back and forward. Page-load events update the toolbar state in the main webview. Closing the panel destroys the child and clears its history.
+Tauri does not expose a cross-platform child-webview navigation-history API. The host therefore records finished top-level URLs in a bounded in-memory history and uses direct navigation for back and forward. Page-load events update the toolbar state in the main webview. Closing the panel first hides the child, clears its navigation state, and retains the single child for reuse. Runtime restart or application exit hides and destroys it. This avoids a race between Tauri's asynchronous child-webview close and reopening the same label.
 
 Adding a child webview currently requires Tauri's `unstable` Cargo feature. The use is isolated to the desktop browser module so it can be replaced with a stable API later without changing Web Shell or the interaction contract.
 

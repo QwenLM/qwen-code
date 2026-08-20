@@ -101,10 +101,14 @@
     };
   };
 
-  const closePanel = () => {
+  const closePanel = async () => {
     if (!elements) return;
-    elements.panel.hidden = true;
-    void invoke('browser_panel_close').catch(ignoreFailure);
+    try {
+      await invoke('browser_panel_close');
+      elements.panel.hidden = true;
+    } catch {
+      elements.panel.hidden = false;
+    }
   };
 
   const bindPanelEvents = (panel) => {

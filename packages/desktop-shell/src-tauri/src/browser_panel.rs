@@ -102,11 +102,10 @@ impl BrowserPanelController {
         }
     }
 
-    fn reset(&mut self) -> Option<Webview> {
+    fn reset(&mut self) {
         self.current_url.clear();
         self.loading = false;
         self.history = BrowserHistory::default();
-        self.view.take()
     }
 }
 
@@ -135,6 +134,8 @@ pub async fn browser_panel_open(
             size: rect.size.into(),
         })
         .map_err(|error| format!("Failed to resize the desktop browser: {error}"))?;
+        view.show()
+            .map_err(|error| format!("Failed to show the desktop browser: {error}"))?;
         {
             let mut controller = lock(&store.0);
             controller.view = Some(view.clone());
@@ -203,6 +204,9 @@ pub async fn browser_panel_open(
                 })
                 .map_err(|resize_error| {
                     format!("Failed to resize the desktop browser: {resize_error}")
+                })?;
+                view.show().map_err(|show_error| {
+                    format!("Failed to show the desktop browser: {show_error}")
                 })?;
                 view.navigate(url.clone()).map_err(|navigate_error| {
                     format!("Failed to navigate the desktop browser: {navigate_error}")
@@ -317,12 +321,36 @@ pub fn browser_panel_close(
     app: AppHandle,
 ) -> Result<(), String> {
     require_runtime_origin(&caller, &application)?;
-    close(&app)
+    hide(&app)
+}
+
+fn hide(app: &AppHandle) -> Result<(), String> {
+    let store = app.state::<BrowserPanelStore>();
+    let view = lock(&store.0)
+        .view
+        .clone()
+        .or_else(|| app.get_webview(BROWSER_PANEL_LABEL));
+    if let Some(view) = view {
+        view.hide()
+            .map_err(|error| format!("Failed to hide the desktop browser: {error}"))?;
+        lock(&store.0).view = Some(view);
+    }
+    lock(&store.0).reset();
+    emit_state(app);
+    Ok(())
 }
 
 pub fn close(app: &AppHandle) -> Result<(), String> {
-    let view = lock(&app.state::<BrowserPanelStore>().0).reset();
+    let store = app.state::<BrowserPanelStore>();
+    let view = {
+        let mut controller = lock(&store.0);
+        controller.reset();
+        controller.view.take()
+    }
+    .or_else(|| app.get_webview(BROWSER_PANEL_LABEL));
     if let Some(view) = view {
+        view.hide()
+            .map_err(|error| format!("Failed to hide the desktop browser: {error}"))?;
         view.close()
             .map_err(|error| format!("Failed to close the desktop browser: {error}"))?;
     }

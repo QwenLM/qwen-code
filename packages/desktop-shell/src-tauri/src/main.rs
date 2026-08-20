@@ -259,15 +259,16 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             .title("Qwen Code")
             .inner_size(width, height)
             .min_inner_size(900.0, 600.0)
-             .background_color(Color(13, 13, 13, 255))
-             .initialization_script(include_str!("../web-shell-desktop.js"))
-             .initialization_script(include_str!("../web-shell-computer-use.js"))
-             .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin));
+            .background_color(Color(13, 13, 13, 255))
+            .initialization_script(include_str!("../web-shell-desktop.js"))
+            .initialization_script(include_str!("../web-shell-computer-use.js"))
+            .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin));
     #[cfg(target_os = "macos")]
     let window_builder = window_builder
-         .title_bar_style(TitleBarStyle::Overlay)
-         .hidden_title(true);
-     let window = window_builder
+        .title_bar_style(TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .accept_first_mouse(true);
+    let window = window_builder
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
                 let _ = open::that_detached(url.as_str());

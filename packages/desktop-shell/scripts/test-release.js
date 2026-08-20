@@ -40,6 +40,7 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  testTauriDesktopPermissions();
   await testWebShellBrowserPanel();
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
@@ -56,6 +57,27 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+function testTauriDesktopPermissions() {
+  const buildSource = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'build.rs'),
+    'utf8',
+  );
+  assert.match(
+    buildSource,
+    /AppManifest::new\(\)\.commands\(&\[/,
+    'Tauri must generate permissions for its custom application commands.',
+  );
+  const mainSource = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  assert.match(
+    mainSource,
+    /\.accept_first_mouse\(true\)/,
+    'The macOS WebView must accept the first click while its window is inactive.',
+  );
 }
 
 async function testWebShellBrowserPanel() {
@@ -145,6 +167,7 @@ async function testWebShellBrowserPanel() {
   const windowListeners = {};
   const commands = [];
   let browserOpenError;
+  let browserCloseError;
   const shell = new FakeElement();
   shell.isConnected = true;
   const sidebarShell = new FakeElement('div');
@@ -208,6 +231,9 @@ async function testWebShellBrowserPanel() {
           commands.push({ command, args });
           if (command === 'browser_panel_open' && browserOpenError) {
             throw browserOpenError;
+          }
+          if (command === 'browser_panel_close' && browserCloseError) {
+            throw browserCloseError;
           }
         },
       },
@@ -330,12 +356,26 @@ async function testWebShellBrowserPanel() {
   assert.equal(commands[0].command, 'browser_panel_open');
   assert.equal(commands[0].args.url, 'https://example.org/');
   commands.length = 0;
-  browserOpenError = new Error('a webview with this label already exists');
-  click(new FakeAnchor('https://example.net/'), { ctrlKey: true });
-  await new Promise((resolve) => setImmediate(resolve));
   const browserPanel = shell.children.find(
     (child) => 'qwenDesktopBrowserPanel' in child.dataset,
   );
+  const browserClose = browserPanel.children[1].children[0].children[5];
+  await browserClose.listeners.click();
+  assert.equal(commands[0].command, 'browser_panel_close');
+  assert.equal(browserPanel.hidden, true);
+  commands.length = 0;
+
+  click(new FakeAnchor('https://example.net/'), { ctrlKey: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  browserCloseError = new Error('close failed');
+  await browserClose.listeners.click();
+  assert.equal(browserPanel.hidden, false);
+  browserCloseError = undefined;
+  commands.length = 0;
+
+  browserOpenError = new Error('a webview with this label already exists');
+  click(new FakeAnchor('https://example.net/'), { ctrlKey: true });
+  await new Promise((resolve) => setImmediate(resolve));
   const browserError = browserPanel.children[1].children[1].children[0];
   assert.equal(browserPanel.hidden, false);
   assert.equal(browserError.hidden, false);
@@ -951,6 +991,11 @@ function testBootstrapBridgeConfiguration() {
   assert.deepEqual(capability.permissions, [
     'core:event:allow-listen',
     'core:event:allow-unlisten',
+    'allow-bootstrap-state',
+    'allow-choose-workspace',
+    'allow-open-logs',
+    'allow-restart-runtime',
+    'allow-install-update',
   ]);
 
   const webShellCapability = JSON.parse(
@@ -972,6 +1017,22 @@ function testBootstrapBridgeConfiguration() {
   assert.deepEqual(webShellCapability.permissions, [
     'core:event:allow-listen',
     'core:event:allow-unlisten',
+    'core:window:allow-start-dragging',
+    'core:window:allow-internal-toggle-maximize',
+    'allow-computer-use-request-state',
+    'allow-computer-use-sync-session',
+    'allow-computer-use-stop',
+    'allow-computer-use-set-picture-in-picture-visible',
+    'allow-computer-use-set-always-hide-picture-in-picture',
+    'allow-browser-panel-open',
+    'allow-browser-panel-navigate',
+    'allow-browser-panel-set-bounds',
+    'allow-browser-panel-go-back',
+    'allow-browser-panel-go-forward',
+    'allow-browser-panel-reload',
+    'allow-browser-panel-open-external',
+    'allow-browser-panel-close',
+    'allow-desktop-set-theme',
     {
       identifier: 'opener:allow-open-url',
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
@@ -997,6 +1058,9 @@ function testBootstrapBridgeConfiguration() {
     'core:event:allow-listen',
     'core:event:allow-unlisten',
     'core:window:allow-start-dragging',
+    'allow-computer-use-request-state',
+    'allow-computer-use-stop',
+    'allow-computer-use-set-picture-in-picture-visible',
   ]);
   assert.equal(tauriConfig.app?.macOSPrivateApi, true);
   for (const asset of [
