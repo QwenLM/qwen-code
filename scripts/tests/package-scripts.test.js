@@ -424,6 +424,7 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
     const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
     const commitStep = getWorkflowStep(
       publishJob,
@@ -434,10 +435,13 @@ describe('package scripts', () => {
       'Build Bundle and Prepare Package',
     );
 
+    expect(checkoutStep).toContain('persist-credentials: false');
     expect(gitConfigStep).toContain('git config core.hooksPath .husky');
     expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
       publishJob.indexOf(commitStep),
     );
+    expect(commitStep).toContain("CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'");
+    expect(commitStep).toContain('GH_TOKEN="${CI_BOT_PAT}" gh auth setup-git');
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 
