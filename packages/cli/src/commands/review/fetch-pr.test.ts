@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
 import { resolve } from 'node:path';
 import {
@@ -24,10 +25,13 @@ import {
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
-import { DEADLINE_ENV } from './lib/deadline.js';
+import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
-import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
+import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
+import { buildDiffPlan } from './lib/diff-plan.js';
+import { buildPlanReport } from './lib/report.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import { makeDiff } from './lib/test-utils.js';
 
 describe('classifyHeavy', () => {
@@ -229,6 +233,7 @@ describe('fetchPrCommand builder', () => {
 // ---------------------------------------------------------------------------
 
 const producerMocks = vi.hoisted(() => ({
+  mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
   readFileSync: vi.fn((_path?: unknown): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -244,6 +249,12 @@ const producerMocks = vi.hoisted(() => ({
   // so a test that wants a git-surface-unavailable shape — an exit-128
   // fatal, a timeout kill's null status — overrides this.
   gitExit: vi.fn(),
+  statSync: vi.fn((path?: unknown): { mtimeMs: number } | undefined =>
+    String(path).endsWith('-fetch.json') ||
+    String(path).endsWith('fetch-report.json')
+      ? { mtimeMs: Date.parse('2026-08-13T00:00:00.000Z') }
+      : undefined,
+  ),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
     (..._args: unknown[]): MergeBaseResult => ({
@@ -264,14 +275,21 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     default: {
       ...actual,
-      mkdirSync: vi.fn(),
+      mkdirSync: producerMocks.mkdirSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
+      statSync: statSyncThroughMock,
     },
-    mkdirSync: vi.fn(),
+    mkdirSync: producerMocks.mkdirSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
+    statSync: statSyncThroughMock,
   };
+  function statSyncThroughMock(path?: unknown, ...rest: unknown[]) {
+    const mocked = producerMocks.statSync(path);
+    if (mocked !== undefined) return mocked;
+    return (actual.statSync as (...a: unknown[]) => unknown)(path, ...rest);
+  }
 });
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -317,6 +335,7 @@ vi.mock('./lib/git.js', () => ({
   gitOpt: producerMocks.gitOpt,
   gitProbe: (...args: string[]) => producerMocks.gitExit(...args),
   gitRaw: producerMocks.gitRaw,
+  gitWithInput: vi.fn((): string => ''),
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
 }));
@@ -328,9 +347,43 @@ vi.mock('./lib/merge-base.js', () => ({
 // The ledger append is the wiring under test here, not the ledger itself
 // (run-ledger.test.ts owns that): a silently unwritten ledger would make a
 // later --resume find no prior sessions and re-run everything.
-vi.mock('./lib/run-ledger.js', () => ({
-  appendRunSession: vi.fn(),
-}));
+vi.mock('./lib/run-ledger.js', async (importOriginal) => {
+  // Take RESUME_MAX from the real module: hardcoding it here made the
+  // production constant unfalsifiable — changing it shipped this suite green.
+  const actual = await importOriginal<typeof import('./lib/run-ledger.js')>();
+  return {
+    ...actual,
+    appendRunSession: vi.fn(),
+    priorSessionIds: vi.fn(() => []),
+    sessionEntryCount: vi.fn(() => 1),
+    ledgerResumeCount: vi.fn(() => 0),
+    readResumeMarker: vi.fn(() => ({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [],
+    })),
+    recordResume: vi.fn(),
+    recordRestart: vi.fn(),
+  };
+});
+
+// The budget-hygiene branch runs in these tests; unmocked it performs REAL
+// filesystem deletes against the hardcoded report path's record dir, and
+// nothing could observe whether it ran.
+vi.mock('./lib/deadline.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/deadline.js')>();
+  // Spread the real module so `DEADLINE_ENV` and the real deadline/round-cap
+  // wiring the report-assembly suite exercises pass through; stub only the
+  // budget-hygiene calls the resume suite asserts on. `hasReviewDeadline`
+  // stays real — it reads `DEADLINE_ENV`, which is unset in the resume tests,
+  // so it returns false there anyway.
+  return {
+    ...actual,
+    readBudgetStop: vi.fn(() => null),
+    clearBudgetStop: vi.fn(),
+    clearRoundStamps: vi.fn(),
+  };
+});
 vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/diff-plan.js')>();
   producerMocks.actualBuildDiffPlan = actual.buildDiffPlan as (
@@ -379,6 +432,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -943,7 +997,9 @@ describe('fetch-pr report assembly', () => {
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
         ['branch', '-D', 'qwen-review/pr-42'],
-        { stdio: 'pipe' },
+        // Sanitized env: a delete must land in the repository the caller
+        // named, not the one an exported `GIT_DIR` points at.
+        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
       );
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
@@ -1040,6 +1096,23 @@ describe('fetch-pr report assembly', () => {
     );
     const report = await reportFor({});
     expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('does not inherit an extended-year forgery that sorts before today', async () => {
+    // `'+275760-09-13…'` parses to the maximum Date yet sorts
+    // lexicographically BEFORE any `'2026-…'` string — a string-compared
+    // bound inherited exactly the far-future forgery it exists to reject,
+    // and cleanup's `comments?since=<far future>` audit then returned
+    // nothing. The bound compares numerically.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        auditSince: '+275760-09-13T00:00:00.000Z',
+        fetchedAt: '+275760-09-13T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt);
   });
 
   it('does not inherit a window from a DIFFERENT PR left at the same path', async () => {
@@ -1169,6 +1242,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 400,
         deletions: 100,
         changedFiles: 9,
@@ -1548,7 +1622,13 @@ describe('fetch-pr report assembly', () => {
             : null,
       );
       producerMocks.gitExit.mockImplementation((...args: string[]) => {
-        if (args[0] === 'merge-base' && !args.includes('--is-ancestor')) {
+        // Match the SUBCOMMAND, not argv[0]: the probe prefixes `-c`
+        // config pins (`core.commitGraph=false`), so a predicate keyed on
+        // the first argument silently stops matching when one is added —
+        // and the mock then answers from the default mapping, which can
+        // only produce exit 0 and exit 1, quietly turning a surface failure
+        // into "no common ancestor".
+        if (args.includes('merge-base') && !args.includes('--is-ancestor')) {
           return mergeBase;
         }
         const out = producerMocks.gitOpt(...args);
@@ -1863,6 +1943,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 800,
         deletions: 100,
         changedFiles: 9,
@@ -2249,6 +2330,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 400,
         deletions: 100,
         changedFiles: 9,
@@ -3032,12 +3114,20 @@ describe('fetch-pr diff identity (diffSha256)', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
         isCrossRepository: false,
         body: '',
       }),
+    );
+    // Self-containment: one test here matches a `resume` filter, and the
+    // shared buildDiffPlan delegation is otherwise installed only by a
+    // preceding describe's beforeEach — a filtered run of this suite alone
+    // partitioned with an implementation-less mock and crashed the report.
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
     );
   });
 
@@ -3170,6 +3260,7 @@ describe('fetch-pr run-session ledger wiring', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -3221,5 +3312,841 @@ describe('fetch-pr run-session ledger wiring', () => {
     const writeOrder =
       producerMocks.writeFileSync.mock.invocationCallOrder[writeIndex];
     expect(appendOrder).toBeGreaterThan(writeOrder);
+  });
+});
+
+// The plan payload a genuine capture of the resume fixtures' diff records:
+// the ruling re-plans the re-derived bytes under this invocation's context
+// and compares the report field for field, so the fixture must carry what a
+// real fetch-pr wrote — built through the same functions, with the line
+// count the gitRaw mock answers every `git show` with (the diff's own five
+// lines).
+function resumePlanFields(diffBytes: string): Record<string, unknown> {
+  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
+    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+    hasDeadline: hasReviewDeadline(process.env),
+  }) as unknown as Record<string, unknown>;
+}
+
+describe('fetch-pr --resume', () => {
+  const OUT = '/tmp/fetch-report.json';
+  const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+
+  function prevReport(over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      prNumber: '42',
+      ownerRepo: 'acme/widgets',
+      host: null,
+      fetchedSha: 'f00df00df00d',
+      diffSha256: createHash('sha256')
+        .update(Buffer.from(DIFF_BYTES))
+        .digest('hex'),
+      worktreePath: '.qwen/tmp/review-pr-42',
+      diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
+      mergeBaseSha: 'baseb45eb45e',
+      baseRefName: 'main',
+      baseRefOid: 'ba5e0f0ba5e0',
+      headRefName: 'feat/x',
+      baseFetchFailed: false,
+      auditSince: '2026-08-12T00:00:00.000Z',
+      fetchedAt: '2026-08-13T00:00:00.000Z',
+      prDescriptionHasHan: false,
+      isCrossRepository: false,
+      diffStat: { files: 1, additions: 1, deletions: 0 },
+      ...resumePlanFields(DIFF_BYTES),
+      ...over,
+    });
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // The path-switched fs: the previous report and the diff exist; every
+    // other read (resume marker, session ledger) is ENOENT.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+        headRefOidOnly: undefined,
+      }),
+    );
+    const { gitOpt, gitRaw } = await import('./lib/git.js');
+    // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
+    // identity probes agree on ONE repository; rev-parse → the fetched SHA.
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    // The re-derivation terms: a resolvable merge-base and a `git diff`
+    // whose bytes match the recorded capture.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockImplementation(() => ({
+      sha: 'baseb45eb45e',
+      baseFetchFailed: false,
+    }));
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('ls-tree') || args.includes('cat-file')
+        ? Buffer.from('')
+        : Buffer.from(DIFF_BYTES),
+    );
+    // clearAllMocks resets call history but NOT implementations; re-assert
+    // the ledger defaults so a mockReturnValue set by one test cannot leak
+    // into the next — the same discipline the fs mock above follows.
+    const {
+      priorSessionIds,
+      readResumeMarker,
+      ledgerResumeCount,
+      sessionEntryCount,
+    } = await import('./lib/run-ledger.js');
+    vi.mocked(priorSessionIds).mockImplementation(() => []);
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    vi.mocked(readResumeMarker).mockImplementation(() => ({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [],
+    }));
+    // Self-containment: a filtered run of ONLY this suite never executes the
+    // preceding describes' beforeEach, which is the only place the shared
+    // buildDiffPlan delegation is installed — clearAllMocks does not
+    // reinstall it. A refused resume falls through to the fresh path and
+    // partitions the diff, so the suite owns the implementation it consumes.
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
+    // The cap's marker term excludes THIS session, so these tests need a
+    // current session id for it to exclude. The lease gate (#9205) demands
+    // BOTH ids before any step runs.
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
+    vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+  });
+
+  async function run(extraArgs: Record<string, unknown> = {}) {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: OUT,
+      maxChunkLines: 400,
+      resume: true,
+      ...extraArgs,
+    } as unknown as Parameters<typeof handler>[0]);
+  }
+
+  function reportWritten(): boolean {
+    return producerMocks.writeFileSync.mock.calls.some(
+      ([path]) => path === OUT,
+    );
+  }
+
+  async function stdoutJsonLines(): Promise<Array<Record<string, unknown>>> {
+    const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+    return vi
+      .mocked(writeStdoutLine)
+      .mock.calls.map((c) => String(c[0]))
+      .filter((l) => l.startsWith('{'))
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it('resumes without touching the report when every probe matches', async () => {
+    await run();
+    expect(reportWritten()).toBe(false);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      {
+        resumed: true,
+        resumeAttempt: 1,
+        restartsSpent: 0,
+        effort: 'high',
+        out: OUT,
+      },
+    ]);
+    const { recordResume, appendRunSession } = await import(
+      './lib/run-ledger.js'
+    );
+    expect(vi.mocked(recordResume)).toHaveBeenCalledWith(OUT);
+    expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+  });
+
+  it('falls through to a fresh fetch when the head moved, and says so', async () => {
+    producerMocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('headRefOid') && !args.includes('headRefName')) {
+        return JSON.stringify({ headRefOid: 'aaaa1111bbbb' });
+      }
+      return JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'aaaa1111bbbb',
+        baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'head-moved' }]);
+    // The once-per-review restart bound becomes a fact on disk here.
+    const { recordRestart } = await import('./lib/run-ledger.js');
+    expect(vi.mocked(recordRestart)).toHaveBeenCalledWith(
+      OUT,
+      expect.stringContaining('head-moved'),
+    );
+  });
+
+  it('falls through when the diff bytes changed — the content key', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from('tampered') as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'diff-hash-mismatch' },
+    ]);
+  });
+
+  it('falls through when there is no previous report at all', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'no-report' }]);
+  });
+
+  it('without --resume the flag path never runs', async () => {
+    await run({ resume: false });
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([]);
+  });
+
+  it('surfaces the recorded restart count to the resumed session', async () => {
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [{ atMs: Date.now(), reason: 'head-moved aaa->bbb' }],
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]['restartsSpent']).toBe(1);
+  });
+
+  it('cross-caps the resume count on the session ledger — a deleted marker does not reset it', async () => {
+    // Marker reads empty (deleted), but the ledger names three sessions:
+    // the original plus two resumes — two entries past the original, so the
+    // cap must read as spent.
+    // Read UNGATED: the gated accessor cannot answer at ruling time, because
+    // the record that satisfies its gate is written only after the ruling.
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
+    // The ruling passes the CURRENT session for exclusion; a deleted-marker
+    // attack arrives as a session the ledger does not name, so nothing is
+    // excluded and the full count bites.
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 2);
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('refuses the ORIGINAL session at the cap on the backstop path', async () => {
+    // Ledger [S0 (original), S1, S2], marker deleted — the exact backstop
+    // state the ledger term exists for — and S0 itself resumes again. The
+    // exclusion already removed S0's entry, so the count answers 2; the old
+    // unconditional minus one read 1 and admitted a third resume through
+    // the cap's own backstop.
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 2);
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('spends the resume budget from the ledger, not one early', async () => {
+    // The ledger's first entry is the original run's own session, not a
+    // resume — so [original, resume1] is ONE resume spent, and RESUME_MAX = 2
+    // still allows this one. Counting the first entry reads it as two and
+    // refuses a legitimate continuation; the three-session case cannot see
+    // the difference, because there both counts rule alike.
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 1);
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('a same-session retry at the cap is the SAME resume in both terms', async () => {
+    // Sessions S0/S1/S2 all inside the fence (a resume never rewrites the
+    // plan), marker [S1, S2], current session S2 retrying: the ledger term
+    // must exclude S2 too — counting it pushed the retry to the cap, and
+    // the fresh fall-through force-removed the worktree being resumed.
+    const { readResumeMarker, ledgerResumeCount } = await import(
+      './lib/run-ledger.js'
+    );
+    vi.mocked(ledgerResumeCount).mockImplementation((_p, opts) =>
+      opts?.excludeSessionId?.toLowerCase() === 's-test' ? 1 : 2,
+    );
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [
+        { sessionId: 'S-prev', atMs: Date.now() },
+        { sessionId: 'S-test', atMs: Date.now() },
+      ],
+      restarts: [],
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('does not count the CURRENT session against its own resume cap', async () => {
+    // A same-session retry of the last permitted resume is that same resume —
+    // `recordResume` dedupes on exactly this. Counting the session's own
+    // marker entry refused the retry as `resume-cap`, and the fall-through
+    // then force-removed the worktree and rewrote the plan, fencing out every
+    // attempt's evidence: a review restarted from zero by a retry.
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [
+        { sessionId: 'S-prev', atMs: Date.now() },
+        { sessionId: 'S-test', atMs: Date.now() },
+      ],
+      restarts: [],
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('asks git for untracked files EXPLICITLY, immune to user config', async () => {
+    // `status.showUntrackedFiles=no` hides untracked residue from a bare
+    // `--porcelain`, and untracked files are the one dirty state no other
+    // probe can see.
+    await run();
+    const { gitOpt } = await import('./lib/git.js');
+    const statusCall = vi
+      .mocked(gitOpt)
+      .mock.calls.find((c) => c.includes('status') && c.includes('-C'));
+    expect(statusCall).toContain('--untracked-files=normal');
+  });
+
+  it('refuses on an explicit effort different from the recorded run', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ effort: 'medium' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run({ effort: 'high' });
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'effort-mismatch' },
+    ]);
+  });
+
+  it('resumes at the recorded effort when none is passed, and says so', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ effort: 'medium' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]['resumed']).toBe(true);
+    expect(lines[0]['effort']).toBe('medium');
+  });
+
+  it('falls through when the worktree holds uncommitted changes', async () => {
+    // Right HEAD, right diff bytes, moved content: this pipeline's own probe
+    // and build/test agents mutate worktrees, and a death between an apply
+    // and its revert leaves exactly this.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return ' M packages/cli/src/x.ts';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'worktree-dirty' },
+    ]);
+  });
+
+  it('falls through when the captured diff is gone', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'diff-unreadable' },
+    ]);
+  });
+
+  it('falls through when the worktree is not at the fetched SHA', async () => {
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'someothersha';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'worktree-sha-mismatch' },
+    ]);
+  });
+
+  // -- The report is attempt-1-writable: every field the resumed pipeline
+  // -- consumes is compared against a fact this run derives itself. Each
+  // -- test forges ONE field and expects the refusal that names it.
+
+  it('does NOT refuse ordinary ignored build artifacts — node_modules is expected', async () => {
+    // The residue probe respects `.gitignore` (`--exclude-standard`): a
+    // resume after `npm install` left node_modules must not read as tamper.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      // The unexcluded pathspec listing (planted .gitignore probe) and the
+      // exclude-standard residue listing both come back empty; node_modules
+      // is ignored, so exclude-standard omits it.
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(false);
+    expect(await stdoutJsonLines()).toEqual([
+      {
+        resumed: true,
+        resumeAttempt: 1,
+        restartsSpent: 0,
+        effort: 'high',
+        out: OUT,
+      },
+    ]);
+  });
+
+  it('keeps a round-cap stop and its stamps on a continuation', async () => {
+    // A round-cap stop is the trusted CLI's own record that the audit reached
+    // its round cap — not a stale time-budget stop — so the continuation
+    // keeps it and the stamps that price its rounds rather than clearing them.
+    const { readBudgetStop, clearBudgetStop, clearRoundStamps } = await import(
+      './lib/deadline.js'
+    );
+    vi.mocked(readBudgetStop).mockReturnValue({
+      cause: 'round-cap',
+      cap: 5,
+      entry: 'round cap',
+      entryZh: '轮数上限',
+      round: 5,
+      remainingSeconds: 0,
+      reserveSeconds: 0,
+      atMs: Date.now(),
+    });
+    await run();
+    expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
+    expect(vi.mocked(clearRoundStamps)).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
+  const OUT = '/tmp/fetch-report.json';
+  const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+
+  function prevReport(over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      prNumber: '42',
+      ownerRepo: 'acme/widgets',
+      host: null,
+      fetchedSha: 'f00df00df00d',
+      diffSha256: createHash('sha256')
+        .update(Buffer.from(DIFF_BYTES))
+        .digest('hex'),
+      worktreePath: '.qwen/tmp/review-pr-42',
+      diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
+      mergeBaseSha: 'baseb45eb45e',
+      baseRefName: 'main',
+      baseRefOid: 'ba5e0f0ba5e0',
+      headRefName: 'feat/x',
+      baseFetchFailed: false,
+      auditSince: '2026-08-12T00:00:00.000Z',
+      fetchedAt: '2026-08-13T00:00:00.000Z',
+      prDescriptionHasHan: false,
+      isCrossRepository: false,
+      diffStat: { files: 1, additions: 1, deletions: 0 },
+      ...resumePlanFields(DIFF_BYTES),
+      ...over,
+    });
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const { gitOpt } = await import('./lib/git.js');
+    // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
+    // identity probes agree on ONE repository; rev-parse → the fetched SHA.
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    const {
+      priorSessionIds,
+      readResumeMarker,
+      ledgerResumeCount,
+      sessionEntryCount,
+    } = await import('./lib/run-ledger.js');
+    vi.mocked(priorSessionIds).mockImplementation(() => []);
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    vi.mocked(readResumeMarker).mockImplementation(() => ({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [],
+    }));
+    // Self-containment, the same reason as the first resume suite: these
+    // re-derivation probes and the partitioner are installed only by
+    // preceding describes' beforeEach in a full-file run; a filtered run of
+    // this suite must install them itself.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockImplementation(() => ({
+      sha: 'baseb45eb45e',
+      baseFetchFailed: false,
+    }));
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('ls-tree') || args.includes('cat-file')
+        ? Buffer.from('')
+        : Buffer.from(DIFF_BYTES),
+    );
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
+    // The cap's marker term excludes THIS session, so these tests need a
+    // current session id for it to exclude. The lease gate (#9205) demands
+    // BOTH ids before any step runs.
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
+    vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+  });
+
+  async function run(extra: Record<string, unknown> = {}) {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: OUT,
+      maxChunkLines: 400,
+      resume: true,
+      ...extra,
+    } as unknown as Parameters<typeof handler>[0]);
+  }
+
+  it('writes the resume bookkeeping exactly once, and only on a continuation', async () => {
+    const { appendRunSession, recordResume, recordRestart } = await import(
+      './lib/run-ledger.js'
+    );
+    await run();
+    expect(vi.mocked(recordResume)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(appendRunSession)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordRestart)).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the resume is refused', async () => {
+    // Hoisting the bookkeeping above the ruling shipped green before this.
+    const { recordResume } = await import('./lib/run-ledger.js');
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
+      args.includes('status') ? '' : 'someothersha',
+    );
+    await run();
+    expect(vi.mocked(recordResume)).not.toHaveBeenCalled();
+  });
+
+  it('records a restart ONLY for head movement, not for any refusal', async () => {
+    const { recordRestart } = await import('./lib/run-ledger.js');
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
+      args.includes('status') ? ' M src/x.ts' : 'f00df00df00d',
+    );
+    await run();
+    expect(vi.mocked(recordRestart)).not.toHaveBeenCalled();
+  });
+
+  it('honours the marker term of the cap independently of the ledger', async () => {
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [
+        { sessionId: 'A', atMs: 1 },
+        { sessionId: 'B', atMs: 2 },
+      ],
+      restarts: [],
+    });
+    await run();
+    const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+    const lines = vi
+      .mocked(writeStdoutLine)
+      .mock.calls.map((c) => String(c[0]))
+      .filter((l) => l.startsWith('{'))
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('numbers the attempt from the marker AFTER the write', async () => {
+    // recordResume deduplicates by session, so a second --resume in the same
+    // session is the same resume — not attempt 2.
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [{ sessionId: 'S-current', atMs: 1 }],
+      restarts: [],
+    });
+    await run();
+    const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+    const line = JSON.parse(
+      vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .filter((l) => l.startsWith('{'))[0],
+    ) as Record<string, unknown>;
+    expect(line['resumeAttempt']).toBe(1);
+  });
+
+  it('runs the budget hygiene on a continuation, and only there', async () => {
+    const { clearRoundStamps, clearBudgetStop, readBudgetStop } = await import(
+      './lib/deadline.js'
+    );
+    vi.mocked(readBudgetStop).mockReturnValue({
+      cause: 'time-budget',
+      entry: 'stopped',
+      entryZh: '停止',
+      round: 3,
+      remainingSeconds: 10,
+      reserveSeconds: 4800,
+      atMs: Date.now(),
+    });
+    await run();
+    expect(vi.mocked(clearRoundStamps)).toHaveBeenCalledWith(OUT);
+    expect(vi.mocked(clearBudgetStop)).toHaveBeenCalledWith(OUT);
+  });
+
+  it('keeps a round-cap stop across the resume', async () => {
+    // A round-cap stop is about rounds, not time — it is the interrupted
+    // attempt's genuine record that the audit reached its cap, so it survives
+    // the continuation untouched.
+    const { clearBudgetStop, readBudgetStop } = await import(
+      './lib/deadline.js'
+    );
+    vi.mocked(readBudgetStop).mockReturnValue({
+      cause: 'round-cap',
+      cap: 5,
+      entry: 'round cap',
+      entryZh: '轮数上限',
+      round: 5,
+      remainingSeconds: 900,
+      reserveSeconds: 1200,
+      atMs: Date.now(),
+    });
+    await run();
+    expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
+  });
+
+  it('keeps a round-cap stop AND its stamps across TWO resumes', async () => {
+    // Real stamp files: a round-cap stop and the stamps that price its rounds
+    // must both survive every resume, or resume 2 reads an empty set and
+    // silently reprices the exhausted cap — the exact population RESUME_MAX
+    // exists for.
+    const actualDeadline =
+      await vi.importActual<typeof import('./lib/deadline.js')>(
+        './lib/deadline.js',
+      );
+    const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const recordDir = `${OUT.replace(/\.json$/, '')}-prompts`;
+    const routeRecordDirToDisk = (): void => {
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (String(path).startsWith(recordDir)) {
+          return realFs.readFileSync(String(path), 'utf8');
+        }
+        if (path === OUT) return prevReport();
+        if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+          return Buffer.from(DIFF_BYTES) as unknown as string;
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      producerMocks.writeFileSync.mockImplementation(
+        (path: unknown, data: unknown) => {
+          if (String(path).startsWith(recordDir)) {
+            realFs.writeFileSync(String(path), String(data));
+          }
+        },
+      );
+      producerMocks.mkdirSync.mockImplementation((dir: unknown) => {
+        if (String(dir).startsWith(recordDir)) {
+          realFs.mkdirSync(String(dir), { recursive: true });
+        }
+      });
+    };
+    const { readBudgetStop, clearBudgetStop, clearRoundStamps } = await import(
+      './lib/deadline.js'
+    );
+    try {
+      routeRecordDirToDisk();
+      vi.mocked(readBudgetStop).mockImplementation(() =>
+        actualDeadline.readBudgetStop(OUT),
+      );
+      vi.mocked(clearBudgetStop).mockImplementation(() =>
+        actualDeadline.clearBudgetStop(OUT),
+      );
+      vi.mocked(clearRoundStamps).mockImplementation(() =>
+        actualDeadline.clearRoundStamps(OUT),
+      );
+      // Attempt 1 exhausted the round cap: stamps 1..2 and the stop marker.
+      const now = Date.now();
+      actualDeadline.stampRound(OUT, 1, now);
+      actualDeadline.stampRound(OUT, 2, now + 1000);
+      actualDeadline.writeRoundCapStop(OUT, 2, 2, now + 2000);
+
+      await run();
+      const stampsFile = `${recordDir}/budget-rounds.json`;
+      // Resume 1 kept the stop — and the stamps that price its rounds.
+      expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
+      expect(realFs.existsSync(stampsFile)).toBe(true);
+
+      // The resumed run dies again — the exact population RESUME_MAX exists
+      // for — and resume 2 re-reads the same state.
+      await run();
+      expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
+      expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
+
+      const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+      const lines = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .filter((l) => l.startsWith('{'))
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(lines).toEqual([
+        {
+          resumed: true,
+          resumeAttempt: 1,
+          restartsSpent: 0,
+          effort: 'high',
+          out: OUT,
+        },
+        {
+          resumed: true,
+          resumeAttempt: 1,
+          restartsSpent: 0,
+          effort: 'high',
+          out: OUT,
+        },
+      ]);
+    } finally {
+      realFs.rmSync(recordDir, { recursive: true, force: true });
+    }
   });
 });

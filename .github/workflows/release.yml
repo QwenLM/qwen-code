@@ -386,6 +386,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
@@ -529,9 +532,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -547,9 +549,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -565,9 +566,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -589,7 +589,7 @@ jobs:
                 echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
                 exit 0
               fi
-              npm publish "${PUBLISH_ARGS[@]}"
+              npm publish --provenance "${PUBLISH_ARGS[@]}"
               echo "${channel}" >> "${PUBLISH_MARKER}"
             )
             echo "::endgroup::"
@@ -598,7 +598,6 @@ jobs:
             echo "::warning::Every channel package was already published; nothing shipped"
           fi
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'

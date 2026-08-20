@@ -292,7 +292,16 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
-    rmSync(qwenHome, { recursive: true, force: true });
+    // The cron job is recurring and, under QWEN_CODE_TEST_CRON_FAST, re-fires
+    // every ~5s. A second fire can race cleanup and drop a fresh file into the
+    // fake HOME after the recursive walk has drained it, making the final rmdir
+    // fail with ENOTEMPTY. Retry a few times so the transient write settles.
+    rmSync(qwenHome, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
   };
 
   return {

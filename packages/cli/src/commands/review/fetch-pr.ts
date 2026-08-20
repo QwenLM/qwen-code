@@ -38,11 +38,14 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
+import type { ReviewPlatformReader } from './lib/platform/types.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   git,
+  gitOpt,
   gitProbe as gitExit,
   gitRaw,
   refExists,
@@ -70,9 +73,26 @@ import {
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
-import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import {
+  appendRunSession,
+  ledgerResumeCount,
+  readResumeMarker,
+  recordResume,
+  recordRestart,
+  RESUME_MAX,
+} from './lib/run-ledger.js';
+import {
+  assessResume,
+  type PreviousReport,
+  type ResumeRefusal,
+} from './lib/resume.js';
+import {
+  hasReviewDeadline,
+  readBudgetStop,
+  clearBudgetStop,
+  clearRoundStamps,
+} from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 
 interface PrMetadata {
@@ -102,6 +122,15 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * Continue the interrupted run at this plan path when its state still
+   * matches (worktree at `fetchedSha`, diff bytes unhashed-unchanged, live
+   * head unmoved): keep the worktree, do NOT rewrite the plan — its mtime is
+   * the run epoch every fence keys on — and re-announce the existing report.
+   * When the state does not match, fall through to a fresh fetch; the flag
+   * never fails a run that could start over.
+   */
+  resume?: boolean;
   /**
    * WHO certified the `--since` anchor: the `lastModelId` beside it in the
    * cache, or the `model` beside the marker's `sha`. Copied through verbatim
@@ -483,7 +512,18 @@ const gitProbe: GitProbe = {
     // split it: git ALSO exits 1 when it cannot read the object store on
     // the walk, so a fault there is indistinguishable from an orphan
     // history. The arm below discloses it.
-    const { out, status } = gitExit('merge-base', a, b);
+    //
+    // `core.commitGraph=false` is #9092's pin, kept: the commit-graph is a
+    // cache, and a stale or truncated one answers this walk from data the
+    // object store no longer agrees with — a wrong merge base, which is the
+    // one input every clamp and the whole narrowing are computed against.
+    const { out, status } = gitExit(
+      '-c',
+      'core.commitGraph=false',
+      'merge-base',
+      a,
+      b,
+    );
     if (status === 0) return out;
     if (status === 1) return null;
     throw new GitUnavailable();
@@ -499,13 +539,168 @@ function tryRemove(action: () => void): void {
 }
 
 function cleanStale(prNumber: string): void {
-  releaseWorktree(worktreePath(prNumber));
+  // The result is READ, because `releaseWorktree` can now refuse: an ancestor
+  // symlink above the temp dir means the removal would land in whatever
+  // checkout it names, so it declines and says so. Dropping that on the floor
+  // left the sweep looking successful and the next `worktree add` wedged at a
+  // path nobody was told about — the same "something that should be gone is
+  // still there, and nothing said so" the cleanup path reports everywhere else.
+  const { existed, freed, reason } = releaseWorktree(worktreePath(prNumber));
+  if (existed && !freed) {
+    writeStderrLine(
+      `Could not free the stale worktree at ${worktreePath(prNumber)}: ${reason}`,
+    );
+  }
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+      execFileSync('git', ['branch', '-D', ref], {
+        stdio: 'pipe',
+        // Same reason as every other git spawn in this pipeline: a delete must
+        // land in the repository the caller named, not the one the shell's
+        // `GIT_DIR` points at.
+        env: sanitizedGitEnv(),
+      }),
     );
   }
+}
+
+/** sha256 of a file's raw bytes, or null when it cannot be read. */
+function sha256OfFile(path: string): string | null {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+type ResumeOutcome =
+  | { resumed: true }
+  | { resumed: false; reason: ResumeRefusal; priorFetchedSha: string | null };
+
+/**
+ * The `--resume` fast path: rule on the interrupted attempt's state and, when
+ * it holds, continue it — every probe is a fact this command gathers itself
+ * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
+ * account. On a continuation the plan file is NOT touched: its mtime is the
+ * run epoch that keeps the first attempt's records, stamps and transcripts
+ * inside every reader's fence.
+ */
+function tryResume(
+  args: FetchPrArgs,
+  wt: string,
+  platform: ReviewPlatformReader,
+): ResumeOutcome {
+  const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  let prev: PreviousReport | null = null;
+  try {
+    prev = JSON.parse(readFileSync(out, 'utf8')) as PreviousReport;
+  } catch {
+    prev = null;
+  }
+  // An unreachable forge reads as "unmoved": the worktree and diff hashes
+  // pin the content, and presubmit's headDrift re-checks before anything
+  // posts. Only the live head OID is needed — a moved head is the one
+  // upstream change resume refuses. The read goes through the same platform
+  // reader the fresh path uses, so an Aone clone resolves the same way.
+  let liveHeadSha: string | null = null;
+  try {
+    const oid = platform.getFetchMeta(Number(prNumber), ownerRepo).headRefOid;
+    liveHeadSha = typeof oid === 'string' && oid !== '' ? oid : null;
+  } catch {
+    liveHeadSha = null;
+  }
+  // The resume cap: how many times this review has already been resumed.
+  // Both counters are the CLI's own record; the marker is primary and the
+  // session ledger cross-caps it, minus the original run's own first entry.
+  const marker = readResumeMarker(out);
+  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  const ledgerResumes = ledgerResumeCount(out, {
+    excludeSessionId: currentSessionId,
+  });
+  const currentKey = currentSessionId?.toLowerCase();
+  const markerResumes = marker.resumes.filter(
+    (r) => r.sessionId.toLowerCase() !== currentKey,
+  ).length;
+  // `--porcelain` prints nothing on a clean tree; a null (the command could
+  // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
+  // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
+  // in the PR.
+  const status = gitOpt(
+    '-C',
+    wt,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  );
+  const ruling = assessResume(prev, {
+    prNumber,
+    worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
+    worktreeClean: status === null ? null : status.trim() === '',
+    diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
+    liveHeadSha,
+    resumeCount: Math.max(markerResumes, ledgerResumes),
+    requestedEffort: args.effort ?? null,
+  });
+  if (!ruling.ok) {
+    return {
+      resumed: false,
+      reason: ruling.reason,
+      priorFetchedSha:
+        prev !== null && typeof prev.fetchedSha === 'string'
+          ? prev.fetchedSha
+          : null,
+    };
+  }
+
+  // Budget hygiene: the continuation runs under a fresh deadline, so a
+  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // A round-cap stop is about rounds, not time — it is the trusted CLI's own
+  // record that the audit reached its round cap, so it stands, and the round
+  // stamps stay with it. Any other stop is cleared with the stamps: the span
+  // from the dead attempt's last stamp to the continuation's first admission
+  // spans the death gap and would price a round at hours; without the stamps
+  // the gate falls back to its conservative constant.
+  const stop = readBudgetStop(out);
+  const roundCapStands = stop !== null && stop.cause === 'round-cap';
+  if (stop !== null && !roundCapStands) {
+    clearBudgetStop(out);
+  }
+  if (!roundCapStands) {
+    clearRoundStamps(out);
+  }
+  appendRunSession(out);
+  recordResume(out);
+  // Read the marker back: `recordResume` deduplicates by session, so a
+  // second `--resume` in the SAME session is the same resume, and deriving
+  // the number from the pre-write count would announce attempt 2 for it.
+  const attempt = Math.max(1, readResumeMarker(out).resumes.length);
+  // `restartsSpent` is the resume marker's ONE consumer beyond idempotency:
+  // the resumed session initialises Step 7's once-per-review restart bound
+  // from it — without a reader here, the recorded restart would silently
+  // reset on every resume. `effort` names the level the continuation is
+  // pinned to (the plan's, deliberately untouched), so a continuation never
+  // silently runs at a level the caller did not expect.
+  const pinnedEffort =
+    prev !== null && typeof prev.effort === 'string' && prev.effort !== ''
+      ? prev.effort
+      : 'high';
+  writeStdoutLine(
+    JSON.stringify({
+      resumed: true,
+      resumeAttempt: attempt,
+      restartsSpent: marker.restarts.length,
+      effort: pinnedEffort,
+      out,
+    }),
+  );
+  writeStderrLine(
+    `Resumed PR #${prNumber} review (resume ${attempt} of ${RESUME_MAX}): ` +
+      `worktree, plan and the interrupted attempt's agent evidence are reused; ` +
+      `the report at ${out} is unchanged, and the run continues at its ` +
+      `recorded effort (${pinnedEffort}).`,
+  );
+  return { resumed: true };
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
@@ -615,6 +810,31 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const platform = getPlatformReader({ remoteUrl, host: args.host?.trim() });
     platform.ensureAuthenticated();
 
+    // A `--resume` rules before any destructive step: a continuation must
+    // reach neither the cleanup below (the worktree is the state being
+    // resumed) nor the plan write (its mtime is the run epoch). Platform
+    // detection above is non-destructive and gives the resume probe's forge
+    // read its auth. The lease already covers the resumed run — a
+    // continuation keeps working in this worktree after this command
+    // returns, and cleanup releases the lease with the rest. A refused
+    // resume falls through to the fresh path and announces why; head
+    // movement is recorded AFTER the fresh plan lands, so the marker entry
+    // postdates the new epoch.
+    let resumeRefusal: ResumeRefusal | null = null;
+    let priorFetchedSha: string | null = null;
+    if (args.resume) {
+      const outcome = tryResume(args, wt, platform);
+      if (outcome.resumed) return;
+      resumeRefusal = outcome.reason;
+      priorFetchedSha = outcome.priorFetchedSha;
+      writeStdoutLine(
+        JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
+      );
+      writeStderrLine(
+        `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
+      );
+    }
+
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
 
@@ -673,7 +893,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
@@ -689,7 +915,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       git('worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
@@ -988,7 +1220,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         demote('capture-failed');
       } else if (mergeBaseSha === null && baseFetchFailed) {
         // No merge base because the FETCH failed and no local base ref
-        // remained to resolve one from. The class has TWO members the exit
+        // remained to resolve one from. (A merge-base walk that failed on the
+        // surface is the arm above, not this one.) The class has TWO members
+        // the exit
         // status cannot split — git exits 128 for BOTH: a transient fault (a
         // fresh CI clone whose base fetch hit a network blip), where the
         // re-run re-runs exactly the component that failed and can succeed,
@@ -1228,8 +1462,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // attempt, never forward. A corrupted far-future `auditSince`
           // (`"2099-…"`) is therefore rejected here — it would push the window
           // ahead of every real comment and silently report a clean audit.
-          // (ISO-8601 strings from `toISOString()` compare chronologically.)
-          prevSince < auditSince
+          // Compared NUMERICALLY: `toISOString()` output happens to sort
+          // chronologically, but a forged extended-year form
+          // (`"+275760-…"`) parses to the far future while sorting
+          // lexicographically BEFORE any `"2026-…"` string — a string
+          // comparison inherits exactly the forgery this bound rejects.
+          Date.parse(prevSince) < Date.parse(auditSince)
         ) {
           auditSince = prevSince;
         }
@@ -1347,6 +1585,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // reads the ledger to find this attempt's transcripts. After the plan
     // write, so the entry sits inside the run-epoch fence it is read through.
     appendRunSession(out);
+    if (resumeRefusal === 'head-moved') {
+      // The once-per-review restart bound, now a fact on disk. Recorded after
+      // the plan write for the same fence reason as the session entry.
+      recordRestart(
+        out,
+        `head-moved ${priorFetchedSha?.slice(0, 7) ?? 'unknown'}->${fetchedSha.slice(0, 7)}`,
+      );
+    }
     writeStdoutLine(`Wrote fetch-pr report to ${out}`);
     if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
     // Surface diff stats to stderr so a human running the command interactively
@@ -1540,6 +1786,12 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', {
         type: 'string',
