@@ -3909,6 +3909,41 @@ const SETTINGS_SCHEMA = {
             description: 'Upload-channel delivery settings.',
             showInDialog: false,
             properties: {
+              baseUrl: {
+                type: 'string',
+                label: 'Upload Base URL',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'DashScope-compatible endpoint used only for temporary ' +
+                  'media uploads. Set together with apiKeyEnv and model to ' +
+                  'separate uploads from inference.',
+                showInDialog: false,
+              },
+              apiKeyEnv: {
+                type: 'string',
+                label: 'Upload API Key Environment Variable',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'Name of the environment variable containing the ' +
+                  'DashScope upload API key. The key itself is not stored ' +
+                  'in settings.',
+                showInDialog: false,
+              },
+              model: {
+                type: 'string',
+                label: 'Upload Model',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'DashScope model identifier sent to the temporary-upload ' +
+                  'policy endpoint.',
+                showInDialog: false,
+              },
               urlTtlHours: {
                 type: 'number',
                 label: 'Upload URL TTL (hours)',

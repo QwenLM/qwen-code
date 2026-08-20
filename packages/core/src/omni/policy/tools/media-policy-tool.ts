@@ -417,8 +417,8 @@ export function ffmpegFailureMessage(
 }
 
 /**
- * Successful policy-tool result: a one-line summary for the model-facing
- * channel and exactly one lossy media artifact whose
+ * Successful policy-tool result: a model-facing summary plus the absolute
+ * output path, and exactly one lossy media artifact whose
  * `metadata.omniDisclosure` carries the disclosure text the orchestrator
  * validates and delivers adjacent to the media (decision D8).
  */
@@ -434,6 +434,7 @@ export function mediaPolicyToolSuccess(args: {
    * protocol); omitted for plain media derivatives. */
   role?: string;
 }): ToolResult {
+  const outputPath = path.join(args.outputDir, args.outputFileName);
   const artifact: ToolArtifact = {
     kind: args.artifactKind,
     storage: 'workspace',
@@ -449,7 +450,10 @@ export function mediaPolicyToolSuccess(args: {
         : { omniDisclosure: args.disclosure, omniRole: args.role },
   };
   return {
-    llmContent: `${args.title}: ${args.disclosure}`,
+    llmContent:
+      `${args.title}: ${args.disclosure}\n` +
+      `Output file: ${outputPath}\n` +
+      'Use read_file with this absolute path to inspect the result.',
     returnDisplay: args.disclosure,
     artifacts: [artifact],
   };

@@ -293,11 +293,16 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       }
 
       const summary = `Extracted ${frames.length} keyframe(s) from ${path.basename(this.params.inputPath)} (${originalDuration}${originalResolution})`;
+      const outputPaths = frames
+        .map((frame) => path.join(this.params.outputDir, frame.fileName))
+        .join('\n');
       // Not mediaPolicyToolSuccess: that helper encodes the common
       // one-artifact contract, while this is the multi-artifact tool —
       // every frame is its own artifact with its own disclosure.
       return {
-        llmContent: summary,
+        llmContent:
+          `${summary}\nOutput files:\n${outputPaths}\n` +
+          'Use read_file with these absolute paths to inspect the results.',
         returnDisplay: summary,
         artifacts,
       };
