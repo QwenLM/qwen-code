@@ -333,6 +333,10 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    // The gh write binds the cwd probe's host instead of restoring env
+    // inheritance — otherwise it would route at the very ambient Aone
+    // host the title promises can never interfere.
+    expect(setGhHostMock).toHaveBeenCalledWith('github.com');
   });
 
   it('a wildcard *.alibaba-inc.com GH_HOST (an org GHE, not Aone) never routes to a1', () => {
@@ -353,11 +357,19 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    expect(setGhHostMock).toHaveBeenCalledWith('github.com');
   });
 
   it('an explicit wildcard-family --host (a GHE host) routes to gh, not a1, and binds gh at that host', () => {
-    // The explicit flag outranks the recorded Aone host — and the gh
+    // The family suffix also names GitHub Enterprise instances; an
+    // explicit GHE flag is platform proof for the gh path, and the gh
     // write must then ROUTE at the flag's host, not the ambient env.
+    // No recorded host: a recorded Aone host beside this flag is a
+    // contradiction and refuses (the conflict test above).
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+    });
     ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base({ host: 'ghe.alibaba-inc.com' }), 'unknown', {
@@ -389,42 +401,76 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
   });
 
-  it('an explicit --host OUTRANKS a recorded Aone host, in BOTH directions', () => {
-    // The registry's documented precedence: the explicit flag wins over
-    // the recorded binding. A recorded codereview target submitted with
-    // an explicit github.com posts at GitHub, not Aone.
+  it('an explicit --host that CONTRADICTS the recorded host refuses — in BOTH directions', () => {
+    // The explicit flag FILLS a gap in the recorded evidence (the
+    // unbound refusal's remedy); it does not override the recording's
+    // answer. A recorded Aone target submitted with an explicit
+    // github.com would retarget the irreversible write at github.com's
+    // same-named repo — the recorded host is the user's own keystrokes,
+    // and the review was composed for the platform it names. Refuse,
+    // exit-3, naming both hosts.
     authMock.mockReturnValue({
       ok: true,
       why: '`--comment` was in the review arguments for #1',
       recordedHost: 'code.alibaba-inc.com',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
-    ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base({ host: 'github.com' }), 'unknown', {
         defaultComment: false,
       }),
     ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'target-platform-conflict',
+    });
     expect(submitAoneMock).not.toHaveBeenCalled();
-    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
-  });
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('contradicts the host the recorded review'),
+    );
 
-  it('an explicit Aone --host OUTRANKS a recorded non-Aone host too', () => {
-    // The other cell of "in BOTH directions": a recorded github.com
-    // binding must not veto an explicit canonical-Aone flag (a
-    // recorded-veto regression of the explicit arm would route the
-    // operator's re-run at gh against the documented precedence).
+    // The mirror direction: a recorded non-Aone host contradicts an
+    // explicit canonical-Aone flag.
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    stderrMock.mockClear();
     authMock.mockReturnValue({
       ok: true,
       why: '`--comment` was in the review arguments for #1',
       recordedHost: 'github.com',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
     expect(() =>
       runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
         defaultComment: false,
       }),
     ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'target-platform-conflict',
+    });
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an ALIASED explicit --host still passes — the Aone web/git pair is one platform', () => {
+    // The conflict check compares through hostsEquivalent: the CR URL
+    // records the WEB host while the skill's --host rule for Aone
+    // targets carries the GIT host. That is one platform under two
+    // names, not a contradiction — refusing it would kill the canonical
+    // Aone post shape.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'code.alibaba-inc.com',
+    });
+    expect(() =>
+      runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
@@ -465,13 +511,16 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(postedJson().posted).toBe(true);
-    // The force applies ONLY to the Aone path — a GitHub write keeps the
-    // state's own context claim (the reads are backed there).
+    // The force applies ONLY to the Aone path — a GitHub write hands the
+    // state's own context claim through RAW (the reads are backed there):
+    // this fixture state carries no claim, so undefined reaches compose —
+    // coercing it to false here would also coerce a malformed non-boolean
+    // claim past compose-review's deliberate shape refusal.
     expect(
       (composeMock.mock.calls[0][0] as Record<string, unknown>)[
         'contextUnavailable'
       ],
-    ).toBe(false);
+    ).toBeUndefined();
   });
 
   it('the FAST path with no recording at all refuses — the cwd probe must not guess the platform', () => {
@@ -518,6 +567,73 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
+  it('a HOSTLESS recording from the --skill-args override refuses — the submission cwd must not stand in for the record of another cwd', () => {
+    // The slow path can authorise from a caller-supplied --skill-args
+    // file when no session id is present — a recording that belongs to
+    // ANOTHER cwd. The cwd probe names submit's clone, not the review's:
+    // a bare-number recording from a github clone, published from an
+    // Aone-origin cwd, must not flip the irreversible write to Aone on
+    // the probe's say-so. Fail closed like the fast-path hostless shape;
+    // the --host remedy lifts it.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      viaSkillArgsOverride: true,
+    });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'target-platform-unbound',
+    });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('--skill-args'),
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+
+    // The --host remedy lifts the refusal — the explicit flag is
+    // platform proof, posted via a1 here.
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    expect(() =>
+      runSubmit(
+        base({ userAuthorized: false, host: 'gitlab.alibaba-inc.com' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a HOSTFUL override recording still routes at its recorded host', () => {
+    // The override flag only fails closed the HOSTLESS form: a recording
+    // from another cwd that names a host carries its own platform
+    // evidence — the review ran where the recording says.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'gitlab.alibaba-inc.com',
+      viaSkillArgsOverride: true,
+    });
+    gitOptMock.mockReturnValue('git@github.com:acme/web.git');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('a cwd origin on a FAMILY-WILDCARD host (an org GHE) never takes the a1 path', () => {
     // The cwd arm probes the origin through the CANONICAL predicate, not
     // the registry's family-wildcard detection: `ghe.alibaba-inc.com`
@@ -537,6 +653,12 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    // The gh write binds the SAME evidence that selected it — the cwd
+    // origin. Without the bind, setGhHost(undefined) restored ambient
+    // env inheritance and the write routed past the very clone that
+    // chose the platform (github.com's same-named repo, or the ambient
+    // GH_HOST).
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
   });
 
   it('a recorded-but-hostless target still refuses — a write must not guess the platform', () => {
@@ -631,6 +753,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       postedInline: 1,
       postedCommentIds: [11],
       summaryPosted: false,
+      ambiguous: false,
     });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),
@@ -663,6 +786,11 @@ describe('submit posts an authorised Aone target through a1', () => {
       postedInline: 0,
       postedCommentIds: [],
       summaryPosted: false,
+      // The flag rides the stdout JSON, not only stderr: all-zero counts
+      // with a silent ambiguous flag read as a clean total failure, and
+      // the user hand-posting the "remainder" double-posts the comment
+      // the count never saw.
+      ambiguous: true,
     });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),

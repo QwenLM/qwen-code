@@ -67,7 +67,11 @@ import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
 } from './lib/authorization.js';
-import { isAoneCanonicalHost, parseRemoteUrl } from './lib/remote-match.js';
+import {
+  hostsEquivalent,
+  isAoneCanonicalHost,
+  parseRemoteUrl,
+} from './lib/remote-match.js';
 import { gitOpt } from './lib/git.js';
 import {
   AonePartialPostError,
@@ -207,6 +211,7 @@ function authorization(
   why: string;
   recordedHost?: string;
   recordedUnbound?: boolean;
+  viaSkillArgsOverride?: boolean;
 } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
@@ -294,8 +299,12 @@ function compose(
     {
       ...rest,
       // Forced for the Aone write path — see the parameter comment. For
-      // GitHub the state's own claim stands (the reads are backed there).
-      contextUnavailable: aoneWrite || rest.contextUnavailable === true,
+      // GitHub the state's own claim stands (the reads are backed there)
+      // and is handed through RAW: compose-review's boundary deliberately
+      // refuses a malformed non-boolean here, and coercing the claim to a
+      // boolean first would silently drop the context-unavailable cap a
+      // stringified "true" was asking for.
+      contextUnavailable: aoneWrite ? true : rest.contextUnavailable,
       criticalsInline,
       suggestionsInline,
       draftedComments: comments,
@@ -559,10 +568,10 @@ export function runSubmit(
     return;
   }
 
-  // Which PLATFORM this write lands on. Precedence mirrors the registry's
-  // documented detection order — an EXPLICIT host flag outranks the
-  // recorded binding outranks the cwd probe, in BOTH directions — with
-  // three write-specific disciplines:
+  // Which PLATFORM this write lands on. Evidence precedence mirrors the
+  // registry's documented detection order — an EXPLICIT host flag, else
+  // the recorded binding, else the cwd probe — with four write-specific
+  // disciplines:
   //  - The predicate is the CANONICAL Aone pair, not the family wildcard:
   //    `*.alibaba-inc.com` also names GitHub Enterprise instances (an
   //    org's `ghe.alibaba-inc.com`), and an irreversible write must not
@@ -580,13 +589,55 @@ export function runSubmit(
   //    proof, so it lifts the refusal instead of meeting it again. The
   //    cwd probe may still decide a SLOW-path publish — that path reads
   //    the current session's own recording, so it is same-session by
-  //    construction and the cwd names the clone the review ran in.
+  //    construction and the cwd names the clone the review ran in. The
+  //    ONE slow-path shape that is not — a session-less caller reading a
+  //    `--skill-args` override, another cwd's record — fails closed on
+  //    its hostless form too: the probe names submit's clone there, not
+  //    the review's.
+  //  - An explicit `--host` and a recorded host are ONE evidence chain
+  //    about where the reviewed target lives: the flag FILLS the gap
+  //    when the recording names no host (the remedy above), it does not
+  //    override the recording's answer. Two hosts that are not the same
+  //    platform (through hostsEquivalent, so the Aone web/git alias
+  //    passes) name a contradiction — the review ran on one, and the
+  //    write would land on the other's same-named repo — so the gate
+  //    refuses instead of choosing. The recorded host is the user's own
+  //    keystrokes; a caller-typed flag is not entitled to retarget it.
   const recordedHost = auth.recordedHost;
   const explicitHost = args.host?.trim() || undefined;
+  if (
+    explicitHost !== undefined &&
+    recordedHost !== undefined &&
+    !hostsEquivalent(explicitHost, recordedHost)
+  ) {
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: the explicit ` +
+        `\`--host ${explicitHost}\` contradicts the host the recorded ` +
+        `review names (\`${recordedHost}\`) — the two are not the same ` +
+        `platform, and a public write must not be retargeted from the ` +
+        `platform its review ran on to another platform's same-named ` +
+        `repo. Re-run without \`--host\` to post where the recorded ` +
+        `review ran, or re-run the review for ${explicitHost} first. ` +
+        `The findings are in the terminal output and the saved report.`,
+    );
+    writeStdoutLine(
+      JSON.stringify(
+        { posted: false, reason: 'target-platform-conflict' },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 3;
+    return;
+  }
+  const overrideHostless =
+    !args.userAuthorized &&
+    auth.viaSkillArgsOverride === true &&
+    recordedHost === undefined;
   const fastPathHostless =
     auth.recordedUnbound === true ||
     (args.userAuthorized && recordedHost === undefined);
-  if (fastPathHostless && explicitHost === undefined) {
+  if ((fastPathHostless || overrideHostless) && explicitHost === undefined) {
     // Same exit-3 shape as an unauthorised refusal — Step 7 treats it as
     // a complete, correct outcome; a throw would surface as a failed
     // command an agent might retry or route around.
@@ -595,7 +646,11 @@ export function runSubmit(
         `can read names the platform the target lives on — ` +
         (auth.recordedUnbound === true
           ? `the recorded review is a bare PR number with no \`--host\``
-          : `no recorded review names this target at all`) +
+          : overrideHostless
+            ? `the authorising recording came from the \`--skill-args\` ` +
+              `override — another cwd's record that names no host — and ` +
+              `the submission cwd's platform must not stand in for it`
+            : `no recorded review names this target at all`) +
         ` — and a public write must not guess between GitHub and Aone ` +
         `Code. Re-run with \`--host <host>\` naming the host the target ` +
         `lives on. The findings are in the terminal output and the saved ` +
@@ -623,16 +678,19 @@ export function runSubmit(
     : undefined;
   const aoneWrite =
     isAoneCanonicalHost(explicitHost ?? recordedHost) ||
-    (explicitHost === undefined &&
+    (auth.viaSkillArgsOverride !== true &&
+      explicitHost === undefined &&
       recordedHost === undefined &&
       isAoneCanonicalHost(cwdOriginHost));
   // The gh write binds its routing host to the SAME evidence that selected
-  // it: an explicit flag, else the recorded binding. Without the rebind a
-  // recorded non-Aone host (e.g. a GHE instance) posted wherever the
-  // ambient env pointed — github.com's same-named repo — instead of where
-  // the review actually ran. setGhHost validates its input; a1 writes
-  // never touch the gh host state.
-  if (!aoneWrite) setGhHost(explicitHost ?? recordedHost);
+  // it: an explicit flag, else the recorded binding, else the cwd origin
+  // the selection arm ran on. Without the rebind a recorded non-Aone host
+  // (e.g. a GHE instance) posted wherever the ambient env pointed —
+  // github.com's same-named repo — instead of where the review actually
+  // ran; and a cwd-selected post restored ambient env inheritance, routing
+  // the write past the very clone that chose the platform. setGhHost
+  // validates its input; a1 writes never touch the gh host state.
+  if (!aoneWrite) setGhHost(explicitHost ?? recordedHost ?? cwdOriginHost);
 
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
@@ -681,12 +739,15 @@ export function runSubmit(
         : undefined,
     callerPr: args.pr,
     callerRepo: args.repo,
-    // The host axis binds to the host the WRITE actually routes at —
-    // explicit flag, else the recorded binding, else the gh fallback.
-    // resolveGhHost alone never yields a recorded Aone host, so a flagless
-    // Aone post (routed via the recorded binding) would bind the floor to
-    // github.com/ambient and silently drop the operator's recorded floor.
-    callerHost: explicitHost ?? recordedHost ?? resolveGhHost(args.host),
+    // The host axis binds to the host the WRITE actually routes at — the
+    // SAME evidence chain the routing bind uses: explicit flag, else the
+    // recorded binding, else the cwd origin the selection arm ran on,
+    // else the gh fallback. resolveGhHost alone never yields a recorded
+    // Aone host, so a flagless Aone post (routed via the recorded
+    // binding) would bind the floor to github.com/ambient and silently
+    // drop the operator's recorded floor.
+    callerHost:
+      explicitHost ?? recordedHost ?? cwdOriginHost ?? resolveGhHost(args.host),
     defaultSeverityFloor: opts.defaultSeverityFloor,
     skillArgs: args.skillArgs,
   });
@@ -895,7 +956,10 @@ export function runSubmit(
       // is the do-not-retry signal; the ids make "inspect the MR"
       // concrete. `ambiguous` counts as landed: the FAILED write may have
       // reached the server (accepted, then the transport died), so the MR
-      // can carry a comment the count never saw.
+      // can carry a comment the count never saw — and it rides the stdout
+      // JSON too: all-zero counts with a silent ambiguous flag read as a
+      // clean total failure, and a user hand-posting the "remainder"
+      // double-posts the comment the count never saw.
       const landed =
         partial.postedInline > 0 || partial.summaryPosted || partial.ambiguous;
       writeStderrLine(
@@ -917,6 +981,7 @@ export function runSubmit(
             postedInline: partial.postedInline,
             postedCommentIds: partial.inlineCommentIds,
             summaryPosted: partial.summaryPosted,
+            ambiguous: partial.ambiguous,
           },
           null,
           2,

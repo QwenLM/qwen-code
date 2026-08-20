@@ -19,7 +19,7 @@
 // `{"comment":{"effective":true}}` to any file and point at it; it cannot
 // retroactively edit the user's own keystrokes.
 
-import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   skillArgsPath,
@@ -135,14 +135,17 @@ const RECORDED_ARGS_MAX_BYTES = 64 * 1024;
  *    this same store) — a planted link must not be followed;
  *  - reads are size-bounded (RECORDED_ARGS_MAX_BYTES).
  *
- * Lookup order: the session-scoped args file first, then the sibling
- * session directories (sorted). The args file is named for the session
- * that recorded the review, and a `--user-authorized` publish
- * characteristically runs in a DIFFERENT session ("post the review we
- * saved") — without the sibling scan the file is simply absent there and
- * a recorded Aone target posts at github.com's same-named repo. Any
- * read/parse trouble still degrades gracefully and never blocks a
- * user-authorised publish.
+ * Candidate set: the session-scoped args file (the publishing session's
+ * own recording — it may post an OLDER same-PR recording than a sibling
+ * session's, so it joins the ordering instead of preceding it), every
+ * sibling session directory's recording, and the sessionless root-level
+ * recording. ALL of them order by the recording FILE's mtime, newest
+ * first. The args file is named for the session that recorded the
+ * review, and a `--user-authorized` publish characteristically runs in a
+ * DIFFERENT session ("post the review we saved") — without the sibling
+ * scan the file is simply absent there and a recorded Aone target posts
+ * at github.com's same-named repo. Any read/parse trouble still degrades
+ * gracefully and never blocks a user-authorised publish.
  */
 function lookupRecordedHost(
   req: WriteAuthorizationRequest,
@@ -174,63 +177,58 @@ function lookupRecordedHost(
       return null;
     }
   };
-  const isReadableRecording = (path: string): boolean => {
-    try {
-      if (lstatSync(path).isSymbolicLink()) return false;
-      return statSync(path).size <= RECORDED_ARGS_MAX_BYTES;
-    } catch {
-      return false;
-    }
-  };
-  const candidates: string[] = [
+  // The FULL candidate set: the session-scoped (or override) recording,
+  // every sibling session recording, and the sessionless root recording.
+  // A Set dedupes the publishing session's own directory, which the
+  // sibling scan reaches again.
+  const candidatePaths = new Set<string>([
     currentSessionId() === '' && req.skillArgs
       ? req.skillArgs
       : defaultSkillArgsPath(),
-  ];
+  ]);
   try {
-    // Sibling sessions in MTIME order, newest first — session ids are
-    // arbitrary strings, so name order is a coin flip; the record itself is
-    // last-writer-wins and the cross-session scan must read it the same
-    // way, or an OLDER session's same-number recording (Aone's small global
-    // MR ids collide with GitHub PR numbers easily) supplies a stale host
-    // that masks the newest recording's hostlessness.
-    const entries = readdirSync(SKILL_ARGS_DIR, { withFileTypes: true })
-      .filter(
-        // Session directories ONLY — `.qwen/tmp/` also holds review
-        // worktrees materialized from the reviewed PR's own tree; their
-        // content is attacker-controlled and must never supply a host.
-        (entry) =>
-          entry.isDirectory() &&
-          !entry.isSymbolicLink() &&
-          /^s-/.test(entry.name),
-      )
-      .flatMap((entry) => {
-        try {
-          return [
-            {
-              path: join(
-                SKILL_ARGS_DIR,
-                entry.name,
-                'qwen-skill-args-review.txt',
-              ),
-              mtime: statSync(join(SKILL_ARGS_DIR, entry.name)).mtimeMs,
-            },
-          ];
-        } catch {
-          return [];
-        }
-      })
-      .sort((a, b) => b.mtime - a.mtime);
-    for (const entry of entries) {
-      candidates.push(entry.path);
+    for (const entry of readdirSync(SKILL_ARGS_DIR, { withFileTypes: true })) {
+      // Session directories ONLY — `.qwen/tmp/` also holds review
+      // worktrees materialized from the reviewed PR's own tree; their
+      // content is attacker-controlled and must never supply a host.
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (!/^s-/.test(entry.name)) continue;
+      candidatePaths.add(
+        join(SKILL_ARGS_DIR, entry.name, 'qwen-skill-args-review.txt'),
+      );
     }
-    candidates.push(join(SKILL_ARGS_DIR, 'qwen-skill-args-review.txt'));
+    candidatePaths.add(join(SKILL_ARGS_DIR, 'qwen-skill-args-review.txt'));
   } catch {
     // No recorded-args directory at all — the session-scoped candidate
     // above is the only one.
   }
-  for (const path of candidates) {
-    if (!isReadableRecording(path)) continue;
+  // Order every candidate by the recording FILE's mtime, newest first.
+  // Session ids are arbitrary strings, so name order is a coin flip; the
+  // record itself is last-writer-wins and the cross-session scan must
+  // read it the same way, or an OLDER session's same-number recording
+  // (Aone's small global MR ids collide with GitHub PR numbers easily)
+  // supplies a stale host that masks the newest recording's hostlessness.
+  // The DIRECTORY's mtime is NOT the key: writeSkillArgs rewrites the
+  // recording in place (O_WRONLY|O_CREAT|O_TRUNC, no unlink/rename),
+  // which advances the file's mtime and never the parent directory's —
+  // and any other skill's args file created in the session dir bumps it.
+  // Keying the sort on the directory let a plain re-run of an older
+  // session's review (the re-run the unbound refusal's remedy prescribes)
+  // lose its newest-wins position, routing an irreversible write on
+  // stale evidence. Symlinks are skipped at the file level, mirroring
+  // writeSkillArgs' O_NOFOLLOW policy on the write side of this store.
+  const candidates: Array<{ path: string; mtime: number }> = [];
+  for (const path of candidatePaths) {
+    try {
+      const st = lstatSync(path);
+      if (st.isSymbolicLink() || st.size > RECORDED_ARGS_MAX_BYTES) continue;
+      candidates.push({ path, mtime: st.mtimeMs });
+    } catch {
+      continue;
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const { path } of candidates) {
     let raw: string;
     try {
       raw = readFileSync(path, 'utf8');
@@ -278,6 +276,16 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
    * runtime environment alone. Absent on the refusal paths.
    */
   recordedUnbound?: boolean;
+  /**
+   * True when the slow path authorised from a caller-supplied
+   * `--skill-args` path (honoured only when no session id is present) —
+   * a recording that belongs to ANOTHER cwd. The write gate must not let
+   * the submission cwd's origin probe stand in for such a recording's
+   * missing platform evidence: the probe names submit's clone, not the
+   * review's, so a hostless override recording fails closed instead.
+   * Absent on the fast path and on refusals.
+   */
+  viaSkillArgsOverride?: boolean;
 } {
   if (req.userAuthorized) {
     const lookup = lookupRecordedHost(req);
@@ -298,8 +306,13 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   }
 
   const sessionScoped = defaultSkillArgsPath();
-  const path =
-    currentSessionId() === '' && req.skillArgs ? req.skillArgs : sessionScoped;
+  // The caller-supplied seam is honoured ONLY when no session id is
+  // present (see WriteAuthorizationRequest.skillArgs). When it is used,
+  // the recording belongs to another cwd, and the write gate must know:
+  // the submission cwd's origin probe is not platform evidence for it.
+  const skillArgsOverride =
+    currentSessionId() === '' && req.skillArgs ? req.skillArgs : undefined;
+  const path = skillArgsOverride ?? sessionScoped;
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -401,14 +414,19 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // the recorded `--host` flag (its only host evidence). The UNBOUND
     // fail-closed does NOT ride the slow path — the reason is not what it
     // was when first written (the write gate's cwd arm REFUSED then; it
-    // SELECTS now). It survives because the slow path reads ONLY the
-    // current session's args file, so it is same-session by construction:
-    // the cwd probe the write gate falls back to names the clone the
-    // review itself ran in — sound evidence, not a guess — and it no
-    // longer reads the ambient GH_HOST (aligned with read detection).
+    // SELECTS now). It survives because the slow path reads the CURRENT
+    // SESSION's args file, so it is same-session by construction: the cwd
+    // probe the write gate falls back to names the clone the review
+    // itself ran in — sound evidence, not a guess — and it no longer
+    // reads the ambient GH_HOST (aligned with read detection).
     // Cross-session publishes are the fast path's business, where the
-    // unbound refusal covers the same bare-number shape.
+    // unbound refusal covers the same bare-number shape. The ONE shape
+    // that is NOT same-session by construction — a session-less caller
+    // reading a caller-supplied `--skill-args` override — rides
+    // `viaSkillArgsOverride` below, and the write gate fails closed on
+    // its hostless form instead of probing the submission cwd.
     recordedHost: t.type === 'pr-url' ? t.host : verdict.host,
+    viaSkillArgsOverride: skillArgsOverride !== undefined,
   };
 }
 

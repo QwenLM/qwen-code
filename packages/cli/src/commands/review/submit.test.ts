@@ -961,13 +961,68 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('the cross-session scan is last-writer-wins by MTIME, not name order', () => {
+  it('a contradicting --host beside a recorded host refuses — the flag does not retarget the recorded review', () => {
+    // The explicit flag FILLS a gap in the recorded evidence; it does
+    // not override the recording's answer. A bare-number recording with
+    // a recorded Aone host, submitted with an explicit github.com,
+    // would retarget the irreversible write at github.com's same-named
+    // repo — the fast path performs no gate host comparison of its own,
+    // so the platform gate must refuse the contradiction itself.
+    writeFileSync(siblingFile, '42 --host code.alibaba-inc.com --comment\n');
+    expect(() =>
+      runSubmit(
+        args({
+          userAuthorized: true,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'github.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(
+      JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+    ).toEqual({ posted: false, reason: 'target-platform-conflict' });
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+
+    // The ALIASED spelling is one platform, not a contradiction: the
+    // canonical Aone post shape (CR-URL record + git-host flag) passes.
+    process.exitCode = undefined;
+    writeStdoutSpy.mockClear();
+    expect(() =>
+      runSubmit(
+        args({
+          userAuthorized: true,
+          pr: 42,
+          repo: 'maxcompute/odps_src',
+          host: 'gitlab.alibaba-inc.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('the cross-session scan is last-writer-wins by the FILE mtime, not name order and not the directory mtime', () => {
     // Session ids are arbitrary strings, so name order is a coin flip. The
     // record itself is last-writer-wins; the scan must read it the same
     // way, or an OLDER session's same-number recording supplies a stale
     // host that masks the newest recording's hostlessness. Aone's small
     // global MR ids collide with GitHub PR numbers easily, so the stale
     // host routes an irreversible write at the wrong platform.
+    //
+    // The sort key is the recording FILE's mtime — writeSkillArgs
+    // rewrites the file in place (O_WRONLY|O_CREAT|O_TRUNC, no
+    // unlink/rename), which advances the file's mtime and never the
+    // parent directory's. The directory mtimes below are stamped
+    // BACKWARDS on purpose: a scan keyed on them would decide the
+    // opposite way in both arms.
     const oldDir = join('.qwen', 'tmp', 's-mtime-old');
     const newDir = join('.qwen', 'tmp', 's-mtime-new');
     const oldFile = join(oldDir, 'qwen-skill-args-review.txt');
@@ -979,10 +1034,13 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       // OLDER session carried a host; NEWER session recorded a bare number.
       writeFileSync(oldFile, '7 --host gitlab.alibaba-inc.com --comment\n');
       writeFileSync(newFile, '7 --comment\n');
-      utimesSync(oldDir, now - 3600, now - 3600);
-      utimesSync(newDir, now, now);
+      utimesSync(oldFile, now - 3600, now - 3600);
+      utimesSync(newFile, now, now);
+      utimesSync(oldDir, now, now);
+      utimesSync(newDir, now - 3600, now - 3600);
       // The newest same-PR recording (hostless) decides → unbound refusal,
-      // NOT a post at the stale session's Aone host.
+      // NOT a post at the stale session's Aone host — even though the
+      // stale session's DIRECTORY is the newer one.
       expect(() =>
         runSubmit(
           args({ userAuthorized: true, pr: 7, repo: 'maxcompute/odps_src' }),
@@ -997,13 +1055,14 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       expect(aoneSubmitMock).not.toHaveBeenCalled();
       expect(ghMock).not.toHaveBeenCalled();
 
-      // Reverse the mtimes: the host-carrying recording is now the newest,
-      // so it binds and the write posts at its Aone host.
+      // Reverse the FILE mtimes: the host-carrying recording is now the
+      // newest, so it binds and the write posts at its Aone host — even
+      // though its directory is now the older one.
       process.exitCode = undefined;
       aoneSubmitMock.mockClear();
       writeStdoutSpy.mockClear();
-      utimesSync(oldDir, now, now);
-      utimesSync(newDir, now - 3600, now - 3600);
+      utimesSync(oldFile, now, now);
+      utimesSync(newFile, now - 3600, now - 3600);
       expect(() =>
         runSubmit(
           args({ userAuthorized: true, pr: 7, repo: 'maxcompute/odps_src' }),
@@ -1017,6 +1076,115 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       rmSync(oldDir, { recursive: true, force: true });
       rmSync(newDir, { recursive: true, force: true });
     }
+  });
+
+  it('the sessionless root recording joins the mtime ordering — newest decides', () => {
+    // writeSkillArgs records at the ROOT level when no session id is
+    // present. That recording is a candidate like any other — pinned
+    // last, it could never win, and a newer hostless root record (the
+    // ordinary headless re-run) would let an older session's stale host
+    // bind the write. Under vitest the session-scoped candidate IS the
+    // root file, so this also pins that the publishing session's own
+    // recording joins the ordering instead of preceding it.
+    const rootFile = join('.qwen', 'tmp', 'qwen-skill-args-review.txt');
+    const siblingDir = join('.qwen', 'tmp', 's-root-mtime-sibling');
+    const siblingFile = join(siblingDir, 'qwen-skill-args-review.txt');
+    mkdirSync(siblingDir, { recursive: true });
+    try {
+      // The describe's beforeEach plants a sibling recording of this same
+      // target with a fresh mtime; the stamps below reach past it in BOTH
+      // directions so the ordering under test is the one under test.
+      const now = Math.floor(Date.now() / 1000);
+      // Older sibling carries a host; NEWER root recording is hostless.
+      writeFileSync(
+        siblingFile,
+        'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
+      );
+      writeFileSync(rootFile, '42 --comment\n');
+      utimesSync(siblingFile, now - 3600, now - 3600);
+      utimesSync(rootFile, now + 3600, now + 3600);
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBe(3);
+      expect(
+        JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+      ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+      expect(aoneSubmitMock).not.toHaveBeenCalled();
+      expect(ghMock).not.toHaveBeenCalled();
+
+      // Reverse: the hosted recording is newest, the hostless root
+      // record must not veto it from a pinned-first position.
+      process.exitCode = undefined;
+      aoneSubmitMock.mockClear();
+      writeStdoutSpy.mockClear();
+      utimesSync(siblingFile, now + 3600, now + 3600);
+      utimesSync(rootFile, now - 3600, now - 3600);
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBeUndefined();
+      expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(rootFile, { force: true });
+      rmSync(siblingDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a HOSTLESS recording read via the --skill-args seam refuses — the cwd probe must not stand in for the record of another cwd', () => {
+    // Under vitest there is no session id, so the slow path reads the
+    // caller-supplied seam file — the cross-cwd shape: the recording
+    // belongs to another cwd, and the submission cwd's origin probe is
+    // not platform evidence for it. A bare-number hostless recording
+    // fails closed (the platform is unprovable); the --host remedy
+    // lifts the refusal.
+    const rec = file('override-hostless.txt', '7 --comment');
+    expect(() =>
+      runSubmit(
+        args({ skillArgs: rec, pr: 7, repo: 'maxcompute/odps_src' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(
+      JSON.parse(writeStdoutSpy.mock.calls.map((c) => String(c[0])).join('')),
+    ).toEqual({ posted: false, reason: 'target-platform-unbound' });
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('--skill-args'),
+      ),
+    ).toBe(true);
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+
+    // The remedy works: the explicit flag is platform proof.
+    process.exitCode = undefined;
+    writeStdoutSpy.mockClear();
+    ghMock.mockClear();
+    expect(() =>
+      runSubmit(
+        args({
+          skillArgs: rec,
+          pr: 7,
+          repo: 'maxcompute/odps_src',
+          host: 'github.com',
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).toHaveBeenCalled();
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
   });
 
   it('never reads recordings planted OUTSIDE session dirs (worktree vector)', () => {
@@ -1211,7 +1379,16 @@ describe('the posting gate', () => {
   });
 
   it('posts when the user typed `--comment`', () => {
-    runSubmit(args({ skillArgs: file('skill-args.txt', '6771 --comment') }));
+    // The bare-number recording carries no host, and this test runs
+    // through the session-less --skill-args seam — the submission cwd's
+    // platform must not stand in for the recording's missing evidence
+    // (it refuses without the flag; the explicit host is the remedy).
+    runSubmit(
+      args({
+        skillArgs: file('skill-args.txt', '6771 --comment'),
+        host: 'github.com',
+      }),
+    );
 
     expect(ghMock).toHaveBeenCalledOnce();
     const call = ghMock.mock.calls[0] as unknown as string[];
@@ -1223,6 +1400,23 @@ describe('the posting gate', () => {
     // `--input -` (stdin), never `-f body=` which re-escapes newlines.
     expect(call).toContain('--input');
     expect(call).toContain('-');
+  });
+
+  it('refuses a malformed contextUnavailable on the GitHub path — the claim passes through raw', () => {
+    // The gh path hands the state's context claim through RAW so
+    // compose-review's deliberate shape check still refuses a
+    // stringified boolean. Coercing the claim to a boolean first
+    // (`=== true`) silently dropped the context-unavailable cap the
+    // malformed value was asking for — a payload the archived
+    // compose-review boundary refuses must not compose here.
+    const review = file('ctx-malformed.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, contextUnavailable: 'true' },
+    });
+    expect(() => runSubmit(args({ review, userAuthorized: true }))).toThrow(
+      /does not compose into a verdict/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('posts when the user asked for it in so many words', () => {
@@ -1480,10 +1674,15 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     // Wiring leg: hardcoded or dropped `defaultComment` in the handler would
     // leave the direct runSubmit test green while production submissions
     // ignore the setting. The args file names the PR but carries no
-    // --comment; only the setting authorises.
+    // --comment; only the setting authorises. The explicit host is the
+    // platform evidence the hostless seam recording lacks (see the
+    // session-less override refusal).
     reviewSettingsMock.mockReturnValue({ attribution: true, comment: true });
     await submitCommand.handler?.(
-      args({ skillArgs: file('handler-comment-args.txt', '6771') }) as never,
+      args({
+        skillArgs: file('handler-comment-args.txt', '6771'),
+        host: 'github.com',
+      }) as never,
     );
     expect(ghMock).toHaveBeenCalled();
     expect(process.exitCode).toBeUndefined();
@@ -1509,6 +1708,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       args({
         review,
         skillArgs: file('handler-floor-args.txt', '6771 --comment'),
+        host: 'github.com',
       }) as never,
     );
     expect(ghMock).toHaveBeenCalledOnce();
@@ -1944,10 +2144,13 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
   it('the standing review.comment setting authorises a post without --comment in the args', () => {
     // The setting replaces the flag, not the binding: the recorded arguments
-    // still name the PR, and only that PR.
-    runSubmit(args({ skillArgs: file('skill-args.txt', '6771') }), 'unknown', {
-      defaultComment: true,
-    });
+    // still name the PR, and only that PR. The explicit host is the
+    // platform evidence the hostless seam recording lacks.
+    runSubmit(
+      args({ skillArgs: file('skill-args.txt', '6771'), host: 'github.com' }),
+      'unknown',
+      { defaultComment: true },
+    );
     expect(ghMock).toHaveBeenCalled();
 
     ghMock.mockClear();
@@ -2327,6 +2530,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
           'floor-args.txt',
           '6771 --comment --severity-floor critical',
         ),
+        host: 'github.com',
       }),
     );
     expect(ghMock).toHaveBeenCalledOnce();
@@ -2371,6 +2575,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
             `floor-equal-args-${stateFloor}.txt`,
             '6771 --comment --severity-floor critical',
           ),
+          host: 'github.com',
         }),
       );
       expect(ghMock).toHaveBeenCalledOnce();
@@ -2406,6 +2611,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
           'floor-auto-args.txt',
           '6771 --comment --severity-floor auto',
         ),
+        host: 'github.com',
       }),
     );
     expect(ghMock).toHaveBeenCalledOnce();
@@ -2474,6 +2680,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
           'floor-reverse-args.txt',
           '6771 --comment --severity-floor suggestion',
         ),
+        host: 'github.com',
       }),
     );
     expect(ghMock).toHaveBeenCalledOnce();
@@ -2505,6 +2712,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       args({
         review,
         skillArgs: file('floor-configured-args.txt', '6771 --comment'),
+        host: 'github.com',
       }),
       'unknown',
       { defaultSeverityFloor: 'critical' },
