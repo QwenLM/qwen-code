@@ -19,6 +19,10 @@ import { TaskUpdateTool } from '../../../tools/task-update.js';
 import type { TaskUpdateParams } from '../../../tools/task-update.js';
 import type { Config } from '../../../config/config.js';
 
+const { mockSendStructuredMessage } = vi.hoisted(() => ({
+  mockSendStructuredMessage: vi.fn(),
+}));
+
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
   const original =
@@ -33,6 +37,15 @@ vi.mock('../../../config/storage.js', async (importOriginal) => {
         mockGlobalDir = dir;
       },
     },
+  };
+});
+
+vi.mock('../mailbox.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../mailbox.js')>();
+  mockSendStructuredMessage.mockImplementation(original.sendStructuredMessage);
+  return {
+    ...original,
+    sendStructuredMessage: mockSendStructuredMessage,
   };
 });
 
@@ -915,6 +928,29 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('worker');
       await h.waitForStatus('worker', AgentStatus.COMPLETED);
+    });
+
+    it('does not gate a teammate when the shutdown mailbox write fails', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      const mailboxError = new Error('EIO: mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(mailboxError);
+
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        mailboxError,
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+
+      await createTask(h.teamName, {
+        subject: 'After failed shutdown',
+        description: 'Should still be claimable',
+      });
+      await h.waitForMessages('target', 1);
+      expect(target.getReceivedMessages()[0]).toContain(
+        'After failed shutdown',
+      );
     });
 
     it('shutdown_approved from the requested teammate aborts them', async () => {
