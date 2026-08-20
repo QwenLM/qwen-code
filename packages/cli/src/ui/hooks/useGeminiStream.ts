@@ -143,6 +143,48 @@ import {
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
+// User-facing ⚠ messages for ABNORMAL finish reasons. STOP and UNSPECIFIED
+// map to undefined: they produce no info item. Consumed both by
+// handleFinishedEvent (which adds the info item) and by the Finished-case
+// deferral resolution, which needs to know whether an info item is about to
+// land so a deferred thought can commit ABOVE it.
+const FINISH_REASON_INFO_MESSAGES: Record<FinishReason, string | undefined> = {
+  [FinishReason.FINISH_REASON_UNSPECIFIED]: undefined,
+  [FinishReason.STOP]: undefined,
+  [FinishReason.MAX_TOKENS]: 'Response truncated due to token limits.',
+  [FinishReason.SAFETY]: 'Response stopped due to safety reasons.',
+  [FinishReason.RECITATION]: 'Response stopped due to recitation policy.',
+  [FinishReason.LANGUAGE]: 'Response stopped due to unsupported language.',
+  [FinishReason.BLOCKLIST]: 'Response stopped due to forbidden terms.',
+  [FinishReason.PROHIBITED_CONTENT]:
+    'Response stopped due to prohibited content.',
+  [FinishReason.SPII]:
+    'Response stopped due to sensitive personally identifiable information.',
+  [FinishReason.OTHER]: 'Response stopped for other reasons.',
+  [FinishReason.MALFORMED_FUNCTION_CALL]:
+    'Response stopped due to malformed function call.',
+  [FinishReason.IMAGE_SAFETY]:
+    'Response stopped due to image safety violations.',
+  [FinishReason.IMAGE_PROHIBITED_CONTENT]:
+    'Response stopped due to image prohibited content.',
+  [FinishReason.IMAGE_RECITATION]:
+    'Response stopped due to image recitation policy.',
+  [FinishReason.IMAGE_OTHER]:
+    'Response stopped due to other image-related reasons.',
+  [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
+  [FinishReason.UNEXPECTED_TOOL_CALL]:
+    'Response stopped due to unexpected tool call.',
+};
+
+// The info-item message an abnormal finish reason produces, or undefined for
+// normal finishes (STOP / UNSPECIFIED / absent reason).
+function finishReasonInfoMessage(
+  reason: FinishReason | undefined,
+): string | undefined {
+  if (!reason) return undefined;
+  return FINISH_REASON_INFO_MESSAGES[reason];
+}
+
 interface ToolContinuationOwner {
   promptId: string;
   signal: AbortSignal;
@@ -2246,36 +2288,7 @@ export const useGeminiStream = (
         return;
       }
 
-      const finishReasonMessages: Record<FinishReason, string | undefined> = {
-        [FinishReason.FINISH_REASON_UNSPECIFIED]: undefined,
-        [FinishReason.STOP]: undefined,
-        [FinishReason.MAX_TOKENS]: 'Response truncated due to token limits.',
-        [FinishReason.SAFETY]: 'Response stopped due to safety reasons.',
-        [FinishReason.RECITATION]: 'Response stopped due to recitation policy.',
-        [FinishReason.LANGUAGE]:
-          'Response stopped due to unsupported language.',
-        [FinishReason.BLOCKLIST]: 'Response stopped due to forbidden terms.',
-        [FinishReason.PROHIBITED_CONTENT]:
-          'Response stopped due to prohibited content.',
-        [FinishReason.SPII]:
-          'Response stopped due to sensitive personally identifiable information.',
-        [FinishReason.OTHER]: 'Response stopped for other reasons.',
-        [FinishReason.MALFORMED_FUNCTION_CALL]:
-          'Response stopped due to malformed function call.',
-        [FinishReason.IMAGE_SAFETY]:
-          'Response stopped due to image safety violations.',
-        [FinishReason.IMAGE_PROHIBITED_CONTENT]:
-          'Response stopped due to image prohibited content.',
-        [FinishReason.IMAGE_RECITATION]:
-          'Response stopped due to image recitation policy.',
-        [FinishReason.IMAGE_OTHER]:
-          'Response stopped due to other image-related reasons.',
-        [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
-        [FinishReason.UNEXPECTED_TOOL_CALL]:
-          'Response stopped due to unexpected tool call.',
-      };
-
-      const message = finishReasonMessages[finishReason];
+      const message = finishReasonInfoMessage(finishReason);
       if (message) {
         addItem(
           {
@@ -2759,8 +2772,22 @@ export const useGeminiStream = (
             case ServerGeminiEventType.Finished:
               flushBufferedStreamEvents();
               // A thinking-only turn (no content/tool) still commits its
-              // reasoning so it persists collapsed in history.
-              commitPendingThought(userMessageTimestamp);
+              // reasoning so it persists collapsed in history. An ABNORMAL
+              // finish (one that adds a ⚠ info item via handleFinishedEvent
+              // below) must also end an active merge deferral first: the
+              // deferred thought has to commit ABOVE the info item,
+              // preserving the thought-first ordering every other abort site
+              // maintains. Normal STOP must NOT abort — the scheduled batch
+              // still gets to fold into the thought on completion.
+              if (
+                finishReasonInfoMessage(
+                  (event as ServerGeminiFinishedEvent).value.reason,
+                )
+              ) {
+                abortThoughtMergeDeferral(userMessageTimestamp);
+              } else {
+                commitPendingThought(userMessageTimestamp);
+              }
               // Seal off this turn's UI state before the parent re-enters
               // sendMessageStream for a continuation (Stop-hook block at
               // client.ts:1378 or next-speaker auto-continue at 1444). Both
@@ -3528,6 +3555,21 @@ export const useGeminiStream = (
         }
       }
 
+      // Resolve an active merge deferral BEFORE prepareQueryForGemini
+      // appends the new user item: the deferred thought belongs to the
+      // PREVIOUS turn and must land above the new prompt. Committing it
+      // after the user item (in the new-prompt reset below) would attribute
+      // it to the new turn's region and misgroup findLastUserItemIndex-keyed
+      // turn slicing (rewind selector, ESC auto-restore).
+      if (
+        (submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate) &&
+        thoughtMergeDeferralRef.current
+      ) {
+        abortThoughtMergeDeferral(userMessageTimestamp);
+      }
+
       // Reset quota error flag when starting a new query (not a continuation).
       // Notifications (background agent/shell/monitor completions) are system
       // events, not new user turns: they must not clear the user's model
@@ -3826,15 +3868,12 @@ export const useGeminiStream = (
             );
           }
 
-          // Reset thought when starting a new prompt. With a deferral active
-          // (concurrent `?btw` submitted mid tool batch), persist the
-          // deferred thought instead of silently dropping it.
+          // Reset thought when starting a new prompt. An active merge
+          // deferral was already resolved above — BEFORE
+          // prepareQueryForGemini appended this turn's user item — so the
+          // deferred thought committed above the new prompt, not below it.
           setThought(null);
-          if (thoughtMergeDeferralRef.current) {
-            abortThoughtMergeDeferral(Date.now());
-          } else {
-            setPendingThoughtItem(null);
-          }
+          setPendingThoughtItem(null);
         }
 
         if (submitType === SendMessageType.Retry) {

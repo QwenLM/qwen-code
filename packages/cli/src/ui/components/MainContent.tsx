@@ -9,6 +9,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -309,6 +310,52 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     ],
     [visibleHistory, pendingHistoryItems],
   );
+
+  // Ctrl+O (fullDetail) inserts/removes merged tool_groups in the MIDDLE of
+  // the virtual list, but VirtualizedList's scroll anchor is index-based —
+  // without help, the anchored ITEM changes identity and a user scrolled up
+  // loses their reading position. Capture the anchored item during the
+  // fullDetail-flip render (the ref still holds the pre-flip handle and the
+  // pre-flip list) and scroll back to it once the new list commits.
+  const prevFullDetailRef = useRef(fullDetail);
+  const allVirtualItemsRef = useRef(allVirtualItems);
+  const anchorRestoreItemRef = useRef<VpItem | null>(null);
+  if (prevFullDetailRef.current !== fullDetail) {
+    prevFullDetailRef.current = fullDetail;
+    anchorRestoreItemRef.current = null;
+    if (useVirtualScroll) {
+      const list = scrollRef.current;
+      const prevItems = allVirtualItemsRef.current;
+      const state = list?.getScrollState();
+      const atBottom =
+        !!state &&
+        state.innerHeight > 0 &&
+        state.scrollTop + state.innerHeight >= state.scrollHeight - 1;
+      const anchorIndex = list?.getScrollIndex() ?? -1;
+      // At-bottom stays glued to the end via VirtualizedList's own
+      // data-change re-anchor; restoring there would fight it. Pending
+      // items (negative ids) get a fresh object every render, so only
+      // committed history items keep a stable identity across the
+      // filter re-run.
+      if (!atBottom && anchorIndex >= 0 && anchorIndex < prevItems.length) {
+        const item = prevItems[anchorIndex];
+        if (item.type !== 'vp-banner' && item.id > 0) {
+          anchorRestoreItemRef.current = item;
+        }
+      }
+    }
+  }
+  allVirtualItemsRef.current = allVirtualItems;
+  useLayoutEffect(() => {
+    const item = anchorRestoreItemRef.current;
+    if (!item) return;
+    anchorRestoreItemRef.current = null;
+    // Runs after VirtualizedList's own data-change layout effect
+    // (child effects fire before parent effects), so the restore wins.
+    // If the item was filtered OUT by the toggle, indexOf fails and this
+    // is a harmless no-op.
+    scrollRef.current?.scrollToItem({ item });
+  }, [allVirtualItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each

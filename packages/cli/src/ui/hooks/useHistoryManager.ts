@@ -195,6 +195,25 @@ export function useHistory(): UseHistoryManagerReturn {
       let toolGroupsSeen = 0;
       let assistantImageItemsSeen = 0;
 
+      // A merged tool_group (display.mergedIntoThought) renders nothing
+      // outside full detail — its main-view representation is the thought
+      // line it folded into, committed immediately before it. Pre-scan for
+      // each merged group's paired thought so the drop pass below can
+      // un-suppress groups whose thought is compacted away (otherwise the
+      // whole tool batch loses its collapsed summary line).
+      const pairedThoughtIdByGroupId = new Map<number, number>();
+      for (let i = 0; i < prev.length; i++) {
+        const item = prev[i];
+        if (
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought &&
+          i > 0
+        ) {
+          pairedThoughtIdByGroupId.set(item.id, prev[i - 1].id);
+        }
+      }
+      const droppedThoughtIds = new Set<number>();
+
       const next = prev
         .filter((item) => {
           if (
@@ -204,6 +223,7 @@ export function useHistory(): UseHistoryManagerReturn {
             if (thoughtsDropped < thoughtsToDrop) {
               thoughtsDropped++;
               thoughtRemoved++;
+              droppedThoughtIds.add(item.id);
               return false;
             }
           }
@@ -228,24 +248,40 @@ export function useHistory(): UseHistoryManagerReturn {
             }
           }
           if (item.type !== 'tool_group') return item;
+          // If this merged group's paired thought was dropped above, clear
+          // mergedIntoThought so the group falls back to its normal collapsed
+          // summary — with the thought line gone, staying suppressed would
+          // make the whole tool batch invisible in the main view.
+          let group: Extract<HistoryItem, { type: 'tool_group' }> = item;
+          const pairedThoughtId = pairedThoughtIdByGroupId.get(item.id);
+          if (
+            item.display?.mergedIntoThought &&
+            pairedThoughtId !== undefined &&
+            droppedThoughtIds.has(pairedThoughtId)
+          ) {
+            group = {
+              ...item,
+              display: { ...item.display, mergedIntoThought: undefined },
+            };
+          }
           // Check for any non-null resultDisplay (covers string, FileDiff,
           // AnsiOutputDisplay, AgentResultDisplay, etc.), a lingering
           // `detailedDisplay`, or image payloads. Every retained output form
           // must participate in the same keep-recent limit.
-          const hasOldOutput = item.tools.some(
+          const hasOldOutput = group.tools.some(
             (t) =>
               (t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
               t.detailedDisplay != null ||
               Boolean(t.images?.length || t.omittedImageCount),
           );
-          if (!hasOldOutput) return item;
+          if (!hasOldOutput) return group;
           toolGroupsSeen++;
-          if (toolGroupsSeen > toolGroupsToCompact) return item;
+          if (toolGroupsSeen > toolGroupsToCompact) return group;
           toolGroupsCompacted++;
           return {
-            ...item,
-            tools: item.tools.map((t) => {
+            ...group,
+            tools: group.tools.map((t) => {
               if (
                 (t.resultDisplay != null &&
                   t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||

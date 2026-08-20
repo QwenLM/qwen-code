@@ -435,7 +435,11 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
       </Text>
       <ThinkBody
         text={text}
-        isPending={isPending}
+        // A finalized thought is complete: keep the raw `isPending` out of
+        // MarkdownDisplay so the deferred-batch window doesn't subject the
+        // finished body to streaming-only slicing (which would hide its tail
+        // without a truncation cue).
+        isPending={isPending && !finalized}
         expanded={expanded}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
