@@ -683,6 +683,8 @@ export interface BridgeSessionSummary {
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
+  /** Present when a GitHub PR has been bound to the session. */
+  pr?: SessionPrInfo;
 }
 
 /**
@@ -713,8 +715,14 @@ export interface BridgeSessionGoal {
   } | null;
 }
 
+export interface SessionPrInfo {
+  number: number;
+  url: string;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
+  pr?: SessionPrInfo;
 }
 
 export interface CloseSessionOpts {
@@ -1410,7 +1418,7 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Update mutable session metadata. Currently supports `displayName` only.
+   * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   updateSessionMetadata(

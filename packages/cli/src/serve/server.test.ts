@@ -83,6 +83,7 @@ import {
   SessionService,
   Storage,
   TrustGateError,
+  readSessionPr,
   type Extension,
   type CommittedExtensionMutation,
   type PrepareExtensionInstallOptions,
@@ -1859,6 +1860,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.updateMetadataImpl ??
     ((_sid: string, m: SessionMetadataUpdate) => ({
       displayName: m.displayName,
+      ...(m.pr ? { pr: m.pr } : {}),
     }));
   const heartbeatImpl =
     opts.heartbeatImpl ??
@@ -25087,6 +25089,110 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
       expect(res.body.field).toBe('displayName');
+    });
+
+    it('200 on pr-only update and echoes the pr binding', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.sessionId).toBe('session-A');
+      expect(res.body.pr).toEqual(pr);
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: undefined,
+        pr,
+      });
+    });
+
+    it('400 invalid_metadata for a malformed pr', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ pr: { number: 'x', url: 'https://github.com/o/r/pull/1' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      const nonHttp = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ pr: { number: 1, url: 'javascript:alert(1)' } });
+      expect(nonHttp.status).toBe(400);
+      expect(nonHttp.body.code).toBe('invalid_metadata');
+      expect(nonHttp.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.pr).toEqual(pr);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: undefined, pr },
+          context: undefined,
+        },
+      ]);
+      const service = new SessionService(WS_DIFFERENT);
+      const sidecar = await readSessionPr(
+        service.getPrSessionPathForArchiveState('session-A', 'active'),
+      );
+      expect(sidecar?.number).toBe(9517);
+      expect(sidecar?.url).toBe(pr.url);
+    });
+
+    it('400 when neither displayName nor pr is provided on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update for a persisted (non-live) session', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      try {
+        const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/session-A/metadata',
+          ),
+        ).send({ pr });
+        expect(res.status).toBe(200);
+        expect(res.body.pr).toEqual(pr);
+        const service = new SessionService(WS_DIFFERENT);
+        const sidecar = await readSessionPr(
+          service.getPrSessionPathForArchiveState('session-A', 'active'),
+        );
+        expect(sidecar?.number).toBe(9517);
+        expect(sidecar?.url).toBe(pr.url);
+      } finally {
+        locationSpy.mockRestore();
+      }
     });
 
     it('404 on unknown session', async () => {

@@ -25,6 +25,7 @@ import {
   writeWorktreeSessionMarker,
   writeWorktreeSession,
   readWorktreeSession,
+  writeSessionPr,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -2073,6 +2074,37 @@ export function registerSessionRoutes(
       return undefined;
     }
     return [...new Set(sessionIds as string[])];
+  };
+
+  // Tri-state: absent → undefined (skip); invalid → null (400 already sent);
+  // valid → the PR binding to apply.
+  const parseSessionPrBody = (
+    req: Request,
+    res: Response,
+  ): { number: number; url: string } | null | undefined => {
+    const raw: unknown = safeBody(req)['pr'];
+    if (raw === undefined) return undefined;
+    const candidate = raw as Record<string, unknown> | null;
+    const number = candidate?.['number'];
+    const url = candidate?.['url'];
+    if (
+      candidate === null ||
+      typeof candidate !== 'object' ||
+      typeof number !== 'number' ||
+      !Number.isInteger(number) ||
+      number <= 0 ||
+      typeof url !== 'string' ||
+      !/^https?:\/\//i.test(url)
+    ) {
+      res.status(400).json({
+        error:
+          '`pr` must be an object with a positive integer `number` and an http(s) `url`',
+        code: 'invalid_metadata',
+        field: 'pr',
+      });
+      return null;
+    }
+    return { number, url };
   };
 
   const serializeSessionErrors = (
@@ -5049,7 +5081,7 @@ export function registerSessionRoutes(
     mutate({ strict: true }),
     withOwnerMutableSession(
       'PATCH /session/:id/metadata',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -5065,6 +5097,8 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const pr = parseSessionPrBody(req, res);
+        if (pr === null) return;
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
@@ -5073,9 +5107,16 @@ export function registerSessionRoutes(
         try {
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName },
+            { displayName, ...(pr ? { pr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
+          if (pr) {
+            const service = createWorkspaceRuntimeSessionService(runtime);
+            await writeSessionPr(
+              service.getPrSessionPathForArchiveState(sessionId, 'active'),
+              { ...pr, createdAt: new Date().toISOString() },
+            );
+          }
         } finally {
           invalidateSessionLists(runtime, ['active']);
         }
@@ -5096,7 +5137,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       const rawDisplayName = safeBody(req)['displayName'];
-      if (typeof rawDisplayName !== 'string') {
+      if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
         res.status(400).json({
           error: '`displayName` must be a string',
           code: 'invalid_metadata',
@@ -5104,26 +5145,41 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const pr = parseSessionPrBody(req, res);
+      if (pr === null) return;
+      if (rawDisplayName === undefined && pr === undefined) {
+        res.status(400).json({
+          error: 'at least one of `displayName` or `pr` is required',
+          code: 'invalid_metadata',
+          field: 'displayName',
+        });
+        return;
+      }
       try {
-        const displayName = rawDisplayName.slice(0, 256);
-        if (displayName.trim() === '') {
-          // An empty name would append an empty custom_title record to
-          // persisted sessions, which the title readers disagree on.
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not be empty',
-          );
-        }
-        if (
-          Array.from(displayName).some((character) => {
-            const code = character.charCodeAt(0);
-            return code <= 31 || code === 127;
-          })
-        ) {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not contain control characters',
-          );
+        const displayName =
+          typeof rawDisplayName === 'string'
+            ? rawDisplayName.slice(0, 256)
+            : undefined;
+        if (displayName !== undefined) {
+          if (displayName.trim() === '') {
+            // An empty name would append an empty custom_title record to
+            // persisted sessions, which the title readers disagree on.
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not be empty',
+            );
+          }
+          if (
+            Array.from(displayName).some((character) => {
+              const code = character.charCodeAt(0);
+              return code <= 31 || code === 127;
+            })
+          ) {
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not contain control characters',
+            );
+          }
         }
         await archiveCoordinator.runExclusiveMany([sessionId], async () => {
           const assertRuntimeGenerationOpen =
@@ -5158,14 +5214,25 @@ export function registerSessionRoutes(
             return;
           }
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
-            let effective: { displayName?: string };
+            let effective: {
+              displayName?: string;
+              pr?: { number: number; url: string };
+            };
             try {
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName },
+                { displayName, ...(pr ? { pr } : {}) },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
+              if (pr) {
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                await writeSessionPr(
+                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                  { ...pr, createdAt: new Date().toISOString() },
+                );
+                assertRuntimeGenerationOpen?.();
+              }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
               const service = createWorkspaceRuntimeSessionService(runtime);
@@ -5174,24 +5241,36 @@ export function registerSessionRoutes(
               if (location === 'conflict') {
                 throw new SessionConflictError(sessionId);
               }
-              const renamed = location
-                ? await service.renameSession(
-                    sessionId,
-                    displayName,
-                    'manual',
-                    location,
-                  )
-                : false;
-              assertRuntimeGenerationOpen?.();
-              if (!renamed) {
+              if (!location) {
                 throw new SessionNotFoundError(sessionId);
               }
-              // The persisted rename appends a custom_title record the next
-              // catalog scan serves, so this fallback must advance the same
-              // catalog revision the live rename marks — otherwise
-              // version-watching clients keep the stale name.
+              effective = {};
+              if (displayName !== undefined) {
+                const renamed = await service.renameSession(
+                  sessionId,
+                  displayName,
+                  'manual',
+                  location,
+                );
+                assertRuntimeGenerationOpen?.();
+                if (!renamed) {
+                  throw new SessionNotFoundError(sessionId);
+                }
+                effective.displayName = displayName;
+              }
+              if (pr) {
+                await writeSessionPr(
+                  service.getPrSessionPathForArchiveState(sessionId, location),
+                  { ...pr, createdAt: new Date().toISOString() },
+                );
+                assertRuntimeGenerationOpen?.();
+                effective.pr = pr;
+              }
+              // The persisted mutation is picked up by the next catalog
+              // scan, so this fallback must advance the same catalog
+              // revision the live update marks — otherwise version-watching
+              // clients keep the stale metadata.
               runtime.bridge.markSessionCatalogChanged();
-              effective = { displayName: displayName || undefined };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
             res.status(200).json({ sessionId, ...effective });

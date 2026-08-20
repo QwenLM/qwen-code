@@ -80,6 +80,45 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('shows the bound pull request as a link', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    expect(details?.textContent).toContain('Pull Request #9517');
+    const link = details?.querySelector(
+      'a[href="https://github.com/o/r/pull/9517"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('target')).toBe('_blank');
+
+    act(() => root.unmount());
+  });
+
   it('does not reopen after a row action opens its menu', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

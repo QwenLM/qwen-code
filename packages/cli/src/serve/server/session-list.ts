@@ -10,6 +10,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  readSessionPr,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -399,6 +400,42 @@ async function enrichWorktreeSidecars(
   }
 }
 
+/**
+ * Enrich persisted session summaries with GitHub PR bindings from sidecar
+ * files so the binding survives daemon restarts. Same pattern as
+ * {@link enrichWorktreeSidecars}.
+ */
+async function enrichPrSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState = 'active',
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    if (summary.pr) continue;
+    let sidecar: Awaited<ReturnType<typeof readSessionPr>>;
+    try {
+      const sidecarPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      sidecar = signal
+        ? await readSessionPr(sidecarPath, { signal })
+        : await readSessionPr(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
+    if (sidecar) {
+      bySessionId.set(sessionId, {
+        ...summary,
+        pr: { number: sidecar.number, url: sidecar.url },
+      });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -514,6 +551,7 @@ async function loadAllPersistedSummaries(
     archiveState,
     signal,
   );
+  await enrichPrSidecars(bySessionId, sessionService, archiveState, signal);
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
@@ -1179,6 +1217,12 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichPrSidecars(
     bySessionId,
     sessionService,
     archiveState,

@@ -26424,6 +26424,99 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('stores a pr binding, exposes it in summaries, and publishes an event', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr,
+      });
+
+      expect(effective.pr).toEqual(pr);
+      expect(bridge.getSessionSummary(session.sessionId).pr).toEqual(pr);
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { pr?: unknown }).pr !== undefined,
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { pr: typeof pr }).pr).toEqual(pr);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('does not republish when the same pr is bound again', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { pr?: unknown }).pr !== undefined,
+      );
+      expect(prEvents).toHaveLength(1);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it.each([
+      [
+        'non-integer number',
+        { number: 1.5, url: 'https://github.com/o/r/pull/1' },
+      ],
+      ['missing url', { number: 1 }],
+      ['empty url', { number: 1, url: '' }],
+      ['non-http url', { number: 1, url: 'javascript:alert(1)' }],
+      ['null', null],
+    ])('rejects an invalid pr: %s', async (_label, pr) => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: pr as { number: number; url: string },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('throws SessionNotFoundError for unknown session', () => {
       const bridge = makeBridge();
       expect(() =>

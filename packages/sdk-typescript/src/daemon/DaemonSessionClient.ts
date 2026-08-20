@@ -55,6 +55,7 @@ import type {
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonSessionPrInfo,
 } from './types.js';
 
 /** Compacted replay snapshot returned by the daemon on session load. */
@@ -905,6 +906,7 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    pr?: DaemonSessionPrInfo;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
       this.sessionId,

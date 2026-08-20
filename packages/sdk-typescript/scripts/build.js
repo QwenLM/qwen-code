@@ -96,8 +96,9 @@ const rootDir = join(__dirname, '..');
 // surface (catalog version + live snapshot accessors) and immutable,
 // identity-stable transcript block indexes used by browser renderers.
 // Bumped from 197KB to 198KB for the unrecognized-diagnostic sidechannel
-// (`unrecognizedDiagnostics` routing + selector, #8823).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 198 * 1024;
+// (`unrecognizedDiagnostics` routing + selector, #8823). Bumped from 198KB to
+// 199KB for the session PR binding (`DaemonSessionPrInfo` + validators).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 199 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

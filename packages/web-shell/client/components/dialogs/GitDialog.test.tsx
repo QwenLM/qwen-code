@@ -26,6 +26,7 @@ const {
   workspaceGitHubDefaultBranch,
   workspaceGit,
   workspaceGitHubCreatePullRequest,
+  updateSessionMetadata,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
@@ -38,6 +39,7 @@ const {
   const workspaceGitHubDefaultBranch = vi.fn();
   const workspaceGit = vi.fn();
   const workspaceGitHubCreatePullRequest = vi.fn();
+  const updateSessionMetadata = vi.fn();
   const workspaceClient = {
     workspaceByCwd: () => ({
       workspaceGitDiff,
@@ -51,6 +53,7 @@ const {
       workspaceGitHubDefaultBranch,
       workspaceGit,
       workspaceGitHubCreatePullRequest,
+      updateSessionMetadata,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -64,6 +67,7 @@ const {
     workspaceGitHubDefaultBranch,
     workspaceGit,
     workspaceGitHubCreatePullRequest,
+    updateSessionMetadata,
     workspaceClient,
     mockState,
   };
@@ -843,5 +847,83 @@ describe('GitDialog', () => {
       undefined,
     );
     expect(document.body.textContent).toContain('#99');
+  });
+
+  it('binds the created PR to the current session', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      files: [],
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 99,
+      url: 'https://github.com/o/r/pull/99',
+    });
+    updateSessionMetadata.mockResolvedValue({});
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            sessionId="sess-1"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    const titleInput = document.body.querySelector(
+      '[data-web-shell-dialog] input',
+    );
+    expect(titleInput).toBeTruthy();
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(titleInput, 'feat: add new feature');
+      titleInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    expect(submitBtn).toBeTruthy();
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+
+    expect(updateSessionMetadata).toHaveBeenCalledWith('sess-1', {
+      pr: { number: 99, url: 'https://github.com/o/r/pull/99' },
+    });
   });
 });

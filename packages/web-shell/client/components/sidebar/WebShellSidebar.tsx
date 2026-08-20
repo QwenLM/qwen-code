@@ -86,6 +86,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { sessionMatchesGitQuery } from './sessionSearch';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -820,6 +822,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const openExternalLink = useExternalLinkOpener();
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -3299,7 +3302,8 @@ export function WebShellSidebar({
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
-            session.sessionId.toLowerCase().includes(query)
+            session.sessionId.toLowerCase().includes(query) ||
+            sessionMatchesGitQuery(session, query)
           );
         })
       : unpinnedSessions.slice();
@@ -3616,6 +3620,24 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
+      const prBadge = session.pr ? (
+        <a
+          className={styles.sessionPrBadge}
+          href={session.pr.url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={t('sidebar.sessionPr', { number: session.pr.number })}
+          title={session.pr.url}
+          onClick={(event) => {
+            event.stopPropagation();
+            openExternalLink(event, session.pr?.url);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          #{session.pr.number}
+        </a>
+      ) : null;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -3688,6 +3710,7 @@ export function WebShellSidebar({
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
+            {prBadge}
             <div
               className={styles.sessionMetaSlot}
               style={
@@ -3864,6 +3887,7 @@ export function WebShellSidebar({
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
+              {prBadge}
               <div
                 className={styles.sessionMetaSlot}
                 style={
@@ -4136,6 +4160,7 @@ export function WebShellSidebar({
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
+      openExternalLink,
       openGroupMenuFromAnchor,
       saveRename,
       sessionActionItems,

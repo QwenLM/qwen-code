@@ -535,6 +535,25 @@ export function GitDialog({
         url: result.url,
       });
       setPrFormOpen(false);
+      // Bind the PR to the current session so the sidebar can badge and
+      // search sessions by PR number. Best-effort: a binding failure must
+      // not shadow the successful PR creation. Binding never creates a
+      // session — when the dialog has no session context (workspace-level
+      // open), the PR simply stays unbound. A session from another
+      // workspace is rejected by the daemon route's workspace-conflict
+      // check and surfaces here as a warning only.
+      if (typeof result.number === 'number' && result.url) {
+        const pr = { number: result.number, url: result.url };
+        const sid = sessionIdRef.current;
+        if (sid) {
+          ws.updateSessionMetadata(sid, { pr }).catch((err: unknown) => {
+            console.warn(
+              'Failed to bind PR to session:',
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+        }
+      }
     } catch (err) {
       setPrStatus({
         msg: err instanceof Error ? err.message : String(err),

@@ -65,6 +65,7 @@ import type {
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
+  DaemonSessionPrInfo,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
   DaemonUsageDashboard,
@@ -500,6 +501,20 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
     typeof error === 'object' &&
     error !== null &&
     (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
+}
+
+export function isDaemonSessionPrInfo(
+  value: unknown,
+): value is DaemonSessionPrInfo {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['number'] === 'number' &&
+    Number.isInteger(v['number']) &&
+    v['number'] > 0 &&
+    typeof v['url'] === 'string' &&
+    /^https?:\/\//i.test(v['url'])
   );
 }
 
@@ -5319,7 +5334,7 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -5333,10 +5348,16 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
+            pr?: unknown;
           };
-          return typeof body.displayName === 'string'
-            ? { displayName: body.displayName }
-            : {};
+          const result: SessionMetadataResult = {};
+          if (typeof body.displayName === 'string') {
+            result.displayName = body.displayName;
+          }
+          if (isDaemonSessionPrInfo(body.pr)) {
+            result.pr = body.pr;
+          }
+          return result;
         }
         throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
@@ -6094,7 +6115,7 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName: string },
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(

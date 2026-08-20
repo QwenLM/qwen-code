@@ -527,6 +527,7 @@ export type {
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
+  DaemonSessionPrInfo,
   DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,

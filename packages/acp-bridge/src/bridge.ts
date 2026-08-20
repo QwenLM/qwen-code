@@ -166,6 +166,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
   BridgePendingInteraction,
@@ -958,6 +959,8 @@ interface SessionEntry {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string };
+  /** GitHub PR bound to the session via updateSessionMetadata. */
+  pr?: SessionPrInfo;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -3604,6 +3607,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
+      ...(entry.pr ? { pr: entry.pr } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -9536,6 +9540,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId !== undefined
           ? resolveTrustedClientId(entry, context.clientId)
           : undefined;
+      // Validate everything before mutating anything: a combined
+      // displayName+pr request must not partially apply when the pr is
+      // invalid.
+      if (metadata.pr !== undefined) {
+        const pr = metadata.pr as unknown;
+        if (
+          pr === null ||
+          typeof pr !== 'object' ||
+          typeof (pr as SessionPrInfo).number !== 'number' ||
+          !Number.isInteger((pr as SessionPrInfo).number) ||
+          (pr as SessionPrInfo).number <= 0 ||
+          typeof (pr as SessionPrInfo).url !== 'string' ||
+          !/^https?:\/\//i.test((pr as SessionPrInfo).url)
+        ) {
+          throw new InvalidSessionMetadataError(
+            'pr',
+            'must be an object with a positive integer `number` and an http(s) `url`',
+          );
+        }
+      }
       if (metadata.displayName !== undefined) {
         if (
           typeof metadata.displayName !== 'string' ||
@@ -9602,7 +9626,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
         }
       }
-      return { displayName: entry.displayName };
+      if (metadata.pr !== undefined) {
+        // Already validated above, before any mutation.
+        const nextPr: SessionPrInfo = {
+          number: metadata.pr.number,
+          url: metadata.pr.url,
+        };
+        if (
+          entry.pr?.number !== nextPr.number ||
+          entry.pr?.url !== nextPr.url
+        ) {
+          entry.pr = nextPr;
+          markSessionCatalogChanged();
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              data: { sessionId, pr: entry.pr },
+              ...(metadataOriginatorClientId
+                ? { originatorClientId: metadataOriginatorClientId }
+                : {}),
+            });
+          } catch {
+            /* bus already closed */
+          }
+        }
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.pr ? { pr: entry.pr } : {}),
+      };
     },
 
     async getSessionArtifacts(sessionId, context) {

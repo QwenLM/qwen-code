@@ -1834,6 +1834,30 @@ describe('SessionService', () => {
       );
     });
 
+    it('should remove pr sidecars in both states when removing a session', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
     it('should remove both JSONL files when active and archived copies conflict', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
@@ -1910,6 +1934,22 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should move the pr sidecar into the archive directory', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
       );
     });
 
@@ -2067,6 +2107,22 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should move the pr sidecar back to the active directory', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
       );
     });
 

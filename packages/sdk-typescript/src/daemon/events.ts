@@ -10,6 +10,7 @@ import type {
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSessionPrInfo,
   DaemonSkillToggleMutation,
   PermissionOutcome,
   PromptContentBlock,
@@ -296,6 +297,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  pr?: DaemonSessionPrInfo;
   [key: string]: unknown;
 }
 
@@ -2646,14 +2648,29 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
   );
 }
 
+function isSessionPrInfo(value: unknown): value is DaemonSessionPrInfo {
+  return (
+    isRecord(value) &&
+    typeof value['number'] === 'number' &&
+    Number.isInteger(value['number']) &&
+    value['number'] > 0 &&
+    typeof value['url'] === 'string' &&
+    /^https?:\/\//i.test(value['url'])
+  );
+}
+
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
-  return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    isOptionalStringOrNull(value['displayName'])
-  );
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isOptionalStringOrNull(value['displayName'])
+  ) {
+    return false;
+  }
+  const pr = value['pr'];
+  return pr === undefined || isSessionPrInfo(pr);
 }
 
 function isArtifactChangedData(

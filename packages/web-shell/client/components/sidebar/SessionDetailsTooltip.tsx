@@ -5,9 +5,11 @@ import {
   CopyIcon,
   FolderClosedIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   RadioTowerIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import styles from './WebShellSidebar.module.css';
@@ -29,6 +31,7 @@ export function SessionDetailsTooltip({
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [open, setOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
@@ -137,6 +140,23 @@ export function SessionDetailsTooltip({
           <div className={styles.sessionDetailsRow}>
             <GitBranchIcon aria-hidden="true" />
             <span title={branch}>{branch}</span>
+          </div>
+        )}
+        {session.pr && (
+          <div className={styles.sessionDetailsRow}>
+            <GitPullRequestIcon aria-hidden="true" />
+            <a
+              href={session.pr.url}
+              target="_blank"
+              rel="noreferrer"
+              title={session.pr.url}
+              onClick={(event) => {
+                event.stopPropagation();
+                openExternalLink(event, session.pr?.url);
+              }}
+            >
+              {t('sidebar.sessionPr', { number: session.pr.number })}
+            </a>
           </div>
         )}
         <div className={styles.sessionDetailsRow}>

@@ -533,6 +533,13 @@ export class SessionService {
     );
   }
 
+  private getPrSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
+  }
+
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
@@ -586,6 +593,18 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getWorktreeSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * session's GitHub PR binding for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no PR binding".
+   */
+  getPrSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getPrSessionPathForState(sessionId, state);
   }
 
   private async readProjectSessionHead(
@@ -719,6 +738,15 @@ export class SessionService {
   private removeWorktreeSidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private removePrSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getPrSessionPathForState(sessionId, state);
       if (fs.existsSync(sidecar)) {
         this.removeFileIfExists(sidecar);
       }
@@ -1585,6 +1613,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removePrSidecars(sessionId);
         this.removeFileHistoryBackups(sessionId);
         return true;
       }
@@ -1599,6 +1628,7 @@ export class SessionService {
       await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removePrSidecars(sessionId);
       this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
@@ -1666,6 +1696,16 @@ export class SessionService {
             `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
           );
         }
+        try {
+          this.moveOptionalFile(
+            this.getPrSessionPathForState(sessionId, 'active'),
+            this.getPrSessionPathForState(sessionId, 'archived'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
+          );
+        }
         archived.push(sessionId);
       } catch (error) {
         errors.push({
@@ -1729,6 +1769,16 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          this.moveOptionalFile(
+            this.getPrSessionPathForState(sessionId, 'archived'),
+            this.getPrSessionPathForState(sessionId, 'active'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
         }
         unarchived.push(sessionId);
