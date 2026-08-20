@@ -1075,17 +1075,10 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[3]?.type).toBe('tool_use');
     });
 
-    it('pins current behavior: a merge can produce a content array not led by a thinking block when the first message has none', () => {
-      // Known residual risk (not fixed here, flagged for follow-up):
-      // Anthropic's manual-mode extended thinking requires the FINAL
-      // assistant turn of a thinking-enabled request to begin with a
-      // thinking block (adaptive mode relaxes this). Straight concatenation
-      // is correct chronological ordering, but if the first of two merged
-      // messages has no leading thinking block and the merge result becomes
-      // the trailing assistant turn sent to a manual-mode (pre-4.7) model,
-      // the resulting content array's first block would not be `thinking`.
-      // This is pinning today's accepted behavior, not asserting it is safe
-      // in that scenario -- see the design discussion for reachability.
+    it('adaptive/default mode preserves chronological order when the first merged message has no leading thinking block', () => {
+      // Adaptive-thinking models don't require the final assistant turn to
+      // begin with thinking, so straight chronological concatenation is
+      // both correct and sufficient here -- no reordering should occur.
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1121,6 +1114,64 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[0]?.type).toBe('text');
       expect(blocks[1]?.type).toBe('thinking');
       expect(blocks[2]?.type).toBe('tool_use');
+    });
+
+    it('ensureLeadingAssistantThinking relocates the first thinking run to the front of the latest assistant message', () => {
+      // Anthropic's manual-mode extended thinking requires the FINAL
+      // assistant turn of a thinking-enabled request to begin with a
+      // thinking block. `ensureLeadingAssistantThinking` is the minimal
+      // reorder that satisfies this without reintroducing the
+      // hoist-every-thinking-block behavior this generator moved away from.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'no thinking here' }],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thought B',
+                  thought: true,
+                  thoughtSignature: 'sigB',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        signature?: string;
+      }>;
+      expect(blocks[0]?.type).toBe('thinking');
+      expect(blocks[1]?.type).toBe('text');
+      expect(blocks[2]?.type).toBe('tool_use');
+      // The relocated block itself is untouched -- same text/signature.
+      expect(blocks[0]?.thinking).toBe('thought B');
+      expect(blocks[0]?.signature).toBe('sigB');
     });
 
     it('cleans orphaned tool_use blocks without matching tool_result', () => {

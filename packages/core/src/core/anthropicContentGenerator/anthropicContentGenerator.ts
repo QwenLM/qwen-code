@@ -787,6 +787,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
+        // Manual (non-adaptive) extended thinking requires the final
+        // assistant turn to begin with a thinking block whenever a
+        // tool_use remains in it; adaptive thinking relaxes this. See
+        // ensureLeadingAssistantThinking's doc in the converter.
+        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,

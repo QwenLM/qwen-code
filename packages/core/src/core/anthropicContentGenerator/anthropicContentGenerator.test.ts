@@ -2891,6 +2891,121 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
+  // Regression for the manual-mode leading-thinking requirement: Anthropic
+  // rejects a thinking-enabled tool loop whose final assistant turn doesn't
+  // begin with a thinking block. mergeConsecutiveAssistantMessages's
+  // straight concatenation can otherwise leave a leading text block ahead
+  // of a later thinking run (see converter.ts's
+  // ensureLeadingAssistantThinking doc).
+  describe('manual-mode leading-thinking normalization', () => {
+    it('reorders the latest assistant turn to lead with thinking under an explicit-budget (manual) configuration', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          // Explicit budget_tokens is the escape hatch that keeps
+          // claude-opus-4-6 (a 4.6+ model that otherwise defaults to
+          // adaptive) on the manual `{ type: 'enabled', budget_tokens }`
+          // shape -- see "honors explicit reasoning.budget_tokens" above.
+          reasoning: { budget_tokens: 42_000 },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+          {
+            // No leading thinking block on this earlier turn -- adaptive
+            // mode explicitly permits this, and it's what the merge
+            // concatenates ahead of the next turn's thinking block.
+            role: 'model' as const,
+            parts: [{ text: 'Sure, one moment.' }],
+          },
+          {
+            role: 'model' as const,
+            parts: [
+              {
+                text: 'reasoning about the tool call',
+                thought: true,
+                thoughtSignature: 'sig-1',
+              },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user' as const,
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [rawRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const anthropicRequest = rawRequest as {
+        thinking?: unknown;
+        messages: Array<{ role: string; content: unknown[] }>;
+      };
+
+      expect(anthropicRequest.thinking).toEqual({
+        type: 'enabled',
+        budget_tokens: 42_000,
+      });
+      expect(
+        (options as { headers?: Record<string, string> })?.headers?.[
+          'anthropic-beta'
+        ],
+      ).toContain('interleaved-thinking-2025-05-14');
+
+      // The two model turns are merged into one assistant message by
+      // mergeConsecutiveAssistantMessages; the merged turn is also the
+      // request's latest assistant message, and manual mode requires it
+      // to begin with thinking.
+      const assistantMessages = anthropicRequest.messages.filter(
+        (m) => m.role === 'assistant',
+      );
+      const latestAssistant = assistantMessages.at(-1) as {
+        content: Array<{
+          type: string;
+          text?: string;
+          thinking?: string;
+          signature?: string;
+        }>;
+      };
+      expect(latestAssistant.content[0]?.type).toBe('thinking');
+      expect(latestAssistant.content[0]?.thinking).toBe(
+        'reasoning about the tool call',
+      );
+      expect(latestAssistant.content[0]?.signature).toBe('sig-1');
+      expect(latestAssistant.content[1]).toEqual({
+        type: 'text',
+        text: 'Sure, one moment.',
+      });
+      expect(latestAssistant.content[2]?.type).toBe('tool_use');
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
   // anthropic-compatible API rejects requests in thinking mode when a prior
   // assistant turn carrying `tool_use` omits a thinking block. Plain-text
