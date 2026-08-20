@@ -42,27 +42,12 @@ export function buildSkillLlmContent(baseDir: string, body: string): string {
 
 /** Whether a Skill tool-result output is an injected skill body (built by
  * {@link buildSkillLlmContent}). Proves residency: excludes dedup confirmations,
- * SkillTool error text, `/unskill` placeholders, and cleared messages. */
+ * SkillTool error text, and cleared messages. */
 export function isSkillBodyOutput(output: unknown): boolean {
   return (
     typeof output === 'string' &&
     output.startsWith(SKILL_BODY_PREFIX) &&
     output.includes(SKILL_BODY_STATIC_LINE)
-  );
-}
-
-/**
- * Whether a tool-result output is the dedup guard's short confirmation
- * (`Skill "x" is already loaded in context.`, emitted by SkillTool) rather
- * than a full body. A kept confirmation must NOT suppress eviction
- * reporting for its skill — the body it refers to may already be gone;
- * only a kept full body proves residency.
- */
-export function isSkillDedupConfirmation(output: unknown): boolean {
-  return (
-    typeof output === 'string' &&
-    output.startsWith('Skill "') &&
-    output.endsWith('" is already loaded in context.')
   );
 }
 

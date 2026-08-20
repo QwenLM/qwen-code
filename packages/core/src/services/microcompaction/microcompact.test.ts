@@ -2431,4 +2431,90 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
       new Set(['bar', 'foo']),
     );
   });
+
+  it('reports evicted skills on the size-trigger path (R1-7)', () => {
+    // All other eviction tests use the time path; the size path has its
+    // own keptPathRefs derivation. A regression there (e.g. reverting
+    // keptPathRefs = tool) would ship with every other test green.
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output '.repeat(50)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 500,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('suppresses the report when a blanked body has a kept sibling body (R1-9)', () => {
+    // Positive suppression: BOTH entries are real bodies of the same
+    // skill; the older ages out while the newer stays resident. The
+    // kept-body shield must suppress the eviction report — un-tracking
+    // the skill would re-append a duplicate while a body is resident.
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'older body content '.repeat(50)),
+      ),
+      skillCall('s1', 'demo-poem'),
+      skillResult(
+        's1',
+        buildSkillLlmContent('/demo', 'newer body content '.repeat(50)),
+      ),
+      shellCall('c2'),
+      shellResult('c2', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not count a blanked non-body Skill result as unresolved (R1-10)', () => {
+    // An orphaned dedup confirmation (no call id anywhere) is blanked:
+    // the body-output gate must keep it out of unresolvedEvictedSkills —
+    // counting it would force a blanket clear that re-injects every
+    // resident body, exactly what the gate's comment warns against.
+    const history: Content[] = [
+      skillResult(undefined, 'Skill "demo-poem" is already loaded in context.'),
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output '.repeat(50)),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[0]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
 });

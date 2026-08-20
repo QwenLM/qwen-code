@@ -1366,6 +1366,11 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Prompt content from MCP');
       expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
+      // Command delegations are NOT tracked (R1-14): the result is raw
+      // command text, not a skill body, so no eviction/sync path could
+      // ever un-track it — tracking here would deadlock a later
+      // same-named file skill behind the dedup guard forever.
+      expect([...skillTool.getLoadedSkillNames()]).toEqual([]);
     });
 
     it('should fall through to not-found error when executor returns null', async () => {

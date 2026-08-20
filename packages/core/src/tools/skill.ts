@@ -478,7 +478,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
               this.config,
               new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
-            this.onSkillLoaded(this.params.skill);
+            // Don't track via `onSkillLoaded` (mirrors the disabled
+            // branch above): the result is raw command text, not a
+            // skill body, so no eviction/sync path keyed on body
+            // markers could ever un-track it — a tracked name here
+            // would deadlock a later same-named file skill behind the
+            // dedup guard forever.
             return {
               llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,

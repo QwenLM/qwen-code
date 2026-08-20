@@ -59,7 +59,6 @@ import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import {
   clearLoadedSkillTracking,
   reconcileLoadedSkillTracking,
-  resolveLoadedSkillNames,
   unloadSkillsFromEntries,
 } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
@@ -4504,6 +4503,12 @@ export class GeminiChat {
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
     this.redactApprovedPlansFromLoadedHistory();
+    // Wholesale replacement can drop resident skill bodies (/restore,
+    // session-manager load_history, ACP restoreSessionHistory all land
+    // here); residency is fully knowable from the new history, so
+    // rebuild tracking instead of letting stale names deadlock reload
+    // behind the dedup guard.
+    this.reconcileLoadedSkillTracking('setHistory');
   }
 
   truncateHistory(keepCount: number): void {
@@ -4519,11 +4524,9 @@ export class GeminiChat {
       // Truncation keeps a prefix of history, so residency is knowable:
       // rebuild tracking from the surviving entries instead of a blanket
       // clear that would un-track skills whose bodies are still resident.
-      reconcileLoadedSkillTracking(
-        this.history,
-        this.config.getToolRegistry(),
-        'truncateHistory',
-      );
+      // Guarded wrapper: a forked chat shares the parent's tracker
+      // while holding only a tail slice.
+      this.reconcileLoadedSkillTracking('truncateHistory');
     }
     this.clearPendingPartialState();
   }
@@ -4584,29 +4587,22 @@ export class GeminiChat {
     if (strippedEntries.length > 0) {
       // Targeted un-track: only skills whose bodies were provably in the
       // stripped entries lose their tracking; resident bodies earlier in
-      // history keep theirs. Unresolvable entries are left tracked — a
-      // needless un-track self-heals, a wrong un-track deadlocks reload.
-      unloadSkillsFromEntries(
-        strippedEntries,
-        this.history,
-        this.config.getToolRegistry(),
-        'stripOrphanedUserEntries',
-      );
+      // history keep theirs. Any unresolvable stripped body falls back to
+      // a wholesale clear — over-clearing self-heals with one duplicate
+      // body on the next invoke; leaving it tracked deadlocks reload.
+      // Guarded: a forked chat shares the parent's tracker while holding
+      // only a tail slice.
+      if (!this.isForkedChat) {
+        unloadSkillsFromEntries(
+          strippedEntries,
+          this.history,
+          this.config.getToolRegistry(),
+          'stripOrphanedUserEntries',
+        );
+      }
     }
     this.clearPendingPartialState();
     return strippedEntries;
-  }
-
-  /**
-   * Resolve the skill names of skill-body entries against the CURRENT
-   * history. The ACP continuation strip resolves at strip time so it can
-   * tell whether the stripped entries carried any skill body — a
-   * compression inside the continuation send can summarize away the
-   * model-side functionCalls needed for pairing, so re-deriving from the
-   * post-send history would miss them.
-   */
-  resolveLoadedSkillNamesInEntries(entries: Content[]): string[] {
-    return resolveLoadedSkillNames(entries, this.history);
   }
 
   /**

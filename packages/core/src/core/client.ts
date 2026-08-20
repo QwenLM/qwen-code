@@ -715,8 +715,8 @@ export class GeminiClient {
     );
     this.config.getFileReadCache().clear();
     // Loaded-skill tracking is synced in GeminiChat.stripOrphanedUserEntriesFromHistory
-    // (targeted un-track of provable bodies; unresolvable entries stay
-    // tracked) so both TUI and ACP paths are covered.
+    // (targeted un-track of provable bodies; any unresolvable stripped
+    // body triggers a wholesale clear) so both TUI and ACP paths are covered.
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context

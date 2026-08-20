@@ -4420,18 +4420,19 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
-            // The continuation strip un-tracks any skill body it removes;
-            // every terminal path of this turn re-adds the stripped content
-            // (send re-push, catch restore, or the abort addHistory). The
-            // stashed names gate the settle reconcile in the outer finally,
-            // which rebuilds tracking from the SETTLED history — residency
-            // aware, because a mid-turn rewrite can blank or summarize away
-            // the re-pushed body again. Names are resolved AT STRIP TIME:
-            // a compression inside the continuation send can summarize away
-            // the model-side functionCalls needed for pairing, so
-            // re-deriving the gate from the post-send history would miss
-            // them.
-            let orphanStrippedSkillNames: string[] = [];
+            // The strip un-tracks any skill body it removes; every
+            // terminal path of this turn re-adds the stripped content
+            // (send re-push, catch restore, or the abort addHistory).
+            // This flag arms the settle reconcile in the outer finally,
+            // which rebuilds tracking from the SETTLED history —
+            // residency aware, because a mid-turn rewrite can blank or
+            // summarize away the re-pushed body again. It arms on strip
+            // OCCURRENCE, not on what the strip removed: an unresolvable
+            // stripped body makes the strip blanket-clear all tracking
+            // while resolving names would return [], and the isRetry
+            // strip below discards its return value entirely — both must
+            // still be reconciled at settle.
+            let orphanStripRan = false;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -4467,12 +4468,7 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
-                orphanStrippedSkillNames =
-                  (strippedOrphanEntries?.length ?? 0) > 0
-                    ? this.#getCurrentChat().resolveLoadedSkillNamesInEntries(
-                        strippedOrphanEntries!,
-                      )
-                    : [];
+                orphanStripRan = true;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4489,6 +4485,7 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              orphanStripRan = true;
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -5152,7 +5149,7 @@ export class Session implements SessionContext {
               // Fires on every terminal path of the turn — including the
               // top-of-loop abort return that re-adds the stripped content
               // via addHistory without entering the send-try's finally.
-              if (orphanStrippedSkillNames.length > 0) {
+              if (orphanStripRan) {
                 // Residency-aware, not additive: a mid-turn rewrite
                 // (tryCompress / microcompaction) can blank or summarize
                 // away the re-pushed body and correctly un-track it;
@@ -5169,9 +5166,9 @@ export class Session implements SessionContext {
                 // would add a second residency-truth path beside the
                 // reconcile; not worth it for a self-healing duplicate.
                 this.#getCurrentChat().reconcileLoadedSkillTracking(
-                  'acpContinuationSettle',
+                  'acpTurnSettle',
                 );
-                orphanStrippedSkillNames = [];
+                orphanStripRan = false;
               }
               logConversationFinishedEvent(
                 this.config,

@@ -11,11 +11,14 @@ import {
   clearCollectedSkillEntriesCache,
   syncSkillEvictions,
   clearLoadedSkillTracking,
+  unloadSkillsFromEntries,
+  buildSkillLlmContent,
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
+import type { Content } from '@google/genai';
 
 function mockPermissionManager(): {
   pm: PermissionManager;
@@ -245,5 +248,77 @@ describe('syncSkillEvictions / clearLoadedSkillTracking', () => {
     clearLoadedSkillTracking(registry, 'test');
 
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
+  });
+});
+
+describe('unloadSkillsFromEntries', () => {
+  function registryFor(tool: unknown): ToolRegistry {
+    const getTool = vi.fn().mockReturnValue(tool);
+    return { getTool } as unknown as ToolRegistry;
+  }
+
+  function trackerMocks() {
+    const unloadSkills = vi.fn();
+    const clearLoadedSkills = vi.fn();
+    const trackSkills = vi.fn();
+    return {
+      registry: registryFor({ unloadSkills, clearLoadedSkills, trackSkills }),
+      unloadSkills,
+      clearLoadedSkills,
+    };
+  }
+
+  const skillCall = (id: string, name: string): Content => ({
+    role: 'model',
+    parts: [{ functionCall: { id, name: 'skill', args: { skill: name } } }],
+  });
+
+  const skillBody = (id: string | undefined, body: string): Content => ({
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'skill',
+          response: { output: buildSkillLlmContent('/demo', body) },
+        },
+      },
+    ],
+  });
+
+  it('blanket-clears when a stripped body has an unresolvable call id (R1-6)', () => {
+    // The branch the strip invariant leans on most: an unresolvable
+    // stripped body must never leave its skill tracked — tracked with
+    // no resident body is the dedup-guard deadlock this PR exists to
+    // prevent, and dropping this arm leaves the suite green.
+    const { registry, unloadSkills, clearLoadedSkills } = trackerMocks();
+    const stripped = [skillBody('missing', 'gone body')];
+    // History holds no functionCall with id 'missing'.
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+
+    unloadSkillsFromEntries(stripped, history, registry, 'test');
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('keeps tracking when the stripped body has a resident sibling (R1-11)', () => {
+    // Resident shield: the skill still has ANOTHER body in history. The
+    // targeted un-track must exclude it — un-tracking would disarm the
+    // dedup guard with a body in context and the next invoke would
+    // inject a full duplicate.
+    const { registry, unloadSkills, clearLoadedSkills } = trackerMocks();
+    const history: Content[] = [
+      skillCall('s0', 'demo'),
+      skillBody('s0', 'resident body'),
+      skillCall('s1', 'demo'),
+    ];
+    // The trailing body was stripped; its call id still pairs in history.
+    const stripped = [skillBody('s1', 'stripped body')];
+
+    unloadSkillsFromEntries(stripped, history, registry, 'test');
+
+    expect(clearLoadedSkills).not.toHaveBeenCalled();
+    expect(unloadSkills).not.toHaveBeenCalled();
   });
 });
