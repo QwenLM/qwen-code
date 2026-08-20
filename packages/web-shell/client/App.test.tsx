@@ -10568,6 +10568,246 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('keeps a re-armed carry when the in-flight creation cleans up (#8977)', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    const creation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      const result = await creation.promise;
+      mockConnection.sessionId = result.sessionId;
+      return result;
+    });
+    // Hang the rename so the creation stays in its attach window: the
+    // session exists and carries the manual name, but the post-success
+    // cleanup has not consumed the token yet.
+    const rename = deferred<void>();
+    mockSessionActions.renameSession.mockImplementationOnce(
+      () => rename.promise,
+    );
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // Deferred creation starts and captures the carry.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    await act(async () => {
+      creation.resolve({ sessionId: 'session-2' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledOnce();
+      });
+    });
+    // The rename in flight makes the daemon report the new session under the
+    // manual name, so a /clear in this window re-arms the carry from the
+    // connection with a NEW same-name object.
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // Rename completes; the creation's cleanup must consume only the token
+    // it captured, not the re-armed same-name one.
+    await act(async () => {
+      rename.resolve();
+      await rename.promise;
+      await vi.waitFor(() => {
+        expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    // The next prompt's deferred creation must still receive the carried
+    // name — with a value-based cleanup the re-armed token was already
+    // erased and this creation renames nothing.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('second prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.renameSession).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.renameSession).toHaveBeenLastCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
+  it('keeps the carry for an in-flight creation when a split folds on shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    const creation = deferred<{ sessionId: string }>();
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      const result = await creation.promise;
+      mockConnection.sessionId = result.sessionId;
+      return result;
+    });
+    const { container } = renderApp();
+    await flush();
+
+    // Seed the split with the connected session so a later shrink has a pane
+    // to land on.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // Deferred creation captures the carry and stays in flight.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    // Re-enter the split (the /clear folded back to the chat) and shrink:
+    // the landing load of the first pane must not clear the carry while the
+    // creation still owns it.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    });
+    await flush();
+
+    await act(async () => {
+      creation.resolve({ sessionId: 'session-2' });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+          { silent: true },
+        );
+      });
+    });
+  });
+
+  it('drops the carry when a split landing load succeeds with no creation in flight', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    // No creation in flight: the shrink folds the split and the successful
+    // landing load of the first pane invalidates the carry.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
   it('focuses the composer after loading an existing session', async () => {
     const { container, rerender } = renderApp();
     await flush();

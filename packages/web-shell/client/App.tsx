@@ -5529,10 +5529,12 @@ export function App({
           if (result.branch) {
             setSessionBranch(result.branch);
           }
-          if (
-            pendingManualTitleRef.current?.displayName ===
-            pendingManualTitle?.displayName
-          ) {
+          // Consume by identity, not value: the rename gate above compares
+          // values so a mid-creation re-arm (a new object with the same
+          // name) still renames, but the cleanup must only consume the token
+          // this creation captured — a value comparison here would erase the
+          // re-armed carry and leave the user's next session unnamed.
+          if (pendingManualTitleRef.current === pendingManualTitle) {
             pendingManualTitleRef.current = undefined;
           }
           // Clear the pending intent only on success. On failure the
