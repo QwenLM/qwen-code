@@ -404,7 +404,7 @@ describe('package scripts', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --no-audit --progress=false/g,
+        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --ignore-scripts --no-audit --progress=false[\s\S]*? {10}npx patch-package/g,
       ) || [];
 
     expect(installSteps.length).toBeGreaterThanOrEqual(5);

@@ -100,7 +100,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # --ignore-scripts skips postinstall; apply patches explicitly.
+          npx patch-package
 
       - name: 'Get the version'
         id: 'version'
@@ -171,7 +173,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # --ignore-scripts skips postinstall; apply patches explicitly.
+          npx patch-package
 
       - name: 'Format Project'
         run: |-
@@ -229,7 +233,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # --ignore-scripts skips postinstall; apply patches explicitly.
+          npx patch-package
 
       - name: 'Build Bundle'
         run: |-
@@ -276,7 +282,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # --ignore-scripts skips postinstall; apply patches explicitly.
+          npx patch-package
 
       - name: 'Build Bundle'
         run: |-
@@ -394,7 +402,9 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # --ignore-scripts skips postinstall; apply patches explicitly.
+          npx patch-package
 
       - name: 'Configure Git User'
         run: |-
