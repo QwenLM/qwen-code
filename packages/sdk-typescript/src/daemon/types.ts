@@ -4153,7 +4153,8 @@ export type DaemonExtensionInstallType =
   | 'link'
   | 'archive-url'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'snapshot';
 
 export type DaemonExtensionOriginSource =
   | 'QwenCode'
@@ -4208,6 +4209,7 @@ export interface DaemonExtensionEntry {
   originSource?: DaemonExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: DaemonExtensionUpdateState;
   capabilities: DaemonExtensionCapabilities;
   details?: DaemonExtensionDetails;
@@ -4223,6 +4225,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 
 export interface ExtensionInstallRequest {
   source: string;
+  credentialPersistence?: 'stored' | 'one_time';
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -4248,12 +4251,16 @@ export interface ExtensionManagementInstallRequest
 
 export type ExtensionActivationState = 'enabled' | 'disabled';
 export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+export type ExtensionWorkspaceBatchActivationState =
+  | ExtensionActivationState
+  | 'inherit';
 
 export interface ExtensionCatalogEntry {
   id: string;
   name: string;
   version: string;
   installType?: DaemonExtensionInstallType;
+  credentialPersistence?: 'stored' | 'one_time';
   defaultActivation: ExtensionActivationState;
   workspaceOverrideCount: number;
 }
@@ -4316,12 +4323,28 @@ export interface ExtensionOperationResult {
   source?: string;
   name?: string;
   version?: string;
+  credentialPersistence?: 'stored' | 'one_time';
+  credentialStorage?: 'keychain' | 'encrypted_file';
   refreshed?: number;
   failed?: number;
   error?: string;
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  results?: Array<
+    ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
+  >;
+}
+
+export interface ExtensionDefaultActivationBatchItem {
+  name: string;
+  defaultActivation: ExtensionActivationState;
+}
+
+export interface ExtensionWorkspaceActivationBatchItem {
+  name: string;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
 }
 
 export interface ExtensionOperationStatus {

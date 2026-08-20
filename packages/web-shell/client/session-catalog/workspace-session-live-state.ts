@@ -254,6 +254,13 @@ export function useWorkspaceSessionLiveState(
         return;
       }
       state.inFlight = true;
+      // Contract: only a response from a request started after a completion
+      // was recorded may settle it, so the pending set is snapshotted before
+      // the request goes out. Completions recorded mid-flight keep their
+      // newer sequence and settle on the next tick.
+      const pendingActivity = catalogStore.snapshotSessionActivity(
+        state.workspaceCwd,
+      );
       let live: DaemonWorkspaceSessionLiveState;
       try {
         live = await readLiveState(state.workspaceCwd);
@@ -282,8 +289,27 @@ export function useWorkspaceSessionLiveState(
         state.inFlight = false;
         return;
       }
-      catalogStore.applyLiveState(state.workspaceCwd, live.sessions);
+      const absorbedActivity = catalogStore.applyLiveState(
+        state.workspaceCwd,
+        live.sessions,
+      );
       state.liveRetryAt = 0;
+      if (pendingActivity) {
+        for (const [sessionId, sequence] of pendingActivity) {
+          // applyLiveState reports which sessions absorbed a usable watermark
+          // on a loaded active page; anything else (missing row, absent or
+          // invalid stamp, row outside the loaded catalog) falls back to the
+          // rate-limited full reconcile.
+          if (!absorbedActivity.has(sessionId)) {
+            state.invalidationRequested = true;
+          }
+          catalogStore.resolveSessionActivity(
+            state.workspaceCwd,
+            sessionId,
+            sequence,
+          );
+        }
+      }
       consumeRefreshRequest(state);
       if (
         !state.reconcileRequested &&
@@ -326,8 +352,9 @@ export function useWorkspaceSessionLiveState(
     };
 
     // Interactive refresh requests (explicit refresh(), expiring
-    // maxAgeMs subscriptions, group-membership growth) wake the loop
-    // immediately instead of waiting for the next 2s tick.
+    // maxAgeMs subscriptions, group-membership growth) and recorded turn
+    // completions wake the loop immediately instead of waiting for the
+    // next 2s tick.
     const stopWake = catalogStore.onLiveStateWake((workspaceCwd) => {
       const state = states.find(
         (candidate) => candidate.workspaceCwd === workspaceCwd,
