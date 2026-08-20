@@ -759,18 +759,33 @@ function tryResume(
 }
 
 /**
- * Did decoding these bytes as UTF-8 LOSE information?
+ * Are these bytes valid UTF-8 — i.e. would decoding them lose information?
  *
- * Re-encode the decode and compare byte lengths: a substitution replaces an
- * invalid sequence with U+FFFD, whose UTF-8 form is three bytes, so any
- * substitution changes the length. A buffer that legitimately CONTAINS
- * U+FFFD round-trips unchanged, which is the whole distinction — the code
- * point is ordinary content, and the collision hazard comes from invalid
- * bytes collapsing onto one name, never from the character itself.
+ * Asked of the decoder, which is the only thing that knows. The distinction
+ * that matters is between an invalid sequence SUBSTITUTED with U+FFFD and the
+ * code point appearing as ordinary content: the first collides two filenames
+ * onto one string, the second is a character like any other, and this
+ * repository carries four literal ones in its own source.
+ *
+ * A byte-length round-trip looks like it answers this and does not. Node
+ * emits one U+FFFD per maximal ill-formed subpart, and a 3-byte ill-formed
+ * subpart substitutes to a 3-byte U+FFFD — `F0 9F 98`, a truncated
+ * 4-byte sequence, decodes to one replacement character of exactly the
+ * length it replaced. Every length-preserving substitution passed as clean,
+ * which left the collision this guards wide open for precisely the shape a
+ * truncated capture produces.
  */
 export function decodeWasLossy(bytes: Buffer): boolean {
-  return Buffer.byteLength(bytes.toString('utf8'), 'utf8') !== bytes.length;
+  try {
+    STRICT_UTF8.decode(bytes);
+    return false;
+  } catch {
+    return true;
+  }
 }
+
+/** Constructed once: a decoder is stateless here and the guard runs per round. */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Sampled HERE, at the start of the round: see `reviewModelId`.
@@ -1346,15 +1361,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // can answer it: rename detection is a similarity threshold, and the
         // two ranges compare different pairs of blobs, so one can pair a
         // rename while the other renders a plain deletion beside a plain
-        // addition.
+        // addition — or each can pair the SAME deletion with a different
+        // target.
         //
         // The rule is therefore the direct one — does the full diff carry a
         // section under the SOURCE name? If it does, that section is
         // unreviewed content the slice would drop, so the source rides along
-        // and the lineage check keeps it. If it does not, the full range
-        // paired the rename too, the net hunks already sit under the new-side
-        // section, and riding the source along would demand a section that
-        // does not exist and refuse the round.
+        // and the lineage check keeps it. If it does not, ask where the full
+        // range put the deletion: when it paired it with a DIFFERENT target,
+        // the source's net hunks sit under that section, and it rides along
+        // instead (a rename target of the full range is absent at the base
+        // by construction, so the restoration probe cannot misread it as
+        // restored and drop it). Otherwise the full range paired the delta's
+        // own rename, the net hunks already sit under the new-side section,
+        // and riding anything along would demand a section that does not
+        // exist and refuse the round.
         //
         // Keying on `restored(target)` instead covered only the case where
         // the target dropped out of the live set. A LIVE target whose ranges
@@ -1362,18 +1383,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // it, round 2 moves it to `b.ts` — left the source's net-deletion
         // hunks out of the slice with the anchor advancing past them, and
         // content no round had seen retired for good.
-        const fullSectionPaths = new Set(
-          parseDiff(fullText).files.map((f) => f.path),
-        );
+        const fullFiles = parseDiff(fullText).files;
+        const fullSectionPaths = new Set(fullFiles.map((f) => f.path));
+        const fullRenameTargets = new Map<string, string>();
+        for (const f of fullFiles) {
+          if (f.renamedFrom) fullRenameTargets.set(f.renamedFrom, f.path);
+        }
         const deltaFiles: string[] = [];
         for (const f of deltaSections) {
           deltaFiles.push(f.path);
-          if (
-            f.renamedFrom &&
-            f.renamedFrom !== f.path &&
-            fullSectionPaths.has(f.renamedFrom)
-          ) {
+          if (!f.renamedFrom || f.renamedFrom === f.path) continue;
+          if (fullSectionPaths.has(f.renamedFrom)) {
             deltaFiles.push(f.renamedFrom);
+          } else {
+            const carrier = fullRenameTargets.get(f.renamedFrom);
+            if (carrier && carrier !== f.path) deltaFiles.push(carrier);
           }
         }
         const unanswerable = deltaFiles.filter((p) => restored(p) === null);

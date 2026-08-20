@@ -483,6 +483,17 @@ function blindPlan(): string {
   return plan();
 }
 
+function findingsFile(content: string): string {
+  const f = join(dir, 'qwen-review-findings.md');
+  writeFileSync(f, content);
+  return f;
+}
+
+const TAGGED =
+  '- **File:** src/pay.ts:42\n' +
+  '- **Issue:** off-by-one in the retry cap\n' +
+  '- **Severity:** Critical — [unverified]\n';
+
 const FOOTER = `_— ${MODEL} via Qwen Code /review (vunknown)_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
@@ -1007,7 +1018,7 @@ describe('repository context proof boundary', () => {
   });
 
   it('caps the unverified-dimension disclosure at five entries', () => {
-    // The schema admits 128 dimensions x 512 chars; joined into one
+    // The schema admits 256 dimensions x 512 chars; joined into one
     // disclosure that outruns the review body's own size budget — the same
     // cap discipline testPlanGate applies to its notes.
     const planPath = join(dir, 'capped-plan.json');
@@ -1878,6 +1889,28 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).toContain(
       '⚠️ Downgraded from Approve to Comment: self-PR; CI still running.',
     );
+  });
+
+  it('keeps the presubmit downgrade reasons when a cap softens the Approve first', () => {
+    // The APPROVE→COMMENT cap runs before the presubmit arms, so a capped
+    // zero-finding Approve reached arm 1 as COMMENT — its `event === 'APPROVE'`
+    // gate failed, arm 2's REQUEST_CHANGES gate failed too, and the presubmit
+    // reasons vanished from the body and the verdict line while the identical
+    // uncapped run rendered both. The gate is derived from `baseEvent` — the
+    // row before every cap — exactly like its RC sibling.
+    const r = composeReview(
+      base({
+        contextUnavailable: true,
+        presubmit: { downgradeApprove: true, downgradeReasons: ['self-PR'] },
+      }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('context-unavailable');
+    expect(r.downgraded).toBe(true);
+    expect(r.downgradedFrom).toBe('Approve');
+    expect(r.body).toContain('⚠️ Downgraded from Approve to Comment: self-PR.');
+    expect(verdictLine(r)).toContain('a presubmit check failed');
   });
 
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
@@ -3947,6 +3980,32 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(verdictLine(r)).toContain('its blockers were never verified');
   });
 
+  it('keeps the presubmit downgrade reasons when the findings-tag cap also holds', () => {
+    // The tag cap softens the event while setting NEITHER legacy flag, so the
+    // recovery arm's enumeration missed it: the presubmit reasons vanished
+    // from the body — the silent loss the arm's own comment forbids. Verdict
+    // keeps the tag sentence; the body's downgrade clause carries the reasons.
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      findingsPath: findingsFile(TAGGED),
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['self-PR'],
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      'Downgraded from Request changes to Comment: self-PR',
+    );
+    expect(verdictLine(r)).toContain(
+      'findings were still unverified when the loop ended',
+    );
+  });
+
   it('verify on record with the reverse audit absent still blocks — softening gates on verify alone', () => {
     const r = composeReview({
       criticalsInline: 1,
@@ -3970,6 +4029,31 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
+  it('keeps the body Criticals when the FINDINGS-TAG cap softens the event', () => {
+    // The third softening path, and the one the enumerated condition missed:
+    // coverage is proven and the verifier ran, so `criticalsUnverified` is
+    // false and no presubmit downgrade fired — the cap comes from the
+    // findings file still carrying `— [unverified]` at compose time. The
+    // posted body was 239 characters of opener and disclosure with the
+    // blocker — its only copy — nowhere in it.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+      findingsPath: findingsFile(TAGGED),
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    // Neither flag the old condition listed is set on this path.
+    expect(r.downgradedFrom).toBeNull();
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -7306,9 +7390,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // that qualify the verdict before it spent a single blocker.
     //
     // The cap here is the absent verifier, which still POSTS the blockers
-    // (clause 7 rides on `criticalsUnverified`); the findings-file tag route
-    // caps without that flag, so its body carries no blocker and cannot
-    // reach the cut at all.
+    // (clause 7 rides on the softened RC→COMMENT transition); the
+    // findings-file tag route softens the same way, so its body carries the
+    // blocker too and can reach the cut.
     const r = composeReview({
       planPath: coveredPlan(['reverse-audit']),
       env: ENV,
@@ -7565,16 +7649,6 @@ describe('composeReview — the findings file tag check', () => {
   // round's findings digest — so compose-review reads the cumulative
   // findings file itself and caps on any surviving tag.
 
-  function findingsFile(content: string): string {
-    const f = join(dir, 'qwen-review-findings.md');
-    writeFileSync(f, content);
-    return f;
-  }
-
-  const TAGGED =
-    '- **File:** src/pay.ts:42\n' +
-    '- **Issue:** off-by-one in the retry cap\n' +
-    '- **Severity:** Critical — [unverified]\n';
   const CLEAN =
     '- **File:** src/pay.ts:42\n' +
     '- **Issue:** off-by-one in the retry cap\n' +

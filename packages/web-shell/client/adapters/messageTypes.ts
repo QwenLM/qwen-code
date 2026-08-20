@@ -6,6 +6,15 @@
 
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 
+export interface AttachmentPreviewRequest {
+  name: string;
+  mimeType?: string;
+  data?: Blob;
+  text?: string;
+  workspacePath?: string;
+  attachmentId?: string;
+}
+
 export type DaemonMessageToolCallStatus =
   | 'pending'
   | 'in_progress'
@@ -82,7 +91,13 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
-  files?: Array<{ name: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }

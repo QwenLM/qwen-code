@@ -477,6 +477,11 @@ describe('the bundled skill stops on what this module prints', () => {
       const services = join(root, 'packages', 'cli', 'src', 'services');
       mkdirSync(services, { recursive: true });
       writeFileSync(join(services, 'review-worktree-lease.ts'), 'leases');
+      const utils = join(root, 'packages', 'cli', 'src', 'utils');
+      mkdirSync(utils, { recursive: true });
+      writeFileSync(join(utils, 'findings.ts'), 'validates');
+      writeFileSync(join(utils, 'shell-args.ts'), 'tokenizes');
+      writeFileSync(join(utils, 'paths.ts'), 'flattens');
       const skillDir = join(
         root,
         'packages',
@@ -523,6 +528,7 @@ describe('the bundled skill stops on what this module prints', () => {
       rmSync(join(commands, 'review.ts'));
       rmSync(join(commands, 'review', 'drive.ts'));
       rmSync(join(services, 'review-worktree-lease.ts'));
+      rmSync(utils, { recursive: true, force: true });
       writeFileSync(join(commands, 'review', 'keep.test.ts'), 'a test');
       rmSync(skillDir, { recursive: true, force: true });
       emit();
@@ -552,7 +558,7 @@ describe('the bundled skill stops on what this module prints', () => {
 });
 
 describe('reviewSourceRoots', () => {
-  it('covers the directory, the registration file beside it, the lease outside it, and the skill', () => {
+  it('covers the directory, the registration file beside it, the lease and lifted helpers outside it, and the skill', () => {
     // Built with the platform's `join`, so the expectation is too — a literal
     // with forward slashes passes on Linux and fails every element on the
     // Windows leg of the merge queue, which the PR event never runs.
@@ -578,6 +584,20 @@ describe('reviewSourceRoots', () => {
           'services',
           'review-worktree-lease.ts',
         ),
+        kind: 'code',
+      },
+      // The review helpers lifted out of `commands/review/`; the digest
+      // covered them there before the lift.
+      {
+        path: join('/w', 'packages', 'cli', 'src', 'utils', 'findings.ts'),
+        kind: 'code',
+      },
+      {
+        path: join('/w', 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
+        kind: 'code',
+      },
+      {
+        path: join('/w', 'packages', 'cli', 'src', 'utils', 'paths.ts'),
         kind: 'code',
       },
       {
