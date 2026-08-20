@@ -434,6 +434,82 @@ describe('AgentCore.runInAgentFrames', () => {
 });
 
 describe('AgentCore approval response deduplication', () => {
+  it('retries an approval incarnation when event delivery throws', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('approval-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'approval-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    let shouldThrow = true;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('approval listener failed');
+      }
+    });
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const request = {
+      callId: 'call-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
   it('emits once per approval incarnation and allows each response', async () => {
     const config = {
       getToolRegistry: vi.fn().mockReturnValue({

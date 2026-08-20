@@ -1858,7 +1858,6 @@ export class AgentCore {
             if (emittedApprovalDetails.get(callId) === confirmationDetails) {
               continue;
             }
-            emittedApprovalDetails.set(callId, confirmationDetails);
             const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
             // Snapshot the ambient runtime view here, while the loop frame
             // is still live. For inheriting agents (no own runtimeView)
@@ -1912,6 +1911,7 @@ export class AgentCore {
               },
               timestamp: Date.now(),
             });
+            emittedApprovalDetails.set(callId, confirmationDetails);
           } catch {
             // ignore UI event emission failures
           }
