@@ -5,6 +5,7 @@
  */
 
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
@@ -22,6 +23,7 @@ import {
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { ReadonlyComposerTag } from './messages/UserMessage';
+import { FileTypeIcon } from './FileTypeIcon';
 import { isSafeImageSrc } from './messages/Markdown';
 import styles from '../App.module.css';
 
@@ -144,6 +146,7 @@ export function QueuedPromptDisplay({
   onDelete,
   onEdit,
   onImagePreview,
+  onAttachmentPreview,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
@@ -151,6 +154,7 @@ export function QueuedPromptDisplay({
   onDelete: (id: number) => void;
   onEdit: (id: number) => void;
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -182,6 +186,12 @@ export function QueuedPromptDisplay({
         });
         const imageCount = safeImages.length;
         const fileCount = prompt.files?.length ?? 0;
+        const attachmentLabel = [
+          imageCount > 0 ? t('queue.imageCount', { count: imageCount }) : '',
+          fileCount > 0 ? t('queue.fileCount', { count: fileCount }) : '',
+        ]
+          .filter(Boolean)
+          .join(', ');
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
@@ -238,15 +248,12 @@ export function QueuedPromptDisplay({
                 ),
               )}
               {preview.truncated ? '...' : null}
-              {fileCount > 0
-                ? ` ${t('queue.fileCount', { count: fileCount })}`
-                : ''}
             </span>
-            {imageCount > 0 ? (
+            {imageCount > 0 || fileCount > 0 ? (
               <span
                 className={styles.queuedPromptImages}
-                aria-label={t('queue.imageCount', { count: imageCount })}
-                title={t('queue.imageCount', { count: imageCount })}
+                aria-label={attachmentLabel}
+                title={attachmentLabel}
               >
                 {safeImages.map(({ index, src }) => {
                   const alt = t('user.uploadedImage', { index: index + 1 });
@@ -278,6 +285,46 @@ export function QueuedPromptDisplay({
                           : undefined
                       }
                     />
+                  );
+                })}
+                {prompt.files?.map((file, index) => {
+                  const previewable = Boolean(
+                    onAttachmentPreview &&
+                      (file.data !== undefined ||
+                        file.text !== undefined ||
+                        file.attachmentId),
+                  );
+                  return (
+                    <button
+                      key={`${file.name}-${index}`}
+                      type="button"
+                      className={styles.queuedPromptFile}
+                      disabled={!previewable}
+                      title={file.name}
+                      onClick={() =>
+                        onAttachmentPreview?.({
+                          name: file.name,
+                          mimeType: file.media_type,
+                          ...(file.data !== undefined
+                            ? { data: file.data }
+                            : {}),
+                          ...(file.text !== undefined
+                            ? { text: file.text }
+                            : {}),
+                          ...(file.attachmentId
+                            ? { attachmentId: file.attachmentId }
+                            : {}),
+                        })
+                      }
+                    >
+                      <FileTypeIcon
+                        name={file.name}
+                        mimeType={file.media_type}
+                        size={14}
+                        aria-hidden="true"
+                      />
+                      <span>{file.name}</span>
+                    </button>
                   );
                 })}
               </span>

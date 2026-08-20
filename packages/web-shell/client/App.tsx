@@ -6290,6 +6290,7 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: artifactWorkspaceActions,
     streamingState,
     sessionActions,
     store,
@@ -7396,7 +7397,7 @@ export function App({
           : undefined;
       if (workspaceCwd) {
         sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
-        if (!connectionRef.current.displayName) {
+        if (!sessionDisplayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
             workspaceCwd,
@@ -7422,6 +7423,7 @@ export function App({
     connection.workspaceCwd,
     scheduleDelayedActiveSessionDisplayNameRefresh,
     sessionCatalogController,
+    sessionDisplayName,
     streamingState,
   ]);
 
@@ -12633,6 +12635,7 @@ export function App({
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
                           onImagePreview={openImagePanel}
+                          onAttachmentPreview={openAttachmentPanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>

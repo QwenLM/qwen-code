@@ -22,6 +22,7 @@ import {
   useDaemonSessionOwnerGuard,
   type DaemonSessionActions,
   type DaemonStreamingState,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonInputAnnotation,
@@ -37,6 +38,13 @@ import { removeInjectedFromQueue } from '../midTurnDedup';
 import { isCommandPrompt } from '../utils/localCommandQueue';
 import type { getTranslator } from '../i18n';
 import type { QueuedPrompt } from '../components/QueuedPromptDisplay';
+import { readWorkspaceFileAsBlob } from '../components/artifacts/artifactUtils';
+import {
+  MAX_FILE_ATTACHMENT_DATA_BYTES,
+  normalizeImageMediaType,
+  normalizeTextMediaType,
+  sanitizeAttachmentName,
+} from '../utils/imageIngestion';
 
 interface RefBox<T> {
   current: T;
@@ -64,11 +72,11 @@ interface UseQueuedPromptsArgs {
   canQueryMidTurn: boolean;
   /**
    * Whether the daemon advertises `session_attachments`. With it,
-   * images attached to a mid-turn send travel with the message and are
-   * injected into the running turn; without it they stay queued for the next
-   * turn (an older daemon would silently drop them).
+   * attachments travel with a mid-turn message and are injected into the
+   * running turn; without it they stay queued for the next turn.
    */
   canInjectMidTurnMedia: boolean;
+  workspaceFileActions?: Pick<DaemonWorkspaceActions, 'readFileBytes' | 'stat'>;
   streamingState: DaemonStreamingState;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
@@ -78,6 +86,67 @@ interface UseQueuedPromptsArgs {
 }
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
+
+interface AnnotatedFiles {
+  displayText: string;
+  paths: string[];
+}
+
+function annotatedFiles(
+  text: string,
+  inputAnnotations: readonly DaemonInputAnnotation[] | undefined,
+): AnnotatedFiles | undefined {
+  if (!inputAnnotations || inputAnnotations.length === 0) {
+    return { displayText: text.trim(), paths: [] };
+  }
+  const leadingWhitespace = text.length - text.trimStart().length;
+  const trimmed = text.trim();
+  const ranges: Array<{ start: number; end: number }> = [];
+  const paths: string[] = [];
+  let previousEnd = 0;
+  for (const annotation of inputAnnotations) {
+    const start = annotation.start - leadingWhitespace;
+    const end = annotation.end - leadingWhitespace;
+    const metadata = annotation.reference.metadata;
+    const fileKind =
+      metadata && typeof metadata === 'object' && 'fileKind' in metadata
+        ? metadata.fileKind
+        : undefined;
+    if (
+      annotation.reference.kind !== 'file' ||
+      (fileKind !== undefined && fileKind !== 'file') ||
+      !annotation.reference.value ||
+      start < previousEnd ||
+      start < 0 ||
+      end > trimmed.length ||
+      trimmed.slice(start, end) !== annotation.text
+    ) {
+      return undefined;
+    }
+    ranges.push({ start, end });
+    paths.push(annotation.reference.value);
+    previousEnd = end;
+  }
+  let displayText = trimmed;
+  for (const range of ranges.reverse()) {
+    displayText = `${displayText.slice(0, range.start)}${displayText.slice(range.end)}`;
+  }
+  return {
+    displayText: displayText.trim(),
+    paths,
+  };
+}
+
+function annotatedFile(filePath: string): PromptFile {
+  const name = sanitizeAttachmentName(filePath);
+  return {
+    name,
+    media_type:
+      normalizeImageMediaType('', name) ??
+      normalizeTextMediaType('', name) ??
+      'application/octet-stream',
+  };
+}
 
 /**
  * Merge a restored prompt's text into the editor content. Restoration paths
@@ -180,6 +249,7 @@ function contentToFiles(
     }
     files.push({
       name: record['attachmentId'],
+      attachmentId: record['attachmentId'],
       media_type:
         typeof record['mimeType'] === 'string'
           ? record['mimeType']
@@ -264,6 +334,7 @@ export function useQueuedPrompts({
   canMutateMidTurn,
   canQueryMidTurn,
   canInjectMidTurnMedia,
+  workspaceFileActions,
   streamingState,
   sessionActions,
   store,
@@ -1281,6 +1352,9 @@ export function useQueuedPrompts({
       const targetWorkspaceCwd = latestWorkspaceCwdRef.current;
       const ownerToken = ownerTokenRef.current;
       const imageList = images ?? [];
+      const fileList = files ?? [];
+      const annotated = annotatedFiles(text, inputAnnotations);
+      const annotatedFileList = annotated?.paths.map(annotatedFile) ?? [];
       // Mid-turn media needs the daemon-owned id surface AND the daemon's media
       // capability; an image we can't type also keeps the whole message on the
       // next-turn path so the daemon never drops part of the payload.
@@ -1294,11 +1368,19 @@ export function useQueuedPrompts({
             image.media_type.startsWith('image/') &&
             image.media_type !== 'image/*',
         );
+      const canSendMidTurnFiles =
+        fileList.length > 0 && canQueryMidTurn && canInjectMidTurnMedia;
+      const canSendMidTurnAnnotatedFiles =
+        annotatedFileList.length > 0 &&
+        canQueryMidTurn &&
+        canInjectMidTurnMedia &&
+        workspaceFileActions !== undefined;
       const shouldInsertMidTurn =
         latestStreamingStateRef.current !== 'idle' &&
-        (files?.length ?? 0) === 0 &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
-        (inputAnnotations?.length ?? 0) === 0 &&
+        (fileList.length === 0 || canSendMidTurnFiles) &&
+        annotated !== undefined &&
+        (annotatedFileList.length === 0 || canSendMidTurnAnnotatedFiles) &&
         !isCommandPrompt(trimmed);
       const midTurnMessageId =
         shouldInsertMidTurn && canQueryMidTurn
@@ -1323,17 +1405,34 @@ export function useQueuedPrompts({
         const pendingAdmission: QueuedPrompt = {
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
-          text: trimmed,
+          text: annotated?.displayText ?? trimmed,
           ...(imageList.length > 0 ? { images: [...imageList] } : {}),
+          ...(fileList.length > 0 || annotatedFileList.length > 0
+            ? { files: [...fileList, ...annotatedFileList] }
+            : {}),
           midTurnMessageId,
           midTurnState: 'submitting',
-          payloadCompleteness: 'complete',
+          payloadCompleteness:
+            annotatedFileList.length > 0 ? 'summary-only' : 'complete',
         };
         pendingMidTurnAdmissionsRef.current.set(midTurnMessageId, {
           prompt: pendingAdmission,
           workspaceCwd: targetWorkspaceCwd,
         });
-        if (imageList.length > 0) {
+        const restoreAdmission: QueuedPrompt = {
+          ...pendingAdmission,
+          text: trimmed,
+          files: fileList.length > 0 ? [...fileList] : undefined,
+          inputAnnotations: inputAnnotations
+            ? [...inputAnnotations]
+            : undefined,
+          payloadCompleteness: 'complete',
+        };
+        if (
+          imageList.length > 0 ||
+          fileList.length > 0 ||
+          annotatedFileList.length > 0
+        ) {
           queuedPromptsRef.current = [
             ...queuedPromptsRef.current,
             pendingAdmission,
@@ -1359,18 +1458,52 @@ export function useQueuedPrompts({
           );
           uploadedAttachmentReferences = [];
         };
-        void Promise.allSettled(
-          imageList.map(
+        void Promise.allSettled([
+          ...imageList.map(
             async (image) =>
               await sessionActions.uploadAttachment(
                 {
                   data: image.data,
                   mimeType: image.media_type,
                 },
-                { signal: abort.signal },
+                { signal: abort.signal, sessionId: targetSessionId },
               ),
           ),
-        )
+          ...fileList.map(
+            async (file) =>
+              await sessionActions.uploadAttachment(
+                {
+                  name: file.name,
+                  data: file.data,
+                  text: file.text,
+                  mimeType: file.media_type,
+                },
+                { signal: abort.signal, sessionId: targetSessionId },
+              ),
+          ),
+          ...annotatedFileList.map(async (file, index) => {
+            const filePath = annotated!.paths[index]!;
+            const data = await readWorkspaceFileAsBlob(
+              (path, options) =>
+                workspaceFileActions!.readFileBytes(path, options),
+              filePath,
+              file.media_type,
+              {
+                statFile: (path) => workspaceFileActions!.stat(path),
+                isCancelled: () => abort.signal.aborted,
+                maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+              },
+            );
+            return await sessionActions.uploadAttachment(
+              {
+                name: file.name,
+                data,
+                mimeType: file.media_type,
+              },
+              { signal: abort.signal, sessionId: targetSessionId },
+            );
+          }),
+        ])
           .then(async (results) => {
             uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],
@@ -1389,17 +1522,46 @@ export function useQueuedPrompts({
             ) {
               throw new DOMException('Session changed', 'AbortError');
             }
+            if (fileList.length > 0 || annotatedFileList.length > 0) {
+              const sourceFiles = [...fileList, ...annotatedFileList];
+              const attachedFiles = uploadedAttachmentReferences
+                .slice(imageList.length)
+                .map((reference, index) => ({
+                  ...sourceFiles[index]!,
+                  media_type: reference.mimeType,
+                  size: reference.size,
+                  attachmentId: reference.attachmentId,
+                }));
+              const admittedPrompt = {
+                ...pendingAdmission,
+                ...(attachedFiles.length > 0 ? { files: attachedFiles } : {}),
+              };
+              pendingMidTurnAdmissionsRef.current.set(midTurnMessageId, {
+                prompt: admittedPrompt,
+                workspaceCwd: targetWorkspaceCwd,
+              });
+              queuedPromptsRef.current = queuedPromptsRef.current.map(
+                (prompt) =>
+                  prompt.midTurnMessageId === midTurnMessageId
+                    ? admittedPrompt
+                    : prompt,
+              );
+              setQueuedPrompts(queuedPromptsRef.current);
+            }
             enqueueStarted = true;
-            return await sessionActions.enqueueMidTurnMessage(trimmed, {
-              signal: abort.signal,
-              messageId: midTurnMessageId,
-              onAdmissionStarted: () => {
-                enqueueDispatched = true;
+            return await sessionActions.enqueueMidTurnMessage(
+              annotated?.displayText ?? trimmed,
+              {
+                signal: abort.signal,
+                messageId: midTurnMessageId,
+                onAdmissionStarted: () => {
+                  enqueueDispatched = true;
+                },
+                ...(uploadedAttachmentReferences.length > 0
+                  ? { content: uploadedAttachmentReferences }
+                  : {}),
               },
-              ...(uploadedAttachmentReferences.length > 0
-                ? { content: uploadedAttachmentReferences }
-                : {}),
-            });
+            );
           })
           .then(async (result) => {
             if (!result.accepted) {
@@ -1424,6 +1586,7 @@ export function useQueuedPrompts({
               );
               return;
             }
+            if (targetIsCurrent()) onAdmitted?.();
             const next = queuedPromptsRef.current.filter(
               (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
             );
@@ -1447,7 +1610,7 @@ export function useQueuedPrompts({
                 // return: restore it to the current editor instead of
                 // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
-                  restoreQueuedPromptsToEditor([pendingAdmission], undefined);
+                  restoreQueuedPromptsToEditor([restoreAdmission], undefined);
                   reportError(error, t('queue.queueFailed'));
                 }
               }
@@ -1468,7 +1631,7 @@ export function useQueuedPrompts({
               );
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
-              restoreQueuedPromptsToEditor([pendingAdmission], targetSessionId);
+              restoreQueuedPromptsToEditor([restoreAdmission], targetSessionId);
               reportError(error, t('queue.queueFailed'));
               return;
             }
@@ -1573,6 +1736,7 @@ export function useQueuedPrompts({
       settleCompletionCallback,
       submitPendingPrompt,
       t,
+      workspaceFileActions,
     ],
   );
 
@@ -1816,6 +1980,19 @@ export function useQueuedPrompts({
           target.midTurnMessageId,
           { sessionId: target.sessionId },
         );
+        if (result.removed) {
+          await Promise.allSettled(
+            (target.files ?? []).flatMap((file) =>
+              file.attachmentId
+                ? [
+                    sessionActions.removeAttachment(file.attachmentId, {
+                      sessionId: target.sessionId,
+                    }),
+                  ]
+                : [],
+            ),
+          );
+        }
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return result.removed;
         const current = queuedPromptsRef.current;
         const latest = current.find((prompt) => prompt.id === target.id);
@@ -1859,7 +2036,9 @@ export function useQueuedPrompts({
           );
           return settledAtIdle;
         }
-        const next = current.filter((prompt) => prompt.id !== target.id);
+        const next = queuedPromptsRef.current.filter(
+          (prompt) => prompt.id !== target.id,
+        );
         queuedPromptsRef.current = next;
         setQueuedPrompts(next);
         return true;
