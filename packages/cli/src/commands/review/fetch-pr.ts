@@ -1341,15 +1341,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // can answer it: rename detection is a similarity threshold, and the
         // two ranges compare different pairs of blobs, so one can pair a
         // rename while the other renders a plain deletion beside a plain
-        // addition.
+        // addition — or each can pair the SAME deletion with a different
+        // target.
         //
         // The rule is therefore the direct one — does the full diff carry a
         // section under the SOURCE name? If it does, that section is
         // unreviewed content the slice would drop, so the source rides along
-        // and the lineage check keeps it. If it does not, the full range
-        // paired the rename too, the net hunks already sit under the new-side
-        // section, and riding the source along would demand a section that
-        // does not exist and refuse the round.
+        // and the lineage check keeps it. If it does not, ask where the full
+        // range put the deletion: when it paired it with a DIFFERENT target,
+        // the source's net hunks sit under that section, and it rides along
+        // instead (a rename target of the full range is absent at the base
+        // by construction, so the restoration probe cannot misread it as
+        // restored and drop it). Otherwise the full range paired the delta's
+        // own rename, the net hunks already sit under the new-side section,
+        // and riding anything along would demand a section that does not
+        // exist and refuse the round.
         //
         // Keying on `restored(target)` instead covered only the case where
         // the target dropped out of the live set. A LIVE target whose ranges
@@ -1357,18 +1363,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // it, round 2 moves it to `b.ts` — left the source's net-deletion
         // hunks out of the slice with the anchor advancing past them, and
         // content no round had seen retired for good.
-        const fullSectionPaths = new Set(
-          parseDiff(fullText).files.map((f) => f.path),
-        );
+        const fullFiles = parseDiff(fullText).files;
+        const fullSectionPaths = new Set(fullFiles.map((f) => f.path));
+        const fullRenameTargets = new Map<string, string>();
+        for (const f of fullFiles) {
+          if (f.renamedFrom) fullRenameTargets.set(f.renamedFrom, f.path);
+        }
         const deltaFiles: string[] = [];
         for (const f of deltaSections) {
           deltaFiles.push(f.path);
-          if (
-            f.renamedFrom &&
-            f.renamedFrom !== f.path &&
-            fullSectionPaths.has(f.renamedFrom)
-          ) {
+          if (!f.renamedFrom || f.renamedFrom === f.path) continue;
+          if (fullSectionPaths.has(f.renamedFrom)) {
             deltaFiles.push(f.renamedFrom);
+          } else {
+            const carrier = fullRenameTargets.get(f.renamedFrom);
+            if (carrier && carrier !== f.path) deltaFiles.push(carrier);
           }
         }
         const unanswerable = deltaFiles.filter((p) => restored(p) === null);
