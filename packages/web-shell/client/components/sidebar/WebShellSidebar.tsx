@@ -166,15 +166,13 @@ interface OptimisticPinEntry {
   pinned: boolean;
   /** Pin timestamp assigned optimistically (present when pinning). */
   pinnedAt?: string;
+  rpcSettled: boolean;
+  catalogPages: readonly (DaemonSessionSummary[] | undefined)[];
 }
 
 function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
   const pinnedAt = Date.parse(session.pinnedAt ?? '');
-  if (Number.isFinite(pinnedAt)) return pinnedAt;
-  // Pins recorded before pinnedAt existed: fall back to activity so the
-  // order stays deterministic.
-  const activity = Date.parse(session.updatedAt ?? session.createdAt ?? '');
-  return Number.isFinite(activity) ? activity : 0;
+  return Number.isFinite(pinnedAt) ? pinnedAt : 0;
 }
 
 // Pin order is stable: sessions sort by when they were pinned (new pins
@@ -1385,6 +1383,19 @@ export function WebShellSidebar({
       ),
     [secondaryPinnedSnapshots],
   );
+  const optimisticCatalogPages = useMemo(
+    () => [
+      ...(includePrimaryWorkspaceSessions ? [primaryPinnedSessions] : []),
+      ...secondaryPinnedSnapshots.map((snapshot) => snapshot.page?.sessions),
+      sessionsPage,
+    ],
+    [
+      includePrimaryWorkspaceSessions,
+      primaryPinnedSessions,
+      secondaryPinnedSnapshots,
+      sessionsPage,
+    ],
+  );
   const secondaryArchivedEnabled =
     archivedExpanded &&
     sessionArchiveEnabled &&
@@ -1484,37 +1495,20 @@ export function WebShellSidebar({
     },
     [optimisticPins, primaryWorkspaceCwd],
   );
-  // Drop optimistic entries once an authoritative list agrees with the
-  // target state (the post-toggle catalog refresh has landed).
+  // Drop optimistic entries only after the RPC has settled and a catalog page
+  // changed afterwards. Before that point, an old page can contradict the
+  // toggle or omit a row while its refresh is still in flight.
   useEffect(() => {
     if (optimisticPins.size === 0) return;
-    const authoritative = [
-      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
-      ...secondaryPinnedSessions,
-      ...sessions,
-    ];
+    const pages = optimisticCatalogPages;
     const staleIdentities: string[] = [];
     for (const [identity, entry] of optimisticPins) {
-      const current = authoritative.find(
-        (session) =>
-          getSessionIdentity(
-            session.sessionId,
-            session.workspaceCwd || primaryWorkspaceCwd,
-          ) === identity,
+      if (!entry.rpcSettled) continue;
+      const pagesChanged = pages.some(
+        (page, index) => page !== entry.catalogPages[index],
       );
-      // A pin reconciles once an authoritative list carries the target
-      // state. An unpin additionally reconciles when the row disappears
-      // from every list: the pinned page drops it after the refresh, and
-      // secondary-workspace rows never appear in the all-sessions page, so
-      // absence is the only reconciliation signal they get. (An unpin entry
-      // is only ever created while its row is rendered from a list, so
-      // disappearance cannot race the toggle itself.)
-      const reconciled = current
-        ? current.isPinned === entry.pinned
-        : entry.pinned === false;
-      if (reconciled) {
-        staleIdentities.push(identity);
-      }
+      if (!pagesChanged) continue;
+      staleIdentities.push(identity);
     }
     if (staleIdentities.length === 0) return;
     setOptimisticPins((previous) => {
@@ -1529,6 +1523,7 @@ export function WebShellSidebar({
     secondaryPinnedSessions,
     sessions,
     primaryWorkspaceCwd,
+    optimisticCatalogPages,
   ]);
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
@@ -3130,12 +3125,27 @@ export function WebShellSidebar({
         return;
       }
       const targetPinned = !session.isPinned;
+      const markRpcSettled = (): void => {
+        setOptimisticPins((previous) => {
+          const entry = previous.get(sessionIdentity);
+          if (!entry) return previous;
+          const next = new Map(previous);
+          next.set(sessionIdentity, {
+            ...entry,
+            rpcSettled: true,
+            catalogPages: optimisticCatalogPages,
+          });
+          return next;
+        });
+      };
       const applyOptimistic = (): void => {
         setOptimisticPins((previous) => {
           const next = new Map(previous);
           next.set(sessionIdentity, {
             session,
             pinned: targetPinned,
+            rpcSettled: false,
+            catalogPages: optimisticCatalogPages,
             ...(targetPinned ? { pinnedAt: new Date().toISOString() } : {}),
           });
           return next;
@@ -3164,6 +3174,7 @@ export function WebShellSidebar({
           isPinned: targetPinned,
         })
         .then(() => {
+          markRpcSettled();
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => {
@@ -3188,6 +3199,7 @@ export function WebShellSidebar({
       sessionCatalogController,
       setSessionBusy,
       t,
+      optimisticCatalogPages,
     ],
   );
 
@@ -5146,6 +5158,7 @@ export function WebShellSidebar({
                 channelGroupingEnabled={false}
                 ungroupedLabel={t('sidebar.groupUngrouped')}
                 excludePinned={selectedSessionSource !== 'channel'}
+                mapSession={applyOptimisticPin}
                 limitSessions={editingSessionIdentity === null}
                 autoExpandKey={
                   autoExpandWorkspace?.id === ws.id
@@ -5275,6 +5288,7 @@ export function WebShellSidebar({
                           deleteGroupLabel={t('sidebar.groupDelete')}
                           groupActionsDisabled={groupBusy}
                           excludePinned={selectedSessionSource !== 'channel'}
+                          mapSession={applyOptimisticPin}
                           limitSessions={editingSessionIdentity === null}
                           onOpenGitDiff={onOpenGitDiff}
                           onOpenCommit={onOpenCommit}

@@ -312,14 +312,14 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
         isPinned: true,
         pinnedAt: '2026-01-02T00:00:00.000Z',
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-05T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
       }),
       makeSession('older', {
         displayName: 'Older activity',
         isPinned: true,
         pinnedAt: '2026-01-01T00:00:00.000Z',
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-05T00:00:00.000Z',
       }),
     ];
     pinned.data = pinned.sessions;
@@ -328,32 +328,6 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Older activity', 'Recent activity']);
-  });
-
-  it('keeps legacy pins without pinnedAt in deterministic activity order', async () => {
-    // Pins recorded before pinnedAt existed fall back to activity time as a
-    // pin-time proxy; the section stays stable (ascending), never reshuffled
-    // by fresh activity on one row.
-    pinned.sessions = [
-      makeSession('stale', {
-        displayName: 'Stale legacy',
-        isPinned: true,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      }),
-      makeSession('fresh', {
-        displayName: 'Fresh legacy',
-        isPinned: true,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-03T00:00:00.000Z',
-      }),
-    ];
-    pinned.data = pinned.sessions;
-
-    renderSidebar();
-    await flushSidebar();
-
-    expect(pinnedListTitles()).toEqual(['Stale legacy', 'Fresh legacy']);
   });
 
   it('reflects pinning immediately without waiting for the daemon RPC', async () => {
@@ -379,6 +353,29 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     // hidden from the unpinned list while the RPC is in flight.
     expect(pinnedListTitles()).toEqual(['Plain session']);
     expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('appends an optimistic pin below existing pinned sessions', async () => {
+    pinned.sessions = [
+      makeSession('existing', {
+        displayName: 'Existing pin',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Existing pin', 'Plain session']);
   });
 
   it('reflects unpinning immediately without waiting for the daemon RPC', async () => {
@@ -433,6 +430,46 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
+  it('drops an optimistic pin when the refreshed catalog contradicts it', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    active.sessions = [
+      makeSession('plain', { displayName: 'Plain session', isPinned: false }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps an optimistic pin until a refreshed catalog settles', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+  });
+
   it('keeps one row when the authoritative pinned page lands after an optimistic pin', async () => {
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
@@ -457,25 +494,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     pinned.data = pinned.sessions;
     active.sessions = [];
     active.data = active.sessions;
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <WebShellSidebar
-            collapsed={false}
-            onCollapsedChange={() => {}}
-            onOpenSettings={() => {}}
-            onOpenDaemonStatus={() => {}}
-            onOpenScheduledTasks={() => {}}
-            onOpenGoals={() => {}}
-            onOpenSessions={() => {}}
-            onOpenSplitView={() => {}}
-            onNewSession={() => false}
-            onLoadSession={loadSession}
-            onError={() => {}}
-          />
-        </I18nProvider>,
-      );
-    });
+    renderSidebar();
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Plain session']);
@@ -507,25 +526,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     // The refresh lands and the pinned page drops the row.
     pinned.sessions = [];
     pinned.data = pinned.sessions;
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <WebShellSidebar
-            collapsed={false}
-            onCollapsedChange={() => {}}
-            onOpenSettings={() => {}}
-            onOpenDaemonStatus={() => {}}
-            onOpenScheduledTasks={() => {}}
-            onOpenGoals={() => {}}
-            onOpenSessions={() => {}}
-            onOpenSplitView={() => {}}
-            onNewSession={() => false}
-            onLoadSession={loadSession}
-            onError={() => {}}
-          />
-        </I18nProvider>,
-      );
-    });
+    renderSidebar();
     await flushSidebar();
 
     // Another client re-pins the session; a stale optimistic unpin entry
@@ -538,25 +539,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
       }),
     ];
     pinned.data = pinned.sessions;
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <WebShellSidebar
-            collapsed={false}
-            onCollapsedChange={() => {}}
-            onOpenSettings={() => {}}
-            onOpenDaemonStatus={() => {}}
-            onOpenScheduledTasks={() => {}}
-            onOpenGoals={() => {}}
-            onOpenSessions={() => {}}
-            onOpenSplitView={() => {}}
-            onNewSession={() => false}
-            onLoadSession={loadSession}
-            onError={() => {}}
-          />
-        </I18nProvider>,
-      );
-    });
+    renderSidebar();
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Only pinned']);

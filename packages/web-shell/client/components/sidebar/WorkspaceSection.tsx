@@ -106,6 +106,7 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -147,6 +148,7 @@ export function WorkspaceSection({
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  mapSession,
   showSessionDetails = true,
   headerActions,
   onRenameGroup,
@@ -428,15 +430,18 @@ export function WorkspaceSection({
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return sessions.filter((session) => {
-      if (excludePinned && session.isPinned) return false;
-      if (!query) return true;
-      const label = (session.displayName || '').toLowerCase();
-      return (
-        label.includes(query) || session.sessionId.toLowerCase().includes(query)
-      );
-    });
-  }, [excludePinned, searchQuery, sessions]);
+    return sessions
+      .map((session) => mapSession?.(session) ?? session)
+      .filter((session) => {
+        if (excludePinned && session.isPinned) return false;
+        if (!query) return true;
+        const label = (session.displayName || '').toLowerCase();
+        return (
+          label.includes(query) ||
+          session.sessionId.toLowerCase().includes(query)
+        );
+      });
+  }, [excludePinned, mapSession, searchQuery, sessions]);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions
