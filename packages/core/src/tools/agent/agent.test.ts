@@ -537,7 +537,7 @@ describe('AgentTool', () => {
         'an explicit false is rejected',
       );
       expect(properties.properties.run_in_background.description).toContain(
-        'explicit run_in_background: true is rejected',
+        'explicit run_in_background: true and configured background defaults',
       );
     });
 
@@ -1409,6 +1409,42 @@ describe('AgentTool', () => {
           plan_mode_required: true,
         }),
       ).toBeNull();
+    });
+
+    it('rejects read_only without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          read_only: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects read_only when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('rejects combining read_only with plan_mode_required', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/cannot be used together/i);
     });
 
     it('accepts redundant isolation for a named worktree teammate', () => {
