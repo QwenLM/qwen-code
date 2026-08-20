@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type {
   DaemonSseConnectReason,
@@ -504,19 +505,7 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   );
 }
 
-export function isDaemonSessionPrInfo(
-  value: unknown,
-): value is DaemonSessionPrInfo {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v['number'] === 'number' &&
-    Number.isInteger(v['number']) &&
-    v['number'] > 0 &&
-    typeof v['url'] === 'string' &&
-    /^https?:\/\//i.test(v['url'])
-  );
-}
+export { isDaemonSessionPrInfo } from './session-pr.js';
 
 /**
  * The daemon rejected a session branch because the requested checkpoint is

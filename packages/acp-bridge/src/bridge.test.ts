@@ -26457,6 +26457,106 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('bumps the catalog revision when a pr is bound', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion().revision;
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+      // Repeating the same binding must not bump again.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('echoes the current displayName on the pr metadata event', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'My Session',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      // SDK folds treat an absent displayName as "cleared", so the pr event
+      // must echo the current name instead of blanking the title.
+      expect((prEvent?.data as { displayName?: string }).displayName).toBe(
+        'My Session',
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('caps the binding list at MAX_SESSION_PRS, dropping the oldest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (let i = 1; i <= 12; i++) {
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: i, url: `https://github.com/o/r/pull/${i}` },
+        });
+      }
+
+      const prs = bridge.getSessionSummary(session.sessionId).prs;
+      expect(prs).toHaveLength(10);
+      expect(prs?.[0]?.number).toBe(3);
+      expect(prs?.[9]?.number).toBe(12);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not apply displayName when the combined pr is invalid', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'should-not-apply',
+          pr: { number: -1, url: 'https://github.com/o/r/pull/1' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it.each([
       [
         'non-integer number',
@@ -26465,6 +26565,10 @@ describe('createAcpSessionBridge', () => {
       ['missing url', { number: 1 }],
       ['empty url', { number: 1, url: '' }],
       ['non-http url', { number: 1, url: 'javascript:alert(1)' }],
+      [
+        'url over 2048 characters',
+        { number: 1, url: `https://github.com/${'a'.repeat(2048)}` },
+      ],
       ['null', null],
     ])('rejects an invalid pr: %s', async (_label, pr) => {
       const bridge = makeBridge({

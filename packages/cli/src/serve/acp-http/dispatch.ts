@@ -2911,15 +2911,25 @@ export class AcpDispatcher {
               );
               // The bridge keeps the binding in live memory only; persist it
               // as a sidecar so it survives daemon restarts, matching the
-              // REST metadata routes.
-              const latestPr = result?.prs?.[result.prs.length - 1];
-              if (latestPr) {
+              // REST metadata routes. Gate on this call actually binding a
+              // PR — the bridge echoes `prs` whenever any binding exists, so
+              // a displayName-only rename must not re-upsert (it would
+              // refresh createdAt and could evict an older entry early).
+              const boundPr = metadata['pr'];
+              if (
+                isObject(boundPr) &&
+                typeof boundPr['number'] === 'number' &&
+                typeof boundPr['url'] === 'string'
+              ) {
                 const service = new SessionService(this.boundWorkspace, {
                   runtimeBaseDir: this.sessionRuntimeBaseDir,
                 });
                 await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                  latestPr,
+                  {
+                    number: boundPr['number'],
+                    url: boundPr['url'],
+                  },
                 );
               }
             } finally {

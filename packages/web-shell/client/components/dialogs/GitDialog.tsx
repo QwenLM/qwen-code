@@ -103,7 +103,12 @@ export function GitDialog({
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  // Reset only when the prop actually changes — an unconditional render-body
+  // sync would clobber the fresh id the dialog resolves for its own side
+  // queries (commit-message generation) before the PR binding reads it.
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   // btwSession with automatic retry: if the resolved session is stale
   // (daemon restarted, session evicted), force-create a new one and retry.

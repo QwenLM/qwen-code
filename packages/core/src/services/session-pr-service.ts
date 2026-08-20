@@ -28,6 +28,9 @@ export interface SessionPr {
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
 
+/** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
+export const SESSION_PR_URL_MAX_LENGTH = 2048;
+
 interface SessionPrList {
   prs: SessionPr[];
 }
@@ -44,6 +47,7 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     Number.isInteger(v['number']) &&
     v['number'] > 0 &&
     typeof v['url'] === 'string' &&
+    v['url'].length <= SESSION_PR_URL_MAX_LENGTH &&
     /^https?:\/\//i.test(v['url']) &&
     typeof v['createdAt'] === 'string'
   );
@@ -102,21 +106,36 @@ export async function writeSessionPrs(
   await atomicWriteJSON(filePath, { prs } satisfies SessionPrList);
 }
 
+// Serializes read-modify-write cycles per sidecar path: concurrent bindings
+// for the same session must not interleave (read [] → read [] → write [A] →
+// write [B] would silently drop A). A failed predecessor must not block
+// later bindings.
+const upsertQueue = new Map<string, Promise<unknown>>();
+
 /**
  * Insert or refresh a binding (matched by PR number) and persist the list,
  * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
  * number moves to the end (latest) with a fresh createdAt.
  */
-export async function upsertSessionPr(
+export function upsertSessionPr(
   filePath: string,
   pr: { number: number; url: string },
 ): Promise<SessionPr[]> {
-  const existing = (await readSessionPrs(filePath)) ?? [];
-  const rest = existing.filter((entry) => entry.number !== pr.number);
-  const next = [
-    ...rest,
-    { number: pr.number, url: pr.url, createdAt: new Date().toISOString() },
-  ].slice(-SESSION_PR_LIST_LIMIT);
-  await writeSessionPrs(filePath, next);
+  const run = async (): Promise<SessionPr[]> => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const rest = existing.filter((entry) => entry.number !== pr.number);
+    const next = [
+      ...rest,
+      { number: pr.number, url: pr.url, createdAt: new Date().toISOString() },
+    ].slice(-SESSION_PR_LIST_LIMIT);
+    await writeSessionPrs(filePath, next);
+    return next;
+  };
+  const previous = upsertQueue.get(filePath) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  upsertQueue.set(filePath, next);
+  void next.finally(() => {
+    if (upsertQueue.get(filePath) === next) upsertQueue.delete(filePath);
+  });
   return next;
 }

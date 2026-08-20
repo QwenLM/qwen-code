@@ -85,6 +85,7 @@ import {
   Storage,
   TrustGateError,
   readSessionPrs,
+  upsertSessionPr,
   type Extension,
   type CommittedExtensionMutation,
   type PrepareExtensionInstallOptions,
@@ -15281,6 +15282,45 @@ describe('createServeApp', () => {
       expect(res.body.sessions[0].sessionId).toBe(id);
     });
 
+    it('merges sidecar pr history with the live entry bindings on list', async () => {
+      // The live entry only knows bindings from this daemon lifetime; the
+      // sidecar holds the full history. Binding A pre-restart, restarting
+      // (live entry resets), then binding B must still list [A, B] — the
+      // stacked-PR-across-restart case.
+      const id = '550e8400-e29b-41d4-a716-446655440003';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
     it('passes fractional cursor values to SessionService without truncating', async () => {
       const listSessionsSpy = vi
         .spyOn(SessionService.prototype, 'listSessions')
@@ -25661,6 +25701,13 @@ describe('createServeApp', () => {
       const secondaryBridge = fakeBridge();
       const { app } = createWorkspaceMetadataApp(secondaryBridge);
       const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState('session-A', 'active'),
+        {
+          force: true,
+        },
+      );
       const res = await auth(
         request(app).patch(
           '/workspaces/ws-secondary/session/session-A/metadata',
@@ -25675,7 +25722,6 @@ describe('createServeApp', () => {
           context: undefined,
         },
       ]);
-      const service = new SessionService(WS_DIFFERENT);
       const sidecar = await readSessionPrs(
         service.getPrSessionPathForArchiveState('session-A', 'active'),
       );
@@ -25685,6 +25731,13 @@ describe('createServeApp', () => {
     it('accumulates multiple pr bindings on the workspace route', async () => {
       const secondaryBridge = fakeBridge();
       const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState('session-A', 'active'),
+        {
+          force: true,
+        },
+      );
       for (const number of [9600, 9601]) {
         const res = await auth(
           request(app).patch(
@@ -25701,9 +25754,49 @@ describe('createServeApp', () => {
         ),
       ).send({ pr: { number: 9602, url: 'https://github.com/o/r/pull/9602' } });
       // The sidecar persists the full history, so the response echoes every
-      // binding (9517 from the previous test, then 9600-9602).
+      // binding in binding order.
       expect(last.body.prs.map((p: { number: number }) => p.number)).toEqual([
-        9517, 9600, 9601, 9602,
+        9600, 9601, 9602,
+      ]);
+    });
+
+    it('echoes the sidecar list, not the bridge echo, when they disagree', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sid, m) => ({
+          displayName: m.displayName,
+          ...(m.pr
+            ? {
+                prs: [
+                  {
+                    number: 9001,
+                    url: 'https://github.com/o/r/pull/9001',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        'session-A',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9000,
+        url: 'https://github.com/o/r/pull/9000',
+      });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ pr: { number: 9002, url: 'https://github.com/o/r/pull/9002' } });
+      expect(res.status).toBe(200);
+      // The bridge (this-daemon memory) only knows 9001; the sidecar is the
+      // complete history and wins the echo.
+      expect(res.body.prs.map((p: { number: number }) => p.number)).toEqual([
+        9000, 9002,
       ]);
     });
 
@@ -25732,20 +25825,22 @@ describe('createServeApp', () => {
         .mockResolvedValue('active');
       try {
         const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const service = new SessionService(WS_DIFFERENT);
+        await fsp.rm(
+          service.getPrSessionPathForArchiveState('session-A', 'active'),
+          { force: true },
+        );
         const res = await auth(
           request(app).patch(
             '/workspaces/ws-secondary/session/session-A/metadata',
           ),
         ).send({ pr });
         expect(res.status).toBe(200);
-        // Re-binding 9517 moves it to latest (earlier tests bound 9600-9602).
-        expect(res.body.prs?.[res.body.prs.length - 1]).toEqual(pr);
-        const service = new SessionService(WS_DIFFERENT);
+        expect(res.body.prs).toEqual([pr]);
         const sidecar = await readSessionPrs(
           service.getPrSessionPathForArchiveState('session-A', 'active'),
         );
-        expect(sidecar?.[sidecar.length - 1]?.number).toBe(9517);
-        expect(sidecar?.[sidecar.length - 1]?.url).toBe(pr.url);
+        expect(sidecar?.map((p) => p.number)).toEqual([9517]);
       } finally {
         locationSpy.mockRestore();
       }

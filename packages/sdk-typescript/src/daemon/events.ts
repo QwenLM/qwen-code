@@ -15,6 +15,7 @@ import type {
   PermissionOutcome,
   PromptContentBlock,
 } from './types.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
 // validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
@@ -2648,17 +2649,6 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
   );
 }
 
-function isSessionPrInfo(value: unknown): value is DaemonSessionPrInfo {
-  return (
-    isRecord(value) &&
-    typeof value['number'] === 'number' &&
-    Number.isInteger(value['number']) &&
-    value['number'] > 0 &&
-    typeof value['url'] === 'string' &&
-    /^https?:\/\//i.test(value['url'])
-  );
-}
-
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
@@ -2671,7 +2661,8 @@ function isSessionMetadataUpdatedData(
   }
   const prs = value['prs'];
   return (
-    prs === undefined || (Array.isArray(prs) && prs.every(isSessionPrInfo))
+    prs === undefined ||
+    (Array.isArray(prs) && prs.every(isDaemonSessionPrInfo))
   );
 }
 

@@ -87,7 +87,7 @@ import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { sessionMatchesGitQuery } from './sessionSearch';
-import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -822,7 +822,6 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const openExternalLink = useExternalLinkOpener();
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -3621,34 +3620,7 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const prs = session.prs ?? [];
-      const latestPr = prs.length > 0 ? prs[prs.length - 1] : undefined;
-      const prBadge = latestPr ? (
-        <a
-          className={styles.sessionPrBadge}
-          href={latestPr.url}
-          target="_blank"
-          rel="noreferrer"
-          aria-label={t('sidebar.sessionPr', { number: latestPr.number })}
-          title={
-            prs.length > 1
-              ? t('sidebar.sessionPrMultiple', {
-                  number: latestPr.number,
-                  count: prs.length,
-                })
-              : latestPr.url
-          }
-          onClick={(event) => {
-            event.stopPropagation();
-            openExternalLink(event, latestPr.url);
-          }}
-          onDoubleClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-        >
-          #{latestPr.number}
-          {prs.length > 1 ? ` +${prs.length - 1}` : ''}
-        </a>
-      ) : null;
+      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -4171,7 +4143,6 @@ export function WebShellSidebar({
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
-      openExternalLink,
       openGroupMenuFromAnchor,
       saveRename,
       sessionActionItems,

@@ -2,7 +2,7 @@ import { type ReactNode } from 'react';
 import { type DaemonSessionSummary } from '@qwen-code/webui/daemon-react-sdk';
 import { dp } from './dialogStyles';
 import { useI18n } from '../../i18n';
-import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { SessionPrBadge } from '../SessionPrBadge';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 
 interface SessionRowProps {
@@ -64,10 +64,8 @@ export function SessionRow({
   onActivate,
 }: SessionRowProps) {
   const { t } = useI18n();
-  const openExternalLink = useExternalLinkOpener();
   const timestamp = session.updatedAt || session.createdAt;
   const prs = session.prs ?? [];
-  const latestPr = prs.length > 0 ? prs[prs.length - 1] : undefined;
 
   return (
     <div
@@ -95,31 +93,9 @@ export function SessionRow({
         <span className={dp('picker-item-title')}>
           {session.displayName || session.sessionId.slice(0, 8)}
         </span>
-        {latestPr && (
-          <a
-            className={dp('picker-item-pr-badge')}
-            href={latestPr.url}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={t('sidebar.sessionPr', { number: latestPr.number })}
-            title={
-              prs.length > 1
-                ? t('sidebar.sessionPrMultiple', {
-                    number: latestPr.number,
-                    count: prs.length,
-                  })
-                : latestPr.url
-            }
-            onClick={(event) => {
-              event.stopPropagation();
-              openExternalLink(event, latestPr.url);
-            }}
-            onDoubleClick={(event) => event.stopPropagation()}
-          >
-            #{latestPr.number}
-            {prs.length > 1 ? ` +${prs.length - 1}` : ''}
-          </a>
-        )}
+        {/* role="option" rows own roving-tabindex keyboard navigation, so
+            the badge must not steal a tab stop. */}
+        <SessionPrBadge prs={prs} tabIndex={-1} />
         {trailing}
       </div>
       <div className={dp('picker-item-meta')}>

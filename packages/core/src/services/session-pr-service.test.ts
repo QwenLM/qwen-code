@@ -68,6 +68,10 @@ describe('readSessionPrs', () => {
       'entry non-http url',
       { prs: [{ ...entry(1), url: 'javascript:alert(1)' }] },
     ],
+    [
+      'entry url over 2048 characters',
+      { prs: [{ ...entry(1), url: `https://github.com/${'a'.repeat(2048)}` }] },
+    ],
     ['entry missing createdAt', { prs: [{ number: 1, url: entry(1).url }] }],
   ])('returns null for a malformed sidecar: %s', async (_label, value) => {
     await fs.writeFile(filePath, JSON.stringify(value), 'utf-8');
@@ -119,5 +123,18 @@ describe('upsertSessionPr', () => {
     expect(prs?.[SESSION_PR_LIST_LIMIT - 1]?.number).toBe(
       SESSION_PR_LIST_LIMIT + 2,
     );
+  });
+
+  it('serializes concurrent upserts so no binding is dropped', async () => {
+    // Without the per-path queue, interleaved read-modify-write cycles would
+    // let a later writer overwrite an earlier binding (read [] → read [] →
+    // write [A] → write [B]).
+    await Promise.all([
+      upsertSessionPr(filePath, { number: 100, url: entry(100).url }),
+      upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
+      upsertSessionPr(filePath, { number: 102, url: entry(102).url }),
+    ]);
+    const prs = await readSessionPrs(filePath);
+    expect(prs?.map((p) => p.number)).toEqual([100, 101, 102]);
   });
 });

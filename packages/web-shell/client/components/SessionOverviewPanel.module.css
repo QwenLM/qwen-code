@@ -142,39 +142,6 @@
   background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
-.prBadge {
-  flex: 0 0 auto;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 7px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 18px;
-  white-space: nowrap;
-  text-decoration: none;
-  /* Same accent as the sidebar / picker badges — one element, one color. */
-  background: color-mix(
-    in srgb,
-    var(--color-accent-fg, #8b5cf6) 10%,
-    transparent
-  );
-  color: color-mix(
-    in srgb,
-    var(--color-accent-fg, #8b5cf6) 95%,
-    var(--foreground)
-  );
-}
-
-.prBadge:hover {
-  background: color-mix(
-    in srgb,
-    var(--color-accent-fg, #8b5cf6) 18%,
-    transparent
-  );
-}
-
 .cardMeta {
   display: flex;
   align-items: center;

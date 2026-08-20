@@ -1251,6 +1251,8 @@ function writeServeDebugLine(message: string): void {
 const MAX_DISPLAY_NAME_LENGTH = 256;
 /** Bound on the per-session PR binding list; oldest are dropped beyond it. */
 const MAX_SESSION_PRS = 10;
+/** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
+const MAX_SESSION_PR_URL_LENGTH = 2048;
 
 /**
  * Upper bound on how many prompt content blocks the bridge echoes per
@@ -9616,11 +9618,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           !Number.isInteger((pr as SessionPrInfo).number) ||
           (pr as SessionPrInfo).number <= 0 ||
           typeof (pr as SessionPrInfo).url !== 'string' ||
+          (pr as SessionPrInfo).url.length > MAX_SESSION_PR_URL_LENGTH ||
           !/^https?:\/\//i.test((pr as SessionPrInfo).url)
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            'must be an object with a positive integer `number` and an http(s) `url`',
+            'must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters',
           );
         }
       }
@@ -9707,7 +9710,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              data: { sessionId, prs: entry.prs },
+              // Echo the current name: SDK folds treat an absent displayName
+              // as "cleared", so a pr-only event must not blank the title.
+              data: {
+                sessionId,
+                ...(entry.displayName !== undefined
+                  ? { displayName: entry.displayName }
+                  : {}),
+                prs: entry.prs,
+              },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }
                 : {}),

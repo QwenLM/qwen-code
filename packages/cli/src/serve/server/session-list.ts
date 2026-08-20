@@ -403,10 +403,9 @@ async function enrichWorktreeSidecars(
 /**
  * Enrich persisted session summaries with GitHub PR bindings from sidecar
  * files so the binding survives daemon restarts. Same pattern as
- * {@link enrichWorktreeSidecars}. Live entries only accumulate bindings
- * from this daemon lifetime, so sidecar history is merged in rather than
- * skipped when the summary already carries live bindings (deduped by PR
- * number, the live entry's url wins, live-only bindings sort latest).
+ * {@link enrichWorktreeSidecars}. Runs before the live merge, when the map
+ * only holds persisted summaries — {@link mergeLiveSessionSummary} merges
+ * these with the live entry's daemon-lifetime bindings.
  */
 async function enrichPrSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
@@ -430,14 +429,10 @@ async function enrichPrSidecars(
       sidecar = null;
     }
     if (sidecar) {
-      const live = summary.prs ?? [];
-      const merged = [
-        ...sidecar
-          .filter((entry) => !live.some((l) => l.number === entry.number))
-          .map(({ number, url }) => ({ number, url })),
-        ...live,
-      ];
-      bySessionId.set(sessionId, { ...summary, prs: merged });
+      bySessionId.set(sessionId, {
+        ...summary,
+        prs: sidecar.map(({ number, url }) => ({ number, url })),
+      });
     }
   }
 }
@@ -482,7 +477,7 @@ function mergeLiveSessionSummary(
   existing: BridgeSessionSummary,
   live: BridgeSessionSummary,
 ): BridgeSessionSummary {
-  return {
+  const merged: BridgeSessionSummary = {
     ...existing,
     ...live,
     createdAt: existing.createdAt,
@@ -498,6 +493,20 @@ function mergeLiveSessionSummary(
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,
   };
+  // The live entry only knows PR bindings from this daemon lifetime while the
+  // sidecar-enriched persisted summary holds the full history — merge by PR
+  // number (live url wins, live-only bindings sort latest) instead of letting
+  // the spread overwrite the history.
+  if (existing.prs || live.prs) {
+    const livePrs = live.prs ?? [];
+    merged.prs = [
+      ...(existing.prs ?? []).filter(
+        (p) => !livePrs.some((l) => l.number === p.number),
+      ),
+      ...livePrs,
+    ];
+  }
+  return merged;
 }
 
 function clonePersistedSummary(

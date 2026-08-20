@@ -2112,11 +2112,12 @@ export function registerSessionRoutes(
       !Number.isInteger(number) ||
       number <= 0 ||
       typeof url !== 'string' ||
+      url.length > 2048 ||
       !/^https?:\/\//i.test(url)
     ) {
       res.status(400).json({
         error:
-          '`pr` must be an object with a positive integer `number` and an http(s) `url`',
+          '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters',
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -5240,24 +5241,27 @@ export function registerSessionRoutes(
             : undefined;
         let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
         try {
+          // Persist first: the sidecar holds the full binding history (the
+          // live bridge entry only knows bindings from this daemon
+          // lifetime), and writing it before the bridge mutation means a
+          // failure in either step still leaves the binding durable.
+          let persistedPrs: Array<{ number: number; url: string }> | undefined;
+          if (pr) {
+            const service = createWorkspaceRuntimeSessionService(runtime);
+            persistedPrs = (
+              await upsertSessionPr(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                pr,
+              )
+            ).map(({ number, url }) => ({ number, url }));
+          }
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
             { displayName, ...(pr ? { pr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
-          if (pr) {
-            const service = createWorkspaceRuntimeSessionService(runtime);
-            // The sidecar holds the full binding history (the live bridge
-            // entry only knows bindings from this daemon lifetime), so the
-            // persisted list is the complete one to echo back.
-            const persisted = await upsertSessionPr(
-              service.getPrSessionPathForArchiveState(sessionId, 'active'),
-              pr,
-            );
-            effective = {
-              ...effective,
-              prs: persisted.map(({ number, url }) => ({ number, url })),
-            };
+          if (persistedPrs) {
+            effective = { ...effective, prs: persistedPrs };
           }
         } finally {
           invalidateSessionLists(runtime, ['active']);
@@ -5361,27 +5365,37 @@ export function registerSessionRoutes(
               prs?: Array<{ number: number; url: string }>;
             };
             try {
+              // Persist first: the sidecar holds the full binding history
+              // (the live bridge entry only knows bindings from this daemon
+              // lifetime), and writing it before the bridge mutation means a
+              // failure in either step still leaves the binding durable. If
+              // the bridge then reports the session as not live, the
+              // persisted fallback re-upserts at the located state — the
+              // number-keyed upsert makes that idempotent.
+              let persistedPrs:
+                | Array<{ number: number; url: string }>
+                | undefined;
+              if (pr) {
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    pr,
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                assertRuntimeGenerationOpen?.();
+              }
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
                 { displayName, ...(pr ? { pr } : {}) },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
-              if (pr) {
-                const service = createWorkspaceRuntimeSessionService(runtime);
-                // The sidecar holds the full binding history (the live
-                // bridge entry only knows bindings from this daemon
-                // lifetime), so the persisted list is the complete one to
-                // echo back.
-                const persisted = await upsertSessionPr(
-                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                  pr,
-                );
-                assertRuntimeGenerationOpen?.();
-                effective = {
-                  ...effective,
-                  prs: persisted.map(({ number, url }) => ({ number, url })),
-                };
+              if (persistedPrs) {
+                effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;

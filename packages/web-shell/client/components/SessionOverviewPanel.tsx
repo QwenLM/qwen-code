@@ -16,7 +16,7 @@ import type {
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
-import { useExternalLinkOpener } from '../hooks/useExternalLinkOpener';
+import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import {
@@ -173,7 +173,6 @@ function SessionOverviewPanelInner({
   workspaceCwd?: string;
 }) {
   const { t } = useI18n();
-  const openExternalLink = useExternalLinkOpener();
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
@@ -428,35 +427,7 @@ function SessionOverviewPanelInner({
                   {t('sessionsOverview.current')}
                 </span>
               )}
-              {card.prs && card.prs.length > 0 && (
-                <a
-                  className={styles.prBadge}
-                  href={card.prs[card.prs.length - 1].url}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={t('sidebar.sessionPr', {
-                    number: card.prs[card.prs.length - 1].number,
-                  })}
-                  title={
-                    card.prs.length > 1
-                      ? t('sidebar.sessionPrMultiple', {
-                          number: card.prs[card.prs.length - 1].number,
-                          count: card.prs.length,
-                        })
-                      : card.prs[card.prs.length - 1].url
-                  }
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openExternalLink(
-                      event,
-                      card.prs?.[card.prs.length - 1]?.url,
-                    );
-                  }}
-                >
-                  #{card.prs[card.prs.length - 1].number}
-                  {card.prs.length > 1 ? ` +${card.prs.length - 1}` : ''}
-                </a>
-              )}
+              <SessionPrBadge prs={card.prs ?? []} />
             </div>
             <div className={styles.cardMeta}>
               <span
