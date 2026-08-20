@@ -173,6 +173,7 @@ export default {
   'toolDisplayName.ReadFile': '讀取檔案',
   'toolDisplayName.ZoomImage': '縮放圖像',
   'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.ZvecGrep': '語義搜尋',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '運行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',

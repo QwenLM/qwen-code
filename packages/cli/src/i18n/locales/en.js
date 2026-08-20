@@ -182,6 +182,7 @@ export default {
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
   'toolDisplayName.ZoomImage': 'toolDisplayName.ZoomImage',
   'toolDisplayName.Grep': 'toolDisplayName.Grep',
+  'toolDisplayName.ZvecGrep': 'toolDisplayName.ZvecGrep',
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',
   'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',

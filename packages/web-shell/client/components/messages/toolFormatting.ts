@@ -18,6 +18,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   zoom_image: 'ZoomImage',
   grep: 'Grep',
   grep_search: 'Grep',
+  zvec_grep: 'ZvecGrep',
   glob: 'Glob',
   run_shell_command: 'Shell',
   todo_write: 'TodoList',

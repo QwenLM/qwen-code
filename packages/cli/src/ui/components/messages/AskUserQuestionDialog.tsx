@@ -88,13 +88,17 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     ? null
     : confirmationDetails.questions[currentQuestionIndex];
   const isMultiSelect = currentQuestion?.multiSelect ?? false;
+  const allowCustomInput = currentQuestion?.allowCustomInput !== false;
   // Options + custom input ("Other")
-  const totalOptions = currentQuestion ? currentQuestion.options.length + 1 : 2;
+  const totalOptions = currentQuestion
+    ? currentQuestion.options.length + (allowCustomInput ? 1 : 0)
+    : 2;
 
   // Check if the custom input option is selected
   const isCustomInputSelected =
     !isSubmitTab &&
     currentQuestion &&
+    allowCustomInput &&
     selectedIndex === currentQuestion.options.length;
 
   const getCustomInputValue = (idx: number) =>
@@ -103,6 +107,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   const isCustomInputAnswer =
     !isSubmitTab &&
     currentQuestion &&
+    allowCustomInput &&
     !isMultiSelect &&
     selectedOptions[currentQuestionIndex] !== undefined &&
     !currentQuestion.options.some(
@@ -331,7 +336,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         // Handle multi-select: Enter advances to next question / submits
         if (isMultiSelect && currentQuestion) {
           // Custom input is handled by TextInput's onSubmit
-          if (selectedIndex === currentQuestion.options.length) {
+          if (
+            allowCustomInput &&
+            selectedIndex === currentQuestion.options.length
+          ) {
             return;
           }
           handleMultiSelectSubmit();
@@ -523,7 +531,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         })}
 
         {/* Type something option/input */}
-        <Box flexDirection="column">
+        <Box
+          flexDirection="column"
+          display={allowCustomInput ? 'flex' : 'none'}
+        >
           {isCustomInputSelected ? (
             // Inline TextInput replaces the option text
             <Box>
