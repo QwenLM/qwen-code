@@ -514,6 +514,67 @@ async function persistedSessionExistsForLiveEntry(
   );
 }
 
+async function persistedLiveSessionIdsOutsidePage(
+  sessionService: SessionService,
+  liveSessionIds: readonly string[],
+  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
+  byCanonicalId: ReadonlyMap<string, string | undefined>,
+  shouldProbe: boolean,
+  signal?: AbortSignal,
+): Promise<ReadonlySet<string>> {
+  if (!shouldProbe) return new Set();
+  const unmatched = [
+    ...new Set(
+      liveSessionIds.filter(
+        (sessionId) =>
+          persistedSessionIdForLiveEntry(
+            sessionId,
+            bySessionId,
+            byCanonicalId,
+          ) === undefined,
+      ),
+    ),
+  ];
+  if (unmatched.length === 0) return new Set();
+
+  let resolved: Map<string, string | undefined>;
+  try {
+    resolved = await sessionService.findSessionIdsIgnoringCase(unmatched);
+  } catch {
+    signal?.throwIfAborted();
+    const individual = new Set<string>();
+    for (const sessionId of unmatched) {
+      signal?.throwIfAborted();
+      if (
+        await persistedSessionExistsForLiveEntry(
+          sessionService,
+          sessionId,
+          signal,
+        )
+      ) {
+        individual.add(sessionId);
+      }
+      signal?.throwIfAborted();
+    }
+    return individual;
+  }
+  signal?.throwIfAborted();
+
+  const active = await Promise.all(
+    unmatched.map(async (sessionId) => {
+      const persistedSessionId = resolved.get(sessionId);
+      if (persistedSessionId === undefined) return undefined;
+      return (await sessionService.sessionExists(persistedSessionId, {
+        ...(signal ? { signal } : {}),
+      }))
+        ? sessionId
+        : undefined;
+    }),
+  );
+  signal?.throwIfAborted();
+  return new Set(active.filter((sessionId) => sessionId !== undefined));
+}
+
 function clonePersistedSummary(
   session: Readonly<BridgeSessionSummary>,
 ): BridgeSessionSummary {
@@ -871,6 +932,14 @@ async function listOrganizedWorkspaceSessionsForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+      const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
+        sessionService,
+        liveSessions.map((session) => session.sessionId),
+        bySessionId,
+        persistedSessionIdByCanonicalId,
+        isFirstPage && persisted.truncated,
+        readOptions.signal,
+      );
       for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
@@ -909,12 +978,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           // above and this point: `existing` stayed undefined but
           // `sessionExists` flipped to true, silently dropping the live
           // session from the response instead of merging it.
-          (!persisted.truncated ||
-            !(await persistedSessionExistsForLiveEntry(
-              sessionService,
-              live.sessionId,
-              readOptions.signal,
-            )))
+          (!persisted.truncated || !persistedLiveSessionIds.has(live.sessionId))
         ) {
           bySessionId.set(
             live.sessionId,
@@ -1065,7 +1129,16 @@ async function listWorkspaceSessionsByMetadataForResponse(
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
-      for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+      const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+      const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
+        sessionService,
+        liveSessions.map((session) => session.sessionId),
+        bySessionId,
+        persistedSessionIdByCanonicalId,
+        persisted.truncated,
+        readOptions.signal,
+      );
+      for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
           bySessionId,
@@ -1085,11 +1158,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
           // already covers every persisted session, so skip the racy
           // re-check when nothing was truncated.
           !persisted.truncated ||
-          !(await persistedSessionExistsForLiveEntry(
-            sessionService,
-            live.sessionId,
-            readOptions.signal,
-          ))
+          !persistedLiveSessionIds.has(live.sessionId)
         ) {
           bySessionId.set(live.sessionId, {
             ...live,
@@ -1296,6 +1365,14 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
+    sessionService,
+    liveSessions.map((session) => session.sessionId),
+    bySessionId,
+    persistedSessionIdByCanonicalId,
+    isFirstPage && persisted.nextCursor != null,
+    readOptions.signal,
+  );
   for (const live of liveSessions) {
     const persistedSessionId = persistedSessionIdForLiveEntry(
       live.sessionId,
@@ -1316,11 +1393,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
       // silently dropping the live session from the response instead of
       // merging it.
       (persisted.nextCursor == null ||
-        !(await persistedSessionExistsForLiveEntry(
-          sessionService,
-          live.sessionId,
-          readOptions.signal,
-        )))
+        !persistedLiveSessionIds.has(live.sessionId))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,

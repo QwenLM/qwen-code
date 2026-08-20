@@ -15145,9 +15145,77 @@ describe('createServeApp', () => {
       });
     });
 
+    it('batches mixed-case probes for live rows outside the persisted page', async () => {
+      const liveSessionIds = [
+        '550e8400-e29b-41d4-a716-446655440020',
+        '550e8400-e29b-41d4-a716-446655440021',
+      ];
+      for (const [index, sessionId] of liveSessionIds.entries()) {
+        await writeStoredSession({
+          sessionId: sessionId.toUpperCase(),
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T12:0${index}:00.000Z`,
+          prompt: `legacy mixed-case task ${index}`,
+          mtime: new Date(`2026-05-17T12:0${index}:00.000Z`),
+        });
+      }
+      const newestSessionId = '550e8400-e29b-41d4-a716-446655440022';
+      await writeStoredSession({
+        sessionId: newestSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:10:00.000Z',
+        prompt: 'newest persisted task',
+        mtime: new Date('2026-05-17T12:10:00.000Z'),
+      });
+      const bridge = fakeBridge({
+        listImpl: () =>
+          liveSessionIds.map((sessionId) => ({
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          })),
+      });
+      const batchLookup = vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdsIgnoringCase',
+      );
+      const individualLookup = vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      );
+
+      try {
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { size: 1 },
+          { runtimeBaseDir: runtimeDir },
+        );
+
+        expect(result.sessions.map((session) => session.sessionId)).toEqual([
+          newestSessionId,
+        ]);
+        expect(batchLookup).toHaveBeenCalledOnce();
+        expect(batchLookup).toHaveBeenCalledWith(liveSessionIds);
+        expect(individualLookup).not.toHaveBeenCalled();
+      } finally {
+        batchLookup.mockRestore();
+        individualLookup.mockRestore();
+      }
+    });
+
     it('keeps a live-only row when its optional case-alias probe fails', async () => {
       await writeStoredSessions(2);
       const liveSessionId = '550e8400-e29b-41d4-a716-446655440099';
+      const findSessionIds = vi
+        .spyOn(SessionService.prototype, 'findSessionIdsIgnoringCase')
+        .mockRejectedValue(
+          Object.assign(new Error('batch storage unavailable'), {
+            code: 'EIO',
+          }),
+        );
       const findSessionId = vi
         .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockRejectedValue(
@@ -15179,6 +15247,52 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId: liveSessionId }),
         );
       } finally {
+        findSessionIds.mockRestore();
+        findSessionId.mockRestore();
+      }
+    });
+
+    it('does not start individual alias probes after a batch abort', async () => {
+      await writeStoredSessions(2);
+      const liveSessionId = '550e8400-e29b-41d4-a716-446655440098';
+      const controller = new AbortController();
+      const reason = new Error('session list cancelled');
+      const findSessionIds = vi
+        .spyOn(SessionService.prototype, 'findSessionIdsIgnoringCase')
+        .mockImplementation(async () => {
+          controller.abort(reason);
+          throw Object.assign(new Error('batch storage unavailable'), {
+            code: 'EIO',
+          });
+        });
+      const findSessionId = vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      );
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:10:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      try {
+        await expect(
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { size: 1 },
+            { runtimeBaseDir: runtimeDir, signal: controller.signal },
+          ),
+        ).rejects.toBe(reason);
+        expect(findSessionId).not.toHaveBeenCalled();
+      } finally {
+        findSessionIds.mockRestore();
         findSessionId.mockRestore();
       }
     });
@@ -23997,6 +24111,52 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('reads a both-states transcript from its unique live owner', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababac';
+      const secondaryDir = path.join(runtimeDir, 'conflicted-live-owner');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      await writeTranscriptSession(sid, 'archived', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => ({
+          sessionId: sid,
+          workspaceCwd: secondaryWs,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 0,
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid },
+      ]);
+    });
+
     it('rejects transcript requests with ambiguous live session ownership', async () => {
       const sid = '55555555-bbbb-cccc-dddd-abcdabcdabcd';
       const secondaryDir = path.join(runtimeDir, 'ambiguous-secondary');
@@ -24127,7 +24287,7 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
-    it('prefers active ordinary sessions without losing internal archive errors', async () => {
+    it('preserves archive errors and rejects ambiguous active copies across runtimes', async () => {
       const archivedSid = '55555555-bbbb-cccc-dddd-b0b0b0b0b0b0';
       const conflictedSid = '55555555-bbbb-cccc-dddd-b1b1b1b1b1b1';
       const internalOnlyArchivedSid = '55555555-bbbb-cccc-dddd-b2b2b2b2b2b2';
@@ -24190,27 +24350,28 @@ describe('createServeApp', () => {
       const transcript = await request(app)
         .get(`/session/${archivedSid}/transcript`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const exported = await request(app)
-        .get(`/session/${conflictedSid}/export?format=json`)
+      const ambiguousTranscript = await request(app)
+        .get(`/session/${conflictedSid}/transcript`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       const internalOnlyTranscript = await request(app)
         .get(`/session/${internalOnlyArchivedSid}/transcript`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const internalOnlyExport = await request(app)
-        .get(`/session/${internalOnlyConflictedSid}/export?format=json`)
+      const internalOnlyTranscriptFromActive = await request(app)
+        .get(`/session/${internalOnlyConflictedSid}/transcript`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(transcript.status).toBe(200);
-      expect(exported.status).toBe(200);
-      expect(exported.text).toContain(conflictedSid);
+      expect(ambiguousTranscript.status).toBe(500);
+      expect(ambiguousTranscript.body.code).toBe('ambiguous_session_owner');
       expect(internalOnlyTranscript.status).toBe(409);
       expect(internalOnlyTranscript.body.code).toBe('session_archived');
-      expect(internalOnlyExport.status).toBe(409);
-      expect(internalOnlyExport.body.code).toBe('session_conflict');
+      expect(internalOnlyTranscriptFromActive.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([
         { sessionId: archivedSid },
       ]);
-      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: internalOnlyConflictedSid },
+      ]);
     });
 
     it('prefers structured transcript errors found after generic scan failures', async () => {
@@ -24329,6 +24490,31 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(409);
       expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('reads the active copy when the sole owner has both transcript states', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbc';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(sid, 'archived');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
     });
 
     it('returns 404 for missing active sessions before touching the bridge', async () => {

@@ -1647,14 +1647,10 @@ export function registerSessionRoutes(
       if (location === 'archived') {
         throw new SessionArchivedError(sessionId);
       }
-      if (location === 'conflict') {
-        // Ownership arbitration stays strict: a conflicted copy must not
-        // claim a session another workspace serves from its active copy.
-        // Single-runtime read paths resolve conflicts to the active copy
-        // via assertSessionLoadable instead.
-        throw new SessionConflictError(sessionId);
-      }
-      if (location !== 'active') return false;
+      // Both readable states still have one active copy. Treat that copy as an
+      // ownership candidate; the scans below reject multiple candidate
+      // runtimes before any transcript is read.
+      if (location !== 'active' && location !== 'conflict') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       return (
         (await readLoadableLiveConversationMetadata(sessionId, service)) !==
