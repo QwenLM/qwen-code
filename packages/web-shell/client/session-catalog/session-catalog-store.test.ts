@@ -1180,7 +1180,12 @@ describe('SessionCatalogStore', () => {
     // The waiter settles via a later staged commit (not exercised here), so
     // drop the promise; the wake fires synchronously inside refresh().
     void store.refresh(query('/work')).catch(() => undefined);
-    expect(wake).toHaveBeenCalledWith('/work');
+    expect(wake).toHaveBeenCalledWith('/work', false);
+
+    void store
+      .refresh(query('/work'), { interactive: true })
+      .catch(() => undefined);
+    expect(wake).toHaveBeenLastCalledWith('/work', true);
 
     stopWake();
     releaseLiveState();
