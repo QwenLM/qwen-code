@@ -2248,10 +2248,13 @@ describe('LoopDetectionService', () => {
       heuristicService.reset('global-dup');
 
       // Identical task_list calls whose results CHANGE never reach the
-      // global-duplicate threshold, no matter how they are interleaved.
+      // global-duplicate threshold, no matter how they are interleaved. Run
+      // past GLOBAL_DUPLICATE_THRESHOLD rounds so an args-only mutant (which
+      // would halt on the 6th same-args request) cannot hide in a short
+      // phase.
       const interleaved = ['task_list', 'tool_b', 'tool_c'];
       let stateOrdinal = 0;
-      for (let round = 0; round < 3; round++) {
+      for (let round = 0; round < GLOBAL_DUPLICATE_THRESHOLD + 1; round++) {
         for (const name of interleaved) {
           const args = name === 'task_list' ? TASK_LIST_ARGS : { step: round };
           expect(
@@ -2404,6 +2407,175 @@ describe('LoopDetectionService', () => {
         );
       }
       expect(fired).toBe(false);
+    });
+
+    it('restarts result-aware pair counts on Retry under the heuristic gate', () => {
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('retry-pair-reset');
+
+      // Record GLOBAL_DUPLICATE_THRESHOLD - 1 identical frozen (call,
+      // result) pairs, interleaved with a distinct tool so the consecutive
+      // guard never fires.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(
+          heuristicService.addAndCheck(
+            createToolCallRequestEvent('tool_b', { step: i }),
+          ),
+        ).toBe(false);
+        expect(heuristicService.addAndCheck(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        expect(
+          heuristicService.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult('frozen board'),
+          ),
+        ).toBe(false);
+      }
+
+      expect(
+        heuristicService.checkAlwaysOnSafeties({
+          type: GeminiEventType.Retry,
+        } as ServerGeminiStreamEvent),
+      ).toBe(false);
+
+      // The replayed attempt is judged on its own results: one more frozen
+      // pair is pair #1 after the Retry clear, not #threshold.
+      expect(
+        heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'replay' }),
+        ),
+      ).toBe(false);
+      expect(heuristicService.addAndCheck(taskListEvent('replay-0'))).toBe(
+        false,
+      );
+      expect(
+        heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        ),
+      ).toBe(false);
+    });
+
+    it('clears result-aware pair counts across prompts on reset()', () => {
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('prompt-1');
+
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(
+          heuristicService.addAndCheck(
+            createToolCallRequestEvent('tool_b', { step: i }),
+          ),
+        ).toBe(false);
+        expect(heuristicService.addAndCheck(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        expect(
+          heuristicService.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult('frozen board'),
+          ),
+        ).toBe(false);
+      }
+
+      heuristicService.reset('prompt-2');
+
+      // A poller that saw the same frozen board five times in prompt 1 must
+      // not trip the global-duplicate gate on its first poll of prompt 2.
+      expect(
+        heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'p2' }),
+        ),
+      ).toBe(false);
+      expect(heuristicService.addAndCheck(taskListEvent('p2-0'))).toBe(false);
+      expect(
+        heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        ),
+      ).toBe(false);
+    });
+
+    it('halts an interleaved frozen poller just past the adaptive soft cap', () => {
+      // CLI default: skipLoopDetection=true. The request-time cap tracker
+      // skips stateful tools and the result-time global-duplicate halt is
+      // gated off, so the cap's stuck signal fed by recordToolResult pair
+      // counts is the only live halt path for an interleaved frozen poller.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-frozen');
+
+      let fired = false;
+      let totalCalls = 0;
+      for (let round = 0; round < 40 && !fired; round++) {
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        totalCalls++;
+        if (fired) break;
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) break;
+        capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // Halts just past the soft cap (20) once the stuck signal is armed,
+      // far below the hard backstop (20 * 10).
+      expect(totalCalls).toBeLessThanOrEqual(22);
+    });
+
+    it('re-judges a resumed streak on fresh result evidence after a streak break', () => {
+      const unchanged = '#1 [in_progress] @peer-a — task';
+      // A 4-call identical streak with unchanged results.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(unchanged),
+        );
+      }
+
+      // A different tool breaks the consecutive streak; the result evidence
+      // accumulated within it must be discarded for both keys.
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: 1 }),
+        ),
+      ).toBe(false);
+
+      // Resume identical polling, recording only ONE changed result.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('resume-0'))).toBe(
+        false,
+      );
+      service.recordToolResult(
+        { name: 'task_list', args: TASK_LIST_ARGS },
+        taskListResult('board changed'),
+      );
+      for (let i = 1; i <= 3; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(taskListEvent(`resume-${i}`)),
+        ).toBe(false);
+      }
+
+      // The 5th request of the resumed streak expects 4 recorded results but
+      // only 1 was observed: missing evidence fails safe and halts, keeping
+      // the #5019 protection. Stale evidence from the broken streak must not
+      // satisfy the check and restart instead.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('resume-4'))).toBe(
+        true,
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
     });
   });
 });

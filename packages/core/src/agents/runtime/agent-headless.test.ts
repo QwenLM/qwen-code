@@ -2432,6 +2432,129 @@ describe('subagent.ts', () => {
         );
       });
 
+      it('halts interleaved frozen task_list polling via the result-time guard (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const fillerToolDef: FunctionDeclaration = {
+          name: 'tool_b',
+          description: 'Distinct filler work',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef, fillerToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list', 'tool_b'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        // Interleave a DISTINCT call between identical task_list polls: the
+        // consecutive-identical guard never fires (streaks reset), the
+        // alternating guard never fires (filler args differ every round),
+        // and request-time counting is bypassed for stateful tools — only
+        // the result-time global-duplicate guard in agent-core catches it.
+        const turns: Array<FunctionCall[] | 'stop'> = [];
+        for (let poll = 1; poll <= 6; poll++) {
+          turns.push([
+            { id: `poll_${poll}`, name: 'task_list', args: taskListArgs },
+          ]);
+          if (poll < 6) {
+            turns.push([
+              { id: `fill_${poll}`, name: 'tool_b', args: { step: poll } },
+            ]);
+          }
+        }
+        turns.push('stop');
+        mockSendMessageStream.mockImplementation(createMockStream(turns));
+
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // No teammate activity: every poll returns the identical board.
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '#7 [in_progress] @peer-a — task',
+            returnDisplay: 'Listed tasks',
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        const fillerInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Filler'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'filler done',
+            returnDisplay: 'Filler done',
+          }),
+        };
+        const fillerTool = {
+          name: 'tool_b',
+          displayName: 'Tool B',
+          description: 'Distinct filler work',
+          kind: 'READ' as const,
+          schema: fillerToolDef,
+          build: vi.fn().mockImplementation(() => fillerInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list'
+            ? taskListTool
+            : name === 'tool_b'
+              ? fillerTool
+              : undefined,
+        );
+
+        const finishEvents: Array<{ loopType?: string }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(event as { loopType?: string });
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 20 },
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        // 11 model turns: six task_list polls interleaved with five filler
+        // calls; the halt lands when the sixth frozen (call, result) pair is
+        // recorded, before a twelfth request.
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(11);
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(6);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(finishEvents).toHaveLength(1);
+        expect(finishEvents[0].loopType).toBe('global_tool_call_duplicate');
+      });
+
       it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
         const taskListToolDef: FunctionDeclaration = {
           name: 'task_list',
