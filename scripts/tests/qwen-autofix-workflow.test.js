@@ -10288,6 +10288,8 @@ exit 1
       'Operate only in the workflow',
       'Run required verification commands before committing',
       'Verify with a mutation probe before',
+      'temporarily remove or negate the new guard or branch',
+      'and confirm they FAIL; then restore it',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
