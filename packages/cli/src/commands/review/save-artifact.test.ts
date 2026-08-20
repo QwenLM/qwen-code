@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
-import { buildReport, type Finding } from './findings.js';
+import { buildReport, type Finding } from '../../utils/findings.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
@@ -67,6 +67,20 @@ const verdict = {
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
+  // Non-empty for the same reason — absent defaults to [].
+  floorEnforced: [1],
+  // Non-zero on purpose too, but for the OPPOSITE reason to its siblings:
+  // this field's absence is preserved, not defaulted, so the fixture value
+  // proves passthrough against a validator that would otherwise omit the
+  // field entirely.
+  postedInline: 3,
+  // Also non-default on purpose — and on the DEFAULTING side, with
+  // `deferredCount` and `floorEnforced`: an absent `bodyTrim` reads as an
+  // untrimmed one and the field is always emitted. Spelled out rather than
+  // said as "the same reason", which would now resolve against the
+  // preserved-absence block above it and teach the opposite of what
+  // `save-artifact.ts` does.
+  bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -302,6 +316,178 @@ describe('saveReviewArtifact', () => {
       expect(existsSync(paths.out)).toBe(false);
     },
   );
+
+  it.each([
+    ['a string', 'junk'],
+    ['a negative index', [-1]],
+    ['a fraction', [1.5]],
+  ])(
+    'refuses a present floorEnforced of the wrong shape (%s)',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absence default must not
+      // swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, floorEnforced: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/floorEnforced/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['not an object', 'trimmed'],
+    [
+      'a negative section count',
+      { sections: -1, deferralList: false, fold: false, truncated: false },
+    ],
+    [
+      'a fractional section count',
+      { sections: 1.5, deferralList: false, fold: false, truncated: false },
+    ],
+    [
+      'a non-boolean deferralList',
+      { sections: 1, deferralList: 'yes', fold: false, truncated: false },
+    ],
+    [
+      'a non-boolean truncated',
+      // `fold` present and valid: the validator checks sections,
+      // deferralList, fold, truncated in that order, and without it this
+      // case threw on the fold clause — leaving the truncated clause it
+      // exists to pin with zero deciding coverage.
+      { sections: 1, deferralList: false, fold: false, truncated: 1 },
+    ],
+    [
+      'a non-boolean fold',
+      { sections: 1, deferralList: false, fold: 'yes', truncated: false },
+    ],
+    ['a falsy non-null bodyTrim', false],
+  ] as const)('refuses a present bodyTrim carrying %s', (_label, bad) => {
+    // Same reasoning as deferredCount above: the absent-means-default arm
+    // exists for pre-budget composed files, and it must not become a
+    // laundering path for a present record that says nothing true.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, bodyTrim: bad });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/bodyTrim/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it.each(['sections', 'deferralList', 'fold', 'truncated'] as const)(
+    'refuses a present bodyTrim with no `%s` — that shape never shipped',
+    (key) => {
+      // The object-level default below covers a composed file from a CLI
+      // predating the budget. Within a PRESENT record there is no such
+      // history to be kind to: every build that writes `bodyTrim` writes
+      // all four fields, so a missing one is a malformed record — and the
+      // validator is strict about all four, not only `fold`.
+      const paths = fixture();
+      const bodyTrim = { ...(verdict.bodyTrim as Record<string, unknown>) };
+      delete bodyTrim[key];
+      writeJson(paths.composed, { ...verdict, bodyTrim });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/bodyTrim/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['a string', 'three'],
+    ['a negative', -1],
+    ['a fraction', 1.5],
+  ])(
+    'refuses a present postedInline of the wrong shape (%s)',
+    (_label, bad) => {
+      // The sibling discipline: the absent-means-zero arm exists for
+      // pre-telemetry composed files and must not launder a present value
+      // that says nothing true into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, postedInline: bad });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/postedInline/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('PRESERVES an absent or null postedInline — zero would assert an unobserved count', () => {
+    // The one field here whose absence is not defaulted. Its siblings'
+    // defaults are true of a pre-feature round (it deferred nothing,
+    // enforced nothing, trimmed nothing); a pre-telemetry round DID post,
+    // so a written zero would invent a count — and would be
+    // indistinguishable from a genuinely converged round. `lowSignal` in
+    // the same function already persists null rather than a default.
+    const paths = fixture();
+    const { postedInline: _absent, ...preTelemetry } = verdict;
+    for (const composed of [preTelemetry, { ...verdict, postedInline: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect('postedInline' in saved.verdict).toBe(false);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('persists a recorded zero — a converged round is an observation', () => {
+    // The other half of the same distinction: absence is unknown, zero is a
+    // measurement, and the artifact must carry the difference.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, postedInline: 0 });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
+    ).toBe(0);
+  });
+
+  it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount
+    // pair — an undefined-only check would refuse a composed file that
+    // wrote null, breaking the backward compatibility this field promises.
+    const paths = fixture();
+    const { floorEnforced: _absent, ...preEnforcement } = verdict;
+    for (const composed of [
+      preEnforcement,
+      { ...verdict, floorEnforced: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect(saved.verdict.floorEnforced).toEqual([]);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {
+    const paths = fixture();
+    const { bodyTrim: _absent, ...preBudget } = verdict;
+    for (const composed of [preBudget, { ...verdict, bodyTrim: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim,
+      ).toEqual({
+        sections: 0,
+        deferralList: false,
+        fold: false,
+        truncated: false,
+      });
+      rmSync(paths.out, { force: true });
+    }
+  });
 
   it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
     // Null rides the same absence semantics compose-review's own toCount

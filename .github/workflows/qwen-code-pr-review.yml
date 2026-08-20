@@ -553,53 +553,34 @@ jobs:
         run: |-
           set -uo pipefail
           # Pool wipe idiom (serve-ab.yml, qwen-triage.yml): empties the
-          # workspace but keeps the directory itself for the retry checkout,
-          # so no cd-escape and no recreation are needed. The sudo leg only
-          # helps on pool members WITH passwordless sudo; on the rest a
-          # root-owned poisoning degrades to warn-and-retry — the heal chain
-          # must never fail, so the retry still runs against survivors.
+          # workspace but keeps the directory itself for the retry checkout.
+          # GITHUB_WORKSPACE is set by actions/runner (always
+          # <runner workspace>/<repo>/<repo>), so the `:?` guard is the only
+          # STRING check this needs. The wipe also validates the filesystem
+          # OBJECT at $WS against its resolved path: `[ -L ]`/`[ -d ]` see
+          # only the FINAL path component, so a symlinked INTERMEDIATE
+          # component would pass both and let find delete content OUTSIDE
+          # the runner workspace through the redirection, then run the
+          # secret-bearing review step there — refuse any path that does not
+          # resolve to itself instead. A legitimate workspace is always a
+          # runner-created plain directory with no symlink components, so
+          # refusal costs nothing. The sudo leg only helps on pool members
+          # WITH passwordless sudo; on the rest a root-owned poisoning
+          # degrades to warn-and-retry — the heal chain must never fail, so
+          # the retry still runs against survivors.
           WS="${GITHUB_WORKSPACE:?}"
-          # Canonicalize before matching: the kernel resolves non-canonical
-          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
-          # /usr), so a raw string match lets them slip past the case arms.
-          # `-m` is GNU-only — a BSD realpath exits 1 on it and the fallback
-          # silently keeps the raw spelling. Safe here (this pool is
-          # Linux-only), and off-GNU the strip loop and the allowlist below
-          # are what still hold; the suite gates its GNU-only assertion on a
-          # host probe rather than assuming this line ran.
-          WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
-          # Trailing slashes slip past the exact-match case arms below
-          # (`/home/` would pass the guard and reach the rm); realpath strips
-          # them too, but this keeps the guard whole when realpath is absent.
-          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
-          case "$WS" in
-            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: $WS"; exit 1 ;;
-          esac
-          # A denylist can only enumerate known roots — the allowlist closes
-          # every other one (/tmp, /opt, ...): only a directory inside the
-          # runner workspace may be wiped.
-          RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
-          # Mirror the WS strip: without realpath, a trailing slash would
-          # turn the allowlist pattern into "$RWS"//* and refuse the real
-          # workspace; "/" stripped empty would match every path instead.
-          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
-          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
-          case "$WS" in
-            "$RWS"/*) ;;
-            *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;
-          esac
-          if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
+          if [ "$(realpath -- "$WS")" != "$WS" ] || [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            echo "::error::workspace is not a plain directory or resolves through symlinks: $WS"
+            exit 1
+          fi
+          if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
             echo "::warning::first checkout failed; wiped the workspace for a clean retry"
           else
             echo "::warning::could not wipe the workspace; the retry checkout may fail again"
           fi
-          # Triage counts survivors and exits 1; here the chain must stay
-          # alive for the retry, so survivors only get a signal.
-          remaining="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | wc -l | tr -d ' ')"
-          if [ "$remaining" != '0' ]; then
-            survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
-            echo "::warning::${remaining} entries survived the workspace wipe: ${survivors}; the retry checkout runs against them"
+          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::workspace wipe left survivors: ${survivors}; the retry checkout runs against them"
           fi
 
       - name: 'Checkout base branch (retry)'
@@ -1326,6 +1307,7 @@ jobs:
           KIND=''
           run_review_once() {
             local attempt_timeout="$1"
+            local attempt_prompt="$2"
             OUTCOME='fatal'
             REASON=''
             KIND=''
@@ -1382,7 +1364,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
-              --prompt "$PROMPT" \
+              --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
             local ps=("${PIPESTATUS[@]}")
@@ -1478,16 +1460,17 @@ jobs:
 
           # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
           # exceed the single-review budget (nor the job timeout), and that
-          # shared budget is the only thing that needs to bound them. A retry
-          # re-runs the whole review from scratch rather than resuming the failed
-          # one, so on a large PR it spends minutes re-fetching, re-chunking and
-          # re-launching agents before the first finding exists — a short retry
-          # cap makes the retry die on the clock instead of clearing the
-          # transient it was meant to clear. Every attempt therefore gets the
-          # whole remaining budget. Retry only a `retryable` outcome, only once,
-          # and only when enough budget is left for the retry to plausibly
-          # finish; below that, report the transient failure so the next run
-          # starts over with a full budget.
+          # shared budget is the only thing that needs to bound them. Each retry
+          # runs FRESH — a retry re-runs the whole review from scratch rather
+          # than resuming the failed one. `--resume` is a local convenience
+          # only: on CI the review runs no-sandbox on the reviewed PR's own
+          # code, and `runNonInteractiveCli`'s cleanup deletes the attempt's
+          # worktree the moment it exits, so there is no interrupted state on
+          # disk for a next attempt to continue — a resume would refuse
+          # `worktree-gone` and start over anyway. Retry only a `retryable`
+          # outcome, only once, and only when enough budget is left for the
+          # retry to plausibly finish; below that, report the transient failure
+          # so the next run starts over with a full budget.
           BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
           RETRY_BACKOFF_SECONDS=60
           RETRY_MIN_SECONDS=600
@@ -1499,7 +1482,7 @@ jobs:
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
-            run_review_once "$attempt_timeout"
+            run_review_once "$attempt_timeout" "$PROMPT"
             if [ "$OUTCOME" = "success" ]; then
               break
             fi

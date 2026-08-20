@@ -51,24 +51,30 @@ import {
   type CommandResult,
 } from './build-test.js';
 import { failingFilesOf } from './lib/failing-files.js';
+import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
  * this command will hand to a shell.
  *
  * The report is a FILE this reads and then executes from, with `shell: true`,
- * in the base worktree. Nothing else in the pipeline re-executes a string it
- * read back off disk, so nothing else has to care where that string came from;
- * this does. The workspace token is a directory, and a directory is a name a
- * pull request can choose: `packages/x";curl …|sh;"` is a legal path in git
- * and on Linux, and it round-trips through the report into a shell.
+ * in the base worktree. Nothing else re-executes a string it read back off
+ * disk except `build-test --resume`, and both gates are the SAME imported
+ * predicate, defined beside the emitter (`testCommand` in npm-toolchain):
+ * two byte-identical copies once guarded the two re-execution sites, and a
+ * grammar change applied to one would have silently diverged them — this
+ * file skipping a valid stored command (the under-measurement direction this
+ * command exists to avoid) while the other kept accepting it. The workspace
+ * token is a directory, and a directory is a name a pull request can choose:
+ * `packages/x";curl …|sh;"` is a legal path in git and on Linux, and it
+ * round-trips through the report into a shell.
  *
  * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched here —
- * and anything outside it is skipped and disclosed rather than run, which is
+ * produces `npm test` and `npm test --workspace="<dir>"`, both matched — and
+ * anything outside it is skipped and disclosed rather than run, which is
  * the same treatment every other thing this command cannot do gets.
  */
-const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
+const RERUNNABLE_COMMAND_RE = TEST_COMMAND_RE;
 
 /** `trimOutput`'s own marker — the one signal that a stored output is partial. */
 const TRIM_MARKER_RE = /\.\.\. \[\d+ characters omitted/;

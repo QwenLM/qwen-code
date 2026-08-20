@@ -426,6 +426,106 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the composed body budget and its trim order', () => {
+    // A body over GitHub's limit is rejected whole — blockers included — so
+    // the trim ORDER is the policy: a later "simplify the prose" edit that
+    // drops it would leave the model free to shorten findings itself, which
+    // is the one thing this must never license.
+    const body = skillBody();
+    expect(body).toContain('rejected by the API **whole**');
+    expect(body).toContain('**the Chinese fold first**');
+    expect(body).toContain(
+      'then the deferral display, then the not-reviewed disclosures',
+    );
+    // The other half of the policy. A "simplify the prose" edit turning
+    // `never` into `last` would leave every prefix pin matching while the
+    // skill started licensing the one trim this budget exists to refuse.
+    expect(body).toContain(
+      '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
+    );
+    // The last-resort cut has its own order, and it is the opposite of the
+    // rung order above: there, the undecided list never yields; here, it is
+    // the first thing spent, because the author already has it.
+    expect(body).toContain(
+      "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
+    );
+    // The placement rule is what keeps the last resort bounded: a notice
+    // below the cut has to survive whatever the cut left open, and three
+    // hand models of that shipped three classes of divergence.
+    expect(body).toContain(
+      '**that notice rides above the cut, with the others**',
+    );
+    expect(body).toContain('You do not shorten anything yourself to help it');
+    // Where a trimmed section can still be read is not uniform, and the
+    // generalized promise ("stays whole in the artifact") is false for the
+    // disclosures: the artifact persists findings, counts and the trimmed
+    // body. Pin the split, and the terminal-summary duty it creates.
+    expect(body).toContain(
+      '**a finding it trims stays whole in the findings artifact**',
+    );
+    expect(body).toContain(
+      '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    expect(body).toContain(
+      '**say in your Step 6 terminal summary what was trimmed and what it said.**',
+    );
+    // Step 8 makes the same promise about the deferral list from the other
+    // end. It drifted once already — the budget can drop the whole list, not
+    // just the entries past its 20-line cap — so pin the qualification here
+    // rather than let the two paragraphs disagree about the same channel.
+    expect(body).toContain(
+      'Their durable record on the PR is the POSTED deferral list',
+    );
+    expect(body).toContain(
+      'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
+    // The tails carry the load: without them the paragraph reads as a
+    // durability promise again, which is the drift this pin exists for.
+    expect(body).toContain('so an overflowing body can carry none of it');
+    expect(body).toContain('has no cross-round record on the PR at all');
+    expect(body).toContain(
+      "when the budget trims it, the terminal summary is where the author's copy comes from",
+    );
+  });
+
+  it('pins the resume branch on Step 1', () => {
+    // The resume flow is prose over three subcommands (`fetch-pr --resume`,
+    // `recover-findings`, the round re-entry); a later edit dropping any leg
+    // leaves `--resume` silently starting fresh runs. Pin the load-bearing
+    // sentences.
+    const body = skillBody();
+    expect(body).toContain('Resuming an interrupted run (`--resume`)');
+    expect(body).toContain('review recover-findings');
+    expect(body).toContain('`{"resumed": true, ...}`');
+    expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
+    expect(body).toContain('resumes at round `k+1`');
+    expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+    // The restart bound survives a resume only through this reader; the
+    // effort pin and the lightweight inertness disclosure are the two
+    // silent-surprise fixes.
+    expect(body).toContain('`restartsSpent`');
+    expect(body).toContain('`effort-mismatch`');
+    expect(body).toContain('no effect in lightweight mode');
+    // R13-2: the effort rule must key on `effortSource`, so a `--comment`
+    // forced-high is passed through on a resume (a recorded lower level then
+    // refuses and runs fresh at high) rather than silently pinned — dropping
+    // the `forced-by-comment` arm re-creates the "comment at medium" state.
+    expect(body).toContain('`forced-by-comment`');
+    // R15-11: a resumed run must NOT re-take the incremental decision — the
+    // previous attempt's `incremental` field is history, so the continuation
+    // never enters the `upToDate` stop/cleanup branch that would destroy the
+    // reused worktree/lease.
+    expect(body).toContain('is now HISTORY, not a decision to re-take');
+    expect(body).toContain('This branch does not apply on a resumed run');
+    // The Step 7 half specifically: `restartsSpent` also appears in Step 1,
+    // so these anchor the restart-bound blockquote's own survival sentences —
+    // deleting or inverting them must fail here, not ship silently.
+    expect(body).toContain('One slice of this fact survives a resume');
+    expect(body).toContain(
+      "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either
@@ -453,7 +553,7 @@ describe('bundled review skill', () => {
       '"${QWEN_CODE_CLI:-qwen}" review meta <n> --repo <owner>/<repo>',
     );
     expect(body).toMatch(
-      /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
+      /meta <n> --repo <owner>\/<repo>` \(with `--host <host>` for every PR target/,
     );
     // The drift ruling's load-bearing semantic — what `headSha` is compared
     // against — must stay pinned, or a rewrite truncating the comparison
@@ -476,10 +576,10 @@ describe('bundled review skill', () => {
     // same-named repo. Both lines must stay subcommand-shaped.
     const body = skillBody();
     expect(body).toContain(
-      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (add `--host <host>` for Enterprise) and read its `ownerRepo`',
+      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (with `--host <host>` for every PR target — see Step 1\'s host rule) and read its `ownerRepo`',
     );
     expect(body).toContain(
-      'review meta {pr_number} --repo {owner}/{repo}` (add `--host <host>` for Enterprise) and read its `headSha`',
+      "review meta {pr_number} --repo {owner}/{repo}` (with `--host <host>` for every PR target — see Step 1's host rule) and read its `headSha`",
     );
   });
 
@@ -490,10 +590,10 @@ describe('bundled review skill', () => {
     // a hand-restored gh call silently routes at github.com.
     const body = skillBody();
     expect(body).toContain(
-      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt` (add `--host <host>` for Enterprise)',
+      'review fetch-diff <number> --repo <owner>/<repo> --host <host> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
     );
     expect(body).toContain(
-      '# GitHub Enterprise: add --host <host> — plan-diff records it',
+      '# add --host <host> (every PR target, including github.com) — plan-diff',
     );
     // Step 5 only plans the diff Step 1 already fetched — a second
     // fetch-diff would re-download it (and could race a head advance).
