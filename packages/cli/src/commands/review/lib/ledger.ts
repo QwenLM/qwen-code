@@ -141,8 +141,9 @@ export interface Ledger {
    * It cannot decide alone, and that is deliberate: the body it rides on is
    * another account's writable surface, so `compose-review` files nothing on
    * a recovered streak unless THIS round's own census is also above the bar.
-   * A forged streak can then buy a genuinely-churning pull request its
-   * finding one round early, and nothing else.
+   * Recovery hands this account only its OWN streak besides — a foreign
+   * winner's is stripped at the seam (`pr-context`) — so a forged marker
+   * plants neither the streak nor the finding.
    */
   churnRounds?: number;
 }

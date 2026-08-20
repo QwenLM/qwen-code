@@ -2471,6 +2471,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('welds the fix-witness format into the launched finder briefs', () => {
+    // The fix-witness mandate is pinned in SKILL.md by SKILL.test.ts, but
+    // this half is the one that actually reaches the agents: the
+    // FINDING_FORMAT embedded in every finder brief. Deleting the Fix
+    // witness line — or the exemption clause below it — shipped green once,
+    // because no test read a BUILT brief; launched finders would stop being
+    // asked for the criterion and Step 7's posting rule would go inert on
+    // every agent-built round. Pin both halves through the brief.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix witness:** <the test that must go RED if that fix is removed',
+    );
+    expect(brief).toContain('**This field never gates reporting**');
+  });
+
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,

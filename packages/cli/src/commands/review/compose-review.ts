@@ -1205,35 +1205,43 @@ export function composeReview(
     (Array.isArray(input.deferredSuggestions)
       ? input.deferredSuggestions.length
       : 0);
-  const readCensus = churnCensusOf(input.convergence);
+  // Round 1 has no predecessor whose fixes could have induced anything, so a
+  // census there is the same impossible shape `churnCensusOf` refuses for
+  // `induced > fresh` — refused symmetric with the round-0 streak guard in
+  // `prevLedgerFacts`. A legitimate round-1 census can only carry
+  // `induced = 0`, which never trips the bar, so this changes no verdict.
+  const readCensus = prevRound === 0 ? null : churnCensusOf(input.convergence);
   const churnCensus =
     readCensus !== null && readCensus.fresh > reportedThisRound
       ? null
       : readCensus;
   const churnAbove = aboveChurnBar(churnCensus);
+  // Below-minimum carries like absent: a census under CHURN_MIN_FRESH is a
+  // round that could not measure — a ratio over two or three findings is
+  // rounding, not a trend — and a round that could not measure carries the
+  // count without adding to it, exactly as the field's contract says.
+  // Resetting it instead zeroed a standing claim on the looping shape this
+  // exists for: above-bar rounds alternating with small ones never reached
+  // the filing bar.
   const churnRounds = churnAbove
     ? Math.min(prevFacts.churnRounds + 1, LEDGER_MAX_ROUND)
-    : churnCensus === null
+    : churnCensus === null || churnCensus.fresh < CHURN_MIN_FRESH
       ? prevFacts.churnRounds
       : 0;
-  // Filing needs a census IN HAND — not merely a streak. The streak arrives
-  // from a posted review body, which is another account's writable surface,
-  // and a forged `churnRounds` gated on nothing else would block an arbitrary
-  // pull request. Two things stop that, and the second is an INVARIANT OF THE
-  // ARITHMETIC ABOVE, so read them together before editing either:
-  //
-  //   - a round with no census of its own never files (this condition), and
-  //   - `churnRounds` can only REACH the filing bar by advancing, and it
-  //     advances only when this round is itself above the bar — because a
-  //     measured-low round resets it to 0 rather than carrying it.
-  //
-  // So "this round is measurably churning" is already required here, and an
-  // explicit `churnAbove &&` beside it was unreachable code that no mutation
-  // could redden. If the reset above is ever softened into a carry, this
-  // condition stops carrying that meaning and the explicit guard has to come
-  // back with it.
+  // Filing needs THIS ROUND above the bar — not merely a streak, and not a
+  // streak beside any census. The streak arrives from a posted review body,
+  // which is another account's writable surface, and a forged `churnRounds`
+  // gated on nothing else would block an arbitrary pull request; requiring
+  // this round's own census above the bar bounds the worst a forgery can do.
+  // The explicit `churnAbove` is load-bearing now that a below-minimum
+  // census CARRIES the streak: a carried streak at the bar beside a
+  // three-finding census satisfies `churnCensus && churnRounds >=
+  // CHURN_STREAK_TO_FILE` without this round measuring anything, and the
+  // guard is what keeps the blocker off it. Reaching the bar still takes at
+  // least two above-bar rounds — carrying never adds — so a filed blocker
+  // always has its two counted rounds behind it.
   const nonConvergence =
-    churnCensus && churnRounds >= CHURN_STREAK_TO_FILE
+    churnAbove && churnCensus && churnRounds >= CHURN_STREAK_TO_FILE
       ? nonConvergenceCritical(
           churnCensus,
           churnRounds,

@@ -9197,8 +9197,27 @@ describe('the convergence census and the non-convergence finding', () => {
     const r = round({ fresh: 11, induced: 7 });
     const l = parseLedger(r.body)!;
     expect(l.round).toBe(1);
-    expect(l.churnRounds).toBe(1);
+    // And no census either — the symmetric guard. Round 1 has no predecessor
+    // whose fixes could have induced anything, so a shape-valid
+    // `{fresh: 11, induced: 7}` there is the same impossible-census class
+    // `churnCensusOf` refuses for `induced > fresh`. Accepted, it arms the
+    // streak at 1, and the next round's honest above-bar census advances to
+    // 2 and files the blocker one round early — asserting "in every counted
+    // round at least half..." of a round that has no counted predecessor. A
+    // legitimate round-1 census can only carry `induced = 0`, which never
+    // trips the bar, so refusing it changes no verdict.
+    expect(l.churnRounds).toBeUndefined();
+    expect(l.fresh).toBeUndefined();
+    expect(l.induced).toBeUndefined();
     expect(r.body).not.toContain('is not converging');
+    // The refusal arms nothing but breaks nothing: round 2, with a real
+    // predecessor, reads its honest above-bar census and arms the streak
+    // exactly once — the filing still needs its two counted rounds.
+    prevLedger({ round: 1 });
+    const r2 = round({ fresh: 11, induced: 7 });
+    const l2 = parseLedger(r2.body)!;
+    expect(l2.churnRounds).toBe(1);
+    expect(r2.body).not.toContain('is not converging');
   });
 
   it('refuses a census that out-counts the round’s own reports', () => {
@@ -9225,6 +9244,121 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(l.fresh).toBeUndefined();
     expect(l.induced).toBeUndefined();
     expect(l.churnRounds).toBe(1);
+  });
+
+  it('pins the three-channel sum on BOTH non-drafted channels', () => {
+    // The cross-check's denominator sums inline drafts, body Criticals and
+    // deferrals, but the suite exercised the sum with only the drafted term
+    // populated — dropping either other term from the sum shipped green. A
+    // round reporting its first-appearing findings through body Criticals or
+    // deferrals would then trip `fresh > reported`, the census would be
+    // refused, and the streak carried instead of reset on a converging
+    // round: a genuinely churning PR's blocker arriving one round early,
+    // caused by the module itself. Each arm reports its whole census through
+    // ONE non-drafted channel, at the boundary from both sides.
+    const deferral = (i: number): DeferredEntry => ({
+      file: 'src/a.ts',
+      line: i + 1,
+      source: 'review',
+      severity: 'Suggestion',
+      title: `deferral ${i + 1}`,
+    });
+    // Equality — accepted: fresh equals the channel count, below the bar,
+    // so the streak RESETS. A mutant dropping the term refuses the census,
+    // carries the streak, and reds on the undefined assertion.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const byBody = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      bodyCriticals: ['blocker 1', 'blocker 2', 'blocker 3', 'blocker 4'],
+    });
+    expect(parseLedger(byBody.body)!.churnRounds).toBeUndefined();
+
+    prevLedger({ round: 3, churnRounds: 1 });
+    const byDeferral = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      deferredSuggestions: [deferral(0), deferral(1), deferral(2), deferral(3)],
+    });
+    expect(parseLedger(byDeferral.body)!.churnRounds).toBeUndefined();
+
+    // One past — refused: the streak CARRIES. Pins the `>` boundary in the
+    // deferral channel (the drafted channel's refusal is pinned above).
+    prevLedger({ round: 3, churnRounds: 1 });
+    const onePast = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 2 },
+      deferredSuggestions: [deferral(0), deferral(1), deferral(2)],
+    });
+    const l = parseLedger(onePast.body)!;
+    expect(l.churnRounds).toBe(1);
+    expect(onePast.body).not.toContain('is not converging');
+  });
+
+  it('CARRIES the streak through a below-minimum census', () => {
+    // Three findings cannot speak for a trend — that is what CHURN_MIN_FRESH
+    // exists to refuse — so a sub-minimum census is a round that COULD NOT
+    // measure, exactly as an absent one is: it carries the count without
+    // adding to it. Resetting instead wiped a standing claim on exactly the
+    // looping shape this mechanism targets: a pull request alternating
+    // above-bar rounds with below-minimum rounds then never reached the
+    // filing bar, because every small round zeroed what the churning one
+    // had counted.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 3, induced: 3 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(1);
+    // The census itself still rides the marker as telemetry.
+    expect(l.fresh).toBe(3);
+    expect(l.induced).toBe(3);
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('never files the blocker ON a below-minimum census', () => {
+    // The carry above must not turn a carried streak into a filing this
+    // round cannot itself vouch: the filing condition's invariant is that
+    // the round filing is measurably churning. With the reset softened to a
+    // carry, a streak already at the bar and a sub-minimum census in hand
+    // satisfy `churnCensus && churnRounds >= CHURN_STREAK_TO_FILE` — the
+    // explicit above-bar guard is what keeps the blocker off a round of
+    // three findings. The guard's revival is the code's own contract for
+    // softening the reset (see the filing-condition comment).
+    prevLedger({ round: 3, churnRounds: CHURN_STREAK_TO_FILE });
+    const r = round({ fresh: 3, induced: 3 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    expect(r.body).not.toContain('is not converging');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('the alternating loop DOES reach the filing bar', () => {
+    // The defect the carry closes, end to end: above-bar, below-minimum,
+    // above-bar. Under the old reset the middle round zeroed the streak and
+    // the blocker never fired; with the carry, the third round counts as
+    // the second counted round and files.
+    prevLedger({ round: 2 });
+    const first = round({ fresh: 10, induced: 6 });
+    expect(parseLedger(first.body)!.churnRounds).toBe(1);
+    prevLedger({ round: 3, churnRounds: 1 });
+    const small = round({ fresh: 3, induced: 3 });
+    expect(parseLedger(small.body)!.churnRounds).toBe(1);
+    prevLedger({ round: 4, churnRounds: 1 });
+    const third = round({ fresh: 11, induced: 7 });
+    expect(parseLedger(third.body)!.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    expect(third.body).toContain('is not converging');
+    expect(third.event).toBe('REQUEST_CHANGES');
   });
 
   it('keeps filing on every counted round past the streak bar', () => {

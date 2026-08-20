@@ -1356,6 +1356,47 @@ describe('latestLedger — the split trust surface', () => {
     expect(own?.ledger).toEqual(anchored);
   });
 
+  it('drops the churn state from ANOTHER account, keeping the work list', () => {
+    // The streak and its census are the same class of claim as the anchor:
+    // facts ABOUT the round that posted them, certified by the account that
+    // ran it. `stripAnchor` drops the range claim at this seam; left riding,
+    // a foreign marker's `churnRounds` reaches the side file through the
+    // identity-known write path, and any account that can submit a review
+    // can plant a streak — this account's next honest above-bar round then
+    // files the non-convergence blocker on a pull request that never
+    // churned. The work list still crosses: Step 6 re-rules it entry by
+    // entry against the code at HEAD, and the round counter is a shared id
+    // space. Only the streak state cannot be re-vouched across accounts.
+    const churning: Ledger = {
+      v: 1,
+      round: 4,
+      findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+      churnRounds: 4,
+      fresh: 10,
+      induced: 6,
+    };
+    const foreign = latestLedger(
+      [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'maintainer',
+    );
+    expect(foreign?.ledger.churnRounds).toBeUndefined();
+    expect(foreign?.ledger.fresh).toBeUndefined();
+    expect(foreign?.ledger.induced).toBeUndefined();
+    expect(foreign?.ledger.findings).toEqual(churning.findings);
+    expect(foreign?.ledger.round).toBe(4);
+    // The OWN account's churn state round-trips through the same seam: it is
+    // this account's certified streak, the state `compose-review` must carry
+    // on. A seam that stripped wholesale would reset the count on every
+    // recovery and make the blocker unreachable on a genuinely churning PR.
+    const own = latestLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'bot',
+    );
+    expect(own?.ledger.churnRounds).toBe(4);
+    expect(own?.ledger.fresh).toBe(10);
+    expect(own?.ledger.induced).toBe(6);
+  });
+
   it("recovers the winning review's own commit_id as the age reference", () => {
     // The reference must come from the SAME review the ledger came from — a
     // recovery that took the newest ledger but another review's commit_id

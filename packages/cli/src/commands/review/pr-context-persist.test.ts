@@ -20,7 +20,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { persistedAnchorSha, persistRecoveredLedger } from './pr-context.js';
+import {
+  persistRecoveredLedger,
+  persistedAnchorSha,
+  recoverLedger,
+} from './pr-context.js';
 import type { Ledger } from './lib/ledger.js';
 
 describe('persistRecoveredLedger', () => {
@@ -87,6 +91,58 @@ describe('persistRecoveredLedger', () => {
         commitId: 'a'.repeat(40),
         reviewId: 43,
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a FOREIGN winner reaching the side file carries no planted churn state', () => {
+    // The round trip for the recovery seam: any account that can submit a
+    // review can post a marker carrying `churnRounds`, and recovery adopts
+    // the highest round inside the headroom. If the foreign winner's streak
+    // rode the identity-known write into the side file, `compose-review`
+    // would read it back as THIS account's standing claim — one honest
+    // above-bar census later, the non-convergence blocker files on a pull
+    // request that never churned. The winner must reach the file with the
+    // churn state already gone, whichever write path carries it.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const ownMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":3,' +
+        '"findings":[{"id":"R3-1","sev":"S","file":"a.ts","title":"own"}],' +
+        '"churnRounds":1} -->';
+      const plantedMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"theirs"}],' +
+        '"churnRounds":4,"fresh":10,"induced":6} -->';
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: ownMarker,
+          },
+          {
+            id: 2,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: plantedMarker,
+          },
+        ],
+        'bot',
+      );
+      expect(recovered?.foreign).toBe(true);
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.churnRounds).toBeUndefined();
+      expect(written.fresh).toBeUndefined();
+      expect(written.induced).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

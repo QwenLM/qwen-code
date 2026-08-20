@@ -662,6 +662,14 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**Fix witness** — the test that must go RED if that fix is removed',
     );
+    // The aggregate slot: Step 6 names Fix witness in the pattern-aggregated
+    // format, so the Step 4 template it points at must carry the slot — an
+    // aggregate whose fix adds a guard otherwise ships every expanded comment
+    // without the acceptance criterion, silently defeating the "the line
+    // reaches every fixer" property for exactly the aggregated shape.
+    expect(body).toContain(
+      "- **Fix witness:** <the group's shared acceptance criterion",
+    );
     expect(body).toContain(
       'And a comment whose fix adds a guard carries the test that must pin it',
     );

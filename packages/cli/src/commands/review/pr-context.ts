@@ -933,8 +933,11 @@ export function recoverLedger(
   }
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
-  // no consumer downstream has to remember the rule.
-  let ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  // no consumer downstream has to remember the rule. The churn state is the
+  // same class of claim and crosses with it — see `stripChurnState`.
+  let ledger = best.foreign
+    ? stripChurnState(stripAnchor(best.ledger))
+    : best.ledger;
   // A FOREIGN winner never DISPLACES this account's own findings — it is
   // merged over them. Round-first selection alone handed a drive-by poster a
   // one-comment suppression: a marker at `ownMax + 1` (deep inside the
@@ -1242,6 +1245,42 @@ export function persistRecoveredLedger(
 function stripAnchor(ledger: Ledger): Ledger {
   if (ledger.sha === undefined && ledger.model === undefined) return ledger;
   const { sha: _sha, model: _model, ...rest } = ledger;
+  return rest;
+}
+
+/**
+ * The same ledger with its convergence streak and census removed.
+ *
+ * The streak is a standing claim about the pull request built round by round
+ * by the account that ran those rounds — the same class of claim as the
+ * anchor, and as little re-vouchable across accounts. Left on a foreign
+ * winner, it rides the identity-known write into the side file, and any
+ * account that can submit a review can plant one: the next honest above-bar
+ * round then files the non-convergence blocker on a pull request that never
+ * churned, past the one-round-early bound the mechanism documents for
+ * forged streaks. Dropped here, at the seam, so no write path can carry a
+ * foreign streak into the side file; the anonymous-advance drop in
+ * `persistRecoveredLedger` stays as defence in depth. The census goes with
+ * the streak — it describes the foreign round, and `compose-review` reads
+ * neither off a recovered ledger, only off the side file this seam feeds.
+ * The work list, the round counter and the age reference still cross: the
+ * first is re-ruled entry by entry, the second is a shared id space, and
+ * the third is API provenance about their round.
+ */
+function stripChurnState(ledger: Ledger): Ledger {
+  if (
+    ledger.churnRounds === undefined &&
+    ledger.fresh === undefined &&
+    ledger.induced === undefined
+  ) {
+    return ledger;
+  }
+  const {
+    churnRounds: _churnRounds,
+    fresh: _fresh,
+    induced: _induced,
+    ...rest
+  } = ledger;
   return rest;
 }
 
