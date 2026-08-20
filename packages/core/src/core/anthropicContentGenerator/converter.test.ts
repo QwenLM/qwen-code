@@ -1026,7 +1026,13 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
-    it('merges thinking blocks before non-thinking blocks', () => {
+    it('merges consecutive assistant messages by straight concatenation, preserving chronological order across the merge', () => {
+      // Interleaved-thinking-2025-05-14 is unconditionally enabled whenever
+      // `thinking` is set (see buildPerRequestHeaders), so hoisting every
+      // thinking block ahead of both messages' other content is wrong -- it
+      // would move "text A" (which chronologically precedes "thought B") to
+      // after it. A straight concatenation of each side's already-ordered
+      // blocks preserves true chronological order across the merge.
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1064,9 +1070,57 @@ describe('AnthropicContentConverter', () => {
       expect(assistant?.role).toBe('assistant');
       const blocks = assistant?.content as Array<{ type: string }>;
       expect(blocks[0]?.type).toBe('thinking');
-      expect(blocks[1]?.type).toBe('thinking');
-      expect(blocks[2]?.type).toBe('text');
+      expect(blocks[1]?.type).toBe('text');
+      expect(blocks[2]?.type).toBe('thinking');
       expect(blocks[3]?.type).toBe('tool_use');
+    });
+
+    it('pins current behavior: a merge can produce a content array not led by a thinking block when the first message has none', () => {
+      // Known residual risk (not fixed here, flagged for follow-up):
+      // Anthropic's manual-mode extended thinking requires the FINAL
+      // assistant turn of a thinking-enabled request to begin with a
+      // thinking block (adaptive mode relaxes this). Straight concatenation
+      // is correct chronological ordering, but if the first of two merged
+      // messages has no leading thinking block and the merge result becomes
+      // the trailing assistant turn sent to a manual-mode (pre-4.7) model,
+      // the resulting content array's first block would not be `thinking`.
+      // This is pinning today's accepted behavior, not asserting it is safe
+      // in that scenario -- see the design discussion for reachability.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'no thinking here' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'thought B', thought: true, thoughtSignature: 'sigB' },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{ type: string }>;
+      expect(blocks[0]?.type).toBe('text');
+      expect(blocks[1]?.type).toBe('thinking');
+      expect(blocks[2]?.type).toBe('tool_use');
     });
 
     it('cleans orphaned tool_use blocks without matching tool_result', () => {

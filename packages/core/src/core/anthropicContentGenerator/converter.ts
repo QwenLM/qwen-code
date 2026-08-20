@@ -1362,9 +1362,19 @@ export class AnthropicContentConverter {
  * pairing and cause HTTP 400 "tool_use ids were found without tool_result
  * blocks immediately after".
  *
- * Thinking blocks must come first in Anthropic's content array, so merged
- * blocks are reordered: all thinking blocks (from both messages) precede
- * non-thinking blocks (text, tool_use, etc.).
+ * Concatenates each side's blocks in original order rather than hoisting
+ * every thinking block to the front. "Thinking blocks must come first" only
+ * holds for classic (non-interleaved) extended thinking; this generator
+ * unconditionally enables interleaved-thinking-2025-05-14 whenever
+ * `thinking` is set (see buildPerRequestHeaders), and interleaved
+ * thinking's entire point is allowing thinking blocks between tool_use
+ * blocks in original generation order — hoisting all thinking blocks ahead
+ * of both messages' other content destroys that order (e.g. a leading
+ * `[text, thinkingX]` merged with `[thinkingY, tool_use]` previously
+ * produced `[thinkingX, thinkingY, text, tool_use]`, moving `text` after
+ * `thinkingY` even though it chronologically preceded it). The classic
+ * single-leading-thinking-block case is unaffected by this change since
+ * there is nothing to reorder in that shape either way.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1387,17 +1397,10 @@ function mergeConsecutiveAssistantMessages(
         const lastBlocks = lastMessage.content as AnthropicContentBlockParam[];
         const currentBlocks = message.content as AnthropicContentBlockParam[];
 
-        const isThinking = (b: AnthropicContentBlockParam): boolean => {
-          const t = (b as { type?: string }).type;
-          return t === 'thinking' || t === 'redacted_thinking';
-        };
-
         const seenToolUseIds = new Set<string>();
         const combined: AnthropicContentBlockParam[] = [
-          ...lastBlocks.filter(isThinking),
-          ...currentBlocks.filter(isThinking),
-          ...lastBlocks.filter((b) => !isThinking(b)),
-          ...currentBlocks.filter((b) => !isThinking(b)),
+          ...lastBlocks,
+          ...currentBlocks,
         ].filter((b) => {
           const t = (b as { type?: string }).type;
           if (t === 'tool_use') {
