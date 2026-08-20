@@ -1042,7 +1042,7 @@ function setupAcpTest(
       expect(allMessageText(mainRequests[0]!)).toContain(
         "Call 'advisor' by itself",
       );
-      expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
+      expect(toolNames(advisorRequests[0]!)).toEqual([]);
       expect(allMessageText(mainRequests[1]!)).toContain(
         'Advisor advice in ACP.',
       );

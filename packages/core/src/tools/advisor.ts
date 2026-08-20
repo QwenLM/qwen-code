@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFile } from 'node:fs/promises';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { runForkedAgent } from '../utils/forkedAgent.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
-import { runSideQuery } from '../utils/sideQuery.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { mapAdvisorError, type AdvisorErrorCode } from './advisor-error.js';
 import { ToolErrorType } from './tool-error.js';
@@ -334,6 +335,59 @@ function validateAdvisorReview(review: AdvisorReview): string | null {
     : null;
 }
 
+function parseAdvisorReview(value: unknown): AdvisorReview {
+  if (!isObject(value)) {
+    throw new Error('Advisor returned invalid structured output.');
+  }
+
+  const review = {
+    verdict: value['verdict'],
+    risks: value['risks'],
+    missingEvidence: value['missingEvidence'],
+    recommendation: value['recommendation'],
+  };
+  if (
+    typeof review.verdict !== 'string' ||
+    typeof review.risks !== 'string' ||
+    typeof review.missingEvidence !== 'string' ||
+    typeof review.recommendation !== 'string'
+  ) {
+    throw new Error('Advisor returned invalid structured output.');
+  }
+
+  const parsed = review as AdvisorReview;
+  const schemaError = validateAdvisorReview(parsed);
+  if (schemaError) throw new Error(schemaError);
+  return parsed;
+}
+
+async function getOutputLanguageInstruction(
+  config: Config,
+): Promise<string | undefined> {
+  const outputLanguageFilePath = config.getOutputLanguageFilePath?.();
+  if (!outputLanguageFilePath) return undefined;
+
+  try {
+    const preference = (await readFile(outputLanguageFilePath, 'utf8')).trim();
+    if (!preference) return undefined;
+
+    return [
+      'Follow the user-visible output language preference below for this advisor review.',
+      'This preference overrides any earlier language-selection rule in this system instruction.',
+      preference,
+    ].join('\n\n');
+  } catch {
+    return undefined;
+  }
+}
+
+async function buildAdvisorSystemInstruction(config: Config): Promise<string> {
+  const languageInstruction = await getOutputLanguageInstruction(config);
+  return languageInstruction
+    ? `${ADVISOR_SYSTEM_INSTRUCTION}\n\n${languageInstruction}`
+    : ADVISOR_SYSTEM_INSTRUCTION;
+}
+
 class AdvisorToolInvocation extends BaseToolInvocation<
   AdvisorToolParams,
   ToolResult
@@ -388,24 +442,32 @@ class AdvisorToolInvocation extends BaseToolInvocation<
     }
 
     try {
-      const review = await awaitWithAbort(
+      const systemInstruction = await buildAdvisorSystemInstruction(
+        this.config,
+      );
+      const forkedResult = await awaitWithAbort(
         subagentNameContext.run('advisor', () =>
-          runSideQuery<AdvisorReview>(this.config, {
-            contents: [
-              { role: 'user', parts: [{ text: budgetedEvidence.serialized }] },
-            ],
-            schema: ADVISOR_REVIEW_SCHEMA,
+          runForkedAgent({
+            config: this.config,
+            userMessage: budgetedEvidence.serialized,
+            cacheSafeParams: {
+              generationConfig: {
+                systemInstruction,
+              },
+              history: [],
+              model: this.config.getModel?.() ?? model,
+              version: 0,
+            },
+            jsonSchema: ADVISOR_REVIEW_SCHEMA,
             model,
-            systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
             abortSignal: signal,
             promptId: `side-query:advisor:${promptId}:${reservation.ordinal}`,
-            maxAttempts: 1,
-            failClosed: true,
-            validate: validateAdvisorReview,
+            disableModelFallbacks: true,
           }),
         ),
         signal,
       );
+      const review = parseAdvisorReview(forkedResult.jsonResult);
       this.recordSuccess(promptId);
       return advisorSuccessResult(formatAdvisorReview(review));
     } catch (error) {

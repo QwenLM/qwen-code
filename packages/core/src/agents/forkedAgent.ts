@@ -246,11 +246,15 @@ async function buildForkedModelRuntime(
   base: Config,
   contentGeneratorOwner: Config,
   modelSelector: string,
+  opts?: { failClosed?: boolean },
 ): Promise<ForkedModelRuntime> {
   const resolvedModel = resolveModelId(
     modelSelector,
     buildModelIdContext(base),
   );
+  if (!resolvedModel && opts?.failClosed) {
+    throw new Error(`Model selector "${modelSelector}" could not be resolved.`);
+  }
   // When the selector cannot resolve (e.g. `fast` with no fast model
   // configured, or `inherit` on a config without a current model), fall back
   // to the parent session model instead of passing the raw selector string
@@ -377,6 +381,8 @@ export interface CachePathParams {
   model?: string;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Prompt id used for logging/telemetry correlation. */
+  promptId?: string;
   /** Do not route the query through configured model fallbacks. */
   disableModelFallbacks?: boolean;
   /**
@@ -518,7 +524,9 @@ export async function runForkedAgent(
       config,
       config,
       modelSelector,
+      { failClosed: disableModelFallbacks },
     );
+    const promptId = params.promptId ?? 'forked_query';
 
     return runWithForkedModelRuntime(modelRuntime, async (model) => {
       const chat = createForkedChat(config, cacheSafeParams);
@@ -537,14 +545,10 @@ export async function runForkedAgent(
         config: requestConfig,
       };
       const stream = disableModelFallbacks
-        ? await chat.sendMessageStream(
-            model,
-            sendParams,
-            'forked_query',
-            undefined,
-            { disableModelFallbacks: true },
-          )
-        : await chat.sendMessageStream(model, sendParams, 'forked_query');
+        ? await chat.sendMessageStream(model, sendParams, promptId, undefined, {
+            disableModelFallbacks: true,
+          })
+        : await chat.sendMessageStream(model, sendParams, promptId);
 
       let fullText = '';
       let usage: ForkedQueryResult['usage'] = {
