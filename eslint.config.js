@@ -83,7 +83,7 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['**/serve/*', '**/serve/**'],
+              group: ['**/serve', '**/serve/*', '**/serve/**'],
               message:
                 'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
             },
