@@ -229,8 +229,8 @@ describe('qwen-triage: agent tool/permission settings', () => {
     ]) {
       assert.ok(deny.includes(d), `permissions.deny must include ${d}`);
     }
-    // No sandbox key: a deliberate omission, not a capability gap — the ECS
-    // pool does run containers; sandboxing this step is an open decision.
+    // No sandbox key: the ECS pool ships no container runtime, and adding one
+    // would silently disable the step.
     assert.equal(
       settings.sandbox,
       undefined,
@@ -242,8 +242,9 @@ describe('qwen-triage: agent tool/permission settings', () => {
 // The same settings_json → settings bug survived in two more workflows after
 // the triage fix. An unknown action input is dropped without error, so the
 // /resolve agent ran every time with no turn cap, no tool allowlist, and no
-// sandbox, and the follow-up bot ran uncapped too. These blocks were therefore
-// never validated by anything; parse them here.
+// sandbox — on a runner pool its runs-on comment chose specifically because
+// `sandbox: true` needs docker — and the follow-up bot ran uncapped too.
+// These blocks were therefore never validated by anything; parse them here.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
@@ -274,23 +275,22 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    // The resolve agent merges the base branch into the PR's tree and pushes
-    // the result, so it must stay sandboxed.
+    // The runs-on comment pins this job to hosted runners because the sandbox
+    // needs docker; dropping the key would pay that routing cost for nothing.
     assert.equal(
       settings.tools?.sandbox,
       true,
-      'tools.sandbox must stay true — the resolve agent runs on PR code',
+      'tools.sandbox must stay true — the runs-on routing depends on it',
     );
   });
 
-  it('keeps resolve-pr on ephemeral hosted runners', () => {
-    // The job merges the base branch and pushes to the PR's head; the pin is
-    // for ephemerality, not for want of a container runtime (see the job's
-    // runs-on comment).
+  it('keeps resolve-pr on hosted runners (sandbox: true needs docker)', () => {
+    // The routing half of the sandbox coupling: the ECS pool ships no
+    // container runtime, so an ECS-routed sandboxed agent dies at startup.
     assert.equal(
       resolvePrJob['runs-on'],
       'ubuntu-latest',
-      'resolve-pr must stay on ephemeral hosted runners — the job merges the base branch and pushes to the PR head',
+      'resolve-pr must stay on hosted runners — sandbox: true needs docker, absent on the ECS pool',
     );
   });
 });
@@ -318,14 +318,13 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    // follow-up-issues routes to the self-hosted ECS pool by default. The job
-    // checks out nothing and runs no repository code (its tool allowlist is
-    // gh-issue commands only), so `false` is the deliberate shape — the ECS
-    // pool does run containers; this is not a capability workaround.
+    // follow-up-issues routes to the self-hosted ECS pool by default, which
+    // ships no container runtime; sandbox: true would kill the agent at
+    // startup (exit 44) on every ECS-routed run.
     assert.equal(
       settings.tools?.sandbox,
       false,
-      'tools.sandbox must stay false — the job checks out nothing and runs no repository code',
+      'tools.sandbox must stay false — the ECS pool has no container runtime',
     );
   });
 });
