@@ -18,6 +18,10 @@ import {
   type ExtensionManager,
   type ClaudeMarketplaceConfig,
   type ExtensionSetting,
+  type ExtensionCredentialPersistence,
+  type ExtensionGitCredential,
+  ExtensionNotUpdatableError,
+  isSupportedArchiveUrl,
 } from '@qwen-code/qwen-code-core';
 import express, {
   type Application,
@@ -48,6 +52,7 @@ import {
   redactExtensionDisplaySource,
   type ExtensionPendingInteraction,
   type ExtensionOperationContext,
+  type ExtensionMutationEvent,
   type ExtensionsController,
   type RuntimeReconciliationReservation,
 } from './workspace-extensions-controller.js';
@@ -60,6 +65,7 @@ const EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS =
   EXTENSION_PREPARE_DEADLINE_MS + EXTENSION_INTERACTION_DEADLINE_MS;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
 const EXTENSION_ARCHIVE_UPLOAD_LIMIT = '10mb';
+const MAX_EXTENSION_BATCH_SIZE = 100;
 
 const extensionArchiveBodyParser = express.raw({
   type: 'application/octet-stream',
@@ -123,6 +129,42 @@ const parseExtensionScope = (
   return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 };
 
+const parseExtensionBatchNames = (
+  req: Request,
+  res: Response,
+  safeBody: SafeBody,
+): string[] | undefined => {
+  const rawNames = safeBody(req)['extensionNames'];
+  if (
+    !Array.isArray(rawNames) ||
+    rawNames.length === 0 ||
+    rawNames.length > MAX_EXTENSION_BATCH_SIZE ||
+    !rawNames.every((name) => typeof name === 'string')
+  ) {
+    res.status(400).json({
+      error: `\`extensionNames\` must be a non-empty string array (max ${MAX_EXTENSION_BATCH_SIZE})`,
+      code: 'invalid_extension_names',
+    });
+    return undefined;
+  }
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of rawNames as string[]) {
+    if (!/^[a-zA-Z0-9-_.]+$/.test(name)) {
+      res.status(400).json({
+        error: `Invalid extension name "${name}"`,
+        code: 'invalid_extension_name',
+      });
+      return undefined;
+    }
+    const normalizedName = name.toLowerCase();
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
+    names.push(name);
+  }
+  return names;
+};
+
 const parseExtensionRegistryUrl = (
   value: string,
   res: Response,
@@ -168,25 +210,96 @@ const parsePotentialSourceUrl = (source: string): URL | null => {
   }
 };
 
-const validateExtensionSourceHost = (
+interface ParsedExtensionInstallSource {
+  source: string;
+  gitCredential?: ExtensionGitCredential;
+}
+
+const parseExtensionInstallSource = (
   source: string,
+  persistence: unknown,
   res: Response,
-): boolean => {
+): ParsedExtensionInstallSource | null => {
+  if (
+    persistence !== undefined &&
+    persistence !== 'stored' &&
+    persistence !== 'one_time'
+  ) {
+    res.status(400).json({
+      error: '`credentialPersistence` must be "stored" or "one_time"',
+    });
+    return null;
+  }
   const parsed = parsePotentialSourceUrl(source);
-  if (!parsed) return true;
-  if (parsed.username || parsed.password) {
-    res.status(400).json({ error: '`source` must not include credentials' });
-    return false;
+  if (!parsed) {
+    if (persistence !== undefined) {
+      res.status(400).json({
+        error: '`credentialPersistence` requires source URL credentials',
+      });
+      return null;
+    }
+    return { source };
   }
   if (isBlockedAuthProviderHost(parsed.hostname)) {
     res.status(400).json({ error: '`source` host is not allowed' });
-    return false;
+    return null;
   }
   if (parsed.protocol !== 'https:') {
     res.status(400).json({ error: '`source` must use https' });
-    return false;
+    return null;
   }
-  return true;
+  const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(source)?.[1];
+  const hasUserInfo =
+    !!parsed.username || !!parsed.password || authority?.includes('@') === true;
+  if (!hasUserInfo) {
+    if (persistence !== undefined) {
+      res.status(400).json({
+        error: '`credentialPersistence` requires source URL credentials',
+      });
+      return null;
+    }
+    return { source };
+  }
+  const hasControlCharacter = (value: string): boolean =>
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+    });
+  if (hasControlCharacter(source)) {
+    res.status(400).json({ error: '`source` credentials are invalid' });
+    return null;
+  }
+  let username: string;
+  let password: string;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    res.status(400).json({ error: '`source` credentials are invalid' });
+    return null;
+  }
+  const invalidText = (value: string, maxBytes: number): boolean =>
+    Buffer.byteLength(value, 'utf8') > maxBytes || hasControlCharacter(value);
+  if (
+    (!username && !password) ||
+    invalidText(username, 256) ||
+    invalidText(password, 4096)
+  ) {
+    res.status(400).json({ error: '`source` credentials are invalid' });
+    return null;
+  }
+  parsed.username = '';
+  parsed.password = '';
+  const credentialPersistence = (persistence ??
+    'one_time') as ExtensionCredentialPersistence;
+  return {
+    source: parsed.toString(),
+    gitCredential: {
+      username,
+      password,
+      persistence: credentialPersistence,
+    },
+  };
 };
 
 const validateExtensionSourceMetadata = (
@@ -889,6 +1002,7 @@ export function registerWorkspaceExtensionRoutes(
         const allowPreRelease = body['allowPreRelease'];
         const registry = body['registry'];
         const consent = body['consent'];
+        const credentialPersistence = body['credentialPersistence'];
 
         if (!source || typeof source !== 'string') {
           res.status(400).json({ error: 'Missing or invalid source' });
@@ -919,7 +1033,6 @@ export function registerWorkspaceExtensionRoutes(
           res.status(400).json({ error: '`registry` must be a string' });
           return;
         }
-        const sourceValue = source;
         const refValue = typeof ref === 'string' ? ref : undefined;
         const autoUpdateValue =
           typeof autoUpdate === 'boolean' ? autoUpdate : undefined;
@@ -938,7 +1051,25 @@ export function registerWorkspaceExtensionRoutes(
           });
           return;
         }
-        if (!validateExtensionSourceHost(sourceValue, res)) {
+        const parsedSource = parseExtensionInstallSource(
+          source,
+          credentialPersistence,
+          res,
+        );
+        if (!parsedSource) return;
+        const sourceValue = parsedSource.source;
+        body['source'] = sourceValue;
+        const gitCredential = parsedSource.gitCredential;
+        if (gitCredential?.persistence === 'one_time' && autoUpdateValue) {
+          res.status(400).json({
+            error: '`autoUpdate` is not supported with one-time credentials',
+          });
+          return;
+        }
+        if (gitCredential && isSupportedArchiveUrl(sourceValue)) {
+          res.status(400).json({
+            error: 'Git credentials require an HTTPS Git install source.',
+          });
           return;
         }
         const localSource =
@@ -1003,7 +1134,9 @@ export function registerWorkspaceExtensionRoutes(
 
         ctrl.runQueuedExtensionMutation(
           'install',
-          { source: sourceValue },
+          gitCredential?.persistence === 'one_time'
+            ? {}
+            : { source: sourceValue },
           res,
           async (extensionManager, _signal, context, operationId) => {
             const prepared = await context!.prepare(async (signal) => {
@@ -1018,6 +1151,15 @@ export function registerWorkspaceExtensionRoutes(
               ) {
                 throw new Error(
                   'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+                );
+              }
+              if (
+                gitCredential &&
+                installMetadata.type !== 'git' &&
+                installMetadata.type !== 'github-release'
+              ) {
+                throw new Error(
+                  'Git credentials require an HTTPS Git install source.',
                 );
               }
               if (installMetadata.type === 'npm' && refValue) {
@@ -1045,6 +1187,7 @@ export function registerWorkspaceExtensionRoutes(
                 initialActivation: { scope: 'user' },
                 requestConsent: () => Promise.resolve(),
                 signal,
+                ...(gitCredential ? { gitCredential } : {}),
               });
             });
             try {
@@ -1057,9 +1200,19 @@ export function registerWorkspaceExtensionRoutes(
               );
               return {
                 status: 'installed',
-                source: sourceValue,
+                ...(gitCredential?.persistence === 'one_time'
+                  ? {}
+                  : { source: sourceValue }),
                 name: committed.identity.name,
                 version: committed.version,
+                ...(gitCredential
+                  ? {
+                      credentialPersistence: gitCredential.persistence,
+                      ...(prepared.credentialStorage
+                        ? { credentialStorage: prepared.credentialStorage }
+                        : {}),
+                    }
+                  : {}),
               };
             } finally {
               await extensionManager.disposePreparedExtension(prepared);
@@ -1485,6 +1638,21 @@ export function registerWorkspaceExtensionRoutes(
     return state;
   };
 
+  const parseWorkspaceBatchActivationState = (
+    req: Request,
+    res: Response,
+  ): 'enabled' | 'disabled' | 'inherit' | null => {
+    const state = safeBody(req)['state'];
+    if (state !== 'enabled' && state !== 'disabled' && state !== 'inherit') {
+      res.status(400).json({
+        error: '`state` must be "enabled", "disabled", or "inherit"',
+        code: 'invalid_extension_activation',
+      });
+      return null;
+    }
+    return state;
+  };
+
   const sendOperation = (
     req: Request,
     res: Response,
@@ -1496,22 +1664,7 @@ export function registerWorkspaceExtensionRoutes(
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
-    ) => Promise<{
-      status:
-        | 'installed'
-        | 'enabled'
-        | 'disabled'
-        | 'updated'
-        | 'uninstalled'
-        | 'checked'
-        | 'refreshed';
-      source?: string;
-      name?: string;
-      version?: string;
-      updated?: boolean;
-      reason?: string;
-      states?: Record<string, string>;
-    }>,
+    ) => Promise<ExtensionMutationEvent>,
     options: {
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -1563,6 +1716,11 @@ export function registerWorkspaceExtensionRoutes(
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
+            ...(extension.installMetadata?.type === 'snapshot'
+              ? { credentialPersistence: 'one_time' as const }
+              : extension.installMetadata?.credentialPersistence === 'stored'
+                ? { credentialPersistence: 'stored' as const }
+                : {}),
             defaultActivation: policy?.defaultActivation ?? 'enabled',
             workspaceOverrideCount: Object.values(
               policy?.workspaceOverrides ?? {},
@@ -1590,6 +1748,47 @@ export function registerWorkspaceExtensionRoutes(
       return;
     }
     res.status(200).json(operation);
+  });
+
+  app.put('/extensions/activation', mutate({ strict: true }), (req, res) => {
+    const names = parseExtensionBatchNames(req, res, safeBody);
+    if (!names) return;
+    const state = parseActivationState(req, res);
+    if (!state) return;
+    const manager = primaryController.createExtensionManager(
+      boundWorkspace,
+      true,
+    );
+    sendOperation(
+      req,
+      res,
+      'PUT /extensions/activation',
+      manager,
+      'set_default_activation_batch',
+      {},
+      async (extensionManager, _signal, context) => {
+        await context!.commit(
+          async (onCommitted) =>
+            await extensionManager.setExtensionDefaultActivations(
+              names,
+              state,
+              onCommitted,
+            ),
+        );
+        return {
+          status: 'updated',
+          results: names.map((name) => ({
+            name,
+            defaultActivation: state,
+          })),
+        };
+      },
+      {
+        ...(workspaceRegistry
+          ? { refreshRuntimes: () => workspaceRegistry.listAll() }
+          : {}),
+      },
+    );
   });
 
   app.put(
@@ -1645,6 +1844,7 @@ export function registerWorkspaceExtensionRoutes(
     const autoUpdate = body['autoUpdate'];
     const allowPreRelease = body['allowPreRelease'];
     const registry = body['registry'];
+    const credentialPersistence = body['credentialPersistence'];
     if (typeof source !== 'string' || !source) {
       res.status(400).json({ error: 'Missing or invalid source' });
       return;
@@ -1680,7 +1880,27 @@ export function registerWorkspaceExtensionRoutes(
       });
       return;
     }
-    if (!validateExtensionSourceHost(source, res)) return;
+    const parsedSource = parseExtensionInstallSource(
+      source,
+      credentialPersistence,
+      res,
+    );
+    if (!parsedSource) return;
+    const sourceValue = parsedSource.source;
+    body['source'] = sourceValue;
+    const gitCredential = parsedSource.gitCredential;
+    if (gitCredential?.persistence === 'one_time' && autoUpdate === true) {
+      res.status(400).json({
+        error: '`autoUpdate` is not supported with one-time credentials',
+      });
+      return;
+    }
+    if (gitCredential && isSupportedArchiveUrl(sourceValue)) {
+      res.status(400).json({
+        error: 'Git credentials require an HTTPS Git install source.',
+      });
+      return;
+    }
     if (!activation || typeof activation !== 'object') {
       res.status(400).json({ error: 'Missing initial activation' });
       return;
@@ -1725,10 +1945,10 @@ export function registerWorkspaceExtensionRoutes(
       'POST /extensions/install',
       manager,
       'install',
-      { source },
+      gitCredential?.persistence === 'one_time' ? {} : { source: sourceValue },
       async (extensionManager, _signal, context) => {
         const prepared = await context!.prepare(async (signal) => {
-          const metadata = await parseInstallSource(source, {
+          const metadata = await parseInstallSource(sourceValue, {
             networkPolicy: 'public',
           });
           if (
@@ -1738,6 +1958,15 @@ export function registerWorkspaceExtensionRoutes(
           ) {
             throw new Error(
               'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+            );
+          }
+          if (
+            gitCredential &&
+            metadata.type !== 'git' &&
+            metadata.type !== 'github-release'
+          ) {
+            throw new Error(
+              'Git credentials require an HTTPS Git install source.',
             );
           }
           if (!validateExtensionSourceMetadata(metadata)) {
@@ -1767,6 +1996,7 @@ export function registerWorkspaceExtensionRoutes(
             cwd: boundWorkspace,
             initialActivation,
             signal,
+            ...(gitCredential ? { gitCredential } : {}),
           });
         });
         try {
@@ -1779,9 +2009,19 @@ export function registerWorkspaceExtensionRoutes(
           );
           return {
             status: 'installed',
-            source,
+            ...(gitCredential?.persistence === 'one_time'
+              ? {}
+              : { source: sourceValue }),
             name: committed.identity.name,
             version: committed.version,
+            ...(gitCredential
+              ? {
+                  credentialPersistence: gitCredential.persistence,
+                  ...(prepared.credentialStorage
+                    ? { credentialStorage: prepared.credentialStorage }
+                    : {}),
+                }
+              : {}),
           };
         } finally {
           await extensionManager.disposePreparedExtension(prepared);
@@ -1857,9 +2097,7 @@ export function registerWorkspaceExtensionRoutes(
             extension.installMetadata?.type !== 'github-release' &&
             extension.installMetadata?.type !== 'npm'
           ) {
-            throw new Error(
-              `Extension "${extension.name}" is not remotely updatable.`,
-            );
+            throw new ExtensionNotUpdatableError(extension.name);
           }
           const preparedResult = await context!.prepare(
             async (signal) =>
@@ -1928,7 +2166,7 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.getExtensionStoreSnapshot();
         const policy = snapshot.extensions[extensionId];
-        if (!policy) {
+        if (!policy || policy.declarationOnly) {
           res.status(204).end();
           return;
         }
@@ -2008,6 +2246,60 @@ export function registerWorkspaceExtensionRoutes(
         });
       }
     });
+
+    app.put(
+      '/workspaces/:workspace/extensions/activation',
+      mutate({ strict: true }),
+      (req, res) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const names = parseExtensionBatchNames(req, res, safeBody);
+        if (!names) return;
+        const state = parseWorkspaceBatchActivationState(req, res);
+        if (!state) return;
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          true,
+        );
+        sendOperation(
+          req,
+          res,
+          'PUT /workspaces/:workspace/extensions/activation',
+          manager,
+          'set_workspace_activation_batch',
+          {},
+          async (extensionManager, _signal, context) => {
+            const snapshot = await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.setExtensionWorkspaceActivations(
+                  names,
+                  runtime.workspaceCwd,
+                  state,
+                  onCommitted,
+                ),
+            );
+            return {
+              status: 'updated',
+              updated: snapshot.updated,
+              results: names.map((name) => ({
+                name,
+                workspaceActivation: state === 'inherit' ? null : state,
+                effectiveActivation:
+                  extensionManager.getExtensionActivationForNameFromSnapshot(
+                    name,
+                    snapshot,
+                    runtime.workspaceCwd,
+                  ).effective,
+              })),
+            };
+          },
+          {
+            refreshRuntimes: [runtime],
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          },
+        );
+      },
+    );
 
     app.put(
       '/workspaces/:workspace/extensions/:extensionId/activation',

@@ -2344,7 +2344,14 @@ export class CoreToolScheduler {
       }
       const requestsToProcess = dedupeRequestsByCallId(
         Array.isArray(request) ? request : [request],
-      );
+      ).map((item) => ({ ...item, args: structuredClone(item.args) }));
+      // args are cloned at intake: callers pass args that may alias the
+      // model-emitted functionCall part stored in chat history, and
+      // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
+      // place (a persistence the post-'ask' bounce re-execution relies on).
+      // Without the clone those rewrites would leak into history and skew
+      // the (name, args) fingerprints that duplicate-replay detection
+      // derives from it.
       const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
         requestsToProcess.map((item) => canonicalToolName(item.name)),
       );

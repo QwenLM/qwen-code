@@ -881,6 +881,7 @@ function makeBridge(
       closeCalls.push(sessionId);
       live.delete(sessionId);
     },
+    async deleteSessionAttachments() {},
     getPendingPrompts(sessionId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
       pendingPromptCalls.push(sessionId);
@@ -1987,6 +1988,48 @@ describe('multi-workspace session dispatch', () => {
         ]);
         expect(materializeConversationDirectory).toHaveBeenCalledWith(
           LIVE_PROJECTLESS_TASK_ID,
+        );
+      },
+    );
+  });
+
+  it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
+    const storageSessionId = LIVE_PROJECTLESS_TASK_ID.toUpperCase();
+    await withStoredProjectlessLiveTasks(
+      [storageSessionId],
+      async (runtimeDir) => {
+        const materializeConversationDirectory = vi.fn(
+          async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        );
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory,
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
+
+        const response = await request(app)
+          .post(`/session/${LIVE_PROJECTLESS_TASK_ID}/load`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
+
+        expect(response.status).toBe(200);
+        // Storage keeps the persisted spelling, but the directory follows the
+        // live entry the bridge registers under the canonical id — otherwise a
+        // later Live call would materialize a second, empty directory.
+        expect(materializeConversationDirectory).toHaveBeenCalledWith(
+          LIVE_PROJECTLESS_TASK_ID,
+        );
+        expect(materializeConversationDirectory).not.toHaveBeenCalledWith(
+          storageSessionId,
         );
       },
     );
@@ -5781,9 +5824,9 @@ describe('workspace session live-state route', () => {
       generation: expect.any(String),
       revision: expect.any(Number),
     });
-    // Exactly the volatile overlay — static catalog fields (displayName,
-    // updatedAt) and the deliberately excluded volatile extras
-    // (pendingInteractionCount, hasTurnError) all stay out.
+    // Exactly the volatile overlay plus the activity watermark — the static
+    // catalog field (displayName) and the deliberately excluded volatile
+    // extras (pendingInteractionCount, hasTurnError) all stay out.
     expect(res.body.sessions).toEqual([
       {
         sessionId: 'primary-session',
@@ -5791,8 +5834,28 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: true,
         isWaitingForPermission: true,
         isWaitingForUserQuestion: false,
+        updatedAt: '2026-07-08T00:02:00.000Z',
       },
     ]);
+  });
+
+  it('omits updatedAt when the bridge summary has no activity watermark', async () => {
+    // A live entry that has not settled a running turn in this bridge (fresh
+    // spawn, restore) legitimately carries no watermark. The key must be
+    // absent rather than null so old clients decode the response unchanged.
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, { updatedAt: undefined }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions).toHaveLength(1);
+    expect(res.body.sessions[0]).not.toHaveProperty('updatedAt');
   });
 
   it('defaults both wait flags to false when the bridge omits them', async () => {
@@ -5815,6 +5878,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: false,
         isWaitingForPermission: false,
         isWaitingForUserQuestion: false,
+        updatedAt: '2026-07-08T00:01:00.000Z',
       },
     ]);
   });
@@ -5831,11 +5895,16 @@ describe('workspace session live-state route', () => {
 
   it('reads only the selected workspace bridge for trusted selectors', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness({
-      primarySummaries: [makeSummary('primary-session', PRIMARY_CWD)],
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          updatedAt: '2026-07-08T00:05:00.000Z',
+        }),
+      ],
       secondarySummaries: [
         makeSummary('secondary-a', SECONDARY_CWD),
         makeSummary('secondary-b', SECONDARY_CWD, {
           hasActivePrompt: true,
+          updatedAt: '2026-07-08T00:03:00.000Z',
         }),
       ],
     });
@@ -5848,6 +5917,13 @@ describe('workspace session live-state route', () => {
     expect(
       res.body.sessions.map((s: { sessionId: string }) => s.sessionId).sort(),
     ).toEqual(['secondary-a', 'secondary-b']);
+    // The watermark comes from the selected bridge only; the primary's value
+    // must not leak into a secondary response.
+    expect(
+      res.body.sessions.find(
+        (s: { sessionId: string }) => s.sessionId === 'secondary-b',
+      ).updatedAt,
+    ).toBe('2026-07-08T00:03:00.000Z');
     expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
     expect(primaryBridge.listCalls).toEqual([]);
   });
