@@ -6,6 +6,7 @@
 
 import {
   mkdtemp,
+  chmod,
   mkdir,
   realpath,
   rm,
@@ -129,5 +130,24 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.files).toEqual(['shallow.xlsx']);
     expect(collected.truncated).toBe(false);
     expect(collected.depthLimited).toBe(true);
+  });
+
+  it('treats an unreadable over-depth directory as depth-limited', async () => {
+    const root = await workspace();
+    const deepParts = Array.from(
+      { length: MAX_DIRECTORY_ARTIFACT_DEPTH + 1 },
+      (_, index) => `d${index}`,
+    );
+    const deepDir = path.join(root, ...deepParts);
+    await mkdir(deepDir, { recursive: true });
+    await writeFile(path.join(root, 'shallow.xlsx'), 'shallow');
+    await chmod(deepDir, 0o000);
+    try {
+      const collected = await collectRecordableWorkspaceFiles(root, '', root);
+      expect(collected.files).toEqual(['shallow.xlsx']);
+      expect(collected.depthLimited).toBe(true);
+    } finally {
+      await chmod(deepDir, 0o755);
+    }
   });
 });

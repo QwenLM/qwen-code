@@ -2124,6 +2124,126 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('rejects expanding a path nested under a junk directory', async () => {
+    await fs.mkdir(path.join(workspace, 'node_modules', 'react'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'node_modules', 'react', 'index.js'),
+      'js',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-nested-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany(
+        [{ title: 'React', workspacePath: 'node_modules/react' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('rejects a symlink that aliases a skipped directory', async () => {
+    await fs.mkdir(path.join(workspace, 'node_modules', 'react'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'node_modules', 'react', 'index.js'),
+      'js',
+    );
+    await fs.symlink(
+      path.join(workspace, 'node_modules', 'react'),
+      path.join(workspace, 'deps'),
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-symlink-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany([{ title: 'Deps', workspacePath: 'deps' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('keeps a curated title when a same-batch expansion precedes the explicit record', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-batch'));
+    await fs.writeFile(
+      path.join(workspace, 'reports-batch', 'q3.xlsx'),
+      'xlsx',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-same-batch-order',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Reports',
+          workspacePath: 'reports-batch',
+          toolName: 'record_artifact',
+          toolCallId: 'call-dir',
+        },
+        {
+          title: 'Q3 Final',
+          workspacePath: 'reports-batch/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-file',
+        },
+      ],
+      { strict: true },
+    );
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Final',
+        toolCallId: 'call-file',
+        workspacePath: 'reports-batch/q3.xlsx',
+      }),
+    ]);
+    expect(
+      listed.artifacts[0]?.metadata?.expandedFromDirectory,
+    ).toBeUndefined();
+  });
+
+  it('keeps a curated title when a same-batch explicit record precedes expansion', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-batch-b'));
+    await fs.writeFile(
+      path.join(workspace, 'reports-batch-b', 'q3.xlsx'),
+      'xlsx',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-same-batch-order-b',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Final',
+          workspacePath: 'reports-batch-b/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-file',
+        },
+        {
+          title: 'Reports',
+          workspacePath: 'reports-batch-b',
+          toolName: 'record_artifact',
+          toolCallId: 'call-dir',
+        },
+      ],
+      { strict: true },
+    );
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Final',
+        toolCallId: 'call-file',
+        workspacePath: 'reports-batch-b/q3.xlsx',
+      }),
+    ]);
+  });
+
   it('keeps a curated title when a later directory expansion covers the same file', async () => {
     await fs.mkdir(path.join(workspace, 'reports'));
     await fs.writeFile(path.join(workspace, 'reports', 'q3.xlsx'), 'xlsx');

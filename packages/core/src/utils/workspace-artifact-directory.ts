@@ -55,6 +55,15 @@ export function shouldSkipDirectoryArtifactName(name: string): boolean {
   );
 }
 
+export function pathHasSkippedDirectoryComponent(
+  workspacePath: string,
+): boolean {
+  return workspacePath
+    .split('/')
+    .filter(Boolean)
+    .some((segment) => shouldSkipDirectoryArtifactName(segment));
+}
+
 export async function collectRecordableWorkspaceFiles(
   absoluteDir: string,
   relativeDir: string,
@@ -196,7 +205,8 @@ async function hasRecordableDescendant(
   try {
     entries = await fs.readdir(absoluteDir, { withFileTypes: true });
   } catch {
-    return false;
+    // Unreadable over-depth dirs are inconclusive — disclose via depthLimited.
+    return true;
   }
   for (const entry of entries) {
     if (entry.isSymbolicLink()) {

@@ -18,7 +18,7 @@ import {
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
-  shouldSkipDirectoryArtifactName,
+  pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
@@ -1327,6 +1327,14 @@ export class SessionArtifactStore {
           'workspacePath',
         );
       }
+      if (
+        pathHasSkippedDirectoryComponent(relative.split(path.sep).join('/'))
+      ) {
+        throw new SessionArtifactValidationError(
+          'workspacePath is a skipped directory and cannot be recorded',
+          'workspacePath',
+        );
+      }
       let realStat: Stats;
       try {
         realStat = await fs.lstat(realPath);
@@ -1351,9 +1359,7 @@ export class SessionArtifactStore {
       return { inputs: [input] };
     }
 
-    const rootName =
-      path.posix.basename(walkRelative) || path.basename(walkDir);
-    if (walkRelative && shouldSkipDirectoryArtifactName(rootName)) {
+    if (walkRelative && pathHasSkippedDirectoryComponent(walkRelative)) {
       throw new SessionArtifactValidationError(
         'workspacePath is a skipped directory and cannot be recorded',
         'workspacePath',
@@ -1879,6 +1885,7 @@ function mergeBatchArtifact(
     existing.storage === 'workspace' &&
     next.storage === 'workspace' &&
     shouldRefreshWorkspaceDisplay(next, existing);
+  const metadata = mergeMetadata(existing, next);
   return {
     ...existing,
     title: refreshDisplay ? next.title : existing.title,
@@ -1891,7 +1898,9 @@ function mergeBatchArtifact(
     toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
-    metadata: mergeMetadata(existing, next),
+    metadata: refreshDisplay
+      ? stripExpandedFromDirectoryMarker(metadata)
+      : metadata,
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
@@ -1991,6 +2000,7 @@ function mergeArtifact(
     next.toolName = incoming.toolName;
     next.source = incoming.source;
     next.hookEventName = incoming.hookEventName;
+    next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
   }
 
   const changed = !publicArtifactsEqual(
@@ -2014,6 +2024,16 @@ function shouldRecordEphemeralUnpin(
       existing.persistedAt !== undefined ||
       existing.durableTombstoneRequired === true)
   );
+}
+
+function stripExpandedFromDirectoryMarker(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (metadata?.['expandedFromDirectory'] !== true) {
+    return metadata;
+  }
+  const { expandedFromDirectory: _dropped, ...rest } = metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 function shouldRefreshWorkspaceDisplay(

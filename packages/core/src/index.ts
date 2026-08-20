@@ -215,6 +215,7 @@ export {
   OFFICE_DOCUMENT_EXTENSIONS,
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
+  pathHasSkippedDirectoryComponent,
   shouldSkipDirectoryArtifactName,
 } from './utils/workspace-artifact-directory.js';
 export type {

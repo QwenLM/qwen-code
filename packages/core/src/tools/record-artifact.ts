@@ -13,7 +13,7 @@ import { isWithinRoot } from '../utils/fileUtils.js';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   collectRecordableWorkspaceFiles,
-  shouldSkipDirectoryArtifactName,
+  pathHasSkippedDirectoryComponent,
 } from '../utils/workspace-artifact-directory.js';
 import {
   resolveBoundWorkspaceRoot,
@@ -148,8 +148,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   private async expandDirectoryLocator(
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
-    const rootName = path.posix.basename(locator.workspacePath);
-    if (rootName && shouldSkipDirectoryArtifactName(rootName)) {
+    if (pathHasSkippedDirectoryComponent(locator.workspacePath)) {
       const message = [
         `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
         WORKSPACE_PATH_HINT,
@@ -779,6 +778,9 @@ export function isRecordableDerivedChild(
 ): boolean {
   const trimmedTitle = title.trim();
   const trimmedPath = workspacePath.trim();
+  if (title !== trimmedTitle || workspacePath !== trimmedPath) {
+    return false;
+  }
   return (
     trimmedTitle.length > 0 &&
     trimmedTitle.length <= ARTIFACT_TITLE_MAX_LENGTH &&

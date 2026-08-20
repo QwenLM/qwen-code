@@ -529,6 +529,41 @@ describe('RecordArtifactTool', () => {
     expect(result.artifacts).toBeUndefined();
   });
 
+  it('rejects expanding a path nested under a junk directory', async () => {
+    const ws = await workspace();
+    await ws.write('node_modules/react/index.js', 'js');
+
+    const result = await ws.tool
+      .build({
+        title: 'React',
+        workspacePath: 'node_modules/react',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
+    expect(String(result.llmContent)).toContain('skipped directory');
+  });
+
+  it('skips expansion children whose names are not trim-stable', async () => {
+    const ws = await workspace();
+    await ws.write('notes/keep.txt', 'ok');
+    await writeFile(path.join(ws.cwd, 'notes', 'report.txt '), 'space');
+
+    const result = await ws.tool
+      .build({
+        title: 'Notes',
+        workspacePath: 'notes',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'notes/keep.txt' },
+    ]);
+    expect(String(result.llmContent)).toMatch(/Skipped 1 files/i);
+  });
+
   it('rejects recording the worktree cwd as a directory', async () => {
     const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
     await ws.write('keep.xlsx', 'xlsx');
