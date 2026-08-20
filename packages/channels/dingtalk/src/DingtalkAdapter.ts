@@ -1027,9 +1027,18 @@ export class DingtalkChannel extends ChannelBase {
     // claims a delivery that happened.
     let firstError: Error | undefined;
     let outgoingText = prepared.text;
+    // R8-2: receipts ride `outgoingText` in file order, so walk them in order
+    // and rewrite by slice. `String.replace` expands `$` sequences (`$&`,
+    // `$'`, `` $` ``, `$n`) in a replacement built from the filename
+    // (`safeFileName` keeps `$`), and its first-match search rewrote the
+    // WRONG receipt when two files share a display name.
+    let receiptFrom = 0;
     for (const file of prepared.files) {
+      const receipt = `[File sent: ${file.fileName}]`;
+      const receiptAt = outgoingText.indexOf(receipt, receiptFrom);
       try {
         await this.sendProactiveFile(target, file);
+        if (receiptAt !== -1) receiptFrom = receiptAt + receipt.length;
       } catch (error) {
         const deliveryError =
           error instanceof Error ? error : new Error(String(error));
@@ -1040,15 +1049,19 @@ export class DingtalkChannel extends ChannelBase {
             255,
           )}): ${sanitizeLogText(deliveryError.message, 300)}\n`,
         );
-        outgoingText = outgoingText.replace(
-          `[File sent: ${file.fileName}]`,
-          `[File delivery failed: ${file.fileName}]`,
-        );
+        const notice = `[File delivery failed: ${file.fileName}]`;
+        if (receiptAt !== -1) {
+          outgoingText =
+            outgoingText.slice(0, receiptAt) +
+            notice +
+            outgoingText.slice(receiptAt + receipt.length);
+          receiptFrom = receiptAt + notice.length;
+        }
         try {
           await this.sendProactiveChunk(
             target,
             'File delivery failed',
-            `[File delivery failed: ${file.fileName}]`,
+            notice,
             'file delivery failure notice',
           );
         } catch (noticeError) {
@@ -2049,22 +2062,29 @@ export class DingtalkChannel extends ChannelBase {
       await presenter.closeOutput(segment.segmentId, '', reason, segment);
       return;
     }
+    // R7-3: a run terminated as cancelled or failed while the upload was in
+    // flight must not be delivered after its terminal card. R8-4: gate on the
+    // terminal REASON, not bare terminality — a run COMPLETING mid-upload is
+    // still a valid delivery target, and the bare gate dropped its files.
+    if (!presenter.acceptsLateDelivery(segment.runId)) return;
+    // R8-1 (mirrors R2-5): deliver BEFORE the display finalizes. `closeOutput`
+    // bakes `prepared.text` — receipts included — into a surface it can no
+    // longer amend, so a `sendReplyFiles` failure landing after it left a
+    // permanent receipt for a file that never arrives, with no correction.
+    await this.sendReplyFiles(chatId, prepared.files);
     const delivered = await presenter.closeOutput(
       segment.segmentId,
       prepared.text,
       reason,
       segment,
     );
-    if (delivered) {
-      await this.sendReplyFiles(chatId, prepared.files);
-      return;
-    }
-    // R7-3: `closeOutput` answers false for BOTH "no display surface" and
-    // "the run is already terminal". Pre-PR the boundary delivered nothing
-    // in the terminal case; falling back unconditionally lets a segment
-    // outrun a cancel/fail mid-upload. Only a live run falls back.
-    if (!presenter.isRunActive(segment.runId)) return;
-    await this.sendPreparedResponse(chatId, prepared, sessionId);
+    if (delivered) return;
+    // The files already went out above — the fallback must not resend them.
+    await this.sendPreparedResponse(
+      chatId,
+      { ...prepared, files: [] },
+      sessionId,
+    );
   }
 
   protected override onResponseChunk(

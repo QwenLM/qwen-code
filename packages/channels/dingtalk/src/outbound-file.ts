@@ -144,8 +144,13 @@ function neutralizeFileMarkerOpenings(text: string): string {
  * Iterate the two passes until stable. Each changed iteration removes at
  * least one marker opening, and the `[Image pending]` token a replacement
  * inserts never re-opens one, so the loop terminates on its own; the budget
- * mirrors the file fixed point's, leaving the text at least as sanitized as
- * the last completed pass on exhaustion.
+ * mirrors the file fixed point's.
+ *
+ * R8-3: on exhaustion the LAST transform is the image pass, and its removals
+ * can splice the surroundings into a fresh complete `[FILE: …]` marker no
+ * file pass ever sees — the inner fixed point fails closed on ITS exhaustion,
+ * the outer must too. Run one more budgeted file sweep over the exhausted
+ * text before returning it.
  */
 export function sanitizeMediaMarkersToStable(
   text: string,
@@ -157,7 +162,7 @@ export function sanitizeMediaMarkersToStable(
     if (next === sanitized) return next;
     sanitized = next;
   }
-  return sanitized;
+  return sanitizeFileMarkersToFixedPoint(sanitized);
 }
 
 export function safeFileName(filePath: string): string {

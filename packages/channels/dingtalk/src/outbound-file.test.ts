@@ -17,6 +17,7 @@ import {
   replaceFileMarkers,
   safeFileName,
   sanitizeFileMarkersToFixedPoint,
+  sanitizeMediaMarkersToStable,
   sanitizeStreamingFileMarkers,
   stripPartialFileMarker,
   uploadDingTalkFile,
@@ -405,5 +406,36 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
     // innermost FILE-shaped opening, leaving the prose-prefix wrappers.
     expect(sanitized).toBe('[FIL'.repeat(depth - 8));
     expect(sanitizeFileMarkersToFixedPoint(sanitized)).toBe(sanitized);
+  });
+});
+
+describe('sanitizeMediaMarkersToStable exhaustion', () => {
+  // R8-3: the budget-exhaustion return handed back text whose LAST transform
+  // was the image pass — whose removals splice the surroundings into a fresh
+  // complete `[FILE: …]` marker no file pass ever saw (the inner fixed point
+  // fails closed on its own exhaustion; the outer did not). The exhaustion
+  // path must fail closed the same way.
+  it('runs a final file sweep after the image pass exhausts the budget', () => {
+    let input = '[FIL';
+    for (let i = 0; i < 8; i++) input += `[IMAGE: /w${i}.png]`;
+    input += 'E: /pf9.pdf]';
+    // Stand-in for the real image pass's splice: one wrapper removed per
+    // invocation, so the joint loop spends its whole budget unwinding and
+    // exits with the image pass having just exposed the complete marker.
+    const imagePass = (text: string): string => {
+      for (let i = 0; i < 8; i++) {
+        const wrapper = `[IMAGE: /w${i}.png]`;
+        const at = text.indexOf(wrapper);
+        if (at !== -1) {
+          return text.slice(0, at) + text.slice(at + wrapper.length);
+        }
+      }
+      return text;
+    };
+
+    const sanitized = sanitizeMediaMarkersToStable(input, imagePass);
+
+    expect(findFileMarkers(sanitized)).toHaveLength(0);
+    expect(sanitized).not.toContain('/pf9.pdf');
   });
 });

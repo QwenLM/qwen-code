@@ -191,6 +191,38 @@ describe('DingtalkInteractionPresenter', () => {
     expect(presenter.isRunActive('run-1')).toBe(false);
   });
 
+  it('gates late boundary delivery on the terminal reason', async () => {
+    // R8-4: terminality alone used to drop a boundary segment whose upload
+    // outlived the run's COMPLETION. Only cancel/fail suppress the late
+    // delivery — and the answer must survive the run's post-finalization
+    // deletion, which lands before the multi-second prepare resumes.
+    const { presenter } = createHarness();
+    presenter.registerRun('run-c', 'owner-1', target);
+    presenter.registerRun('run-f', 'owner-1', target);
+    presenter.registerRun('run-d', 'owner-1', target);
+
+    expect(presenter.acceptsLateDelivery('run-1')).toBe(true);
+    expect(presenter.acceptsLateDelivery('run-missing')).toBe(false);
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+    presenter.terminalizeRun('run-c', 'completed');
+    presenter.terminalizeRun('run-f', 'failed', 'boom');
+    presenter.terminalizeRun('run-d', 'completed');
+
+    expect(presenter.acceptsLateDelivery('run-1')).toBe(false);
+    expect(presenter.acceptsLateDelivery('run-c')).toBe(true);
+    expect(presenter.acceptsLateDelivery('run-f')).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-d',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.acceptsLateDelivery('run-d')).toBe(true);
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {

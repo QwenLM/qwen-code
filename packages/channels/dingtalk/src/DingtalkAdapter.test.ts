@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -5348,14 +5349,20 @@ describe('DingtalkChannel outbound file delivery', () => {
         return Promise.resolve(true);
       });
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
-      ).interactionPresenter = { closeOutput, segmentContent };
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5502,19 +5509,23 @@ describe('DingtalkChannel outbound file delivery', () => {
     try {
       const channel = createChannel({ cwd: file.dir });
       seedWebhook(channel, 'cid-1');
-      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
-      const isRunActive = vi.fn().mockReturnValue(false);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(false);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
-            isRunActive: typeof isRunActive;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
-      ).interactionPresenter = { closeOutput, segmentContent, isRunActive };
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5536,7 +5547,10 @@ describe('DingtalkChannel outbound file delivery', () => {
         'response_boundary',
       );
 
-      expect(isRunActive).toHaveBeenCalledWith('run-1');
+      expect(acceptsLateDelivery).toHaveBeenCalledWith('run-1');
+      // The upload already ran inside `prepareOutgoingContent` before the
+      // terminal state was observable; only the DELIVERY is suppressed.
+      expect(uploadCalls()).toHaveLength(1);
       expect(markdownCalls()).toHaveLength(0);
       expect(fileCalls()).toHaveLength(0);
     } finally {
@@ -5554,16 +5568,20 @@ describe('DingtalkChannel outbound file delivery', () => {
       const { fileCalls, markdownCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
-      const isRunActive = vi.fn().mockReturnValue(true);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
-            isRunActive: typeof isRunActive;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
-      ).interactionPresenter = { closeOutput, segmentContent, isRunActive };
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5587,6 +5605,195 @@ describe('DingtalkChannel outbound file delivery', () => {
 
       expect(markdownCalls()).toHaveLength(1);
       expect(fileCalls()).toHaveLength(1);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('delivers a boundary segment before finalizing its receipts', async () => {
+    // R8-1: `closeSegmentWithFiles` finalized the display surface BEFORE
+    // `sendReplyFiles` delivered — the inverse of the R2-5 ordering
+    // `onResponseComplete` enforces. `closeOutput` bakes the receipts into a
+    // surface it can no longer amend, so a delivery failure landing after it
+    // left a permanent receipt for a file that never arrives.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { events } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockImplementation(() => {
+        events.push('card');
+        return Promise.resolve(true);
+      });
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      // The file message lands before the receipts are finalized.
+      expect(events.indexOf('file')).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf('file')).toBeLessThan(events.indexOf('card'));
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '[File sent: report.txt]',
+        'response_boundary',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps receipts off the display when boundary delivery fails', async () => {
+    // R8-1 flip: when `sendReplyFiles` throws (the R5-1 missing-webhook
+    // shape), `closeOutput` must never run — no finalized receipt survives a
+    // delivery that did not happen. ChannelBase logs the throw; the hook
+    // surfaces it here.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      // No webhook seeded: uploads succeed, delivery has no endpoint.
+      const { uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await expect(
+        getOutputSegmentEndHook(channel)(
+          'cid-1',
+          'session-1',
+          segment,
+          'response_boundary',
+        ),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(closeOutput).not.toHaveBeenCalled();
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('delivers a boundary segment whose run completed mid-upload', async () => {
+    // R8-4: ChannelBase dispatches the boundary close fire-and-forget; the
+    // run can COMPLETE while `prepareOutgoingContent` still uploads. The
+    // terminality gate then dropped the uploaded files whole — no receipt,
+    // no failure notice, turn booked successful. A completed run's chat
+    // target is still valid for delivery; only cancel/fail suppress it.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      // The run terminalized 'completed' while the upload was in flight:
+      // `closeOutput` answers false on terminality, and the pre-fix liveness
+      // gate answered false too — the reason-aware gate accepts the late
+      // delivery anyway.
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const isRunActive = vi.fn().mockReturnValue(false);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            isRunActive: typeof isRunActive;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        isRunActive,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(fileCalls()).toHaveLength(1);
+      // The fallback carries the receipt text, not the files (already sent).
+      expect(markdownCalls()).toHaveLength(1);
+      expect(
+        JSON.parse(String((markdownCalls()[0]![1] as RequestInit).body)),
+      ).toMatchObject({
+        markdown: { text: expect.stringContaining('[File sent: report.txt]') },
+      });
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -6257,6 +6464,92 @@ describe('DingtalkChannel proactive send', () => {
       expect(chunkParam.text).toContain('[File delivery failed: report.txt]');
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites the receipt without replacement-string expansion', async () => {
+    // R8-2: `String.replace` expands `$` sequences in the replacement string
+    // and `safeFileName` keeps `$` — a failed delivery of `a$&b.png`
+    // re-embedded the success receipt inside the failure text, contradicting
+    // the R3-6 rationale the correction exists for.
+    const file = createTempFile('a$&b.png');
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // call 0 = file POST → no processQueryKey (fails); call 1 = failure
+      // notice; call 2 = text chunk.
+      const { sendCalls } = stubProactiveFetch(
+        () => new Response(JSON.stringify({}), { status: 200 }),
+      );
+
+      await expect(
+        channel.pushProactive(groupTarget, `[FILE: ${file.path}]`),
+      ).rejects.toThrow('missing processQueryKey');
+
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      const markdownBodies = bodies.filter(
+        (body) => body.msgKey === 'sampleMarkdown',
+      );
+      const chunkParam = JSON.parse(markdownBodies.at(-1)!.msgParam) as {
+        text: string;
+      };
+      expect(chunkParam.text).toContain('[File delivery failed: a$&b.png]');
+      expect(chunkParam.text).not.toContain('[File sent:');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites only the failed receipt when two files share a name', async () => {
+    // R8-2: the string-search rewrite replaced the FIRST matching receipt, so
+    // with two files named `report.txt` a failure of the SECOND rewrote the
+    // first file's receipt — the delivered file lost its claim and the failed
+    // one kept it.
+    const parent = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-file-'));
+    const firstPath = join(parent, 'a', 'report.txt');
+    const secondPath = join(parent, 'b', 'report.txt');
+    mkdirSync(dirname(firstPath), { recursive: true });
+    mkdirSync(dirname(secondPath), { recursive: true });
+    writeFileSync(firstPath, 'first');
+    writeFileSync(secondPath, 'second');
+    try {
+      const channel = proactive(createChannel({ cwd: parent }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // call 0 = first file POST (delivered); call 1 = second file POST → no
+      // processQueryKey (fails); call 2 = failure notice; call 3 = text chunk.
+      const { sendCalls } = stubProactiveFetch(
+        (sendCall) =>
+          new Response(
+            JSON.stringify(
+              sendCall === 0 ? { processQueryKey: 'file-key' } : {},
+            ),
+            { status: 200 },
+          ),
+      );
+
+      await expect(
+        channel.pushProactive(
+          groupTarget,
+          `[FILE: ${firstPath}]\n[FILE: ${secondPath}]`,
+        ),
+      ).rejects.toThrow('missing processQueryKey');
+
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      const markdownBodies = bodies.filter(
+        (body) => body.msgKey === 'sampleMarkdown',
+      );
+      const chunkParam = JSON.parse(markdownBodies.at(-1)!.msgParam) as {
+        text: string;
+      };
+      expect(chunkParam.text).toBe(
+        '[File sent: report.txt]\n[File delivery failed: report.txt]',
+      );
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 

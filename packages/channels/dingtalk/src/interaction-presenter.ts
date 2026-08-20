@@ -84,6 +84,15 @@ export class DingtalkInteractionPresenter {
   private readonly runs = new Map<string, RunPresentation>();
   private readonly segments = new Map<string, SegmentPresentation>();
   private readonly terminalSegmentIds = new Set<string>();
+  /**
+   * R8-4: why a run terminalized, kept past the run's post-finalization
+   * deletion — a late boundary close arriving after it still needs the
+   * reason to decide whether delivery is allowed.
+   */
+  private readonly terminalReasons = new Map<
+    string,
+    'completed' | 'failed' | 'cancelled'
+  >();
 
   constructor(private readonly options: DingtalkInteractionPresenterOptions) {}
 
@@ -94,6 +103,7 @@ export class DingtalkInteractionPresenter {
     sessionId = '',
     sender?: DingtalkCardSender,
   ): void {
+    this.terminalReasons.delete(runId);
     this.runs.set(runId, {
       runId,
       ownerId,
@@ -180,6 +190,20 @@ export class DingtalkInteractionPresenter {
   isRunActive(runId: string): boolean {
     const run = this.runs.get(runId);
     return run !== undefined && !run.terminal;
+  }
+
+  /**
+   * Whether a late boundary delivery may still go out for this run. R8-4:
+   * terminality alone used to gate the fallback, so a run COMPLETING while
+   * the boundary's multi-second prepare was in flight dropped the uploaded
+   * files whole. A completed run's chat target is still valid for delivery —
+   * only cancel/fail terminals suppress it — and the answer must survive the
+   * run's post-finalization deletion.
+   */
+  acceptsLateDelivery(runId: string): boolean {
+    return (
+      this.isRunActive(runId) || this.terminalReasons.get(runId) === 'completed'
+    );
   }
 
   closeOutput(
@@ -307,6 +331,12 @@ export class DingtalkInteractionPresenter {
   ): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
+    this.terminalReasons.set(runId, terminal);
+    while (this.terminalReasons.size > 1000) {
+      const oldest = this.terminalReasons.keys().next().value;
+      if (oldest === undefined) break;
+      this.terminalReasons.delete(oldest);
+    }
     this.options.questionCards?.cancelRun(
       runId,
       terminal === 'cancelled' &&
