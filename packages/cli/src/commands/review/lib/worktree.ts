@@ -474,10 +474,18 @@ interface IgnoreRule {
 function ignoreSourcesOf(
   cwd: string,
   paths: string[],
+  anchor: readonly string[] = [],
 ): Map<string, IgnoreRule> | null {
   const r = spawnSync(
     'git',
-    [...pipelineExcludeArgs(), 'check-ignore', '-z', '-v', '--stdin'],
+    [
+      ...anchor,
+      ...pipelineExcludeArgs(),
+      'check-ignore',
+      '-z',
+      '-v',
+      '--stdin',
+    ],
     {
       cwd,
       input: `${paths.join('\0')}\0`,
@@ -539,13 +547,17 @@ function hidesEverything(pattern: string): boolean {
  * out of the worktree is not asked about at all — `ls-files` would reject the
  * pathspec, and unknown provenance is untrusted provenance.
  */
-function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
+function trackedIgnoreSources(
+  cwd: string,
+  sources: Set<string>,
+  anchor: readonly string[] = [],
+): Set<string> {
   const inside = [...sources].filter(
     (s) =>
       s.length > 0 && !isAbsolute(s) && !s.split('/').some((p) => p === '..'),
   );
   if (inside.length === 0) return new Set();
-  const r = spawnSync('git', ['ls-files', '-z', '--', ...inside], {
+  const r = spawnSync('git', [...anchor, 'ls-files', '-z', '--', ...inside], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -555,6 +567,80 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
     return new Set();
   }
   return new Set(r.stdout.split('\0').filter((p) => p.length > 0));
+}
+
+/**
+ * The repo-local `filter.<name>` COMMANDS, when any are defined.
+ *
+ * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
+ * rebuild, and the probe tree's per-run restore — hooks being disabled covers
+ * hooks and not filters. The planting surface is two plain writes a probe can
+ * make into the COMMON dir this command's report calls shared:
+ * `git config filter.evil.smudge CMD` and one line appended to
+ * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
+ * wipe the common dir, so a filter planted while reviewing one PR fires on
+ * every later matching checkout of the user's OWN repository — persistence
+ * planted by reviewing a malicious PR, measured live. The two local config
+ * files are checked with `--file` rather than merged config because filters
+ * in the user's global config (git-lfs is the common one) are the user's own
+ * contract, exactly like any git command they run — while a probe's planting
+ * surface is the repo-local files. The state cannot be told apart from a
+ * filter the user set deliberately, and cannot be safely wiped, so a hit is a
+ * refusal upstream, not a cleanup here.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const files = spawnSync(
+    'git',
+    ['rev-parse', '--git-common-dir', '--git-dir'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
+    return [];
+  }
+  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  const common = resolve(worktree, commonDir);
+  const candidates = [
+    join(common, 'config'),
+    join(resolve(worktree, gitDir), 'config.worktree'),
+  ];
+  // Every OTHER worktree's per-worktree config too. This screen runs against
+  // the review worktree, but the checkout it authorises runs in the SCRATCH
+  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
+  // once `extensions.worktreeConfig` is on and was never read here — a filter
+  // planted there executed during the reset while this function reported the
+  // repository clean. The admin directory is one `readdir`, and a filter in
+  // any of these is a plant whichever tree carries it.
+  try {
+    for (const entry of readdirSync(join(common, 'worktrees'))) {
+      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const found: string[] = [];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const r = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        file,
+        '--get-regexp',
+        // `process` beside the pair: it is the third executable key (a
+        // long-running filter git speaks a protocol to), and enumerating two
+        // of three is how the first cut of this screen read as complete.
+        '^filter\\..*\\.(smudge|clean|process)$',
+      ],
+      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    );
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    for (const line of r.stdout.split('\n')) {
+      const key = line.split(/\s+/)[0];
+      if (key && !found.includes(key)) found.push(key);
+    }
+  }
+  return found;
 }
 
 /**
@@ -652,20 +738,73 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
   // one's. Fail closed the way a loud git failure below does.
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd,
-    encoding: 'utf8',
-    env: sanitizedGitEnv(),
-  });
+  const top = spawnSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir'],
+    { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
   let isWorktree = false;
+  let anchor: string[] = [];
   try {
+    const [toplevel, gitDir] = (top.stdout ?? '').trim().split('\n');
     isWorktree =
       !top.error &&
       top.status === 0 &&
       typeof top.stdout === 'string' &&
-      realpathSync(top.stdout.trim()) === realpathSync(cwd);
+      realpathSync(toplevel) === realpathSync(cwd);
+    if (isWorktree) {
+      // And the gitfile must name an admin entry that names this tree BACK.
+      // The pin below closes the window between this gate and the commands
+      // after it; it cannot help when the swap is already in place when the
+      // probe starts, because then the gate resolves the plant too — a
+      // repository whose `core.worktree` points here answers `--show-toplevel`
+      // with this path. `scratch-tree` gates its own reset on the round-trip
+      // for the same reason, and a planted standalone repo has no admin entry
+      // to round-trip at all.
+      // Its own try: a plant has no `gitdir` file to read, and letting that
+      // ENOENT fall into the outer catch reported it as "not a git worktree",
+      // which is a different and much vaguer thing than what was found.
+      let pointsBack = false;
+      try {
+        const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
+        pointsBack =
+          realpathSync(dirname(resolve(gitDir, backpointer))) ===
+          realpathSync(cwd);
+      } catch {
+        // No admin entry at all — a standalone repository answering for this
+        // path, which is exactly the shape being refused.
+      }
+      if (!pointsBack) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the .git gitfile names an admin entry that does not point back ' +
+            'at this tree — the commands below would measure whichever ' +
+            'repository it does name',
+        };
+      }
+      // PIN the identity this gate just verified, for every spawn below.
+      // Without it the gate is one-shot: each later command re-discovers the
+      // repository through the same `.git` file the check read, and that file
+      // is writable by anything running as this user — so a gitfile swapped in
+      // afterwards, pointing at a repo whose index already holds the
+      // contamination, answers a clean `status` for a dirty tree. Measured:
+      // through discovery the swap certifies a mutant clean deterministically,
+      // with no race; pinned, the same tree still reports ` M a.ts` and the
+      // untracked probe file. Measured too, because a WRONG pin would be worse
+      // than none: across a standalone checkout, a linked worktree, a
+      // superproject with an initialised submodule and a worktree reached
+      // through a symlinked ancestor, all five commands below return
+      // byte-identical output pinned and unpinned.
+      anchor = [
+        `--git-dir=${realpathSync(gitDir)}`,
+        `--work-tree=${realpathSync(toplevel)}`,
+      ];
+    }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.
+    isWorktree = false;
   }
   if (!isWorktree) {
     return {
@@ -679,6 +818,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   const r = spawnSync(
     'git',
     [
+      ...anchor,
       ...pipelineExcludeArgs(),
       // The measurement must not itself become the execution: `core.fsmonitor`
       // runs a command on `status`, and this tree's config is writable by
@@ -749,7 +889,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // from the name.
   const others = spawnSync(
     'git',
-    ['-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
+    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
     {
       cwd,
       encoding: 'utf8',
@@ -780,7 +920,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     extras.push(rec);
   }
   if (extras.length > 0) {
-    const hiddenBy = ignoreSourcesOf(cwd, extras);
+    const hiddenBy = ignoreSourcesOf(cwd, extras, anchor);
     if (hiddenBy === null) {
       return {
         paths: paths.slice(0, cap),
@@ -793,6 +933,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     const fromTheCommit = trackedIgnoreSources(
       cwd,
       new Set([...hiddenBy.values()].map((rule) => rule.source)),
+      anchor,
     );
     for (const rec of extras) {
       const rule = hiddenBy.get(rec);
@@ -826,7 +967,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // gitlink is certified clean.
   const stage = spawnSync(
     'git',
-    ['-c', 'core.fsmonitor=', 'ls-files', '-s', '-z'],
+    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '-s', '-z'],
     {
       cwd,
       encoding: 'utf8',
@@ -884,7 +1025,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // read as "no bits found" and fell through to a clean verdict.
   const bits = spawnSync(
     'git',
-    ['-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
+    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
     {
       cwd,
       encoding: 'utf8',
