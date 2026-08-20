@@ -77,13 +77,19 @@ export interface WriteAuthorizationRequest {
    */
   repo?: string;
   /**
-   * The EFFECTIVE host of the write — where the gh calls will actually route,
-   * including an operator-exported GH_HOST the caller resolved. Absent means
-   * github.com, and the gate compares against that default rather than
-   * skipping the check: a URL-shaped authorisation recorded for an Enterprise
-   * host must not admit a write routed at github.com merely because the
-   * caller omitted --host — and vice versa. (The asymmetric `req.host &&`
-   * guard this replaces bound the host in one direction only; caught by this
+   * The host the caller ASSERTS for the write — the semantics are
+   * caller-dependent, paired with `absentHostFollowsRecording` below.
+   * Callers whose routing falls back to the recorded binding (submit)
+   * pass the caller-typed flag only — never the ambient env: absence is
+   * NOT a github.com claim there, and the pr-url host check is skipped.
+   * Callers whose routing falls back to github.com/ambient
+   * (publish-assets) pass the resolved effective host, including an
+   * operator-exported GH_HOST: absence reads as github.com, and the
+   * gate compares against that default rather than skipping the check —
+   * a URL-shaped authorisation recorded for an Enterprise host must not
+   * admit a write routed at github.com merely because the caller
+   * omitted --host, and vice versa. (The asymmetric `req.host &&` guard
+   * this replaces bound the host in one direction only; caught by this
    * skill's own review.)
    */
   host?: string;

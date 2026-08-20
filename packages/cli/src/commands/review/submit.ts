@@ -727,6 +727,18 @@ export function runSubmit(
     // exit-3 refusal shape Step 7 treats as a complete, correct outcome.
     // Same answer, structured shape, naming the offender and its origin.
     if (boundHost !== undefined && !HOSTNAME_RE.test(boundHost)) {
+      // A recorded offender gets NO flag remedy: any valid flag
+      // contradicts the recorded host (hostsEquivalent cannot match a
+      // value that fails HOSTNAME_RE), and a flag equivalent to it
+      // fails HOSTNAME_RE itself — the contradiction refusal's remedy
+      // points back here, so re-recording is the only escape. The
+      // flag and origin arms ARE fixable by a re-run with a valid
+      // flag.
+      const remedy =
+        recordedHost !== undefined
+          ? `An explicit \`--host\` cannot override the recorded one ` +
+            `— re-record the review with a valid \`--host\`.`
+          : `Re-run with a valid \`--host\`.`;
       writeStderrLine(
         `REFUSED to post to ${args.repo}#${args.pr}: the host this ` +
           `write would route at (${JSON.stringify(boundHost)}, from ` +
@@ -735,9 +747,8 @@ export function runSubmit(
             : recordedHost !== undefined
               ? `the recorded review's \`--host\``
               : `this clone's origin remote`) +
-          `) is not a hostname (optionally :port). Re-run with a valid ` +
-          `\`--host\`, or re-record the review with one. The findings ` +
-          `are in the terminal output and the saved report.`,
+          `) is not a hostname (optionally :port). ${remedy} The ` +
+          `findings are in the terminal output and the saved report.`,
       );
       writeStdoutLine(
         JSON.stringify({ posted: false, reason: 'invalid-host' }, null, 2),
@@ -1064,6 +1075,17 @@ export function runSubmit(
         writeStderrLine(
           `WARNING: the MR head MOVED during posting — the comments ` +
             `that landed may reference code the author already replaced.`,
+        );
+      } else if (partial.headMovedDuringPost === undefined) {
+        // The same unknown state the success path discloses — the
+        // re-read dies in the same outage that killed the batch, so
+        // this is the ordinary partial shape: the user hand-posting
+        // the remainder must not read silence as "the landed pins
+        // were verified against the live head".
+        writeStderrLine(
+          `WARNING: could not re-verify the MR head after the failed ` +
+            `post — confirm the landed pins still anchor the live head ` +
+            `before hand-posting the remainder.`,
         );
       }
       writeStdoutLine(

@@ -301,6 +301,15 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('1 inline Critical(s) block the merge'),
     );
+    // The verified-stable success (headMovedDuringPost false) prints
+    // NEITHER drift warning — a truthiness mutation of the tri-state
+    // condition would print one of them for the ordinary success shape.
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
   });
 
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
@@ -791,6 +800,17 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('the recorded review'),
     );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('re-record the review with a valid'),
+    );
+    // The recorded arm gets NO flag remedy: a valid flag contradicts
+    // the invalid recorded host (hostsEquivalent cannot match a value
+    // that fails HOSTNAME_RE) and an equivalent flag fails HOSTNAME_RE
+    // itself — "re-run with --host" ping-pongs between the two
+    // refusals, so the refusal must lead with the re-recording escape.
+    expect(
+      stderrMock.mock.calls.map((c) => String(c[0])).join(''),
+    ).not.toContain('Re-run with');
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).not.toHaveBeenCalled();
 
@@ -814,6 +834,31 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
+  it('an INVALID cwd-origin host refuses naming the origin arm', () => {
+    // The third provenance arm: no flag, no recorded host — the bound
+    // host is the origin of the clone the cwd probe ran on.
+    // parseRemoteUrl does not validate the hostname (an underscore
+    // host parses intact), so the refusal must happen here and name
+    // THIS arm — a misattribution mutant passes every other cell.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
+    gitOptMock.mockReturnValue('git@ghe_corp.example.com:o/r.git');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining(`this clone's origin remote`),
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('a mid-batch failure discloses a head that moved during posting', () => {
     // The drift disclosure rides the partial shape too — adding a write
     // failure must not silently remove the warning the success path
@@ -834,6 +879,36 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(process.exitCode).toBe(3);
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('the MR head MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
+  });
+
+  it('a mid-batch failure whose head re-read VERIFIED STABLE prints neither drift warning', () => {
+    // Absence pin for the false state: a truthiness mutation of the
+    // disclosure condition (`!== undefined`, or `true`) prints MOVED —
+    // or the re-read warning — for a partial post whose drift state is
+    // verified stable, and only these absence assertions catch it.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'boom after 1 of 3 landed',
+        1,
+        [11],
+        false,
+        false,
+        false,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
     );
   });
 
@@ -1044,6 +1119,17 @@ describe('submit posts an authorised Aone target through a1', () => {
     });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),
+    );
+    // The undefined drift state is the ordinary partial shape — the
+    // re-read dies in the same outage that killed the batch — so
+    // disclose the unknown anchoring instead of letting silence read
+    // as "the landed pins were verified", and never print MOVED for a
+    // merely unknown state.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
     );
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
