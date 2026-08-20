@@ -37,7 +37,7 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
-import type { SessionMediaReference } from './sessionMedia.js';
+import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -100,7 +100,9 @@ export interface ChildHeapReport {
   unclassifiedSpaceNames: string[];
 }
 
-export type BridgePromptContentBlock = ContentBlock | SessionMediaReference;
+export type BridgePromptContentBlock =
+  | ContentBlock
+  | SessionAttachmentReference;
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
@@ -817,7 +819,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
-export const DAEMON_MEDIA_REFERENCES_META_KEY = 'qwen.daemon.mediaReferences';
+export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
+  'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -1887,24 +1890,28 @@ export interface AcpSessionBridge {
     },
   ): { accepted: boolean; messageId?: string };
 
-  storeSessionMedia(
+  storeSessionAttachment(
     sessionId: string,
     data: Uint8Array,
     mimeType: string,
     context?: BridgeClientRequestContext,
-  ): Promise<SessionMediaReference>;
+    name?: string,
+  ): Promise<SessionAttachmentReference>;
 
-  readSessionMedia(
+  readSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ data: Buffer; mimeType: string } | undefined>;
 
-  removeSessionMedia(
+  removeSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<boolean>;
+
+  /** Delete all persisted attachments after the session itself is deleted. */
+  deleteSessionAttachments(sessionId: string): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

@@ -62,7 +62,13 @@ export function createDaemonTranscriptStore(
       text: string,
       images?: Array<{ data: string; mimeType: string }>,
       meta?: DaemonTextDeltaMeta,
-      files?: Array<{ name: string; mimeType: string }>,
+      files?: Array<{
+        name: string;
+        mimeType: string;
+        data?: Blob;
+        text?: string;
+        attachmentId?: string;
+      }>,
     ) {
       state = appendLocalUserTranscriptMessage(state, text, {
         images,

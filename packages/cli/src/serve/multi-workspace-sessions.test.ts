@@ -897,6 +897,7 @@ function makeBridge(
       closeCalls.push(sessionId);
       live.delete(sessionId);
     },
+    async deleteSessionAttachments() {},
     getPendingPrompts(sessionId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
       pendingPromptCalls.push(sessionId);
@@ -2010,6 +2011,48 @@ describe('multi-workspace session dispatch', () => {
         ]);
         expect(materializeConversationDirectory).toHaveBeenCalledWith(
           LIVE_PROJECTLESS_TASK_ID,
+        );
+      },
+    );
+  });
+
+  it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
+    const storageSessionId = LIVE_PROJECTLESS_TASK_ID.toUpperCase();
+    await withStoredProjectlessLiveTasks(
+      [storageSessionId],
+      async (runtimeDir) => {
+        const materializeConversationDirectory = vi.fn(
+          async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        );
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory,
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
+
+        const response = await request(app)
+          .post(`/session/${LIVE_PROJECTLESS_TASK_ID}/load`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
+
+        expect(response.status).toBe(200);
+        // Storage keeps the persisted spelling, but the directory follows the
+        // live entry the bridge registers under the canonical id — otherwise a
+        // later Live call would materialize a second, empty directory.
+        expect(materializeConversationDirectory).toHaveBeenCalledWith(
+          LIVE_PROJECTLESS_TASK_ID,
+        );
+        expect(materializeConversationDirectory).not.toHaveBeenCalledWith(
+          storageSessionId,
         );
       },
     );

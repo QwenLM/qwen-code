@@ -466,6 +466,9 @@ export function transcriptBlocksToDaemonMessages(
           msg.files = textBlock.files.map((file) => ({
             name: file.name,
             mimeType: file.mimeType || 'text/plain',
+            ...(file.data !== undefined ? { data: file.data } : {}),
+            ...(file.text !== undefined ? { text: file.text } : {}),
+            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
           }));
         }
         messages.push(msg);

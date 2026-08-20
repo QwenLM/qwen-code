@@ -4071,14 +4071,14 @@ export interface PromptTextContent {
   text: string;
 }
 
-export type DaemonSessionMediaReference = Record<string, unknown> & {
-  type: 'image';
-  mediaId: string;
+export type DaemonSessionAttachmentReference = Record<string, unknown> & {
+  type: 'image' | 'resource';
+  attachmentId: string;
   mimeType: string;
   size: number;
 };
 
-export interface DaemonSessionMediaData {
+export interface DaemonSessionAttachmentData {
   data: string;
   mimeType: string;
 }
