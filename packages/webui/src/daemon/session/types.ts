@@ -452,8 +452,8 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
   uploadAttachment(
-    image: DaemonPromptImage,
-    opts?: { signal?: AbortSignal },
+    attachment: DaemonPromptImage | DaemonPromptFile,
+    opts?: { signal?: AbortSignal; sessionId?: string },
   ): Promise<DaemonSessionAttachmentReference>;
   readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
   removeAttachment(

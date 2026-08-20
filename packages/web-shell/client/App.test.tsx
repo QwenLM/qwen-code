@@ -8653,12 +8653,13 @@ describe('App session callbacks', () => {
     ).toContain('Investigate task failures');
   });
 
-  it('refreshes the generated title after the first turn completes', async () => {
+  it('stops refreshing the generated title after the catalog resolves it', async () => {
     mockConnection.displayName = undefined;
     const { container, rerender } = renderApp();
     await vi.waitFor(() => {
       expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalled();
     });
+    mockWorkspace.client.listWorkspaceSessions.mockClear();
     mockWorkspace.client.listWorkspaceSessions
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -8693,6 +8694,22 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="chat-context-header"]')
         ?.textContent,
     ).toContain('Generated session title');
+    expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledTimes(2);
+
+    mockWorkspace.client.listWorkspaceSessions.mockClear();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(mockWorkspace.client.listWorkspaceSessions).not.toHaveBeenCalled();
   });
 
   it('defers title refresh while the page is hidden', async () => {
