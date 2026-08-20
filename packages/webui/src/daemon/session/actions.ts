@@ -682,6 +682,20 @@ export function createDaemonSessionActions({
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
             : undefined;
+        const shouldAppendOptimisticMessage =
+          options?.optimisticUserMessage !== false;
+        const optimisticMessageAppended =
+          shouldAppendOptimisticMessage &&
+          displayedImages.length === 0 &&
+          displayedFiles.length === 0;
+        if (optimisticMessageAppended) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            [],
+          );
+        }
         let uploaded: Awaited<
           ReturnType<typeof promptContentWithUploadedAttachments>
         >;
@@ -694,7 +708,7 @@ export function createDaemonSessionActions({
             ctrl.signal,
           );
         } catch (error) {
-          if (options?.optimisticUserMessage !== false) {
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -706,7 +720,7 @@ export function createDaemonSessionActions({
         }
         if (ctrl.signal.aborted) {
           await removeUploadedAttachments(session, uploaded.references);
-          if (options?.optimisticUserMessage !== false) {
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -737,7 +751,7 @@ export function createDaemonSessionActions({
           if (definiteRejection) {
             await removeUploadedAttachments(session, uploaded.references);
           }
-          if (options?.optimisticUserMessage !== false) {
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -751,7 +765,7 @@ export function createDaemonSessionActions({
           }
           throw error;
         }
-        if (options?.optimisticUserMessage !== false) {
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -829,6 +843,20 @@ export function createDaemonSessionActions({
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
           : undefined;
+      const shouldAppendOptimisticMessage =
+        options?.optimisticUserMessage !== false;
+      const optimisticMessageAppended =
+        shouldAppendOptimisticMessage &&
+        displayedImages.length === 0 &&
+        displayedFiles.length === 0;
+      if (optimisticMessageAppended) {
+        store.appendLocalUserMessage(
+          text,
+          displayedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+          [],
+        );
+      }
       let uploaded: Awaited<
         ReturnType<typeof promptContentWithUploadedAttachments>
       >;
@@ -841,7 +869,7 @@ export function createDaemonSessionActions({
           options?.signal,
         );
       } catch (error) {
-        if (options?.optimisticUserMessage !== false) {
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -871,7 +899,7 @@ export function createDaemonSessionActions({
         if (definiteRejection) {
           await removeUploadedAttachments(session, uploaded.references);
         }
-        if (options?.optimisticUserMessage !== false) {
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -885,7 +913,7 @@ export function createDaemonSessionActions({
         }
         throw error;
       }
-      if (options?.optimisticUserMessage !== false) {
+      if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
         store.appendLocalUserMessage(
           text,
           displayedImages,
