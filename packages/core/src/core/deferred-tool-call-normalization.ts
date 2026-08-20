@@ -89,6 +89,20 @@ export function unwrapDeferredToolCallShape(
   };
 }
 
+export interface DeferredToolCallNormalizationOptions {
+  /**
+   * Presentation ledger state captured BEFORE the enclosing tool batch
+   * started executing. Surfaces that execute batch calls sequentially
+   * (daemon/ACP, headless) gate wrapper calls against this snapshot so a
+   * `tool_search` running earlier in the SAME batch cannot self-authorize
+   * a sibling `tool_call` — the search result cannot have entered the
+   * model context inside the batch that contains the call. Omit to gate
+   * against the live ledger (surfaces whose normalization already runs
+   * before any batch execution, e.g. CoreToolScheduler._schedule).
+   */
+  presentationSnapshot?: ReadonlyMap<string, string>;
+}
+
 /**
  * Convert the stable provider-facing `tool_call` wrapper into the
  * real deferred tool request used internally. Callers should run permissions,
@@ -99,6 +113,7 @@ export function unwrapDeferredToolCallShape(
 export async function normalizeDeferredToolCallRequest(
   request: ToolCallRequestInfo,
   toolRegistry: ToolRegistry,
+  options?: DeferredToolCallNormalizationOptions,
 ): Promise<DeferredToolCallNormalizationResult> {
   if (request.name !== ToolNames.DEFERRED_TOOL_CALL) {
     return { ok: true, request };
@@ -199,9 +214,14 @@ export async function normalizeDeferredToolCallRequest(
   // model context (delivered by tool_search this session) and its current
   // schema fingerprint still matches. On absence or mismatch, reject and
   // direct the model to re-search instead of routing guessed/stale
-  // arguments.
+  // arguments. Surfaces that execute batch calls sequentially pass a
+  // batch-start snapshot so a same-batch tool_search cannot self-authorize
+  // this call.
   const liveFingerprint = toolRegistry.schemaFingerprint(targetTool);
-  if (!toolRegistry.hasPresentedProxySchema(canonicalTarget, liveFingerprint)) {
+  const schemaPresented = options?.presentationSnapshot
+    ? options.presentationSnapshot.get(canonicalTarget) === liveFingerprint
+    : toolRegistry.hasPresentedProxySchema(canonicalTarget, liveFingerprint);
+  if (!schemaPresented) {
     return fail(
       `Deferred tool "${targetName}" has no presented schema in this session (or its schema changed since it was fetched). Use tool_search to fetch its current schema, then call tool_call again with the matching arguments.`,
       ToolErrorType.EXECUTION_DENIED,

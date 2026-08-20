@@ -23,6 +23,7 @@
 
 import type {
   AnyDeclarativeTool,
+  ProxySchemaPresentation,
   ToolInvocation,
   ToolResult,
 } from './tools.js';
@@ -339,6 +340,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const blocked: string[] = [];
     const directlyDeclared: string[] = [];
     const deferredToolNames: string[] = [];
+    // Schema presentations are collected here but NOT committed to the
+    // registry ledger at execution time. Issue #6721's fail-closed contract
+    // commits them only once the carrying result actually enters the active
+    // model context; every fallback below that withholds schemas must leave
+    // the ledger untouched. The pairs ride on the returned ToolResult and
+    // the delivery surface settles them (see ToolResult.proxySchemaPresentations).
+    const pendingPresentations: ProxySchemaPresentation[] = [];
 
     // Case-insensitive lookup across all known names (instance names + factory
     // names). Preserve the user-supplied casing in the error list so the
@@ -408,11 +416,14 @@ class ToolSearchInvocation extends BaseToolInvocation<
         deferredToolNames.push(canonical);
         // Issue #6721's fail-closed gate: the `tool_call` proxy may only
         // route to a target whose schema was actually delivered, and only
-        // while it still matches. Fingerprint the delivered version.
-        registry.markProxySchemaPresented(
-          canonical,
-          registry.schemaFingerprint(tool),
-        );
+        // while it still matches. Fingerprint the delivered version. The
+        // pair stays PENDING until the oversized-budget fallback below has
+        // decided the schemas really ship and the carrying result enters
+        // active history (settled by the delivery surface).
+        pendingPresentations.push({
+          name: canonical,
+          fingerprint: registry.schemaFingerprint(tool),
+        });
       } else {
         directlyDeclared.push(canonical);
       }
@@ -464,6 +475,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
       truncated,
     );
     if (oversizedFallback) {
+      // Every fallback result withholds the schemas (aggregate-overflow
+      // retry message, direct declaration, setTools-failure refusal), so
+      // the pending presentations are dropped here uncommitted — the
+      // fail-closed gate must not pass for a schema the model never
+      // received.
       return oversizedFallback;
     }
 
@@ -480,6 +496,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const result: ToolResult = { llmContent, returnDisplay };
     if (blockedErrorMessage && loadedSchemas.length === 0) {
       result.error = { message: blockedErrorMessage };
+    }
+    // This is the only path that actually delivers the `<functions>` blocks
+    // to the model. Attach the pending presentations so the delivery surface
+    // can commit them once this result enters the active model context.
+    if (pendingPresentations.length > 0) {
+      result.proxySchemaPresentations = pendingPresentations;
     }
     return result;
   }

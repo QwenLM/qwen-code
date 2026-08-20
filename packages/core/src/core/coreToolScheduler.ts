@@ -5600,6 +5600,16 @@ export class CoreToolScheduler {
               ? { modelOverride: toolResult.modelOverride }
               : {}),
           ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
+          // tool_search results carry the schemas they delivered as PENDING
+          // presentations; checkAndNotifyCompletion settles them against the
+          // delivery-accepted signal from onAllToolCallsComplete (issue
+          // #6721: commit only once the result enters active history).
+          ...(toolResult.proxySchemaPresentations?.length
+            ? {
+                pendingProxySchemaPresentations:
+                  toolResult.proxySchemaPresentations,
+              }
+            : {}),
           ...(processedImages.visionBridgeNotice !== undefined
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
@@ -6226,7 +6236,26 @@ export class CoreToolScheduler {
         // path is bounded (context accepted, delivery failed, or the send
         // promise settling), so this delays but cannot deadlock the queue.
         if (this.onAllToolCallsComplete) {
-          await this.onAllToolCallsComplete(completedCalls);
+          const deliveryAccepted =
+            await this.onAllToolCallsComplete(completedCalls);
+          // Issue #6721's delivery-acceptance contract: the presentation
+          // ledger commits ONLY once the carrying tool_search result is
+          // accepted into the active model context. `false` means the
+          // consumer rejected or never delivered the batch (a blocking
+          // UserPromptSubmit hook, user cancellation, admission failure),
+          // so the pending presentations are discarded uncommitted — the
+          // schema never reached the model and the gate must stay closed.
+          // `void` means the consumer does not report delivery acceptance;
+          // those surfaces keep the pre-signal behaviour (commit at
+          // completion) rather than losing the feature entirely.
+          this.settlePendingProxySchemaPresentations(
+            completedCalls,
+            deliveryAccepted !== false,
+          );
+        } else {
+          // No delivery consumer exists to withhold the result; commit
+          // like the pre-delivery-signalling path.
+          this.settlePendingProxySchemaPresentations(completedCalls, true);
         }
       } finally {
         try {
@@ -6245,6 +6274,26 @@ export class CoreToolScheduler {
         }
       }
     }
+  }
+
+  /**
+   * Settle the pending proxy-schema presentations carried by this batch's
+   * tool_search results against the delivery outcome. `accepted` commits
+   * every carried pair to the registry ledger (idempotent); `!accepted`
+   * discards them — nothing was ever committed at execution time, so a
+   * rejected/undelivered batch simply leaves the gate closed (fail-closed,
+   * issue #6721).
+   */
+  private settlePendingProxySchemaPresentations(
+    completedCalls: CompletedToolCall[],
+    accepted: boolean,
+  ): void {
+    if (!accepted) return;
+    const pending = completedCalls.flatMap(
+      (call) => call.response.pendingProxySchemaPresentations ?? [],
+    );
+    if (pending.length === 0) return;
+    this.toolRegistry.commitProxySchemaPresentations(pending);
   }
 
   private async maybePersistLargeToolResult(

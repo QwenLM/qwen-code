@@ -20,6 +20,7 @@ import type {
   ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
+  ProxySchemaPresentation,
 } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
@@ -168,6 +169,13 @@ export interface ToolCallResponseInfo {
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   boundaryArtifact?: ToolResultBoundaryArtifact;
+  /**
+   * Deferred-tool schemas delivered by this result (tool_search), pending
+   * commitment to the registry presentation ledger. Issue #6721: committed
+   * only when the carrying result is accepted into active model history;
+   * discarded when delivery fails or is rejected.
+   */
+  pendingProxySchemaPresentations?: readonly ProxySchemaPresentation[];
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {

@@ -871,6 +871,42 @@ export class ToolRegistry {
   }
 
   /**
+   * Clears only the proxy-schema presentation ledger, leaving the revealed
+   * (directly declared) set intact. Issue #6721's gate requires a presented
+   * schema to live in the ACTIVE model context; proxy-presented schemas live
+   * only in history text, so every history mutation that can evict tool
+   * results (compression, microcompaction, rewind/truncation, setHistory)
+   * clears the ledger — the affected tools deterministically require another
+   * search. Revealed tools keep their eligibility: their schemas stay in the
+   * function-declaration list regardless of history.
+   */
+  clearProxySchemaPresentations(): void {
+    this.proxySchemaPresentations.clear();
+  }
+
+  /**
+   * Immutable copy of the presentation ledger. Delivery surfaces gate a
+   * whole tool batch against a snapshot taken before the batch executes so
+   * a mark committed mid-batch (e.g. by a tool_search running earlier in
+   * the same batch) cannot self-authorize a same-batch `tool_call`.
+   */
+  getProxySchemaPresentationSnapshot(): ReadonlyMap<string, string> {
+    return new Map(this.proxySchemaPresentations);
+  }
+
+  /**
+   * Commit delivered schema presentations to the ledger. Called by delivery
+   * surfaces only after the carrying tool result entered active history.
+   */
+  commitProxySchemaPresentations(
+    presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
+  ): void {
+    for (const { name, fingerprint } of presentations) {
+      this.proxySchemaPresentations.set(name, fingerprint);
+    }
+  }
+
+  /**
    * Stable fingerprint of a tool's current schema. The `tool_call` proxy
    * compares the fingerprint recorded when tool_search delivered the schema
    * against the live schema at call time (issue #6721's fail-closed gate).

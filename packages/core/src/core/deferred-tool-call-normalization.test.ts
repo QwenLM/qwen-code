@@ -375,6 +375,89 @@ describe('normalizeDeferredToolCallRequest', () => {
     }
   });
 
+  it('denies a same-batch wrapper call when gated against a pre-batch snapshot', async () => {
+    // Surfaces that execute batch calls sequentially (daemon/ACP,
+    // headless) gate wrapper calls against the ledger state captured
+    // BEFORE the batch started: a tool_search running earlier in the same
+    // batch commits its presentation mid-batch, and that mark must not
+    // self-authorize a same-batch sibling call.
+    const registry = createRegistry();
+    const target = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    const snapshotAtBatchStart = registry.getProxySchemaPresentationSnapshot();
+
+    // Mid-batch: the sibling search delivers and its presentation lands.
+    registry.markProxySchemaPresented(
+      ToolNames.CRON_CREATE,
+      registry.schemaFingerprint(target),
+    );
+
+    // A later-turn call (live ledger) passes…
+    const live = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+    expect(live.ok).toBe(true);
+
+    // …but the identical call gated against the batch-start snapshot must
+    // be rejected instead of routed on guessed arguments.
+    const snapshotGated = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+      { presentationSnapshot: snapshotAtBatchStart },
+    );
+    expect(snapshotGated.ok).toBe(false);
+    if (!snapshotGated.ok) {
+      expect(snapshotGated.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(snapshotGated.error.message).toContain('no presented schema');
+    }
+  });
+
+  it('passes a wrapper call against a snapshot taken after presentation', async () => {
+    const registry = createRegistry();
+    const target = new MockTool({
+      name: ToolNames.CRON_CREATE,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    registry.markProxySchemaPresented(
+      ToolNames.CRON_CREATE,
+      registry.schemaFingerprint(target),
+    );
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    // The snapshot is a copy: later ledger mutations must not leak into it.
+    registry.clearProxySchemaPresentations();
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+      { presentationSnapshot: snapshot },
+    );
+
+    expect(result.ok).toBe(true);
+    // And the cleared live ledger alone would fail closed.
+    const live = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+    expect(live.ok).toBe(false);
+  });
+
   it('rejects a wrapper call when the discovery/proxy pair is unregistered', async () => {
     const registry = createRegistry({ withoutProxyPair: true });
     const ensureTool = vi.spyOn(registry, 'ensureTool');

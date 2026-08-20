@@ -880,6 +880,13 @@ describe('CoreToolScheduler', () => {
       },
       hasPresentedProxySchema: (name: string, fingerprint: string) =>
         presentedSchemaFingerprints.get(name) === fingerprint,
+      commitProxySchemaPresentations: (
+        presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
+      ) => {
+        for (const { name, fingerprint } of presentations) {
+          presentedSchemaFingerprints.set(name, fingerprint);
+        }
+      },
     } as unknown as ToolRegistry;
 
     const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
@@ -977,6 +984,8 @@ describe('CoreToolScheduler', () => {
       markProxySchemaPresented: (name: string, tool: MockTool) => {
         presentedSchemaFingerprints.set(name, fingerprintOf(tool));
       },
+      hasPresentedProxySchema: (name: string, tool: MockTool) =>
+        presentedSchemaFingerprints.get(name) === fingerprintOf(tool),
     };
   }
 
@@ -2678,6 +2687,118 @@ describe('CoreToolScheduler', () => {
 
     expect(cronExecute).toHaveBeenCalledTimes(1);
     expect(cronExecute).toHaveBeenLastCalledWith({ schedule: '0 9 * * *' });
+  });
+
+  describe('proxy schema presentation settlement (issue #6721)', () => {
+    // tool_search executes but its delivered schemas stay PENDING; the
+    // ledger commits only against the delivery-accepted signal from
+    // onAllToolCallsComplete (the carrying result entering active model
+    // history), never at execution time.
+    function createSearchSetup(handlers: {
+      onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
+      disableCompletionCallback?: boolean;
+    }) {
+      const cronTool = new MockTool({
+        name: ToolNames.CRON_CREATE,
+        shouldDefer: true,
+      });
+      const searchExecute = vi.fn().mockResolvedValue({
+        llmContent: '<functions>...</functions>',
+        returnDisplay: 'Loaded 1 tool(s)',
+        proxySchemaPresentations: [
+          {
+            name: ToolNames.CRON_CREATE,
+            fingerprint: JSON.stringify(cronTool.schema ?? {}),
+          },
+        ],
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          ToolNames.TOOL_SEARCH,
+          new MockTool({ name: ToolNames.TOOL_SEARCH, execute: searchExecute }),
+        ],
+        [ToolNames.CRON_CREATE, cronTool],
+      ]);
+      const setup = createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentDeferredSchemas: false,
+        onAllToolCallsComplete: handlers.onAllToolCallsComplete,
+        disableCompletionCallback: handlers.disableCompletionCallback,
+      });
+      const runSearch = async () => {
+        await setup.scheduler.schedule(
+          {
+            callId: 'search-settle',
+            name: ToolNames.TOOL_SEARCH,
+            args: { query: 'cron' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-search-settle',
+          },
+          new AbortController().signal,
+        );
+        await vi.waitFor(() => expect(searchExecute).toHaveBeenCalled());
+        await vi.waitFor(() =>
+          expect(
+            setup.hasPresentedProxySchema(ToolNames.CRON_CREATE, cronTool),
+          ).toBe(true),
+        );
+      };
+      return { ...setup, cronTool, runSearch };
+    }
+
+    it('commits carried presentations when the delivery consumer accepts', async () => {
+      const onAllToolCallsComplete = vi.fn().mockResolvedValue(true);
+      const { runSearch, hasPresentedProxySchema, cronTool } =
+        createSearchSetup({ onAllToolCallsComplete });
+
+      await runSearch();
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      expect(hasPresentedProxySchema(ToolNames.CRON_CREATE, cronTool)).toBe(
+        true,
+      );
+    });
+
+    it('discards carried presentations when the delivery consumer rejects', async () => {
+      // A blocking UserPromptSubmit hook, user cancellation or an admission
+      // failure makes the consumer return false: the schema never reached
+      // the model, so the gate must stay closed.
+      const onAllToolCallsComplete = vi.fn().mockResolvedValue(false);
+      const { scheduler, hasPresentedProxySchema, cronTool } =
+        createSearchSetup({ onAllToolCallsComplete });
+
+      await scheduler.schedule(
+        {
+          callId: 'search-rejected',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search-rejected',
+        },
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      // Give any (incorrect) async commit a chance to land before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(hasPresentedProxySchema(ToolNames.CRON_CREATE, cronTool)).toBe(
+        false,
+      );
+    });
+
+    it('commits when the consumer does not report delivery acceptance', async () => {
+      // void = the consumer has no delivery signal; those surfaces keep the
+      // pre-signal behaviour instead of losing the feature entirely.
+      const onAllToolCallsComplete = vi.fn();
+      const { runSearch, hasPresentedProxySchema, cronTool } =
+        createSearchSetup({ onAllToolCallsComplete });
+
+      await runSearch();
+
+      expect(hasPresentedProxySchema(ToolNames.CRON_CREATE, cronTool)).toBe(
+        true,
+      );
+    });
   });
 
   it('aborts and fails a tool call that exceeds the execution timeout', async () => {

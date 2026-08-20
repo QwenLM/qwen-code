@@ -424,6 +424,96 @@ describe('tool response finalization', () => {
     expect(persist).toHaveBeenCalledOnce();
   });
 
+  it('exempts delivered tool_search schema blocks from the batch budget', async () => {
+    // Issue #6721: a delivered `<functions>` block is atomic. The batch
+    // budget must not truncate it after delivery — the presentation ledger
+    // marks the target schemas as presented, so a partial/stubbed schema
+    // would still pass the fail-closed gate and route guessed arguments.
+    const schemaBlock = `<functions>${'s'.repeat(150_000)}</functions>`;
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'search',
+        toolName: ToolNames.TOOL_SEARCH,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'search',
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: schemaBlock },
+            },
+          },
+        ],
+      },
+      entry('sibling', [
+        {
+          functionResponse: {
+            id: 'sibling',
+            name: 'shell',
+            response: { output: 'x'.repeat(100_000) },
+          },
+        },
+      ]),
+    ];
+
+    const result = await finalizeToolResponses(config(200_000), entries);
+
+    // The schema slot survives intact even though the combined text
+    // (250k+) exceeds the 200k budget…
+    expect(
+      result[0].responseParts[0].functionResponse?.response?.['output'],
+    ).toBe(schemaBlock);
+    expect(
+      String(result[0].responseParts[0].functionResponse?.response?.['output']),
+    ).not.toContain('Tool output truncated');
+    // …and the sibling output is left alone once the exempt schema text is
+    // taken out of the budget accounting.
+    expect(
+      result[1].responseParts[0].functionResponse?.response?.['output'],
+    ).toBe('x'.repeat(100_000));
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('still budgets siblings when a tool_search schema block is present', async () => {
+    const schemaBlock = `<functions>${'s'.repeat(150_000)}</functions>`;
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'search',
+        toolName: ToolNames.TOOL_SEARCH,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'search',
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: schemaBlock },
+            },
+          },
+        ],
+      },
+      entry('sibling', [
+        {
+          functionResponse: {
+            id: 'sibling',
+            name: 'shell',
+            response: { output: 'x'.repeat(300_000) },
+          },
+        },
+      ]),
+    ];
+
+    const result = await finalizeToolResponses(config(200_000), entries);
+
+    // The schema block stays atomic…
+    expect(
+      result[0].responseParts[0].functionResponse?.response?.['output'],
+    ).toBe(schemaBlock);
+    // …while the oversized sibling is persisted and fit into the budget.
+    const siblingOutput = result[1].responseParts[0].functionResponse
+      ?.response?.['output'] as string;
+    expect(siblingOutput.length).toBeLessThan(300_000);
+    expect(siblingOutput).toContain('Tool output truncated');
+    expect(persist).toHaveBeenCalledOnce();
+  });
+
   it('counts protected lifecycle output in response metadata', () => {
     const reminder = getPlanModeSystemReminder(false);
     const parts: Part[] = [
@@ -798,5 +888,58 @@ describe('tool response finalization', () => {
 
     expect(output.startsWith(reminder)).toBe(true);
     expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+  });
+
+  it('the send guard preserves tool_search schema blocks', () => {
+    // The send-boundary guard runs on the unfinalized batch right before a
+    // model request; it must share the finalizer's tool_search exemption or
+    // a delivered `<functions>` block could still be truncated at send time
+    // while the presentation ledger keeps its mark (issue #6721).
+    const schemaBlock = `<functions>${'s'.repeat(150_000)}</functions>`;
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'search',
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: schemaBlock },
+            },
+          },
+          {
+            functionResponse: {
+              id: 'sibling',
+              name: 'shell',
+              response: { output: 'x'.repeat(100_000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    const [guarded] = enforceFunctionResponseBudget(entries, 200_000);
+    const parts = guarded.responseParts;
+    expect(parts[0].functionResponse?.response?.['output']).toBe(schemaBlock);
+    expect(parts[1].functionResponse?.response?.['output']).toBe(
+      'x'.repeat(100_000),
+    );
+  });
+
+  it('toolResponseTextLength still measures tool_search slots', () => {
+    // The exemption applies to budget fitting only; length accounting must
+    // keep counting the schema text (contentLength metadata).
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'search',
+          name: ToolNames.TOOL_SEARCH,
+          response: { output: 'schema-text' },
+        },
+      },
+    ];
+
+    expect(toolResponseTextLength(parts)).toBe('schema-text'.length);
   });
 });

@@ -4465,6 +4465,14 @@ export class GeminiChat {
     // push, corrupting the conversation. Drop the paired deferred-record
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
+    // Issue #6721: proxy-presented schemas live only in history text, so a
+    // history replacement that evicts the carrying tool_search result also
+    // evicts the schema from the active model context. Drop the presentation
+    // ledger so affected tools deterministically require another search
+    // instead of passing the gate against an invisible schema. Revealed
+    // (directly declared) tools are unaffected — their schemas stay in the
+    // function-declaration list regardless of history.
+    this.clearProxySchemaPresentationsIfRegistryAvailable();
     this.redactApprovedPlansFromLoadedHistory();
   }
 
@@ -4477,6 +4485,19 @@ export class GeminiChat {
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
     this.clearPendingPartialState();
+    // Rewind/truncation can evict the tool_search result carrying a
+    // presented schema; clear the ledger for the same reason setHistory
+    // does (issue #6721's active-context requirement).
+    this.clearProxySchemaPresentationsIfRegistryAvailable();
+  }
+
+  private clearProxySchemaPresentationsIfRegistryAvailable(): void {
+    try {
+      this.config.getToolRegistry().clearProxySchemaPresentations();
+    } catch {
+      // Test doubles and early-init configs may not expose a registry;
+      // ledger clearing must never break a history mutation.
+    }
   }
 
   stripThoughtsFromHistory(): void {

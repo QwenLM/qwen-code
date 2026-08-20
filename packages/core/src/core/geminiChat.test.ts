@@ -16073,4 +16073,48 @@ describe('GeminiChat', async () => {
       }
     });
   });
+
+  describe('proxy schema presentation ledger clearing (issue #6721)', () => {
+    // Proxy-presented schemas live only in history text. Every history
+    // mutation that can evict the carrying tool_search result must drop
+    // the presentation ledger so the fail-closed gate cannot pass against
+    // a schema that is no longer in the active model context.
+    function registryWithLedger() {
+      const clearProxySchemaPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations,
+      } as never);
+      return clearProxySchemaPresentations;
+    }
+
+    it('clears the ledger when history is replaced (compression/setHistory)', () => {
+      const clearLedger = registryWithLedger();
+
+      chat.setHistory([{ role: 'user', parts: [{ text: 'compressed' }] }]);
+
+      expect(clearLedger).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the ledger when history is truncated (rewind)', () => {
+      const clearLedger = registryWithLedger();
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'second' }] },
+      ]);
+      clearLedger.mockClear();
+
+      chat.truncateHistory(1);
+
+      expect(clearLedger).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not clear the ledger when only thoughts are stripped', () => {
+      const clearLedger = registryWithLedger();
+
+      chat.stripThoughtsFromHistory();
+
+      expect(clearLedger).not.toHaveBeenCalled();
+    });
+  });
 });

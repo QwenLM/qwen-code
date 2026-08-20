@@ -20,6 +20,9 @@ import { CronListTool } from './cron-list.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
 import { SendMessageTool } from './send-message.js';
 import { ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
+import { normalizeDeferredToolCallRequest } from '../core/deferred-tool-call-normalization.js';
+import type { ToolCallRequestInfo } from '../core/turn.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
@@ -1531,5 +1534,152 @@ describe('ToolRegistry.clearRevealedDeferredTools', () => {
     expect(registry.getFunctionDeclarations().map((d) => d.name)).not.toContain(
       'cron_create',
     );
+  });
+});
+
+describe('proxy schema presentation lifecycle (issue #6721)', () => {
+  const makeWrapperRequest = (target: string): ToolCallRequestInfo => ({
+    callId: `proxy_${target}`,
+    name: ToolNames.DEFERRED_TOOL_CALL,
+    args: { name: target, arguments: { schedule: '0 9 * * *' } },
+    isClientInitiated: false,
+    prompt_id: 'prompt-presentation',
+  });
+
+  // Normalization rejects every wrapper call when the discovery/proxy pair
+  // is unregistered; the lifecycle tests exercise the gate itself.
+  const registerProxyPair = (registry: ToolRegistry) => {
+    registry.registerFactory(
+      ToolNames.TOOL_SEARCH,
+      async () => new MockTool({ name: ToolNames.TOOL_SEARCH }),
+    );
+    registry.registerFactory(
+      ToolNames.DEFERRED_TOOL_CALL,
+      async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+      { allowReservedName: true },
+    );
+  };
+
+  it('delivers schemas as pending presentations, never marking the ledger at execute time', async () => {
+    const { config, registry } = makeConfigWithRegistry();
+    registerProxyPair(registry);
+    const deferred = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(deferred);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const fingerprint = registry.schemaFingerprint(deferred);
+    // Executing the search must NOT commit anything to the ledger — the
+    // contract commits only once the carrying result enters active history.
+    expect(registry.hasPresentedProxySchema('cron_create', fingerprint)).toBe(
+      false,
+    );
+    // The delivered schema rides the result as a pending presentation…
+    expect(result.proxySchemaPresentations).toEqual([
+      { name: 'cron_create', fingerprint },
+    ]);
+    // …so until the delivery surface commits, the fail-closed gate rejects
+    // a wrapper call even though the search already ran.
+    const denied = await normalizeDeferredToolCallRequest(
+      makeWrapperRequest('cron_create'),
+      registry,
+    );
+    expect(denied.ok).toBe(false);
+    // Once the delivery surface commits (result accepted into active
+    // history), the same call passes.
+    registry.commitProxySchemaPresentations(result.proxySchemaPresentations!);
+    const allowed = await normalizeDeferredToolCallRequest(
+      makeWrapperRequest('cron_create'),
+      registry,
+    );
+    expect(allowed.ok).toBe(true);
+  });
+
+  it('aggregate-overflow fallback withholds schemas and keeps the gate closed', async () => {
+    // Combined `<functions>` block exceeds the budget while each schema
+    // fits alone: the fallback returns a schema-less retry message, so no
+    // presentation may be marked/pending — a later wrapper call with
+    // guessed arguments must not pass the gate.
+    const { config, registry } = makeConfigWithRegistry();
+    registerProxyPair(registry);
+    const first = new MockTool({
+      name: 'medium_deferred_a',
+      description: 'a'.repeat(400),
+      shouldDefer: true,
+    });
+    const second = new MockTool({
+      name: 'medium_deferred_b',
+      description: 'b'.repeat(400),
+      shouldDefer: true,
+    });
+    registry.registerTool(first);
+    registry.registerTool(second);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(1_000);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:medium_deferred_a,medium_deferred_b' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain(
+      'Request these tools individually or in a smaller follow-up batch',
+    );
+    expect(result.proxySchemaPresentations).toBeUndefined();
+    expect(
+      registry.hasPresentedProxySchema(
+        'medium_deferred_a',
+        registry.schemaFingerprint(first),
+      ),
+    ).toBe(false);
+    expect(
+      registry.hasPresentedProxySchema(
+        'medium_deferred_b',
+        registry.schemaFingerprint(second),
+      ),
+    ).toBe(false);
+
+    const denied = await normalizeDeferredToolCallRequest(
+      makeWrapperRequest('medium_deferred_a'),
+      registry,
+    );
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) {
+      expect(denied.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(denied.error.message).toContain('no presented schema');
+    }
+  });
+
+  it('setTools-failure refusal withholds schemas and keeps the gate closed', async () => {
+    const { config, registry } = makeConfigWithRegistry();
+    registerProxyPair(registry);
+    const oversized = new MockTool({
+      name: 'oversized_deferred',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockRejectedValue(new Error('provider rejected tools')),
+    } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    // The reveal rolled back AND nothing was presented/pending.
+    expect(registry.isDeferredToolRevealed('oversized_deferred')).toBe(false);
+    expect(result.proxySchemaPresentations).toBeUndefined();
+
+    const denied = await normalizeDeferredToolCallRequest(
+      makeWrapperRequest('oversized_deferred'),
+      registry,
+    );
+    expect(denied.ok).toBe(false);
   });
 });

@@ -1535,3 +1535,59 @@ describe('ToolRegistry', () => {
     });
   });
 });
+
+describe('ToolRegistry proxy schema presentation ledger', () => {
+  it('clearProxySchemaPresentations clears the ledger but keeps revealed tools', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const tool = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(tool);
+    const fingerprint = registry.schemaFingerprint(tool);
+    registry.markProxySchemaPresented('cron_create', fingerprint);
+    registry.revealDeferredTool('cron_create');
+
+    registry.clearProxySchemaPresentations();
+
+    // Issue #6721: proxy-presented schemas live only in history text, so a
+    // history mutation evicting them must drop callable eligibility…
+    expect(registry.hasPresentedProxySchema('cron_create', fingerprint)).toBe(
+      false,
+    );
+    // …while revealed (directly declared) tools keep theirs — their schema
+    // stays in the function-declaration list regardless of history.
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+  });
+
+  it('commitProxySchemaPresentations records every carried pair', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+
+    registry.commitProxySchemaPresentations([
+      { name: 'alpha', fingerprint: 'fp-a' },
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(true);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(true);
+    expect(registry.hasPresentedProxySchema('alpha', 'other')).toBe(false);
+  });
+
+  it('getProxySchemaPresentationSnapshot returns an isolated copy', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+
+    expect(snapshot.get('alpha')).toBe('fp-a');
+    // Mutating the live ledger afterwards must not leak into the snapshot:
+    // batch gates rely on the pre-batch state staying frozen.
+    registry.markProxySchemaPresented('bravo', 'fp-b');
+    registry.clearProxySchemaPresentations();
+    expect(snapshot.get('alpha')).toBe('fp-a');
+    expect(snapshot.has('bravo')).toBe(false);
+  });
+});
