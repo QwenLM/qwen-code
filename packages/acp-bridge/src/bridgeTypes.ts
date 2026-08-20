@@ -6,7 +6,9 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
   GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
   TurnResultCode,
   TurnResultErrorPayload,
@@ -1674,6 +1676,13 @@ export interface AcpSessionBridge {
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
+
   /**
    * Read a live session's Goal state. Throws `SessionNotFoundError` when the
    * session is not resident because this route addresses the selected runtime.
@@ -1862,9 +1871,12 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
-   * With `options.queueOnly` an idle session rejects instead of promoting. If
-   * a busy session settles before draining the message,
-   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
+   * With `options.rejectIfIdle` an idle session rejects instead of taking
+   * ownership. A message accepted while busy keeps the ordinary public queue
+   * semantics: it is echoed when drained and promoted if the turn settles
+   * first. `options.queueOnly` is reserved for internal live steering; if a
+   * busy session settles before draining one of those messages,
+   * `onSettledWithoutDrain` lets that internal caller drive the next turn.
    * `options.content` carries image blocks with the message;
    * an empty `message` is admitted when media blocks are present.
    */
@@ -1874,6 +1886,7 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
     messageId?: string,
     options?: {
+      rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
       content?: readonly BridgePromptContentBlock[];

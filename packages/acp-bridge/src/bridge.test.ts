@@ -1393,6 +1393,40 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('wraps a Goal control request in the envelope the agent reads', async () => {
+    // The agent's `sessionGoalControl` handler reads `params['request']`; this
+    // method is its only producer, and a flattened envelope makes every
+    // POST /session/:id/goal fail with "Invalid or missing Goal control
+    // request" while the route and agent tests stay green.
+    const snapshot = { v: 2, activity: 'idle', goal: null };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl
+          ? { snapshot }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const request = { action: 'create' as const, objective: 'ship it' };
+
+    await expect(
+      bridge.controlSessionGoal(session.sessionId, request),
+    ).resolves.toEqual({ snapshot });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      params: { sessionId: session.sessionId, request },
+    });
+
+    await expect(
+      bridge.controlSessionGoal(
+        '11111111-2222-3333-4444-555555555555',
+        request,
+      ),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+
+    await bridge.shutdown();
+  });
+
   it('serves completed MCP status without restarting an idle channel', async () => {
     const makeMcpChannel = () =>
       makeChannel({
@@ -29859,6 +29893,103 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  /**
+   * A Goal turn runs inside the child via `prompt()` directly, so the bridge
+   * never sees a `session/prompt` RPC for it and `pendingPromptCount` stays 0
+   * for its whole duration. The child still drains this queue between tool
+   * batches, so the session is busy: without the `goalTurnActive` check every
+   * mid-turn insert during a Goal turn would be refused as idle — while the
+   * client enables the affordance precisely because a Goal turn is non-idle.
+   */
+  it('accepts a rejectIfIdle insert while a child-driven Goal turn runs', async () => {
+    const handle = makeChannel({});
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'insert me',
+        { clientId: session.clientId },
+        'goal-insert',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-insert' });
+    // Queued for the child's drain, NOT promoted into a prompt of its own.
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([
+      expect.objectContaining({ messageId: 'goal-insert', text: 'insert me' }),
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('promotes what the ending Goal turn never drained', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((res) => {
+          release = res;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'never drained',
+        { clientId: session.clientId },
+        'goal-undrained',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+
+    // A Goal turn owns no prompt slot, so its end is the only signal that can
+    // settle what its last drain missed.
+    await handle.agentConnection.extNotification('_qwencode/end_turn', {
+      sessionId: session.sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: `${session.sessionId}########1`,
+    });
+
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+        expect.objectContaining({
+          promptId: 'goal-undrained',
+          text: 'never drained',
+        }),
+      ]),
+    );
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([]);
+
+    release?.();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
@@ -30923,10 +31054,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const admission = bridge.enqueueMidTurnMessage(
       session.sessionId,
       'leftover',
+      { clientId: session.clientId },
+      'leftover-public',
+      { rejectIfIdle: true },
     );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'leftover-public',
     });
     releases[0]!();
     await t1;
@@ -30936,6 +31070,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect.objectContaining({
         promptId: admission.messageId,
         text: 'leftover',
+        originatorClientId: session.clientId,
       }),
     ]);
     releases[1]!();
@@ -31324,12 +31459,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-      clientId: session.clientId,
-    });
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'hi',
+      { clientId: session.clientId },
+      'public-mid-turn',
+      { rejectIfIdle: true },
+    );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'public-mid-turn',
     });
 
     // Subscribe before the drain so the live injection frame is captured. The
@@ -32255,6 +32394,31 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       ),
     ).toEqual({ accepted: true, messageId: 'steer-idle' });
     await vi.waitFor(() => expect(promptCalls).toBe(1));
+    await bridge.shutdown();
+  });
+
+  it('rejects a public enqueue on idle only when rejectIfIdle is set', async () => {
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        promptCalls++;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'public message',
+        { clientId: session.clientId },
+        'public-idle',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: false });
+    expect(promptCalls).toBe(0);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();
   });
 

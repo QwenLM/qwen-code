@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { writeClipboardText } from '../../utils/clipboard';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import styles from './WebShellSidebar.module.css';
@@ -173,15 +174,7 @@ export function SessionDetailsTooltip({
             title={t('sidebar.copySessionId')}
             onClick={() => {
               const copyAttempt = ++copyAttemptRef.current;
-              if (
-                typeof navigator === 'undefined' ||
-                !navigator.clipboard?.writeText
-              ) {
-                setCopyStatus('failed');
-                return;
-              }
-              void navigator.clipboard
-                .writeText(session.sessionId)
+              void writeClipboardText(session.sessionId)
                 .then(() => {
                   if (copyAttemptRef.current === copyAttempt) {
                     setCopyStatus('copied');

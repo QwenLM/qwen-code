@@ -31,7 +31,7 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(sab), 0, 0, ms);
 }
 
-function execA1WithRetry(args: string[]): string {
+function execA1(args: string[], retry: boolean): string {
   for (let attempt = 0; ; attempt++) {
     try {
       return execFileSync(A1_BINARY, args, {
@@ -56,7 +56,11 @@ function execA1WithRetry(args: string[]): string {
           e.stderr?.toString() ?? '',
         ].join('\n'),
       );
-      if (attempt < MAX_RETRIES && TRANSIENT_RE.test(rebuilt.message)) {
+      if (
+        retry &&
+        attempt < MAX_RETRIES &&
+        TRANSIENT_RE.test(rebuilt.message)
+      ) {
         const delay = BASE_DELAY_MS * (attempt + 1);
         // The sibling gh.ts prints one trace line per retry; a silent 3–9 s
         // blocking sleep reads as a hang in CI logs.
@@ -71,15 +75,40 @@ function execA1WithRetry(args: string[]): string {
   }
 }
 
-/** Run `a1` with args and return trimmed stdout. */
+/** Run `a1` with args and return trimmed stdout. Idempotent reads ride a
+ *  transient retry. */
 export function a1(...args: string[]): string {
-  return execA1WithRetry(args);
+  return execA1(args, true);
+}
+
+/** Run `a1` for a WRITE — exactly once, never retried. A transient retry
+ *  after the server ACCEPTED the call would duplicate the write (a
+ *  double-posted comment), so a write surfaces its first error and the
+ *  caller reports what already landed. */
+export function a1Once(...args: string[]): string {
+  return execA1(args, false);
 }
 
 /** Run `a1 … --format json` and parse the result. The long `--format` flag is
  *  the one every a1 subcommand accepts (`workitem get` has no `-f` shorthand). */
 export function a1Json<T>(...args: string[]): T {
   return JSON.parse(a1(...args, '--format', 'json')) as T;
+}
+
+/** The JSON shape of `a1Once` — the WRITE that reads its result back (the
+ *  created comment's id). TOLERANT on purpose, and only here: an exec
+ *  failure propagates (the write genuinely failed), but once the exec
+ *  SUCCEEDED the write is ACCEPTED — an answer that then fails to parse is
+ *  a platform anomaly, not a failed post, and must degrade to `undefined`
+ *  ("landed, result unreadable"). A throw instead would let the caller
+ *  count an accepted comment as unposted and re-run it into a duplicate. */
+export function a1JsonOnce<T>(...args: string[]): T | undefined {
+  const raw = a1Once(...args, '--format', 'json');
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
