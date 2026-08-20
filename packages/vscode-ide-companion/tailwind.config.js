@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* eslint-env node */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
