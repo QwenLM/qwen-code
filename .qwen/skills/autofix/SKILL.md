@@ -394,14 +394,16 @@ silently overriding or silently complying.
   - `drift` — implement the named simpler alternative and/or the deletion
     list FIRST (typically net-negative), then continue addressing feedback.
   - `conflict` — two defensible directions and the choice is not yours: STOP
-    `BLOCKED` and write the handoff into `<workdir>/failure.md` — carry the
-    audit's reasoning, name the contested choice, lay out the options and
-    your recommendation. `failure.md` is the one stop file the round's
-    output contract accepts; run-agent.mjs wraps it into the workflow's
-    handoff comment. Do not write `handoff.md` yourself — that file belongs
-    to run-agent.mjs. This is the ONLY growth-related path to a human, and
-    the question you leave must be the narrowed contested choice with
-    evidence, not "the diff is too big".
+    `BLOCKED` with a handoff carrying the audit's reasoning — the narrowed
+    contested choice with evidence, not "the diff is too big".
+    Write that handoff to `<workdir>/handoff.md` — English-only, no details
+    block — naming the decision, the options, your recommendation, and what
+    was tried; then stop without writing anything else: no commit, no
+    `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
+    recognizes a handoff with no fix verdict as a deliberate deferral: the
+    round ends cleanly, the note is posted to the PR, and the item waits for
+    the maintainer instead of being re-run. This is the ONLY growth-related
+    path to a human.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -547,5 +549,7 @@ Finish with exactly one outcome:
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
 - No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
+- Stopped by the growth brake: write `<workdir>/handoff.md` per the
+  not-converging rule (English-only, no details block) — and commit nothing.
 - The GitHub Actions Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.

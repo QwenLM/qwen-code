@@ -53,10 +53,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
-  // Prompts and mid-turn messages support session-scoped media uploaded once
-  // and referenced by `mediaId`. The bridge resolves bytes only when ACP input
-  // is dispatched, keeping base64 out of JSON and SSE payloads.
-  session_media: { since: 'v1' },
+  // Prompts and mid-turn messages reference session-scoped image and file
+  // attachments by their stored filename.
+  session_attachments: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting
