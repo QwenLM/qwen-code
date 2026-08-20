@@ -119,6 +119,7 @@ export interface AgentViewWorkerFile {
   endpoint?: string;
   hostEndpoint?: string;
   hostAuthToken?: string;
+  hostId?: string;
   tokenDigest?: string;
   lastHeartbeatAt?: string;
   protocolVersion: number;
@@ -192,6 +193,7 @@ export type AgentViewWorkerEvent =
       waitingFor?: string;
       inputKind?: AgentViewInputKind;
       lastResult?: string;
+      promptId?: string;
       at?: string;
     };
 
@@ -204,6 +206,7 @@ export type AgentViewWorkerControlEvent =
   | {
       type: 'prompt';
       sequence: number;
+      promptId: string;
       text: string;
       at: string;
     }

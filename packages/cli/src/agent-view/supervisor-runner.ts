@@ -144,6 +144,7 @@ export async function runAgentViewSupervisor(
   const authToken = randomUUID();
   const startedAt = new Date().toISOString();
   let closeRequested = false;
+  let closeServer = (): Promise<void> => Promise.resolve();
   const handler = createAgentViewSupervisorHandler({
     ...(options.globalDir ? { globalDir: options.globalDir } : {}),
     ...(options.hibernationPolicy
@@ -152,7 +153,7 @@ export async function runAgentViewSupervisor(
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
-        void Promise.resolve(server.close()).catch(() => {});
+        void closeServer().catch(() => {});
       });
     },
   });
@@ -178,6 +179,8 @@ export async function runAgentViewSupervisor(
     authToken,
     authorizeSideband,
   });
+  let serverClosePromise: Promise<void> | undefined;
+  closeServer = () => (serverClosePromise ??= server.close());
 
   await server.listen();
   await writeAgentViewSupervisor(
@@ -199,16 +202,14 @@ export async function runAgentViewSupervisor(
     const onSigterm = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
     const onSigint = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
@@ -224,13 +225,7 @@ export async function runAgentViewSupervisor(
     process.once('SIGTERM', onSigterm);
     process.once('SIGINT', onSigint);
   });
-  await fs
-    .unlink(
-      getAgentViewStorePaths({
-        ...(options.globalDir ? { globalDir: options.globalDir } : {}),
-      }).supervisorPath,
-    )
-    .catch(() => {});
+  await closeServer().catch(() => {});
 }
 
 function createSupervisorHandle(

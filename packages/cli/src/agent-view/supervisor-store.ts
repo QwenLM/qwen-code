@@ -886,6 +886,7 @@ function normalizeWorker(
     endpoint: stringValue(raw['endpoint']),
     hostEndpoint: stringValue(raw['hostEndpoint']),
     hostAuthToken: stringValue(raw['hostAuthToken']),
+    hostId: stringValue(raw['hostId']),
     tokenDigest: stringValue(raw['tokenDigest']),
     lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']),
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,

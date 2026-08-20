@@ -16,12 +16,14 @@ import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
   AgentViewLaunchFile,
   AgentViewSessionStateFile,
+  AgentViewWorkerFile,
 } from './protocol.js';
 import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
 import {
+  clearAgentViewWorkerPids,
   getAgentViewSessionPaths,
   readAgentViewActivity,
   readAgentViewLaunch,
@@ -442,6 +444,88 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('does not let a stale ready event resolve a replacement waiter', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const { sessionId } = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const oldToken = await readWorkerTokenForTest(sessionId, globalDir);
+    await patchSessionStateForTest(sessionId, globalDir, {
+      sessionState: 'completed',
+      processState: 'exited',
+    });
+
+    let replacementLaunched!: () => void;
+    const launched = new Promise<void>((resolve) => {
+      replacementLaunched = resolve;
+    });
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      waitForWorkerReady: true,
+      workerReadyTimeoutMs: 1000,
+      launchPtyHost: async () => {
+        replacementLaunched();
+        return fakePtyHost();
+      },
+    });
+    const readState = supervisorStore.readAgentViewSessionState;
+    let staleReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      staleReadStarted = resolve;
+    });
+    let releaseStaleRead!: () => void;
+    const staleReadGate = new Promise<void>((resolve) => {
+      releaseStaleRead = resolve;
+    });
+    const readSpy = vi
+      .spyOn(supervisorStore, 'readAgentViewSessionState')
+      .mockImplementationOnce(async (...args) => {
+        staleReadStarted();
+        await staleReadGate;
+        return readState(...args);
+      });
+    try {
+      const staleReady = handler.workerEvent?.({
+        type: 'ready',
+        sessionId,
+        token: oldToken,
+        cwd: globalDir,
+      });
+      await readStarted;
+      const respawn = Promise.resolve(handler.respawn?.({ sessionId }));
+      await launched;
+      releaseStaleRead();
+      await expect(staleReady).resolves.toMatchObject({ accepted: true });
+      const settled = vi.fn();
+      void respawn.then(settled, settled);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).not.toHaveBeenCalled();
+
+      const newToken = await readWorkerTokenForTest(sessionId, globalDir);
+      await handler.workerEvent?.({
+        type: 'ready',
+        sessionId,
+        token: newToken,
+        cwd: globalDir,
+      });
+      await expect(respawn).resolves.toMatchObject({ respawned: true });
+    } finally {
+      releaseStaleRead();
+      readSpy.mockRestore();
+    }
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('marks dispatch failed when the worker never reports ready', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -698,7 +782,7 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('keeps a fresh adoption and re-adopts stale records with recycled pids', async () => {
+  it('fails closed on adopting records with live unverified pids', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -764,10 +848,14 @@ describe('Agent View supervisor process helpers', () => {
           activeCwd: path.join(globalDir, 'project'),
           terminal: { columns: 80, rows: 24 },
         }),
-      ).resolves.toEqual({ sessionId: staleId, adopted: true });
+      ).resolves.toEqual({
+        sessionId: staleId,
+        adopted: false,
+        alreadyManaged: true,
+      });
       await expect(
         readAgentViewSessionState(staleId, { globalDir }),
-      ).resolves.toMatchObject({ ownership: 'managed' });
+      ).resolves.toMatchObject({ ownership: 'adopting' });
       expect(killSpy.mock.calls.filter(([, signal]) => signal !== 0)).toEqual(
         [],
       );
@@ -1063,7 +1151,7 @@ describe('Agent View supervisor process helpers', () => {
     expect(readyActivity).not.toHaveProperty('waitingFor');
     expect(readyActivity).not.toHaveProperty('inputKind');
     expect(readyActivity).not.toHaveProperty('lastResult');
-    expect(readyActivity).not.toHaveProperty('queuedPromptCount');
+    expect(readyActivity).toMatchObject({ queuedPromptCount: 1 });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -1151,6 +1239,7 @@ describe('Agent View supervisor process helpers', () => {
         {
           type: 'prompt',
           sequence: 1,
+          promptId: expect.any(String),
           text: 'next step',
           at: expect.any(String),
         },
@@ -1167,12 +1256,16 @@ describe('Agent View supervisor process helpers', () => {
       queuedPromptPreview: 'next step',
       capabilities: ['reply', 'hibernate'],
     });
-
+    const firstPromptId = (
+      await readAgentViewActivity(result.sessionId, { globalDir })
+    )?.queuedPromptId;
+    if (!firstPromptId) throw new Error('Missing queued prompt id.');
     await handler.workerEvent?.({
       type: 'state',
       sessionId: result.sessionId,
       token,
       sessionState: 'working',
+      promptId: firstPromptId,
     });
     await expect(
       handler.send?.({ sessionId: result.sessionId, text: 'queued follow-up' }),
@@ -1184,6 +1277,7 @@ describe('Agent View supervisor process helpers', () => {
       token,
       sessionState: 'completed',
       lastResult: 'done',
+      promptId: firstPromptId,
     });
     await expect(
       handler.send?.({ sessionId: result.sessionId, text: 'continue' }),
@@ -1197,12 +1291,16 @@ describe('Agent View supervisor process helpers', () => {
         {
           type: 'prompt',
           sequence: 2,
+          promptId: expect.any(String),
           text: 'continue',
           at: expect.any(String),
         },
       ],
     });
-
+    const secondPromptId = (
+      await readAgentViewActivity(result.sessionId, { globalDir })
+    )?.queuedPromptId;
+    if (!secondPromptId) throw new Error('Missing queued prompt id.');
     await handler.workerEvent?.({
       type: 'state',
       sessionId: result.sessionId,
@@ -1210,6 +1308,7 @@ describe('Agent View supervisor process helpers', () => {
       sessionState: 'needs_input',
       waitingFor: 'response',
       lastResult: 'Anything else?',
+      promptId: secondPromptId,
     });
     await expect(
       readAgentViewActivity(result.sessionId, { globalDir }),
@@ -1388,7 +1487,7 @@ describe('Agent View supervisor process helpers', () => {
     ).rejects.toThrow();
     await expect(
       handler.workerControl?.({ sessionId: result.sessionId, token }),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ events: [] });
 
     // A retry after the store recovers delivers the prompt exactly once.
     await fs.rm(activityPath, { recursive: true, force: true });
@@ -1435,27 +1534,8 @@ describe('Agent View supervisor process helpers', () => {
       readAgentViewActivity(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({ queuedPromptCount: 1 });
 
-    // The durable prompt remains private at the supervisor API boundary and
-    // is delivered exactly once by the restarted daemon.
-    const restartedDaemon = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(),
-    });
-    await restartedDaemon.workerEvent?.({
-      type: 'ready',
-      sessionId: result.sessionId,
-      token,
-      cwd: globalDir,
-    });
-    await restartedDaemon.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-    });
-    await expect(restartedDaemon.list()).resolves.not.toEqual(
+    // The durable prompt remains private at the supervisor API boundary.
+    await expect(firstDaemon.list()).resolves.not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           activity: expect.objectContaining({ queuedPromptText: prompt }),
@@ -1463,7 +1543,7 @@ describe('Agent View supervisor process helpers', () => {
       ]),
     );
     await expect(
-      restartedDaemon.peek?.({ sessionId: result.sessionId }),
+      firstDaemon.peek?.({ sessionId: result.sessionId }),
     ).resolves.not.toMatchObject({
       activity: { queuedPromptText: prompt },
     });
@@ -1474,22 +1554,81 @@ describe('Agent View supervisor process helpers', () => {
       queuedPromptId: expect.any(String),
       queuedPromptText: prompt,
     });
+
+    // A restarted daemon re-serves the prompt until the worker reports that
+    // processing began. The pre-submit idle report must not acknowledge it.
+    const restartedDaemon = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const control = (await restartedDaemon.workerControl?.({
+      sessionId: result.sessionId,
+      token,
+    })) as { events: Array<{ type: string; promptId?: string }> };
+    expect(control).toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: 'prompt',
+          promptId: expect.any(String),
+          text: prompt,
+        }),
+      ],
+    });
+    const queuedActivity = await readAgentViewActivity(result.sessionId, {
+      globalDir,
+    });
+    expect(control.events[0]?.promptId).toBe(queuedActivity?.queuedPromptId);
+    await restartedDaemon.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'idle',
+    });
     await expect(
-      restartedDaemon.workerControl?.({
+      restartedDaemon.workerControl?.({ sessionId: result.sessionId, token }),
+    ).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({ promptId: control.events[0]?.promptId }),
+      ],
+    });
+    await expect(
+      restartedDaemon.workerEvent?.({
+        type: 'state',
         sessionId: result.sessionId,
         token,
+        sessionState: 'working',
+        promptId: control.events[0]?.promptId,
       }),
-    ).resolves.toMatchObject({
-      events: [expect.objectContaining({ type: 'prompt', text: prompt })],
+    ).resolves.toMatchObject({ accepted: true });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ sessionState: 'working' });
+    await expect(
+      readAgentViewActivity(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ queuedPromptDeliveredAt: expect.any(String) });
+    const completedAt = (
+      await readAgentViewActivity(result.sessionId, { globalDir })
+    )?.lastQueuedPromptAt;
+    await restartedDaemon.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'completed',
+      promptId: control.events[0]?.promptId,
+      at: completedAt,
     });
     await expect(
       restartedDaemon.workerControl?.({ sessionId: result.sessionId, token }),
     ).resolves.toMatchObject({ events: [] });
+    await expect(
+      readAgentViewActivity(result.sessionId, { globalDir }),
+    ).resolves.not.toMatchObject({ queuedPromptCount: 1 });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('persists prompt delivery across restarts and transient reads', async () => {
+  it('persists prompt acknowledgements across restarts and transient reads', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -1510,12 +1649,28 @@ describe('Agent View supervisor process helpers', () => {
       cwd: globalDir,
     });
     await firstDaemon.send?.({ sessionId, text: 'create the PR' });
-    await expect(
-      firstDaemon.workerControl?.({ sessionId, token }),
-    ).resolves.toMatchObject({
+    const firstControl = (await firstDaemon.workerControl?.({
+      sessionId,
+      token,
+    })) as { events: Array<{ type: string; promptId?: string }> };
+    expect(firstControl).toMatchObject({
       events: [
         expect.objectContaining({ type: 'prompt', text: 'create the PR' }),
       ],
+    });
+    const firstPromptId = firstControl.events[0]?.promptId;
+    if (!firstPromptId) throw new Error('Missing prompt id.');
+    await expect(
+      readAgentViewActivity(sessionId, { globalDir }),
+    ).resolves.not.toMatchObject({
+      queuedPromptDeliveredAt: expect.any(String),
+    });
+    await firstDaemon.workerEvent?.({
+      type: 'state',
+      sessionId,
+      token,
+      sessionState: 'working',
+      promptId: firstPromptId,
     });
     await expect(
       readAgentViewActivity(sessionId, { globalDir }),
@@ -1532,6 +1687,7 @@ describe('Agent View supervisor process helpers', () => {
       token,
       sessionState: 'completed',
       lastResult: 'done',
+      promptId: firstPromptId,
     });
     await expect(
       readAgentViewActivity(sessionId, { globalDir }),
@@ -1541,10 +1697,19 @@ describe('Agent View supervisor process helpers', () => {
     ).resolves.toMatchObject({ events: [] });
 
     await firstDaemon.send?.({ sessionId, text: 'task A' });
-    await expect(
-      firstDaemon.workerControl?.({ sessionId, token }),
-    ).resolves.toMatchObject({
+    const secondControl = (await firstDaemon.workerControl?.({
+      sessionId,
+      token,
+    })) as { events: Array<{ type: string; promptId?: string }> };
+    expect(secondControl).toMatchObject({
       events: [expect.objectContaining({ type: 'prompt', text: 'task A' })],
+    });
+    await firstDaemon.workerEvent?.({
+      type: 'state',
+      sessionId,
+      token,
+      sessionState: 'working',
+      promptId: secondControl.events[0]?.promptId,
     });
     const readActivity = supervisorStore.readAgentViewActivity;
     let activityReads = 0;
@@ -1603,6 +1768,22 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       handler.send?.({ sessionId: result.sessionId, text: 'follow up' }),
     ).resolves.toEqual({ sessionId: result.sessionId, sent: true });
+    const firstControl = (await handler.workerControl?.({
+      sessionId: result.sessionId,
+      token,
+    })) as { events: Array<{ type: string; promptId?: string }> };
+    expect(firstControl).toMatchObject({
+      events: [expect.objectContaining({ type: 'prompt', text: 'follow up' })],
+    });
+    const promptId = firstControl.events[0]?.promptId;
+    if (!promptId) throw new Error('Missing prompt id.');
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'working',
+      promptId,
+    });
 
     hosts[0]?.resolveExit(1);
     await waitForSessionState(
@@ -1621,13 +1802,105 @@ describe('Agent View supervisor process helpers', () => {
       handler.respawn?.({ sessionId: result.sessionId }),
     ).resolves.toEqual({ sessionId: result.sessionId, respawned: true });
     const nextToken = await readWorkerTokenForTest(result.sessionId, globalDir);
-    await expect(
-      handler.workerControl?.({
-        sessionId: result.sessionId,
-        token: nextToken,
-      }),
-    ).resolves.toMatchObject({
+    const replacementControl = (await handler.workerControl?.({
+      sessionId: result.sessionId,
+      token: nextToken,
+    })) as { events: Array<{ type: string; promptId?: string }> };
+    expect(replacementControl).toMatchObject({
       events: [expect.objectContaining({ type: 'prompt', text: 'follow up' })],
+    });
+    expect(replacementControl.events[0]?.promptId).toBe(promptId);
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('rejects an old worker control request after respawn rotates its token', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => {
+        const host = fakePtyHost(999_999_002 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const { sessionId } = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const oldToken = await readWorkerTokenForTest(sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId,
+      token: oldToken,
+      cwd: globalDir,
+    });
+    await handler.send?.({ sessionId, text: 'follow up' });
+    const control = (await handler.workerControl?.({
+      sessionId,
+      token: oldToken,
+    })) as { events: Array<{ promptId?: string }> };
+    const promptId = control.events[0]?.promptId;
+    if (!promptId) throw new Error('Missing prompt id.');
+    await patchSessionStateForTest(sessionId, globalDir, {
+      sessionState: 'completed',
+      processState: 'exited',
+    });
+
+    let shutdownReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      shutdownReached = resolve;
+    });
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    hosts[0]!.shutdown = async () => {
+      shutdownReached();
+      await shutdownGate;
+      hosts[0]!.resolveExit(0);
+    };
+
+    const respawn = handler.respawn?.({ sessionId });
+    await reached;
+    const readWorker = supervisorStore.readAgentViewWorker;
+    let oldRequestAuthenticated!: () => void;
+    const authenticated = new Promise<void>((resolve) => {
+      oldRequestAuthenticated = resolve;
+    });
+    const readSpy = vi
+      .spyOn(supervisorStore, 'readAgentViewWorker')
+      .mockImplementation(async (...args) => {
+        const worker = await readWorker(...args);
+        oldRequestAuthenticated();
+        return worker;
+      });
+    try {
+      const staleControl = handler.workerControl?.({
+        sessionId,
+        token: oldToken,
+      });
+      await Promise.race([
+        authenticated,
+        new Promise((resolve) => setTimeout(resolve, 25)),
+      ]);
+      releaseShutdown();
+      await expect(respawn).resolves.toMatchObject({ respawned: true });
+      await expect(staleControl).rejects.toThrow('worker token is invalid');
+    } finally {
+      releaseShutdown();
+      readSpy.mockRestore();
+    }
+
+    const newToken = await readWorkerTokenForTest(sessionId, globalDir);
+    await expect(
+      handler.workerControl?.({ sessionId, token: newToken }),
+    ).resolves.toMatchObject({
+      events: [expect.objectContaining({ type: 'prompt', promptId })],
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -1725,6 +1998,84 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'src/app.ts' }),
     ).rejects.toThrow('is waiting for the previous response');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('does not answer a different question that appears during reconnect', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const { sessionId } = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId,
+      token,
+      sessionState: 'needs_input',
+      waitingFor: 'approval-a',
+    });
+
+    const readActivity = supervisorStore.readAgentViewActivity;
+    let activityReads = 0;
+    let releaseRead = () => {};
+    const readBlocked = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let markReadStarted = () => {};
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const readSpy = vi
+      .spyOn(supervisorStore, 'readAgentViewActivity')
+      .mockImplementation(async (...args) => {
+        if (++activityReads === 2) {
+          markReadStarted();
+          await readBlocked;
+        }
+        return readActivity(...args);
+      });
+    try {
+      const answer = handler.answer?.({ sessionId, text: 'yes' });
+      await readStarted;
+      const state = await readAgentViewSessionState(sessionId, { globalDir });
+      const activity = await readAgentViewActivity(sessionId, { globalDir });
+      if (!state || !activity) throw new Error('Missing test session.');
+      const changedAt = new Date(
+        Date.parse(state.updatedAt) + 1000,
+      ).toISOString();
+      await writeAgentViewSessionState(
+        { ...state, updatedAt: changedAt },
+        { globalDir },
+      );
+      await writeAgentViewActivity(
+        sessionId,
+        {
+          ...activity,
+          waitingFor: 'approval-b',
+          lastActivityAt: changedAt,
+        },
+        { globalDir },
+      );
+      releaseRead();
+      await expect(answer).rejects.toThrow(
+        'is no longer waiting for the same input',
+      );
+    } finally {
+      releaseRead();
+      readSpy.mockRestore();
+    }
+    await expect(
+      handler.workerControl?.({ sessionId, token }),
+    ).resolves.toMatchObject({ events: [] });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -2525,8 +2876,16 @@ describe('Agent View supervisor process helpers', () => {
       stopped: true,
     });
     expect(liveHost.killedWith).toBeUndefined();
+    const restartedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+    });
+    await restartedHandler.list();
     await expect(
-      recoveredHandler.workerControl?.({ sessionId: result.sessionId, token }),
+      restartedHandler.workerControl?.({
+        sessionId: result.sessionId,
+        token,
+      }),
     ).resolves.toMatchObject({
       events: [
         {
@@ -2675,19 +3034,42 @@ describe('Agent View supervisor process helpers', () => {
       { globalDir },
     );
     const hosts: FakePtyHost[] = [];
+    const readState = supervisorStore.readAgentViewSessionState;
+    let spawned = false;
+    let workerAtFirstPostSpawnRead: AgentViewWorkerFile | undefined;
+    const readSpy = vi
+      .spyOn(supervisorStore, 'readAgentViewSessionState')
+      .mockImplementation(async (...args) => {
+        if (spawned && !workerAtFirstPostSpawnRead) {
+          workerAtFirstPostSpawnRead = await readAgentViewWorker(
+            result.sessionId,
+            { globalDir },
+          );
+        }
+        return readState(...args);
+      });
     const recoveredHandler = createAgentViewSupervisorHandler({
       globalDir,
       platform: 'linux',
       launchPtyHost: async () => {
         const host = fakePtyHost(999_999_005);
         hosts.push(host);
+        spawned = true;
         return host;
       },
     });
 
-    await expect(
-      recoveredHandler.respawn?.({ sessionId: result.sessionId }),
-    ).resolves.toEqual({ sessionId: result.sessionId, respawned: true });
+    try {
+      await expect(
+        recoveredHandler.respawn?.({ sessionId: result.sessionId }),
+      ).resolves.toEqual({ sessionId: result.sessionId, respawned: true });
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(workerAtFirstPostSpawnRead).toMatchObject({
+      hostPid: 999_999_001,
+      workerPid: 999_999_005,
+    });
     // The refresh repairs the record with a new updatedAt; the respawn must
     // not mistake that rewrite for a user stop and kill the fresh host.
     expect(hosts).toHaveLength(1);
@@ -3463,6 +3845,44 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('finishes an interrupted remove after a daemon restart', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const { sessionId } = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const state = await readAgentViewSessionState(sessionId, { globalDir });
+    if (!state) throw new Error('Missing test session.');
+    await writeAgentViewSessionState(
+      { ...state, ownership: 'removing' },
+      { globalDir },
+    );
+    const restarted = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+    });
+
+    await expect(restarted.list()).resolves.toEqual([]);
+    await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
+      sessions: [],
+    });
+    await expect(
+      readAgentViewSessionState(sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      ownership: 'unmanaged',
+      processState: 'exited',
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('rejects unknown session management requests', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -4127,7 +4547,7 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('reconciles a stale adoption before auto-exit', async () => {
+  it('keeps a stale adoption with live unverified pids fail-closed', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -4184,30 +4604,29 @@ describe('Agent View supervisor process helpers', () => {
 
     await expect(handler.tickIdleHibernation()).resolves.toEqual({
       hibernated: [],
-      shutdownRequested: true,
+      shutdownRequested: false,
     });
     await expect(
       readAgentViewSessionState(sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      ownership: 'unmanaged',
-      processState: 'exited',
-      lastError: { code: 'adoption_failed' },
+      ownership: 'adopting',
+      processState: 'starting',
     });
     await expect(
       readAgentViewWorker(sessionId, { globalDir }),
-    ).resolves.not.toMatchObject({
+    ).resolves.toMatchObject({
       hostPid: expect.any(Number),
       workerPid: expect.any(Number),
     });
     await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
-      sessions: [],
+      sessions: [expect.objectContaining({ sessionId })],
     });
-    expect(onShutdown).toHaveBeenCalledOnce();
+    expect(onShutdown).not.toHaveBeenCalled();
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('finishes a stale adoption when its persisted host reconnects', async () => {
+  it('repairs stale lifecycle state when its persisted host reconnects', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -4239,13 +4658,27 @@ describe('Agent View supervisor process helpers', () => {
       { ...worker, hostEndpoint: hostEndpoint.path },
       { globalDir },
     );
+    await clearAgentViewWorkerPids(result.sessionId, { globalDir });
+    const launchPtyHost = vi.fn(async () => {
+      throw new Error('must not spawn');
+    });
     const recoveredHandler = createAgentViewSupervisorHandler({
       globalDir,
       platform: 'linux',
       now: () => new Date('2026-07-17T00:01:00.000Z'),
       hibernationPolicy: { autoExit: false },
+      launchPtyHost,
     });
 
+    await expect(
+      recoveredHandler.adopt?.({
+        sessionId: result.sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        terminal: { columns: 80, rows: 24 },
+      }),
+    ).resolves.toMatchObject({ adopted: false, alreadyManaged: true });
+    expect(launchPtyHost).not.toHaveBeenCalled();
     await expect(recoveredHandler.list()).resolves.toEqual([
       expect.objectContaining({
         sessionId: result.sessionId,
@@ -4261,6 +4694,36 @@ describe('Agent View supervisor process helpers', () => {
       ownership: 'managed',
       processState: 'alive',
     });
+
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      sessionState: 'idle',
+      processState: 'hibernating',
+    });
+    const restartedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      hibernationPolicy: { autoExit: false },
+    });
+    const patchSpy = vi
+      .spyOn(supervisorStore, 'patchAgentViewSessionStateIf')
+      .mockRejectedValueOnce(new Error('transient write failure'));
+    await expect(restartedHandler.list()).resolves.toEqual([
+      expect.objectContaining({
+        state: expect.objectContaining({ processState: 'hibernating' }),
+      }),
+    ]);
+    await expect(restartedHandler.list()).resolves.toEqual([
+      expect.objectContaining({
+        state: expect.objectContaining({ processState: 'alive' }),
+      }),
+    ]);
+    patchSpy.mockRestore();
+    await expect(
+      restartedHandler.send?.({
+        sessionId: result.sessionId,
+        text: 'follow up',
+      }),
+    ).resolves.toMatchObject({ sent: true });
 
     await hostServer.close();
     await fs.rm(globalDir, { recursive: true, force: true });
