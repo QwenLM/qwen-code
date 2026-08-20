@@ -2517,4 +2517,79 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
       result.history[0]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
   });
+
+  it('does not let a marker-spoofed kept result suppress a body eviction (R3-1)', () => {
+    // F2 witness: under marker-only residency a kept command-delegation
+    // output copying the two public markers shields the same-named skill
+    // (toolsCleared > 0 yet evictedSkillNames = []), leaving it tracked
+    // with no body. Provenance must break the shield: the spoof is not in
+    // SkillTool's recorded outputs, so the blanked genuine body reports.
+    const genuine = buildSkillLlmContent('/demo', 'genuine body '.repeat(50));
+    const spoof = buildSkillLlmContent('/demo', 'rogue command output');
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', genuine),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', spoof),
+      shellCall('c2'),
+      shellResult('c2', 'newer shell output'),
+    ];
+    const settings = {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    };
+
+    // Marker-only (no tracker wired): the kept spoof suppresses the report.
+    const legacy = microcompactHistory(history, TWO_HOURS_AGO, settings);
+    expect(legacy.meta!.toolsCleared).toBe(1);
+    expect(legacy.meta!.evictedSkillNames).toEqual([]);
+
+    // With provenance: the spoof proves nothing, so the eviction reports.
+    const proven = microcompactHistory(history, TWO_HOURS_AGO, settings, {
+      genuineSkillBodyOutputs: new Set([genuine]),
+    });
+    expect(proven.meta!.evictedSkillNames).toEqual(['demo-poem']);
+    expect(proven.meta!.unresolvedEvictedSkills).toBe(0);
+  });
+
+  it('suppresses the report on the size path when a sibling body survives via the low watermark (R3-10)', () => {
+    // Size-path twin of R1-9: the newer body survives the low-watermark
+    // early break WITHOUT entering keepToolRefs; kept-skill filtering is
+    // on the clear-set, so it must still shield the blanked older body.
+    const older = buildSkillLlmContent(
+      '/demo',
+      'older body content '.repeat(300),
+    );
+    const newer = buildSkillLlmContent('/demo', 'newer body');
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', older),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', newer),
+      shellCall('c2'),
+      shellResult('c2', 'x'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 1000,
+      },
+      { genuineSkillBodyOutputs: new Set([older, newer]) },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toContain('newer body');
+  });
 });

@@ -57,7 +57,7 @@ import {
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import {
-  clearLoadedSkillTracking,
+  getGenuineSkillBodyOutputs,
   reconcileLoadedSkillTracking,
   unloadSkillsFromEntries,
 } from '../tools/skill-utils.js';
@@ -2152,16 +2152,11 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      // The summary may or may not have retained any given skill body, so
-      // blanket-clear the tracking — worst case a surviving body is
-      // re-appended once, while a stale entry would leave the skill
-      // unreloadable behind the dedup guard. Forked chats share the
-      // parent's tracker while compressing only a copy of a history
-      // slice; clearing there would disarm the parent's dedup guard with
-      // its bodies still resident.
-      if (!this.isForkedChat) {
-        clearLoadedSkillTracking(this.config.getToolRegistry(), 'tryCompress');
-      }
+      // No explicit loaded-skill sync here: the setHistory above already
+      // reconciled tracking exactly from the compressed history (residue
+      // bodies re-tracked, dropped ones not). Forked chats are covered by
+      // setHistory's own fork guard. A blanket clear after an exact
+      // reconcile would only un-track still-resident bodies.
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2215,6 +2210,9 @@ export class GeminiChat {
         force: true,
         preserveReadFileResult: (filePath) =>
           isManagedMemoryPath(filePath, projectRoot, targetDir),
+        genuineSkillBodyOutputs: getGenuineSkillBodyOutputs(
+          this.config.getToolRegistry(),
+        ),
       },
     );
     const mcMeta = mcResult.meta;
@@ -2571,19 +2569,9 @@ export class GeminiChat {
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
-          // The verbatim restore makes residency knowable again — rebuild
-          // tracking from the restored history instead of leaving the
-          // blanket clear from the hard-rescue compression in place.
-          // Forked chats share the parent's tracker while holding only a
-          // tail slice of its history; rebuilding from the slice would
-          // desync the parent (same invariant as the tryCompress clear).
-          if (!this.isForkedChat) {
-            reconcileLoadedSkillTracking(
-              this.history,
-              this.config.getToolRegistry(),
-              'hardRescueRestore',
-            );
-          }
+          // The verbatim restore makes residency knowable again; setHistory's
+          // own fork-guarded reconcile rebuilds tracking from the restored
+          // history — no second, explicit reconcile here.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4507,7 +4495,12 @@ export class GeminiChat {
     // session-manager load_history, ACP restoreSessionHistory all land
     // here); residency is fully knowable from the new history, so
     // rebuild tracking instead of letting stale names deadlock reload
-    // behind the dedup guard.
+    // behind the dedup guard. The resume door is deliberately NOT
+    // enumerated: GeminiClient.initialize installs resumed history via
+    // the constructor, and a fresh process has an empty tracker AND
+    // empty body provenance, so a constructor/initialize reconcile would
+    // fail closed and admit nothing anyway — the cost is one bounded
+    // duplicate body on the first post-resume invoke (self-healing).
     this.reconcileLoadedSkillTracking('setHistory');
   }
 

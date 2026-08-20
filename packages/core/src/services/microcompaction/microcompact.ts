@@ -12,7 +12,7 @@ import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
   buildCallIdToSkillName,
-  isSkillBodyOutput,
+  isProvenSkillBody,
 } from '../../tools/skill-utils.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
@@ -445,6 +445,7 @@ function buildKeptSkillNames(
   refs: PartRef[],
   clearRefKeys: Set<string>,
   callIdToSkillName: Map<string, string[]>,
+  genuineOutputs: ReadonlySet<string> | undefined,
 ): Set<string> {
   const kept = new Set<string>();
   for (const ref of refs) {
@@ -452,7 +453,12 @@ function buildKeptSkillNames(
     const part = getPart(history, ref);
     if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
     if (part.functionResponse?.name !== ToolNames.SKILL) continue;
-    if (!isSkillBodyOutput(part.functionResponse.response?.['output'])) {
+    if (
+      !isProvenSkillBody(
+        part.functionResponse.response?.['output'],
+        genuineOutputs,
+      )
+    ) {
       continue;
     }
     const names = getSkillNamesForResponse(part, callIdToSkillName);
@@ -574,6 +580,15 @@ export interface MicrocompactOptions {
   sizeOnly?: boolean;
   pendingContent?: Content | Content[];
   preserveReadFileResult?: PreserveReadFileResult;
+  /**
+   * Residency provenance from SkillTool (outputs it actually produced
+   * this process). When provided, a marker-shaped Skill result proves a
+   * body only if it is in this set — a crafted command-delegation output
+   * copying the two public markers must neither shield a same-named
+   * skill's eviction nor count as an evicted/unresolved body. `undefined`
+   * keeps the legacy marker-only check (no tracker wired).
+   */
+  genuineSkillBodyOutputs?: ReadonlySet<string>;
 }
 
 export interface MicrocompactMeta {
@@ -783,6 +798,7 @@ export function microcompactHistory(
       keptPathRefs,
       clearRefKeys,
       callIdToSkillName,
+      opts?.genuineSkillBodyOutputs,
     );
 
     result = history.map((content, ci) => {
@@ -829,7 +845,10 @@ export function microcompactHistory(
           // unresolved would force a blanket clear that doubles resident bodies.
           if (
             part.functionResponse.name === ToolNames.SKILL &&
-            isSkillBodyOutput(part.functionResponse.response?.['output'])
+            isProvenSkillBody(
+              part.functionResponse.response?.['output'],
+              opts?.genuineSkillBodyOutputs,
+            )
           ) {
             const skillNames = getSkillNamesForResponse(
               part,

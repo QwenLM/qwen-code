@@ -32048,6 +32048,12 @@ describe('Session', () => {
           .mock.calls.map(([params]) => params.update._meta?.['attempt'])
           .filter((attempt) => attempt !== undefined),
       ).toEqual([1, 2, 2]);
+      // The isRetry strip discards its return value but still arms the
+      // settle reconcile (R3-3): tracking must be rebuilt from the settled
+      // history even when the strip found nothing to return.
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpTurnSettle',
+      );
     });
 
     it('keeps a queued prompt ahead of related automatic input', async () => {

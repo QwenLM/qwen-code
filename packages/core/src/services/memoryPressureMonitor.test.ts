@@ -1440,7 +1440,7 @@ describe('MemoryPressureMonitor', () => {
       );
     });
 
-    it('un-tracks skills whose bodies were blanked by compact_history', async () => {
+    it('delegates loaded-skill sync to setHistory after compact_history (R3-2)', async () => {
       const setHistory = vi.fn();
       const unloadSkills = vi.fn();
       const clearLoadedSkills = vi.fn();
@@ -1533,8 +1533,11 @@ describe('MemoryPressureMonitor', () => {
       await drainCleanupMeasurement();
 
       expect(setHistory).toHaveBeenCalled();
-      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      // setHistory's reconcile is the single loaded-skill sync here: the
+      // monitor must not second-write tracking from the compaction meta.
+      expect(unloadSkills).not.toHaveBeenCalled();
       expect(clearLoadedSkills).not.toHaveBeenCalled();
+      expect(trackSkills).not.toHaveBeenCalled();
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {

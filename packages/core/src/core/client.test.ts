@@ -3260,7 +3260,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
 
-    it('un-tracks skills blanked by pre-send microcompaction', async () => {
+    it('delegates loaded-skill sync to setHistory after pre-send microcompaction (R3-2)', async () => {
       mockFileReadCacheStub();
       const unloadSkills = vi.fn();
       const clearLoadedSkills = vi.fn();
@@ -3327,7 +3327,10 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(setHistory).toHaveBeenCalled();
-      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      // setHistory's reconcile is the single loaded-skill sync on this
+      // path: the client must not second-write tracking from the meta
+      // (a post-setHistory sync would race the reconcile's ground truth).
+      expect(unloadSkills).not.toHaveBeenCalled();
       expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
 
@@ -4284,7 +4287,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('un-tracks skills blanked by fast compression', async () => {
+    it('does not second-write loaded-skill tracking on fast compression (R3-2)', async () => {
       mockFileReadCacheStub();
       const unloadSkills = vi.fn();
       const clearLoadedSkills = vi.fn();
@@ -4323,7 +4326,9 @@ describe('Gemini Client (client.ts)', () => {
       const result = await client.tryCompressChatFast();
 
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      // The compressed-history swap inside compressFast reconciles
+      // tracking; the wrapper must not also sync from microcompactMeta.
+      expect(unloadSkills).not.toHaveBeenCalled();
       expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
   });

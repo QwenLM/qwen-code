@@ -86,8 +86,8 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import {
+  getGenuineSkillBodyOutputs,
   reconcileLoadedSkillTracking,
-  syncSkillEvictions,
 } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -2270,6 +2270,9 @@ export class GeminiClient {
           ...opts,
           preserveReadFileResult: (filePath) =>
             isManagedMemoryPath(filePath, projectRoot, targetDir),
+          genuineSkillBodyOutputs: getGenuineSkillBodyOutputs(
+            this.config.getToolRegistry(),
+          ),
         },
       );
       if (!mcResult.meta) {
@@ -2279,8 +2282,10 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory's reconcile is the single loaded-skill sync here: it
+        // rebuilds tracking exactly from the post-eviction history, so no
+        // follow-up eviction sync may second-write that state.
         this.getChat().setHistory(mcResult.history);
-        syncSkillEvictions(m, this.config.getToolRegistry(), 'microcompaction');
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -4474,11 +4479,8 @@ export class GeminiClient {
     }
 
     if (microcompactMeta) {
-      syncSkillEvictions(
-        microcompactMeta,
-        this.config.getToolRegistry(),
-        'compress-fast',
-      );
+      // compressFast's internal setHistory already reconciled tracking
+      // from the post-eviction history — no second sync here.
       await this.disarmFileReadCacheAfterEviction(
         microcompactMeta,
         'compress-fast',

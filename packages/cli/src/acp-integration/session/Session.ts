@@ -5172,9 +5172,17 @@ export class Session implements SessionContext {
               }
               return result;
             } finally {
-              // Fires on every terminal path of the turn — including the
-              // top-of-loop abort return that re-adds the stripped content
-              // via addHistory without entering the send-try's finally.
+              // Fires on every terminal path that reaches this send-loop
+              // try — including the top-of-loop abort return that re-adds
+              // the stripped content via addHistory without entering the
+              // send-try's finally. Five terminal paths exit BEFORE this
+              // try (/advisor aborted return, slash-command result catch
+              // rethrow, locally-handled command return, #resolvePrompt
+              // throw, UserPromptSubmit hook block) and skip the reconcile:
+              // safe because the strip's own unload sync already applied,
+              // except the blanket-clear fallback corner — still-resident
+              // skills stay untracked until the next invoke re-injects one
+              // duplicate body and the re-track self-heals.
               if (orphanStripRan) {
                 // Residency-aware, not additive: a mid-turn rewrite
                 // (tryCompress / microcompaction) can blank or summarize

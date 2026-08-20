@@ -9,8 +9,7 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
-  syncSkillEvictions,
-  clearLoadedSkillTracking,
+  reconcileLoadedSkillTracking,
   unloadSkillsFromEntries,
   buildSkillLlmContent,
 } from './skill-utils.js';
@@ -154,100 +153,141 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   });
 });
 
-describe('syncSkillEvictions / clearLoadedSkillTracking', () => {
-  function mockRegistry(tool: unknown): {
-    registry: ToolRegistry;
-    getTool: ReturnType<typeof vi.fn>;
-  } {
+describe('residency provenance gating (R3-1)', () => {
+  // Both text markers are public constants and every command-delegation
+  // output flows through the same functionResponse{name:'skill'} shape,
+  // so marker text alone cannot prove a body — only membership in
+  // SkillTool's recorded outputs can. When provenance is available the
+  // marker check must fail CLOSED: a fresh process (empty set) trusts no
+  // marker, which is safe because its tracker starts empty too.
+  function registryFor(tool: unknown): ToolRegistry {
     const getTool = vi.fn().mockReturnValue(tool);
-    return { registry: { getTool } as unknown as ToolRegistry, getTool };
+    return { getTool } as unknown as ToolRegistry;
   }
 
-  function mockSkillTool(): {
-    tool: unknown;
-    unloadSkills: ReturnType<typeof vi.fn>;
-    clearLoadedSkills: ReturnType<typeof vi.fn>;
-    trackSkills: ReturnType<typeof vi.fn>;
-  } {
+  function provenanceTracker(genuine: Set<string>) {
     const unloadSkills = vi.fn();
     const clearLoadedSkills = vi.fn();
     const trackSkills = vi.fn();
     return {
-      tool: { unloadSkills, clearLoadedSkills, trackSkills },
+      registry: registryFor({
+        unloadSkills,
+        clearLoadedSkills,
+        trackSkills,
+        getGenuineSkillBodyOutputs: () => genuine,
+      }),
       unloadSkills,
       clearLoadedSkills,
       trackSkills,
     };
   }
 
-  it('un-tracks the reported names when all evictions resolved', () => {
-    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
-    const { registry } = mockRegistry(tool);
-
-    syncSkillEvictions(
-      { evictedSkillNames: ['a', 'b'], unresolvedEvictedSkills: 0 },
-      registry,
-      'test',
-    );
-
-    expect(unloadSkills).toHaveBeenCalledWith(['a', 'b']);
-    expect(clearLoadedSkills).not.toHaveBeenCalled();
+  const skillCall = (id: string, name: string): Content => ({
+    role: 'model',
+    parts: [{ functionCall: { id, name: 'skill', args: { skill: name } } }],
   });
 
-  it('blanket-clears when any eviction is unresolved', () => {
-    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
-    const { registry } = mockRegistry(tool);
+  const skillBody = (id: string, output: string): Content => ({
+    role: 'user',
+    parts: [{ functionResponse: { id, name: 'skill', response: { output } } }],
+  });
 
-    syncSkillEvictions(
-      { evictedSkillNames: ['a'], unresolvedEvictedSkills: 1 },
-      registry,
-      'test',
+  it('reconcile does NOT re-admit a marker-spoofed body (injection)', () => {
+    // A same-named command result copying the two markers must not be
+    // tracked by any reconcile door — tracking it with no real body is
+    // the dedup-guard deadlock this PR exists to eliminate.
+    const spoof = buildSkillLlmContent('/demo', 'rogue command output');
+    const { registry, clearLoadedSkills, trackSkills } = provenanceTracker(
+      new Set(),
     );
+    const history: Content[] = [
+      skillCall('s0', 'demo'),
+      skillBody('s0', spoof),
+    ];
+
+    reconcileLoadedSkillTracking(history, registry, 'test');
 
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
-    expect(unloadSkills).not.toHaveBeenCalled();
+    expect(trackSkills).not.toHaveBeenCalled();
   });
 
-  it('is a NOOP when nothing was evicted', () => {
-    const { tool, unloadSkills, clearLoadedSkills } = mockSkillTool();
-    const { registry, getTool } = mockRegistry(tool);
+  it('reconcile tracks a body SkillTool actually produced', () => {
+    const body = buildSkillLlmContent('/demo', 'real body');
+    const { registry, trackSkills } = provenanceTracker(new Set([body]));
+    const history: Content[] = [skillCall('s0', 'demo'), skillBody('s0', body)];
 
-    syncSkillEvictions(
-      { evictedSkillNames: [], unresolvedEvictedSkills: 0 },
+    reconcileLoadedSkillTracking(history, registry, 'test');
+
+    expect(trackSkills).toHaveBeenCalledWith(['demo']);
+  });
+
+  it('unloadSkillsFromEntries ignores a spoofed stripped body', () => {
+    // A spoof counts as neither dropped nor unresolvable: no targeted
+    // unload, and no blanket clear (which would wipe tracking for every
+    // genuinely loaded skill).
+    const spoof = buildSkillLlmContent('/demo', 'rogue command output');
+    const { registry, unloadSkills, clearLoadedSkills } = provenanceTracker(
+      new Set(),
+    );
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+
+    unloadSkillsFromEntries(
+      [skillBody('missing', spoof)],
+      history,
       registry,
       'test',
     );
 
-    expect(getTool).not.toHaveBeenCalled();
-    expect(unloadSkills).not.toHaveBeenCalled();
     expect(clearLoadedSkills).not.toHaveBeenCalled();
+    expect(unloadSkills).not.toHaveBeenCalled();
   });
+});
 
-  it('tolerates a missing registry or skill tool', () => {
-    expect(() =>
-      syncSkillEvictions(
-        { evictedSkillNames: ['a'], unresolvedEvictedSkills: 0 },
-        undefined,
-        'test',
-      ),
-    ).not.toThrow();
-    const { registry } = mockRegistry(undefined);
-    expect(() =>
-      syncSkillEvictions(
-        { evictedSkillNames: ['a'], unresolvedEvictedSkills: 0 },
-        registry,
-        'test',
-      ),
-    ).not.toThrow();
-  });
+describe('reconcileLoadedSkillTracking', () => {
+  it('ends with exactly the resident names — clear-before-track order (R3-11)', () => {
+    // State-based oracle backed by a REAL Set: swapping clear/track order
+    // inside reconcile would end with an EMPTY tracker while bodies stay
+    // resident, and every order-blind mock assertion would stay green.
+    const loaded = new Set<string>(['stale']);
+    const tool = {
+      unloadSkills: (names: Iterable<string>) => {
+        for (const n of names) loaded.delete(n);
+      },
+      clearLoadedSkills: () => loaded.clear(),
+      trackSkills: (names: Iterable<string>) => {
+        for (const n of names) loaded.add(n);
+      },
+    };
+    const registry = {
+      getTool: vi.fn().mockReturnValue(tool),
+    } as unknown as ToolRegistry;
+    const body = buildSkillLlmContent('/demo', 'resident body');
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { id: 's0', name: 'skill', args: { skill: 'demo' } },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 's0',
+              name: 'skill',
+              response: { output: body },
+            },
+          },
+        ],
+      },
+    ];
 
-  it('clearLoadedSkillTracking blanket-clears via the registry', () => {
-    const { tool, clearLoadedSkills } = mockSkillTool();
-    const { registry } = mockRegistry(tool);
+    reconcileLoadedSkillTracking(history, registry, 'test');
 
-    clearLoadedSkillTracking(registry, 'test');
-
-    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect([...loaded]).toEqual(['demo']);
   });
 });
 
@@ -319,6 +359,27 @@ describe('unloadSkillsFromEntries', () => {
     unloadSkillsFromEntries(stripped, history, registry, 'test');
 
     expect(clearLoadedSkills).not.toHaveBeenCalled();
+    expect(unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('blanket-clears on a mixed batch when ANY stripped body is unresolvable (R3-8)', () => {
+    // Documented mixed-batch policy: even though 'ok' resolves, the
+    // unresolvable sibling forces the wholesale clear — targeted unload
+    // here would leave the unresolvable body's skill tracked with no
+    // resident body (the deadlock direction).
+    const { registry, unloadSkills, clearLoadedSkills } = trackerMocks();
+    const history: Content[] = [
+      skillCall('ok', 'demo'),
+      { role: 'user', parts: [{ text: 'hi' }] },
+    ];
+    const stripped = [
+      skillBody('ok', 'resolvable body'),
+      skillBody('missing', 'unresolvable body'),
+    ];
+
+    unloadSkillsFromEntries(stripped, history, registry, 'test');
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
     expect(unloadSkills).not.toHaveBeenCalled();
   });
 });

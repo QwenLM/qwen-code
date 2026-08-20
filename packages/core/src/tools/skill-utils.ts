@@ -8,7 +8,6 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
-import type { MicrocompactMeta } from '../services/microcompaction/microcompact.js';
 import type { Content } from '@google/genai';
 import type { ToolRegistry } from './tool-registry.js';
 import { ToolNames } from './tool-names.js';
@@ -338,64 +337,43 @@ function getLoadedSkillTracker(
 }
 
 /**
- * Sync loaded-skill tracking after a history eviction blanked Skill tool
- * results. Targeted un-track when every blanked skill was resolved; blanket
- * clear when any could not be resolved — over-clearing only costs a
- * duplicated body on the next invoke, while a stale entry leaves that skill
- * permanently unreloadable behind the dedup guard.
+ * The exact outputs SkillTool produced via {@link buildSkillLlmContent}
+ * this process — authoritative residency provenance, recorded at load
+ * time. Command-delegation outputs (disabled-skill fallback, same-named
+ * MCP prompt / file command) flow through the same
+ * `functionResponse{name:'skill'}` shape carrying arbitrary third-party
+ * text; because both text markers below are public constants, such an
+ * output can copy them and spoof a body. Membership in this set is the
+ * only proof a marker-matching output is a REAL body.
  *
- * Shared by pre-send microcompaction, /compress-fast, and the
- * memory-pressure `compact_history` step (mirrors
- * `disarmFileReadCacheAfterEviction` for the file-read cache).
+ * Returns `undefined` when no tracker exists (legacy / untracked
+ * contexts): callers keep the marker-only check. Returns an EMPTY set in
+ * a fresh process (nothing loaded yet — e.g. right after resume): the
+ * markers are untrusted there too, and failing closed is safe because the
+ * tracker itself starts empty, so nothing can deadlock and the only cost
+ * is a bounded duplicate body on the next invoke.
  */
-export function syncSkillEvictions(
-  meta: Pick<MicrocompactMeta, 'evictedSkillNames' | 'unresolvedEvictedSkills'>,
+export function getGenuineSkillBodyOutputs(
   toolRegistry: ToolRegistry | undefined,
-  logTag: string,
-): void {
-  if (
-    meta.unresolvedEvictedSkills === 0 &&
-    meta.evictedSkillNames.length === 0
-  ) {
-    return;
+): ReadonlySet<string> | undefined {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (tool && 'getGenuineSkillBodyOutputs' in tool) {
+    return (
+      tool as { getGenuineSkillBodyOutputs(): ReadonlySet<string> }
+    ).getGenuineSkillBodyOutputs();
   }
-  const tracker = getLoadedSkillTracker(toolRegistry);
-  if (!tracker) {
-    return;
-  }
-  if (meta.unresolvedEvictedSkills > 0) {
-    tracker.clearLoadedSkills();
-    debugLogger.debug(
-      `[SKILL_TRACKING] cleared all loaded-skill tracking after ${logTag} ` +
-        `(${meta.unresolvedEvictedSkills} unresolved blanked skill result(s))`,
-    );
-    return;
-  }
-  tracker.unloadSkills(meta.evictedSkillNames);
-  debugLogger.debug(
-    `[SKILL_TRACKING] un-tracked ${meta.evictedSkillNames.length} ` +
-      `skill(s) after ${logTag}: ${meta.evictedSkillNames.join(', ')}`,
-  );
+  return undefined;
 }
 
-/**
- * Blanket-clear loaded-skill tracking. Used when history is rewritten in
- * ways that may drop skill bodies without per-skill eviction meta and
- * without a knowable residency afterwards: LLM compression
- * (`tryCompress`). Truncation and orphan-entry stripping reconcile /
- * un-track targeted instead.
- */
-export function clearLoadedSkillTracking(
-  toolRegistry: ToolRegistry | undefined,
-  logTag: string,
-): void {
-  const tracker = getLoadedSkillTracker(toolRegistry);
-  if (!tracker) {
-    return;
-  }
-  tracker.clearLoadedSkills();
-  debugLogger.debug(
-    `[SKILL_TRACKING] cleared loaded-skill tracking after ${logTag}`,
+/** Residency predicate: marker-shaped AND (when provenance is available)
+ * recorded by SkillTool at load time. */
+export function isProvenSkillBody(
+  output: unknown,
+  genuineOutputs: ReadonlySet<string> | undefined,
+): boolean {
+  return (
+    isSkillBodyOutput(output) &&
+    (genuineOutputs === undefined || genuineOutputs.has(output as string))
   );
 }
 
@@ -447,6 +425,7 @@ export function buildCallIdToSkillName(
 export function resolveLoadedSkillNames(
   entries: Content[],
   history: Content[],
+  genuineOutputs?: ReadonlySet<string> | undefined,
 ): string[] {
   const callIdToSkillName = buildCallIdToSkillName(history);
   const names = new Set<string>();
@@ -456,7 +435,7 @@ export function resolveLoadedSkillNames(
       if (
         fr?.id &&
         fr.name === ToolNames.SKILL &&
-        isSkillBodyOutput(fr.response?.['output'])
+        isProvenSkillBody(fr.response?.['output'], genuineOutputs)
       ) {
         const resolved = callIdToSkillName.get(fr.id);
         if (resolved?.length === 1) {
@@ -487,7 +466,11 @@ export function reconcileLoadedSkillTracking(
   if (!tracker) {
     return;
   }
-  const names = resolveLoadedSkillNames(history, history);
+  const names = resolveLoadedSkillNames(
+    history,
+    history,
+    getGenuineSkillBodyOutputs(toolRegistry),
+  );
   tracker.clearLoadedSkills();
   if (names.length > 0) {
     tracker.trackSkills(names);
@@ -505,10 +488,11 @@ export function reconcileLoadedSkillTracking(
  * it would disarm the dedup guard while a body is still resident, letting
  * a duplicate body through on the next invoke. If ANY stripped body's call
  * id cannot be resolved to a name — including when other bodies in the
- * same batch DO resolve — tracking is cleared wholesale instead: the same
- * policy as `syncSkillEvictions`. The body IS gone, and over-clearing only
- * costs one duplicated body on the next invoke, while leaving the stripped
- * body's skill tracked makes it unreloadable behind the dedup guard.
+ * same batch DO resolve — tracking is cleared wholesale instead:
+ * over-clearing only costs one duplicated body on the next invoke, while
+ * leaving the stripped body's skill tracked makes it unreloadable behind
+ * the dedup guard. Marker-matching outputs SkillTool never produced
+ * (spoofed command results) count as neither dropped nor unresolvable.
  */
 export function unloadSkillsFromEntries(
   entries: Content[],
@@ -516,6 +500,7 @@ export function unloadSkillsFromEntries(
   toolRegistry: ToolRegistry | undefined,
   logTag: string,
 ): void {
+  const genuineOutputs = getGenuineSkillBodyOutputs(toolRegistry);
   const callIdToSkillName = buildCallIdToSkillName(history);
   const dropped = new Set<string>();
   let hasUnresolvableBody = false;
@@ -524,7 +509,7 @@ export function unloadSkillsFromEntries(
       const fr = part.functionResponse;
       if (
         fr?.name !== ToolNames.SKILL ||
-        !isSkillBodyOutput(fr.response?.['output'])
+        !isProvenSkillBody(fr.response?.['output'], genuineOutputs)
       ) {
         continue;
       }
@@ -550,7 +535,9 @@ export function unloadSkillsFromEntries(
   if (dropped.size === 0) {
     return;
   }
-  const resident = new Set(resolveLoadedSkillNames(history, history));
+  const resident = new Set(
+    resolveLoadedSkillNames(history, history, genuineOutputs),
+  );
   const names = [...dropped].filter((name) => !resident.has(name));
   if (names.length === 0) {
     return;

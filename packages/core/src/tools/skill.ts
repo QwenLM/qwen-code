@@ -98,6 +98,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     description: string;
   }> = [];
   private loadedSkillNames: Set<string> = new Set();
+  // Exact body outputs produced this process (residency provenance; see
+  // getGenuineSkillBodyOutputs). Bounded by the session's load count.
+  private genuineSkillBodyOutputs: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -253,6 +256,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
+      (output: string) => this.genuineSkillBodyOutputs.add(output),
     );
   }
 
@@ -273,6 +277,18 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   getLoadedSkillNames(): ReadonlySet<string> {
     return this.loadedSkillNames;
+  }
+
+  /**
+   * Residency provenance: the exact body outputs this tool produced via
+   * buildSkillLlmContent this process. History-eviction paths consult
+   * this set to tell a real body apart from a marker-spoofed command
+   * result (see getGenuineSkillBodyOutputs in skill-utils). In-memory by
+   * design: a fresh process has an empty tracker anyway, so failing
+   * closed on unknown bodies there only costs a bounded duplicate body.
+   */
+  getGenuineSkillBodyOutputs(): ReadonlySet<string> {
+    return this.genuineSkillBodyOutputs;
   }
 
   /**
@@ -340,6 +356,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
+    private readonly recordGenuineBodyOutput: (
+      output: string,
+    ) => void = () => {},
   ) {
     super(params);
   }
@@ -592,6 +611,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      // Record provenance BEFORE returning: only outputs this tool
+      // actually produced may later prove residency (marker text alone
+      // can be spoofed by command-delegation results).
+      this.recordGenuineBodyOutput(llmContent);
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,

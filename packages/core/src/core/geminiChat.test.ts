@@ -292,18 +292,42 @@ describe('GeminiChat', async () => {
       trackSkills: vi.fn(),
     });
 
-    it('blanket-clears skill tracking after a COMPRESSED result', async () => {
+    it('reconciles tracking from the compressed history as the ONLY sync (R3-7)', async () => {
       const skillTool = mockSkillTool();
       vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
         getTool: vi.fn().mockReturnValue(skillTool),
       } as unknown as ReturnType<Config['getToolRegistry']>);
+      const skillBody = buildSkillLlmContent('/demo', 'demo body');
       vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
       ).mockResolvedValueOnce({
         newHistory: [
           { role: 'user', parts: [{ text: 'summary' }] },
-          { role: 'model', parts: [{ text: 'ack' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 's0',
+                  name: 'skill',
+                  args: { skill: 'demo' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 's0',
+                  name: 'skill',
+                  response: { output: skillBody },
+                },
+              },
+            ],
+          },
         ],
         info: {
           originalTokenCount: 100_000,
@@ -312,11 +336,19 @@ describe('GeminiChat', async () => {
         },
       });
 
-      await chat.tryCompress('prompt-skill-clear', true);
+      await chat.tryCompress('prompt-skill-reconcile', true);
 
-      // setHistory (inside tryCompress) reconciles against the compressed
-      // history first; the blanket clear must still land on top of it.
-      expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
+      // setHistory's reconcile is the single sync: the surviving body is
+      // re-tracked, and nothing may blanket-clear on top of that exact
+      // state afterwards (re-adding a post-setHistory clear un-tracks a
+      // resident body and doubles its tokens on the next invoke).
+      expect(skillTool.trackSkills).toHaveBeenLastCalledWith(['demo']);
+      const lastClear =
+        skillTool.clearLoadedSkills.mock.invocationCallOrder.at(-1);
+      const lastTrack = skillTool.trackSkills.mock.invocationCallOrder.at(-1);
+      if (lastClear !== undefined) {
+        expect(lastClear).toBeLessThan(lastTrack!);
+      }
     });
 
     it('leaves skill tracking untouched on NOOP', async () => {
@@ -362,13 +394,14 @@ describe('GeminiChat', async () => {
         },
       });
       // Forked chats compress a copy of a parent-history slice while
-      // sharing the parent's SkillTool tracker — clearing there would
-      // disarm the parent's dedup guard with its bodies still resident.
+      // sharing the parent's SkillTool tracker — setHistory's reconcile
+      // must skip the rebuild there or it would desync the parent.
       chat.isForkedChat = true;
 
       await chat.tryCompress('prompt-skill-fork', true);
 
       expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+      expect(skillTool.trackSkills).not.toHaveBeenCalled();
     });
   });
 
@@ -437,7 +470,12 @@ describe('GeminiChat', async () => {
       // Wholesale replacement is the restore door (/restore, session-manager
       // load_history, ACP restoreSessionHistory): a checkpoint predating the
       // load must not leave the skill tracked with no resident body — the
-      // dedup guard would return "already loaded" forever.
+      // dedup guard would return "already loaded" forever. The resume door
+      // is intentionally not covered: initialize() installs resumed history
+      // through the constructor, and a fresh process has empty tracking and
+      // empty provenance, so reconcile there would fail closed and admit
+      // nothing — one bounded duplicate body on the first post-resume
+      // invoke, self-healing on load.
       const skillTool = mockSkillTool();
       wireRegistry(skillTool);
       chat.setHistory([
@@ -4367,9 +4405,6 @@ describe('GeminiChat', async () => {
         clearLoadedSkills: vi.fn(),
         trackSkills: vi.fn(),
       };
-      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
-        getTool: vi.fn().mockReturnValue(skillTool),
-      } as unknown as ReturnType<Config['getToolRegistry']>);
       const originalHistory: Content[] = [
         {
           role: 'model',
@@ -4412,6 +4447,12 @@ describe('GeminiChat', async () => {
         uiTelemetryService,
       );
       chatWithRecording.setHistory(originalHistory);
+      // Wire the tracker AFTER the setup swap: setHistory reconciles on
+      // every replacement, and the setup swap is not the behavior under
+      // test — any-call assertions would be satisfied by it alone (R3-6).
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
       chatWithRecording.setLastPromptTokenCount(176_999);
 
       vi.spyOn(
@@ -4451,12 +4492,12 @@ describe('GeminiChat', async () => {
         originalHistory[2].parts?.[0].text,
       );
       // The verbatim restore reconciles tracking from the restored
-      // history: clears land from the flow's swap-time reconciles and the
-      // tryCompress blanket clear, then the resident body's skill is
-      // re-tracked. Assert the final re-track rather than a call count —
-      // setHistory now reconciles on every replacement.
+      // history: clears land from the flow's swap-time reconciles, then
+      // the resident body's skill is re-tracked. Assert the final re-track
+      // rather than a call count — setHistory now reconciles on every
+      // replacement.
       expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
-      expect(skillTool.trackSkills).toHaveBeenCalledWith(['demo']);
+      expect(skillTool.trackSkills).toHaveBeenLastCalledWith(['demo']);
     });
 
     it('hard-rescue restore leaves the shared tracker untouched for a forked chat (R1-12)', async () => {
