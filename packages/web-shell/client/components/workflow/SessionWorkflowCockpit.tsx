@@ -300,6 +300,16 @@ export function SessionWorkflowCockpit({
         .find((tool): tool is ACPToolCall => Boolean(tool))
     : undefined;
   const activity = agents.slice().sort((a, b) => b.startTime - a.startTime);
+  // A failure is only actionable if you know where it sits: which steps fed it,
+  // and what is now stuck behind it.
+  const attentionUpstream = (attentionTodo?.blockedBy ?? []).filter((id) =>
+    todos.some((todo) => todo.id === id),
+  );
+  const attentionDownstream = attentionTodo
+    ? todos
+        .filter((todo) => todo.blockedBy?.includes(attentionTodo.id))
+        .map((todo) => todo.id)
+    : [];
 
   const headingActions = (
     <div className={styles.headingActions}>
@@ -421,6 +431,32 @@ export function SessionWorkflowCockpit({
                     {t('workflow.attention.detailEyebrow')}
                   </span>
                   <h2>{attentionTodo?.content}</h2>
+                  {attentionTodo && (
+                    <dl className={styles.attentionContext}>
+                      <div>
+                        <dt>{t('workflow.attention.stepId')}</dt>
+                        <dd>
+                          <code>{attentionTodo.id}</code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t('workflow.dependencies.upstream')}</dt>
+                        <dd>
+                          {attentionUpstream.length
+                            ? attentionUpstream.join(', ')
+                            : t('workflow.dependencies.none')}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t('workflow.dependencies.unblocks')}</dt>
+                        <dd>
+                          {attentionDownstream.length
+                            ? attentionDownstream.join(', ')
+                            : t('workflow.dependencies.noDownstream')}
+                        </dd>
+                      </div>
+                    </dl>
+                  )}
                   <p>{t('workflow.attention.failureCopy')}</p>
                   {attentionTool && (
                     <button
@@ -453,17 +489,15 @@ export function SessionWorkflowCockpit({
                     {t(taskStatusI18nKey)}
                   </span>
                 </div>
+                {/* Identity only. Step and agent counts live in the graph's
+                    overview strip immediately below; carrying them here too
+                    put two stat rows within ~100px of each other showing
+                    overlapping numbers. */}
                 <div className={styles.taskMeta}>
                   <code>{sessionId.slice(0, 8)}</code>
                   <span>
                     {workspaceCwd?.split('/').at(-1) ||
                       t('workflow.session.workspace')}
-                  </span>
-                  <span>
-                    {t('workflow.session.steps', { count: todos.length })}
-                  </span>
-                  <span>
-                    {t('workflow.session.agentCalls', { count: tools.length })}
                   </span>
                 </div>
               </div>
@@ -472,6 +506,7 @@ export function SessionWorkflowCockpit({
 
             <div className={styles.workflowSurface}>
               <PlanExecutionView
+                hideTitle
                 todos={todos}
                 tools={tools}
                 tasks={tasks}

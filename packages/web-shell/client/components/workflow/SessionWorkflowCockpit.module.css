@@ -276,6 +276,21 @@
   border-bottom: 0;
 }
 
+/* The graph is the one thing on this page that is not already legible in the
+   chat transcript, so it gets a guaranteed slab of the viewport instead of
+   sizing to content and competing with the panels below it. A min-height keeps
+   the page itself scrollable on short screens. */
+.workflowSurface {
+  display: flex;
+  min-height: clamp(280px, 44vh, 560px);
+  flex-direction: column;
+}
+
+.workflowSurface > section {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
 .supportGrid {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(260px, 0.8fr);
@@ -713,4 +728,36 @@ button.activityRow:hover {
   .cockpit * {
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Where the failing step sits in the plan. A failure you cannot locate in the
+   graph is just a message; the IDs here are the same ones blockedBy and
+   todo_id use, so they carry the reader back to the right node. */
+.attentionContext {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 10px 0 0;
+  gap: 6px 22px;
+}
+
+.attentionContext > div {
+  min-width: 0;
+}
+
+.attentionContext dt {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.attentionContext dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.attentionContext code,
+.attentionContext dd {
+  font-family: var(--font-mono, monospace);
 }

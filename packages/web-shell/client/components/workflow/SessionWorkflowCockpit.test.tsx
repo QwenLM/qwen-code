@@ -48,7 +48,10 @@ describe('SessionWorkflowCockpit', () => {
 
     render('zh-CN');
     expect(container.textContent).toContain('已完成');
-    expect(container.textContent).toContain('计划执行');
+    // The graph's own "Plan execution" caption is suppressed here — the page
+    // h1 already titles the region — so the localized graph region is asserted
+    // through its overview strip and its nodes instead.
+    expect(container.textContent).toContain('整体进度');
     expect(
       container.querySelector('[data-plan-node-id="research"]'),
     ).not.toBeNull();
@@ -61,7 +64,7 @@ describe('SessionWorkflowCockpit', () => {
 
     render('en');
     expect(container.textContent).toContain('Completed');
-    expect(container.textContent).toContain('Plan execution');
+    expect(container.textContent).toContain('Overall progress');
     expect(container.textContent).toContain('Needs attention');
 
     const backToChat = container.querySelector<HTMLButtonElement>(

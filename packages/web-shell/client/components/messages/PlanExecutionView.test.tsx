@@ -788,6 +788,60 @@ describe('PlanExecutionView', () => {
     heightSpy.mockRestore();
   });
 
+  it('mutes edges that do not touch the pointed-at step', () => {
+    const todos: TodoItem[] = [
+      { id: 'root', content: 'Root', status: 'completed' },
+      { id: 'left', content: 'Left', status: 'pending', blockedBy: ['root'] },
+      { id: 'right', content: 'Right', status: 'pending', blockedBy: ['root'] },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <PlanExecutionView todos={todos} tools={[]} tasks={[]} />
+          </I18nProvider>,
+        );
+      });
+
+      const edges = container.querySelector('[data-plan-edge]')?.closest('svg');
+      // Nothing pointed at: no focus, so no edge is singled out.
+      expect(edges?.getAttribute('data-focused')).toBeNull();
+
+      const leftNode = container
+        .querySelector('[data-plan-node-id="left"]')
+        ?.closest('article');
+      // jsdom has no PointerEvent; React synthesizes onPointerEnter from a
+      // bubbling pointerover, which MouseEvent models well enough here.
+      act(() => {
+        leftNode?.dispatchEvent(
+          new MouseEvent('pointerover', { bubbles: true }),
+        );
+      });
+
+      const focused = container
+        .querySelector('[data-plan-edge]')
+        ?.closest('svg');
+      expect(focused?.getAttribute('data-focused')).toBe('true');
+      expect(
+        container
+          .querySelector('[data-from="root"][data-to="left"]')
+          ?.getAttribute('data-active'),
+      ).toBe('true');
+      // The sibling branch is not part of this step's chain.
+      expect(
+        container
+          .querySelector('[data-from="root"][data-to="right"]')
+          ?.getAttribute('data-active'),
+      ).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
   it('gives each layer-spanning edge its own return lane', () => {
     // Two dependencies that both skip a layer. They used to share one routeY
     // and draw on top of each other, which is unreadable as soon as a plan has

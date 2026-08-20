@@ -107,10 +107,22 @@
   font-weight: 400;
 }
 
+/* Scrolls in both axes: a host that gives this region a fixed slab of height
+   (the workflow page does) clips its card, so a tall graph has to scroll inside
+   the viewport rather than overflow it. Flexible sizing is inert when the host
+   lets the section size to its content, as the inline and dialog uses do. */
 .dagViewport {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 2px 0 6px;
+}
+
+.flatList {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
 }
 
 .dagCanvas {
@@ -135,16 +147,47 @@
 
 .dagEdge {
   fill: none;
-  stroke: var(--agent-blue-500);
+  stroke: var(--muted-foreground);
   stroke-linecap: round;
+  stroke-linejoin: round;
   stroke-width: 1.5;
-  opacity: 0.65;
+  opacity: 0.5;
+  transition: opacity 140ms ease;
   vector-effect: non-scaling-stroke;
+}
+
+/* Pointing at a node mutes every edge that does not touch it, so a dense graph
+   answers "what feeds this, and what waits on it?" in one look instead of
+   forcing the reader to trace lines by eye. */
+.dagEdges[data-focused='true'] .dagEdge {
+  opacity: 0.1;
+}
+
+.dagEdges[data-focused='true'] .dagEdge[data-active='true'] {
+  stroke: var(--agent-blue-500);
+  opacity: 0.95;
 }
 
 .edgeArrow {
   fill: var(--agent-blue-500);
-  opacity: 0.8;
+  opacity: 0.75;
+}
+
+.edgeArrowDim {
+  fill: var(--muted-foreground);
+  opacity: 0.1;
+}
+
+/* With the caption gone the row exists only for the locate control. */
+.heading[data-title-hidden='true'] {
+  justify-content: flex-end;
+  margin-bottom: -4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dagEdge {
+    transition: none;
+  }
 }
 
 .flatList,

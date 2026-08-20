@@ -365,11 +365,17 @@ export function PlanExecutionView({
   tools,
   tasks,
   onOpenSubagent,
+  hideTitle = false,
 }: {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
   onOpenSubagent?: (tool: ACPToolCall) => void;
+  /**
+   * Drop the "Plan execution" caption when the host already titles the region.
+   * The locate control stays either way — it is an action, not a label.
+   */
+  hideTitle?: boolean;
 }) {
   const { t } = useI18n();
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
@@ -449,6 +455,7 @@ export function PlanExecutionView({
   }
   const graphId = useId().replaceAll(':', '');
   const markerId = `plan-arrow-${graphId}`;
+  const dimMarkerId = `plan-arrow-dim-${graphId}`;
   const viewportRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef(new Map<string, HTMLElement>());
@@ -460,6 +467,10 @@ export function PlanExecutionView({
   const autoLocatedTopologyRef = useRef('');
   const [graph, setGraph] = useState(EMPTY_GRAPH_LAYOUT);
   const [selectedTodoId, setSelectedTodoId] = useState<string>();
+  const [hoveredTodoId, setHoveredTodoId] = useState<string>();
+  // Hovering previews a step's dependency chain, selecting pins it. Both feed
+  // one focus value so the highlight never fights itself.
+  const focusedTodoId = hoveredTodoId ?? selectedTodoId;
   const focusTodoId =
     todos.find((todo) => {
       const status = statesByTodo.get(todo.id)?.status;
@@ -799,11 +810,16 @@ export function PlanExecutionView({
 
   return (
     <section className={styles.section} aria-label={t('planExecution.title')}>
-      <div className={styles.heading}>
-        <span>
-          {t('planExecution.title')}{' '}
-          <span className={styles.count}>({todos.length})</span>
-        </span>
+      <div
+        className={styles.heading}
+        data-title-hidden={hideTitle || undefined}
+      >
+        {!hideTitle && (
+          <span>
+            {t('planExecution.title')}{' '}
+            <span className={styles.count}>({todos.length})</span>
+          </span>
+        )}
         {hasDependencies && (
           <button
             type="button"
@@ -865,6 +881,7 @@ export function PlanExecutionView({
           {drawsDependencyEdges && graph.edges.length > 0 && (
             <svg
               className={styles.dagEdges}
+              data-focused={focusedTodoId ? 'true' : undefined}
               width={graph.width}
               height={graph.height}
               viewBox={`0 0 ${graph.width} ${graph.height}`}
@@ -885,18 +902,42 @@ export function PlanExecutionView({
                     d="M 0 0 L 7 3.5 L 0 7 z"
                   />
                 </marker>
+                {/* Marker contents inherit from the marker's own ancestors,
+                    not from the path that references it, so a muted edge needs
+                    its own arrowhead rather than inherited opacity. */}
+                <marker
+                  id={dimMarkerId}
+                  markerWidth="7"
+                  markerHeight="7"
+                  markerUnits="userSpaceOnUse"
+                  refX="7"
+                  refY="3.5"
+                  orient="auto"
+                >
+                  <path
+                    className={styles.edgeArrowDim}
+                    d="M 0 0 L 7 3.5 L 0 7 z"
+                  />
+                </marker>
               </defs>
-              {graph.edges.map((edge) => (
-                <path
-                  className={styles.dagEdge}
-                  data-plan-edge
-                  data-from={edge.from}
-                  data-to={edge.to}
-                  d={edge.d}
-                  key={JSON.stringify([edge.from, edge.to])}
-                  markerEnd={`url(#${markerId})`}
-                />
-              ))}
+              {graph.edges.map((edge) => {
+                const active =
+                  focusedTodoId === undefined ||
+                  edge.from === focusedTodoId ||
+                  edge.to === focusedTodoId;
+                return (
+                  <path
+                    className={styles.dagEdge}
+                    data-plan-edge
+                    data-active={active || undefined}
+                    data-from={edge.from}
+                    data-to={edge.to}
+                    d={edge.d}
+                    key={JSON.stringify([edge.from, edge.to])}
+                    markerEnd={`url(#${active ? markerId : dimMarkerId})`}
+                  />
+                );
+              })}
             </svg>
           )}
           {layers.map((layer, index) => (
@@ -908,6 +949,12 @@ export function PlanExecutionView({
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    onPointerEnter={() => setHoveredTodoId(todo.id)}
+                    onPointerLeave={() =>
+                      setHoveredTodoId((current) =>
+                        current === todo.id ? undefined : current,
+                      )
+                    }
                     data-plan-input={
                       (drawsDependencyEdges &&
                         (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||

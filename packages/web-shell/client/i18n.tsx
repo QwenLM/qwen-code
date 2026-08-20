@@ -2448,6 +2448,7 @@ const EN: Messages = {
   'workflow.attention.queue': 'Attention queue',
   'workflow.attention.queueOrder': 'Workflow order',
   'workflow.attention.detailEyebrow': 'Workflow attention',
+  'workflow.attention.stepId': 'Step',
   'workflow.attention.failureCopy':
     'The Agent for this step failed or was cancelled. Return to Chat for follow-up, or open the Agent transcript for full evidence.',
   'workflow.attention.openOutput': 'View full Agent output',
@@ -5379,6 +5380,7 @@ const ZH: Messages = {
   'workflow.attention.queue': '异常队列',
   'workflow.attention.queueOrder': '按工作流顺序',
   'workflow.attention.detailEyebrow': '工作流待处理项',
+  'workflow.attention.stepId': '步骤',
   'workflow.attention.failureCopy':
     '该节点关联的 Agent 执行失败或取消。返回对话补充信息，或打开 Agent 执行记录查看完整证据。',
   'workflow.attention.openOutput': '查看 Agent 完整输出',
