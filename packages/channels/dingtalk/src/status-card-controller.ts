@@ -9,7 +9,7 @@ import {
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
-import { sanitizeFileMarkersToFixedPoint } from './outbound-file.js';
+import { sanitizeMediaMarkersToStable } from './outbound-file.js';
 import { truncateOutboundMediaText } from './outbound-markers.js';
 
 const FLUSH_INTERVAL_MS = 500;
@@ -57,19 +57,19 @@ function boundContent(content: string): string {
 }
 
 /**
- * FILE before IMAGE, then repeat to a fixed point.
+ * FILE before IMAGE, iterated to a JOINT fixed point (R3-2).
  *
  * The image pass substitutes a bracketed `[Image pending]` placeholder while
  * the file pass substitutes nothing, so running images first hands the file
  * pass a `]` that was never in the model's output: an unclosed `[FILE:` then
  * "closes" on the placeholder and swallows it. Sanitising files first means
- * every pass only ever sees brackets the model actually emitted. The repeat
- * covers a removal splicing its surroundings into a fresh marker.
+ * every pass only ever sees brackets the model actually emitted. One image
+ * pass after the file fixed point is still not stable — the image pass's
+ * removal splices its surroundings into a fresh `[FILE: …]` marker the file
+ * pass already finished with — so the two passes iterate together.
  */
 function sanitizeStreamingMediaMarkers(content: string): string {
-  return sanitizeStreamingImageMarkers(
-    sanitizeFileMarkersToFixedPoint(content),
-  );
+  return sanitizeMediaMarkersToStable(content, sanitizeStreamingImageMarkers);
 }
 
 export class StatusCardController {

@@ -258,11 +258,7 @@ function partialMarkerResidueEnd(
 
 /**
  * The bracket-balanced end of the span opening at `open`, confined to the
- * span's line. Advancing the truncation cut here instead of to end-of-line
- * keeps whatever follows a bracketed marker on the final line; a `close + 1`
- * advance can retain a bracket-less path tail for nested shapes, so the
- * balanced extent is the safe target. An unbalanced span falls back to
- * end-of-line.
+ * span's line. An unbalanced span falls back to end-of-line.
  */
 function balancedMarkerEnd(text: string, open: number): number {
   let depth = 0;
@@ -288,9 +284,24 @@ function balancedMarkerEnd(text: string, open: number): number {
  */
 function markerSafeTruncationStart(text: string, start: number): number {
   const before = text.slice(0, start);
-  const lastClose = before.lastIndexOf(']');
-  let open = before.lastIndexOf('[');
-  while (open > lastClose) {
+  // R4-5/R4-6: examine EVERY bracket still unclosed at the cut, rightmost
+  // first — not just the brackets after the last `]` before it. A nested `]`
+  // anywhere before the cut used to stop the walk (the `open > lastClose`
+  // gate), and a walk that hit a non-marker span used to settle for the raw
+  // cut — both left the cut inside an enclosing bracketed marker, retaining
+  // a bracket-less path fragment no sanitizer recognises. Only brackets still
+  // OPEN at the cut can contain it, so pair brackets forward and walk the
+  // survivors; a genuine prose bracket contributes nothing and the walk
+  // simply passes it, so the bare-`[` collapse the old `return start` guarded
+  // against cannot reappear.
+  const unclosed: number[] = [];
+  for (let i = 0; i < start; i++) {
+    const char = text[i];
+    if (char === '[') unclosed.push(i);
+    else if (char === ']' && unclosed.length > 0) unclosed.pop();
+  }
+  while (unclosed.length > 0) {
+    const open = unclosed.pop()!;
     const candidate = before.slice(open + 1);
     const candidateNewline = candidate.search(/[\r\n]/u);
     if (candidateNewline === -1) {
@@ -315,15 +326,17 @@ function markerSafeTruncationStart(text: string, start: number): number {
           // truncation defeating the stripper and leaking the full path.
           //
           // Only for a span that really opens a marker, though. An empty
-          // candidate (the cut landing right after a `[`) prefix-matches every
-          // marker name vacuously, so a prose bracket would take this branch
-          // too and discard the whole retained window — the bare-`[` collapse
-          // that turned a 28k answer into the truncation marker alone.
+          // candidate (the cut landing right after a `[`) prefix-matches
+          // every marker name vacuously, so a prose bracket would take this
+          // branch too and discard the whole retained window — the bare-`[`
+          // collapse that turned a 28k answer into the truncation marker
+          // alone. A span that is not marker-shaped keeps the walk moving
+          // left instead (R4-6).
           //
           // R2-7: advance exactly as far as the display stripper strips —
           // including a path line on the next line — so a cross-line marker
           // never deposits a bare path at the head of the retained tail.
-          if (!opensMediaMarker(text, open)) return start;
+          if (!opensMediaMarker(text, open)) continue;
           return partialMarkerResidueEnd(text, open, text.slice(open + 1));
         }
         // R1-11: only skip when the span really completes a marker. A prose
@@ -337,14 +350,29 @@ function markerSafeTruncationStart(text: string, start: number): number {
         if (!COMPLETED_MARKER_PATTERN.test(completed)) {
           // R2-12: a bracketed path (`[FILE: /etc/passwd [b] c]`) fails the
           // strict completed regex above, yet it still genuinely opens a
-          // marker. Returning the raw cut here dropped the opening bracket and
-          // retained a bracket-less `FILE: /abs/path …` fragment that no
-          // downstream sanitizer recognises.
-          if (!opensMediaMarker(text, open)) return start;
-          // R3-8: advance past the span's balanced bracket extent. End-of-line
-          // collapsed the ENTIRE retained window to the truncation marker when
-          // a bracketed marker sat on the final line.
-          return balancedMarkerEnd(text, open);
+          // marker. Returning the raw cut here dropped the opening bracket
+          // and retained a bracket-less `FILE: /abs/path …` fragment that no
+          // downstream sanitizer recognises. A span that is not marker-shaped
+          // keeps the walk moving left instead (R4-6).
+          if (!opensMediaMarker(text, open)) continue;
+          // R3-8: advance past the span's balanced bracket extent so the
+          // content after a bracketed marker survives. R4-4 — unless the
+          // residue continues past that extent on the same line: for shapes
+          // like `[FILE: /a [b]] /secret/c.pdf]` the balanced close is the
+          // EARLY close of a nested extent, and everything after it up to
+          // end-of-line is the bracket-less path fragment the display
+          // stripper removes. A dangling `]` there is the tell — with one,
+          // advance exactly as far as the stripper strips (R2-7); without
+          // one, the tail is bracket-free prose the stripper also keeps.
+          const balanced = balancedMarkerEnd(text, open);
+          const restAfter = text.slice(balanced);
+          const lineBreak = restAfter.search(/[\r\n]/u);
+          const sameLineTail =
+            lineBreak === -1 ? restAfter : restAfter.slice(0, lineBreak);
+          if (sameLineTail.includes(']')) {
+            return partialMarkerResidueEnd(text, open, text.slice(open + 1));
+          }
+          return balanced;
         }
         return close + 1;
       }
@@ -364,7 +392,6 @@ function markerSafeTruncationStart(text: string, start: number): number {
         return Math.max(start, end);
       }
     }
-    open = previousOpen(before, open);
   }
   return start;
 }
@@ -423,8 +450,15 @@ function openFenceAt(text: string, offset: number): string | undefined {
  * backtick/tilde run, the run becomes a line-start fence OPENER that was
  * never one in the source text. Every downstream sanitizer then masks the
  * tail to end-of-text and the genuine markers it exists to protect ship as
- * literal text. Returns the start of the next line when the cut created such
- * an opener, otherwise `start` unchanged.
+ * literal text. Returns the position just past the created run when the cut
+ * created such an opener, otherwise `start` unchanged.
+ *
+ * R4-7: the advance covers the created run itself (indent plus delimiter),
+ * not the rest of its line. Jumping to the next newline discarded the entire
+ * rest of a long or newline-free line, collapsing the retained window to the
+ * bare truncation marker. Starting the tail at the run's info text opens no
+ * fence — the run's parity is gone with the dropped prefix — and keeps the
+ * line.
  */
 function advancePastCreatedFenceOpener(text: string, start: number): number {
   if (start === 0 || start >= text.length) return start;
@@ -439,8 +473,7 @@ function advancePastCreatedFenceOpener(text: string, start: number): number {
   if (/^ {0,3}$/u.test(dropped) && dropped.length + tailIndent <= 3) {
     return start;
   }
-  const newline = text.indexOf('\n', start);
-  return newline === -1 ? text.length : newline + 1;
+  return start + tailMatch[0].length;
 }
 
 export function truncateOutboundMediaText(

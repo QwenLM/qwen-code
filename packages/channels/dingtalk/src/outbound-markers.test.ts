@@ -698,3 +698,79 @@ describe('R6 round-6 Critical regressions', () => {
     expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).toBe(text);
   });
 });
+
+describe('R7 round-7 Critical regressions', () => {
+  // R4-4: the R2-12 branch advanced only to the balanced-bracket extent —
+  // for `[FILE: /a [b]] /secret/c.pdf]` that is the EARLY close of a nested
+  // extent, and the bracket-less path fragment after it survived every
+  // sanitizer (the stripper strips the identical opening to end-of-line).
+  // A dangling `]` after the balanced close now means the residue continues:
+  // advance exactly as far as the stripper strips.
+  it('does not retain the residue after an early balanced close', () => {
+    const marker = '[FILE: /a [b]] /secret/c.pdf]';
+    const text = 'a'.repeat(85) + marker + 'b'.repeat(19946);
+    // Land the cut inside `[FILE: /a [b`, as CONTENT_LIMIT does mid-stream.
+    const cutAt = 85 + '[FILE: /a [b'.length;
+    const limit = text.length - cutAt + TRUNCATION_MARKER.length;
+    const truncated = truncateOutboundMediaText(text, limit, TRUNCATION_MARKER);
+    expect(truncated).not.toContain('/secret/c.pdf');
+    // The residue runs to the end of the marker's (only) line — the advance
+    // consumes it whole; nothing bracket-less survives into the tail.
+    expect(truncated).toBe(TRUNCATION_MARKER);
+  });
+
+  // R4-5: the backward bracket walk was gated on `open > lastClose` — a
+  // nested `]` anywhere before the cut stopped it entirely, so cuts inside
+  // the outer bracketed marker returned the raw cut and retained a
+  // bracket-less absolute-path fragment.
+  it('walks past a nested close to the enclosing marker', () => {
+    const filler = 'a'.repeat(20000);
+    const marker = '[FILE: /workspace/report [draft].pdf see /etc/shadow]';
+    const text = filler + marker + 'zzz';
+    for (let delta = 1; delta <= marker.length; delta++) {
+      const start = filler.length + delta;
+      const limit = text.length - start + TRUNCATION_MARKER.length;
+      if (limit <= TRUNCATION_MARKER.length) continue;
+      const truncated = truncateOutboundMediaText(
+        text,
+        limit,
+        TRUNCATION_MARKER,
+      );
+      expect(
+        sanitizeFileMarkersToFixedPoint(
+          stripPartialOutboundMediaMarker(truncated, 'FILE', ''),
+        ),
+      ).not.toContain('/etc/shadow');
+    }
+  });
+
+  // R4-6: a cut exactly one character after a NESTED `[` terminated the walk
+  // at that inner bracket — the empty candidate vacuously prefix-matched, the
+  // span failed the marker test, and the walk never reached the enclosing
+  // `[FILE:` opening. Non-marker spans keep the walk moving left instead.
+  it('reaches the enclosing marker from a cut after a nested bracket', () => {
+    const filler = 'a'.repeat(20000);
+    const marker = '[FILE: /workspace/report [draft].pdf see /etc/shadow]';
+    const text = filler + marker + 'zzz';
+    const cutAt = text.indexOf('[draft') + 1;
+    const limit = text.length - cutAt + TRUNCATION_MARKER.length;
+    const truncated = truncateOutboundMediaText(text, limit, TRUNCATION_MARKER);
+    expect(truncated).toBe(TRUNCATION_MARKER + 'zzz');
+  });
+
+  // R4-7: the created-fence-opener advance jumped to the NEXT NEWLINE — on a
+  // long or newline-free line that discarded the entire rest of the line and
+  // collapsed the retained window to the bare truncation marker. The advance
+  // now covers the created run itself, keeping the line.
+  it('keeps the line when advancing past a created fence opener', () => {
+    const runStart = 10000;
+    const text = 'a'.repeat(runStart) + '```' + 'b'.repeat(10009);
+    // The budget cut lands exactly on the mid-line run, turning it into a
+    // line-start fence opener in the retained tail.
+    const limit = text.length - runStart + TRUNCATION_MARKER.length;
+    const truncated = truncateOutboundMediaText(text, limit, TRUNCATION_MARKER);
+    expect(truncated.length).toBeGreaterThan(TRUNCATION_MARKER.length + 5000);
+    expect(truncated.length).toBeLessThanOrEqual(limit);
+    expect(truncated).toContain('bbb');
+  });
+});

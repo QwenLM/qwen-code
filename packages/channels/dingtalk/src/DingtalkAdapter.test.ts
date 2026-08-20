@@ -1932,11 +1932,15 @@ describe('DingtalkChannel status cards', () => {
   it('closes the exact output segment when that segment ends', async () => {
     const channel = createChannel();
     const closeOutput = vi.fn().mockResolvedValue(true);
+    const segmentContent = vi.fn().mockReturnValue(undefined);
     (
       channel as unknown as {
-        interactionPresenter: { closeOutput: typeof closeOutput };
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          segmentContent: typeof segmentContent;
+        };
       }
-    ).interactionPresenter = { closeOutput };
+    ).interactionPresenter = { closeOutput, segmentContent };
     const segment = {
       channelName: 'dingtalk',
       sessionId: 'session-1',
@@ -4692,6 +4696,145 @@ describe('DingtalkChannel outbound file delivery', () => {
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
+  });
+
+  it("delivers a boundary segment's files like the completed path", async () => {
+    // R2-13: `onOutputSegmentEnd` used to close the segment with empty text,
+    // so the boundary never ran `prepareOutgoingContent` (the sole upload
+    // site) — a `[FILE: …]` emitted before a tool call, plan update, or
+    // permission request was stripped by the display sanitizer with no
+    // receipt, no delivery, and no failure notice, while the final segment's
+    // `onResponseComplete` path delivered the same marker. The boundary now
+    // gets the same prepare-then-deliver treatment.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { events, fileCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockImplementation(() => {
+        events.push('card');
+        return Promise.resolve(true);
+      });
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+          };
+        }
+      ).interactionPresenter = { closeOutput, segmentContent };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(segmentContent).toHaveBeenCalledWith('segment-1');
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '[File sent: report.txt]',
+        'response_boundary',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the display-only close for a boundary segment without markers', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const { uploadCalls } = stubFileReplyFetch();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    const segmentContent = vi.fn().mockReturnValue('plain prose only');
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          segmentContent: typeof segmentContent;
+        };
+      }
+    ).interactionPresenter = { closeOutput, segmentContent };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    await getOutputSegmentEndHook(channel)(
+      'cid-1',
+      'session-1',
+      segment,
+      'response_boundary',
+    );
+
+    expect(uploadCalls()).toHaveLength(0);
+    expect(closeOutput).toHaveBeenCalledWith(
+      'segment-1',
+      '',
+      'response_boundary',
+      segment,
+    );
+  });
+
+  it('strips undeliverable marker residue from the outgoing webhook text', async () => {
+    // R4-1: `prepareOutgoingContent` substituted only well-formed markers and
+    // nothing sanitized between prepare and POST, so every undeliverable
+    // shape shipped as literal text, absolute path included — a cross-line
+    // IMAGE opening, a cutoff FILE opening, and the spaced/bracketed shapes
+    // the display surfaces strip fail-closed.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const { markdownCalls } = stubFileReplyFetch();
+
+    await channel.sendMessage(
+      'cid-1',
+      [
+        'cutoff: [FILE: /workspace/secret/report.pdf',
+        'cross-line: [IMAGE:',
+        '/workspace/secret/report.png]',
+        'spaced: [ FILE: /workspace/secret/other.pdf]',
+      ].join('\n'),
+    );
+
+    const delivered = markdownCalls()
+      .map((call) => {
+        const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+          markdown?: { text?: string };
+        };
+        return body.markdown?.text ?? '';
+      })
+      .join('\n');
+    expect(delivered).not.toContain('/workspace/secret/report.pdf');
+    expect(delivered).not.toContain('/workspace/secret/report.png');
+    expect(delivered).not.toContain('/workspace/secret/other.pdf');
+    expect(delivered).toContain('cutoff:');
   });
 });
 

@@ -813,6 +813,29 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  // R3-2: the sequential single-pass composition was not a fixed point of the
+  // JOINT sanitization — the image pass deleted the second residue span BARE,
+  // splicing `[FIL` + `E: /etc/passwd]` into a live `[FILE: …]` marker the
+  // file pass had already finished with, and the fallback shipped it. The two
+  // passes now iterate until stable.
+  it('does not ship a FILE marker the image pass splices together', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '[IMAGE: z\n[FIL[IMAGE:\na]E: /etc/passwd]',
+    );
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).not.toContain('/etc/passwd');
+    expect(fallbackText).not.toContain('[FILE:');
+  });
+
   it.each([
     [
       'tilde-fenced code',

@@ -23,6 +23,7 @@ import {
   findImageMarkers,
   readValidatedImage,
   replaceImageMarkers,
+  stripPartialImageMarker,
   uploadDingTalkImage,
 } from './outbound-image.js';
 import {
@@ -31,6 +32,7 @@ import {
   readValidatedFile,
   replaceFileMarkers,
   safeFileName,
+  sanitizeMediaMarkersToStable,
   uploadDingTalkFile,
 } from './outbound-file.js';
 import {
@@ -717,69 +719,79 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<PreparedDingTalkOutput> {
     const imageText = await this.prepareOutgoingImages(text);
     const markers = findFileMarkers(imageText);
-    if (markers.length === 0) return { text: imageText, files: [] };
-
     const files: PreparedDingTalkFile[] = [];
-    const replacements: string[] = [];
-    for (const [index, marker] of markers.entries()) {
-      if (index >= MAX_FILES_PER_RESPONSE) {
-        replacements.push(
-          '[File delivery failed: response file limit exceeded]',
-        );
-        continue;
-      }
+    let outgoingText = imageText;
+    if (markers.length > 0) {
+      const replacements: string[] = [];
+      for (const [index, marker] of markers.entries()) {
+        if (index >= MAX_FILES_PER_RESPONSE) {
+          replacements.push(
+            '[File delivery failed: response file limit exceeded]',
+          );
+          continue;
+        }
 
-      const fileName = safeFileName(marker.path);
-      try {
-        const file = readValidatedFile(marker.path, {
-          workspaceDir: this.config.cwd,
-        });
-        let mediaId: string | undefined;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const token = await this.getProactiveToken();
-          try {
-            mediaId = await uploadDingTalkFile(file, token);
-            break;
-          } catch (error) {
-            if (
-              error instanceof DingTalkMediaUploadError &&
-              error.authFailure &&
-              attempt === 0
-            ) {
-              this.proactiveToken = undefined;
-              continue;
+        const fileName = safeFileName(marker.path);
+        try {
+          const file = readValidatedFile(marker.path, {
+            workspaceDir: this.config.cwd,
+          });
+          let mediaId: string | undefined;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const token = await this.getProactiveToken();
+            try {
+              mediaId = await uploadDingTalkFile(file, token);
+              break;
+            } catch (error) {
+              if (
+                error instanceof DingTalkMediaUploadError &&
+                error.authFailure &&
+                attempt === 0
+              ) {
+                this.proactiveToken = undefined;
+                continue;
+              }
+              throw error;
             }
-            throw error;
           }
+          if (!mediaId) {
+            throw new Error('DingTalk media upload returned no MediaID');
+          }
+          files.push({
+            mediaId,
+            fileName: file.fileName,
+            fileType: file.fileType,
+          });
+          // "File sent:", not "File:" — the latter self-matches the FILE marker
+          // pattern, so every display-side sanitizer deleted the receipt again on
+          // its way out and a file-only response rendered an empty final card.
+          replacements.push(`[File sent: ${file.fileName}]`);
+        } catch (error) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] outbound file upload failed (${sanitizeLogText(
+              fileName,
+              255,
+            )}): ${sanitizeLogText(
+              error instanceof Error ? error.message : String(error),
+              300,
+            )}\n`,
+          );
+          replacements.push(`[File delivery failed: ${fileName}]`);
         }
-        if (!mediaId) {
-          throw new Error('DingTalk media upload returned no MediaID');
-        }
-        files.push({
-          mediaId,
-          fileName: file.fileName,
-          fileType: file.fileType,
-        });
-        // "File sent:", not "File:" — the latter self-matches the FILE marker
-        // pattern, so every display-side sanitizer deleted the receipt again on
-        // its way out and a file-only response rendered an empty final card.
-        replacements.push(`[File sent: ${file.fileName}]`);
-      } catch (error) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] outbound file upload failed (${sanitizeLogText(
-            fileName,
-            255,
-          )}): ${sanitizeLogText(
-            error instanceof Error ? error.message : String(error),
-            300,
-          )}\n`,
-        );
-        replacements.push(`[File delivery failed: ${fileName}]`);
       }
+      outgoingText = replaceFileMarkers(imageText, markers, replacements);
     }
 
+    // R4-1: nothing else sanitizes between here and the POST —
+    // `normalizeDingTalkMarkdown` only splits chunks. Every shape the finder
+    // cannot deliver (a cross-line `[IMAGE:\n/path]`, a cutoff `[FILE: /path`,
+    // a bracketed or spaced opening) would otherwise ship as literal text,
+    // absolute path included, while the display surfaces strip the very same
+    // shapes fail-closed. Run that same sanitization over the outgoing text:
+    // well-formed markers are already replaced with receipts above, so only
+    // undeliverable residue is touched.
     return {
-      text: replaceFileMarkers(imageText, markers, replacements),
+      text: sanitizeMediaMarkersToStable(outgoingText, stripPartialImageMarker),
       files,
     };
   }
@@ -1909,16 +1921,72 @@ export class DingtalkChannel extends ChannelBase {
     await this.sendResponseMessage(chatId, text, sessionId);
   }
 
-  protected override onOutputSegmentEnd(
-    _chatId: string,
-    _sessionId: string,
+  protected override async onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
-  ): void | Promise<void> {
+  ): Promise<void> {
     if (!this.interactionPresenter) return;
-    return this.interactionPresenter
-      .closeOutput(segment.segmentId, '', reason, segment)
-      .then(() => undefined);
+    if (reason === 'response_boundary' || reason === 'input_requested') {
+      await this.closeSegmentWithFiles(chatId, sessionId, segment, reason);
+      return;
+    }
+    await this.interactionPresenter.closeOutput(
+      segment.segmentId,
+      '',
+      reason,
+      segment,
+    );
+  }
+
+  /**
+   * R2-13: a boundary-closed segment used to be delivered through the display
+   * compositions only — they strip FILE markers with no upload, no receipt,
+   * and no failure notice — so a `[FILE: …]` emitted before a tool call, plan
+   * update, or permission request silently vanished, while the final segment's
+   * `onResponseComplete` path uploads and delivers the same marker. Give the
+   * boundary the same prepare-then-deliver treatment; a segment without
+   * deliverable markers keeps the plain display-only close.
+   */
+  private async closeSegmentWithFiles(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): Promise<void> {
+    const presenter = this.interactionPresenter!;
+    const content = presenter.segmentContent(segment.segmentId);
+    if (!content || findFileMarkers(content).length === 0) {
+      await presenter.closeOutput(segment.segmentId, '', reason, segment);
+      return;
+    }
+    let prepared: PreparedDingTalkOutput;
+    try {
+      prepared = await this.prepareOutgoingContent(content);
+    } catch (error) {
+      // A failed token fetch or unreadable image must not strand the
+      // segment's text — deliver it display-sanitized, as before.
+      process.stderr.write(
+        `[DingTalk:${this.name}] boundary segment preparation failed: ${sanitizeLogText(
+          error instanceof Error ? error.message : String(error),
+          300,
+        )}\n`,
+      );
+      await presenter.closeOutput(segment.segmentId, '', reason, segment);
+      return;
+    }
+    const delivered = await presenter.closeOutput(
+      segment.segmentId,
+      prepared.text,
+      reason,
+      segment,
+    );
+    if (delivered) {
+      await this.sendReplyFiles(chatId, prepared.files);
+      return;
+    }
+    await this.sendPreparedResponse(chatId, prepared, sessionId);
   }
 
   protected override onResponseChunk(

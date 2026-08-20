@@ -8,7 +8,7 @@ import type {
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 import { stripPartialImageMarker } from './outbound-image.js';
-import { sanitizeFileMarkersToFixedPoint } from './outbound-file.js';
+import { sanitizeMediaMarkersToStable } from './outbound-file.js';
 import { truncateOutboundMediaText } from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
@@ -44,7 +44,7 @@ export interface DingtalkInteractionPresenterOptions {
 }
 
 /**
- * Files first, images last.
+ * Files first, images last, iterated to a JOINT fixed point (R3-2).
  *
  * The original order stripped partial image markers before removing file
  * markers, which left an unclosed `[IMAGE:` untouched whenever its candidate
@@ -52,10 +52,13 @@ export interface DingtalkInteractionPresenterOptions {
  * then deleted that closing context and delivered the orphaned image marker,
  * absolute path and all, as literal text. Sanitising files to a fixed point
  * first means the image pass sees the real bracket structure, and running it
- * last keeps its `[Image pending]` placeholder out of the file pass.
+ * last keeps its `[Image pending]` placeholder out of the file pass. One
+ * image pass after the file fixed point is still not stable — the image
+ * pass's removal splices its surroundings into a fresh `[FILE: …]` marker —
+ * so the two passes iterate together.
  */
 function sanitizeFallbackOutput(text: string): string {
-  return stripPartialImageMarker(sanitizeFileMarkersToFixedPoint(text));
+  return sanitizeMediaMarkersToStable(text, stripPartialImageMarker);
 }
 
 export interface DingtalkCardSender {
@@ -156,6 +159,16 @@ export class DingtalkInteractionPresenter {
         presentation.content,
       );
     });
+  }
+
+  /**
+   * The content accumulated for a segment that has not been closed yet.
+   * R2-13: the adapter prepares this content (uploads, receipts) before the
+   * boundary close delivers it, so a `[FILE: …]` marker emitted before the
+   * boundary is handled instead of silently stripped.
+   */
+  segmentContent(segmentId: string): string | undefined {
+    return this.segments.get(segmentId)?.content;
   }
 
   closeOutput(

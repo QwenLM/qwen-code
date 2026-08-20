@@ -190,6 +190,28 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before  after');
   });
 
+  // R3-2: the image pass's bare deletion of a later residue span spliced its
+  // surroundings into a live `[FILE: …]` marker the file pass already
+  // finished with; the card composition shipped it on every write path. The
+  // two passes iterate to a joint fixed point now.
+  it('does not ship a FILE marker the image pass splices together', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.replace(
+      segment(),
+      target,
+      '[IMAGE: z\n[FIL[IMAGE:\na]E: /etc/passwd]',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    const streamContents = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.map(([request]) => request.content);
+    expect(streamContents.join('\n')).not.toContain('/etc/passwd');
+    expect(streamContents.join('\n')).not.toContain('[FILE:');
+  });
+
   it('does not expose a file path when truncation splits its marker', async () => {
     const { client, controller } = createHarness();
     const marker = '[FILE: /Users/ben/private/report.pdf]';

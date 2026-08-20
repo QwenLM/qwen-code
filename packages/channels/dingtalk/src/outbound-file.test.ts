@@ -329,4 +329,29 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
     // A real fixed point: one more pass changes nothing.
     expect(sanitizeFileMarkersToFixedPoint(sanitized)).toBe(sanitized);
   });
+
+  // R3-11: self-similar nesting unwinds one level per pass, so an unbounded
+  // loop pays a full re-scan per level — measured at seconds of synchronous
+  // CPU at CONTENT_LIMIT, re-paid on every streaming card flush. The sweep is
+  // budgeted now and fails CLOSED when the budget is exhausted: the residue
+  // is cut at the first FILE-shaped opening of each line, so the adversarial
+  // depth loses its marker-shaped tail, never its no-leak guarantee. The
+  // pre-budget loop took ~16 s on this input; vitest's own timeout is the
+  // mutation check — restoring the unbounded loop fails it.
+  it('bounds the sweep on adversarial nesting without leaking', () => {
+    const depth = 1052;
+    let nested = '[FILE: /x.pdf]';
+    for (let i = 0; i < depth; i++) nested = `[FIL${nested}E: /p${i}.pdf]`;
+    const text = nested.slice(0, 20007);
+
+    const sanitized = sanitizeFileMarkersToFixedPoint(text);
+
+    expect(sanitized).not.toContain('[FILE:');
+    expect(sanitized).not.toContain('/x.pdf');
+    expect(sanitized).not.toMatch(/\/p\d+\.pdf/u);
+    // The budget unwinds eight levels; the sweep then cuts the line at the
+    // innermost FILE-shaped opening, leaving the prose-prefix wrappers.
+    expect(sanitized).toBe('[FIL'.repeat(depth - 8));
+    expect(sanitizeFileMarkersToFixedPoint(sanitized)).toBe(sanitized);
+  });
 });
