@@ -34,6 +34,11 @@ import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 import { extractZipArchive } from './zip-extraction.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
+import {
+  ExtensionCredentialUnavailableError,
+  resolveStoredGitCredential,
+  type GitCredential,
+} from './extension-git-credentials.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -113,9 +118,9 @@ function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
 
-function addGitHubToken(source: string): string {
+function getGitHubCredential(source: string): GitCredential | undefined {
   const token = getGitHubToken();
-  if (!token) return source;
+  if (!token) return undefined;
   try {
     const parsedUrl = new URL(source);
     if (
@@ -123,13 +128,12 @@ function addGitHubToken(source: string): string {
       parsedUrl.hostname === 'github.com' &&
       !parsedUrl.username
     ) {
-      parsedUrl.username = token;
-      return parsedUrl.toString();
+      return { username: token, password: '' };
     }
   } catch {
-    return source;
+    return undefined;
   }
-  return source;
+  return undefined;
 }
 
 async function assertPinnedGitSupported(): Promise<void> {
@@ -157,8 +161,9 @@ function createPinnedGitConfig(curlResolve: string): string[] {
 function restrictGitEnvironment(
   git: SimpleGit,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  authentication?: { source: string; credential: GitCredential },
 ): SimpleGit {
-  if (networkPolicy !== 'public') return git;
+  if (networkPolicy !== 'public' && !authentication) return git;
   const environment: Record<string, string> = {
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: os.devNull,
@@ -176,6 +181,16 @@ function restrictGitEnvironment(
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
+  if (authentication) {
+    const value = Buffer.from(
+      `${authentication.credential.username}:${authentication.credential.password}`,
+      'utf8',
+    ).toString('base64');
+    environment['GIT_CONFIG_COUNT'] = '1';
+    environment['GIT_CONFIG_KEY_0'] =
+      `http.${authentication.source}.extraHeader`;
+    environment['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${value}`;
+  }
   return git.env(environment);
 }
 
@@ -188,8 +203,12 @@ export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  credential?: GitCredential,
+  hideSource = false,
 ): Promise<string> {
-  const redactedSource = redactUrlCredentials(installMetadata.source);
+  const redactedSource = hideSource
+    ? 'credentialed HTTPS Git source'
+    : redactUrlCredentials(installMetadata.source);
   try {
     const { simpleGit } = await loadSimpleGit();
     let networkConfig: string[] = [];
@@ -207,6 +226,8 @@ export async function cloneFromGit(
         ? createPinnedGitConfig(networkTarget.curlResolve)
         : [];
     }
+    const effectiveCredential =
+      credential ?? getGitHubCredential(installMetadata.source);
     const git = restrictGitEnvironment(
       simpleGit(destination, {
         ...(signal ? { abort: signal } : {}),
@@ -221,13 +242,15 @@ export async function cloneFromGit(
           : {}),
       }),
       installMetadata.networkPolicy,
+      effectiveCredential
+        ? { source: installMetadata.source, credential: effectiveCredential }
+        : undefined,
     );
     signal?.throwIfAborted();
-    const sourceUrl = addGitHubToken(installMetadata.source);
     // On Windows, symlinks require elevated privileges by default, so we
     // disable them to avoid "Permission denied" errors during checkout.
     const symlinkValue = os.platform() === 'win32' ? 'false' : 'true';
-    await git.clone(sourceUrl, './', [
+    await git.clone(installMetadata.source, './', [
       '-c',
       `core.symlinks=${symlinkValue}`,
       '--depth',
@@ -445,6 +468,10 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
+      const storedCredential =
+        installMetadata.credentialPersistence === 'stored'
+          ? (await resolveStoredGitCredential(extension.path)).credential
+          : undefined;
       const { simpleGit } = await loadSimpleGit();
       if (installMetadata.networkPolicy === 'public') {
         await assertPinnedGitSupported();
@@ -452,7 +479,7 @@ export async function checkForExtensionUpdate(
       let remoteUrl: string;
       let localHash: string;
       if (installMetadata.gitCommit) {
-        remoteUrl = addGitHubToken(installMetadata.source);
+        remoteUrl = installMetadata.source;
         localHash = installMetadata.gitCommit;
       } else {
         if (
@@ -496,6 +523,8 @@ export async function checkForExtensionUpdate(
           : [];
       }
       signal?.throwIfAborted();
+      const effectiveCredential =
+        storedCredential ?? getGitHubCredential(remoteUrl);
       const git = restrictGitEnvironment(
         simpleGit(extension.path, {
           ...(signal ? { abort: signal } : {}),
@@ -510,6 +539,9 @@ export async function checkForExtensionUpdate(
             : {}),
         }),
         installMetadata.networkPolicy,
+        effectiveCredential
+          ? { source: remoteUrl, credential: effectiveCredential }
+          : undefined,
       );
       const refToCheck = installMetadata.ref || 'HEAD';
       const refPatterns = installMetadata.ref
@@ -563,6 +595,7 @@ export async function checkForExtensionUpdate(
       return ExtensionUpdateState.UP_TO_DATE;
     }
   } catch (error) {
+    if (error instanceof ExtensionCredentialUnavailableError) throw error;
     signal?.throwIfAborted();
     debugLogger.error(
       `Failed to check for updates for extension "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(getErrorMessage(error))}`,
