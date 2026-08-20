@@ -13159,6 +13159,367 @@ describe('useGeminiStream', () => {
       releaseStream?.();
     });
 
+    it('should merge when a mid-turn thought re-arms only the trailing call of the batch', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'FIRST-THOUGHT' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-A',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'SECOND-THOUGHT' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-B',
+              name: 'read_file',
+              args: { path: '/bar' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('interleaved thought re-arms');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The first thought commits as-is when the second supersedes it.
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('FIRST-THOUGHT'),
+          }),
+          expect.any(Number),
+        );
+      });
+
+      const readCall = (callId: string, path: string): TrackedToolCall =>
+        ({
+          request: {
+            callId,
+            name: 'read_file',
+            args: { file_path: path },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: { callId, responseParts: [{ text: 'contents' }] },
+          tool: { displayName: 'ReadFile' },
+          invocation: {
+            getDescription: () => path,
+          } as unknown as AnyToolInvocation,
+        }) as TrackedCompletedToolCall;
+
+      // The batch completes with BOTH calls even though only the trailing one
+      // (call-B) re-armed the deferral after the mid-turn thought. The
+      // subset ownership check must treat the armed {call-B} as owned by the
+      // completing [call-A, call-B] group and fold the second thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          readCall('call-A', '/foo'),
+          readCall('call-B', '/bar'),
+        ]);
+      });
+
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(2);
+      expect(thoughtCommits[1][0].text).toContain('SECOND-THOUGHT');
+      expect(thoughtCommits[1][0].toolSummary).toBe('Read /foo, /bar');
+      const mergedGroupCommit = mockAddItem.mock.calls.find(
+        ([item]) =>
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought === true,
+      );
+      expect(mergedGroupCommit).toBeDefined();
+    });
+
+    it('should merge when a replay-suppressed call is pruned from the armed set', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      const client = new MockedGeminiClientClass(mockConfig);
+      // call-B is already handled in history: its first replay is suppressed
+      // per-call (the circuit breaker needs a REPEATED duplicate), so it
+      // never joins the scheduled batch.
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'prov-B',
+              getToolCallFingerprint('read_file', { path: '/replayed' }),
+            ],
+          ]),
+        );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning before replay' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-A',
+              providerCallId: 'prov-A',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-B',
+              providerCallId: 'prov-B',
+              name: 'read_file',
+              args: { path: '/replayed' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery('replay suppression');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Only call-A is scheduled; call-B is suppressed as a replay.
+      await waitFor(() => {
+        expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+          [expect.objectContaining({ callId: 'call-A' })],
+          expect.anything(),
+          undefined,
+        );
+      });
+
+      const readCall: TrackedToolCall = {
+        request: {
+          callId: 'call-A',
+          name: 'read_file',
+          args: { file_path: '/foo' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: { callId: 'call-A', responseParts: [{ text: 'contents' }] },
+        tool: { displayName: 'ReadFile' },
+        invocation: {
+          getDescription: () => '/foo',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall;
+
+      // The armed set was {call-A, call-B}; call-B's suppression prunes it to
+      // {call-A}, so the completing [call-A] batch owns the deferral and the
+      // thought folds instead of stranding armed.
+      await act(async () => {
+        await getOnComplete()?.([readCall]);
+      });
+
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('planning before replay');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      const mergedGroupCommit = mockAddItem.mock.calls.find(
+        ([item]) =>
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought === true,
+      );
+      expect(mergedGroupCommit).toBeDefined();
+    });
+
+    it('should not let a concurrent stream Content resolve another invocation armed deferral', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwContent: (() => void) | undefined;
+      const holdBtwContent = new Promise<void>((resolve) => {
+        releaseBtwContent = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'main turn thinking' },
+            };
+            // Hold before the TCR so the deferral is still unarmed when the
+            // concurrent prompt is submitted (the arms-after-submit window).
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          await holdBtwContent;
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // Submit the concurrent prompt while the deferral is still unarmed;
+      // the submit-time abort is a no-op and the btw user item lands.
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Arm the deferral from the main turn (owner = main invocation).
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // The concurrent stream's Content must NOT resolve the armed deferral:
+      // the thought stays finalized and uncommitted, not re-homed below the
+      // btw user item.
+      await act(async () => {
+        releaseBtwContent?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // The owning batch completes and folds the thought.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall()]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('main turn thinking');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      const mergedGroupCommit = mockAddItem.mock.calls.find(
+        ([item]) =>
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought === true,
+      );
+      expect(mergedGroupCommit).toBeDefined();
+
+      releaseMainEnd?.();
+    });
+
     it('should commit the deferred thought as-is on UserCancelled', async () => {
       captureSchedulerOnComplete();
       mockSendMessageStream.mockReturnValue(

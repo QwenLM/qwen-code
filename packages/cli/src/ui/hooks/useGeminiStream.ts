@@ -854,6 +854,13 @@ export const useGeminiStream = (
   // Holds the callIds of the batch that armed the deferral so a concurrent
   // turn's completing batch cannot consume another turn's deferred thought.
   const thoughtMergeDeferralRef = useRef<Set<string> | null>(null);
+  // The promptId of the invocation that armed the deferral. A concurrent
+  // stream (e.g. ?btw during Responding) can trigger an abort after the
+  // deferral is armed; only the owning invocation may resolve it, otherwise
+  // the owner's thought would be committed below the concurrent stream's
+  // user item. promptId identifies the invocation more reliably than a
+  // millisecond timestamp, which can collide across rapid submissions.
+  const thoughtMergeDeferralOwnerRef = useRef<string | null>(null);
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -1249,6 +1256,7 @@ export const useGeminiStream = (
   const abortThoughtMergeDeferral = useCallback(
     (userMessageTimestamp: number) => {
       thoughtMergeDeferralRef.current = null;
+      thoughtMergeDeferralOwnerRef.current = null;
       commitPendingThought(userMessageTimestamp);
     },
     [commitPendingThought],
@@ -1261,7 +1269,7 @@ export const useGeminiStream = (
   // today. The arming callId is recorded so only the owning batch's
   // onComplete may resolve the deferral.
   const deferThoughtCommitForToolMerge = useCallback(
-    (userMessageTimestamp: number, callId: string) => {
+    (userMessageTimestamp: number, callId: string, ownerPromptId?: string) => {
       const pending = pendingThoughtItemRef.current;
       if (pending?.type !== 'gemini_thought') {
         commitPendingThought(userMessageTimestamp);
@@ -1279,9 +1287,13 @@ export const useGeminiStream = (
       thoughtStartTimeRef.current = null;
       // An already-armed deferral means another ToolCallRequest of the same
       // batch (thoughts only re-arm fresh — a new Thought aborts first).
+      const alreadyArmed = thoughtMergeDeferralRef.current !== null;
       const armedCallIds = thoughtMergeDeferralRef.current ?? new Set<string>();
       armedCallIds.add(callId);
       thoughtMergeDeferralRef.current = armedCallIds;
+      if (!alreadyArmed) {
+        thoughtMergeDeferralOwnerRef.current = ownerPromptId ?? null;
+      }
     },
     [commitPendingThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
@@ -1298,19 +1310,25 @@ export const useGeminiStream = (
       if (!armedCallIds) {
         return toolGroup;
       }
-      // Ownership guard: streams can run concurrently in this hook (/btw
-      // during Responding, goal/cron/teammate submits share these refs), so
-      // the batch completing here may not be the one that armed the
-      // deferral. Leave it armed for its own batch instead of merging
-      // another turn's thought.
+      // Ownership guard: the deferral belongs to the batch that contains
+      // every call that armed it. Require the armed set to be a subset of
+      // the completing group rather than an exact match: replay-suppressed
+      // calls are pruned from the armed set at scheduling time, and a
+      // mid-turn thought only re-arms the trailing calls, so the completing
+      // group can legitimately carry extra callIds. Streams can run
+      // concurrently in this hook (/btw during Responding, goal/cron/
+      // teammate submits share these refs), but another turn's batch has
+      // disjoint callIds, so it never satisfies the subset check and the
+      // deferral stays armed for its own batch.
       const groupCallIds = toolGroup.tools.map((tool) => tool.callId);
       const ownedByThisBatch =
-        groupCallIds.length === armedCallIds.size &&
-        groupCallIds.every((id) => armedCallIds.has(id));
+        armedCallIds.size > 0 &&
+        [...armedCallIds].every((id) => groupCallIds.includes(id));
       if (!ownedByThisBatch) {
         return toolGroup;
       }
       thoughtMergeDeferralRef.current = null;
+      thoughtMergeDeferralOwnerRef.current = null;
       const thought = pendingThoughtItemRef.current;
       const tools = toolGroup.tools;
       const mergeable =
@@ -2755,11 +2773,21 @@ export const useGeminiStream = (
                 bufferedEvents.some((e) => e.kind === 'thought')
               ) {
                 flushBufferedStreamEvents();
-                // Content never arrives mid-tool-batch (the continuation
-                // stream starts after onComplete resolved the deferral), so
-                // aborting here is either a no-op deferral clear or a safe
-                // recovery from a stranded deferral.
-                abortThoughtMergeDeferral(userMessageTimestamp);
+                // Content never arrives mid-tool-batch for the OWNING turn
+                // (the continuation stream starts after onComplete resolved
+                // the deferral), so aborting here is either a no-op deferral
+                // clear or a safe recovery from a stranded deferral. But a
+                // CONCURRENT stream's Content must not resolve another
+                // invocation's armed deferral — that would commit the
+                // owner's thought below the concurrent stream's user item.
+                // Only the owning invocation may resolve it here; otherwise
+                // it stays armed for the owner's batch.
+                if (
+                  thoughtMergeDeferralRef.current === null ||
+                  thoughtMergeDeferralOwnerRef.current === (promptId ?? null)
+                ) {
+                  abortThoughtMergeDeferral(userMessageTimestamp);
+                }
                 thoughtBuffer = '';
               }
               setThought((prev) => (prev ? null : prev));
@@ -2790,6 +2818,7 @@ export const useGeminiStream = (
               deferThoughtCommitForToolMerge(
                 userMessageTimestamp,
                 event.value.callId,
+                promptId,
               );
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
@@ -3131,6 +3160,17 @@ export const useGeminiStream = (
           }
 
           if (isReplayOfHandledRequest(request)) {
+            // A suppressed replay never joins the scheduled batch: prune its
+            // callId from the armed deferral so the batch that does complete
+            // can still own it. If nothing armed remains, no batch will
+            // resolve the deferral — commit the thought as-is now.
+            const armedDeferral = thoughtMergeDeferralRef.current;
+            if (armedDeferral?.has(request.callId)) {
+              armedDeferral.delete(request.callId);
+              if (armedDeferral.size === 0) {
+                abortThoughtMergeDeferral(userMessageTimestamp);
+              }
+            }
             markDuplicateProviderToolCallResponseSent(
               providerCallId,
               duplicateProviderToolCallResponseIdsRef.current,
@@ -3211,8 +3251,14 @@ export const useGeminiStream = (
       }
       // No batch will run (nothing executable, aborted signal, or loop
       // detected): a still-deferred thought must commit as-is instead of
-      // lingering in the pending area.
-      if (thoughtMergeDeferralRef.current && !scheduledToolContinuation) {
+      // lingering in the pending area. Only the owning invocation may do
+      // this — a concurrent stream ending here must not resolve another
+      // invocation's armed deferral and re-home its thought.
+      if (
+        thoughtMergeDeferralRef.current &&
+        !scheduledToolContinuation &&
+        thoughtMergeDeferralOwnerRef.current === (promptId ?? null)
+      ) {
         abortThoughtMergeDeferral(userMessageTimestamp);
       }
       return {
