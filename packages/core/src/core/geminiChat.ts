@@ -1988,13 +1988,21 @@ export class GeminiChat {
    * targets so a foreign count cannot anchor that request's decisions even
    * when the active route owns it — e.g. an exact `\0` route selector, or
    * a non-exact send whose `model` param overrides the active model.
+   *
+   * The telemetry mirror is display-only state: it is resynchronized here,
+   * at the next guarded read, so between a `/model` switch and the next
+   * chat touch the UI counters may briefly show the previous route's
+   * counts. Decision paths never read the mirror, only the route-aware
+   * chat getters above.
    */
-  private invalidateTokenCountsIfRouteChanged(
-    targetRouteKey: string = this.currentRouteKey(),
-  ): void {
+  private invalidateTokenCountsIfRouteChanged(targetRouteKey?: string): void {
     if (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0) {
       return;
     }
+    // Resolve the active-route default only AFTER the zero-count fast path:
+    // computing a route identity (SHA-256 digest + config lookups) on every
+    // count read while both counts are 0 would defeat the guard above.
+    targetRouteKey ??= this.currentRouteKey();
     if (this.tokenCountsRouteKey === targetRouteKey) {
       return;
     }
@@ -2004,8 +2012,10 @@ export class GeminiChat {
     );
     this.setLastPromptTokenCount(0);
     // Keep the telemetry mirror in sync, or the UI context counters
-    // and compression banners keep reading the foreign count.
+    // and compression banners keep reading the foreign count. The cached
+    // content count belongs to the same foreign route's last response.
     this.telemetryService?.setLastPromptTokenCount(0);
+    this.telemetryService?.setLastCachedContentTokenCount(0);
   }
 
   /**
@@ -2393,15 +2403,15 @@ export class GeminiChat {
     if (exactRoute) {
       model = exactRoute.model;
     }
-    const requestRouteKey = exactRoute
-      ? this.config.getModelRouteIdentity(
-          model,
-          exactRoute.contentGeneratorConfig,
-        )
-      : this.config.getModelRouteIdentity(
-          model,
-          this.config.getContentGeneratorConfig(),
-        );
+    // Both arms are one call: for a non-exact send `exactRoute` is
+    // undefined, and `resolvedModelIdentity`'s second parameter defaults to
+    // `getContentGeneratorConfig()` — including when passed an explicit
+    // undefined. Keeping a single call site means a future change to how
+    // the request route is identified cannot drift between the arms.
+    const requestRouteKey = this.config.getModelRouteIdentity(
+      model,
+      exactRoute?.contentGeneratorConfig,
+    );
     // Counts recorded for a route other than this request's target must not
     // anchor its admission/clamp/compression decisions (#9454). Comparing
     // against the REQUEST route — resolved above — keeps an exact `\0`
@@ -2559,6 +2569,13 @@ export class GeminiChat {
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
+      // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
+      // setLastPromptTokenCount on the success path) even though this send
+      // targets the REQUEST route — and hard-rescue only fires for
+      // non-exact sends, whose request key can differ from the active one.
+      // Capture the key so the rollback below restores the resurrected
+      // count's original route attribution along with the count itself.
+      const tokenCountsRouteKeyBeforeHardRescue = this.tokenCountsRouteKey;
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2635,6 +2652,7 @@ export class GeminiChat {
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
+          this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );

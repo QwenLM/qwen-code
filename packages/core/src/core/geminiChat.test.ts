@@ -115,6 +115,7 @@ vi.mock('../telemetry/loggers.js', () => ({
 vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: {
     setLastPromptTokenCount: vi.fn(),
+    setLastCachedContentTokenCount: vi.fn(),
   },
 }));
 
@@ -15604,6 +15605,116 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0]?.[1].originalTokenCount).toBe(0);
     });
 
+    it('invalidates a stale route count before fast-compression sizing', () => {
+      // compressFast is the third entrypoint alongside sendMessageStream
+      // and tryCompress: it reads the raw count field for its apiBaseline,
+      // so it must drop a pre-switch count before sizing the new route.
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'question' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        {
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      fastChat.setLastPromptTokenCount(691_000, false);
+      switchRoute('anthropic-model@beef1234');
+
+      const result = fastChat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // The stale 691_000 must not anchor sizing for the new route: the
+      // baseline falls back to the history-walk estimate.
+      expect(result.info.originalTokenCount).toBeLessThan(691_000);
+      expect(fastChat.getLastPromptTokenCount()).toBeLessThan(691_000);
+    });
+
+    it('zeroes the telemetry cached-content mirror when invalidating a foreign count', () => {
+      // The cached content count is written for the same foreign route's
+      // last response; leaving it up next to the zeroed prompt count gives
+      // /context an internally inconsistent capacity picture.
+      chat.setLastPromptTokenCount(691_000, false);
+      switchRoute('anthropic-model@beef1234');
+
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenCalledWith(0);
+    });
+
+    it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
+      // Hard-rescue only fires for non-exact sends, whose request route key
+      // can differ from the active route's. tryCompress re-stamps the key
+      // to the ACTIVE route mid-rescue; the rollback must restore the key
+      // alongside the counts, or the resurrected override-route count rides
+      // the active key past the next send's entry invalidation (#9454).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+      const rescueChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'earlier turn' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        {
+          recordAssistantTurn: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      // Authoritative count recorded by an earlier override-route turn.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'override-model@route',
+      );
+      rescueChat.setLastPromptTokenCount(176_999, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'still large summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 180_000,
+          newTokenCount: 177_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await expect(
+        rescueChat.sendMessageStream(
+          'override-model',
+          { message: 'continue' },
+          'prompt-hard-rescue-route-key-restore',
+        ),
+      ).rejects.toThrow(/compression status: COMPRESSED/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      // The restored count belongs to the override route: an active-route
+      // read must invalidate it, not inherit it.
+      expect(rescueChat.getLastPromptTokenCount()).toBe(0);
+    });
+
     it('does not anchor an exact route output clamp on the active route count', async () => {
       // Authoritative count recorded by the ACTIVE route. An exact `\0`
       // route send targets a different serialization, so its output clamp
@@ -15645,8 +15756,8 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
         resolveForModel,
       } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
-      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
-        (model) => (model ? `${model}@route` : 'gemini-pro@test0001'),
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'gemini-pro@test0001',
       );
 
       const selector = 'openai:vision-agent\0https://vision.example.com/v1\0';
