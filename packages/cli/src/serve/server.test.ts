@@ -15370,6 +15370,92 @@ describe('createServeApp', () => {
       });
     });
 
+    it('merges live state only into the exact case twin across default pages', async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-446655440012';
+      const upperSessionId = liveSessionId.toUpperCase();
+      const upperItem: SessionListItem = {
+        sessionId: upperSessionId,
+        cwd: WS_BOUND,
+        startTime: '2026-05-17T12:05:00.000Z',
+        mtime: Date.parse('2026-05-17T12:05:00.000Z'),
+        prompt: 'upper twin',
+        filePath: `/tmp/${upperSessionId}.jsonl`,
+      };
+      const lowerItem: SessionListItem = {
+        ...upperItem,
+        sessionId: liveSessionId,
+        startTime: '2026-05-17T12:00:00.000Z',
+        mtime: Date.parse('2026-05-17T12:00:00.000Z'),
+        prompt: 'lower twin',
+        filePath: `/tmp/${liveSessionId}.jsonl`,
+      };
+      await writeStoredSession({
+        sessionId: liveSessionId,
+        cwd: WS_BOUND,
+        timestamp: lowerItem.startTime,
+        prompt: lowerItem.prompt,
+        mtime: new Date(lowerItem.mtime),
+      });
+      const listSessions = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async ({ cursor }) =>
+          cursor === undefined
+            ? { items: [upperItem], nextCursor: 1, hasMore: true }
+            : { items: [lowerItem], hasMore: false },
+        );
+      const aliasLookup = vi
+        .spyOn(SessionService.prototype, 'findSessionIdsIgnoringCase')
+        .mockRejectedValue(new SessionIdCaseConflictError(liveSessionId));
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            updatedAt: '2026-05-17T12:10:00.000Z',
+            displayName: 'Live lower twin',
+            clientCount: 9,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+
+      try {
+        const first = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { size: 1 },
+          { runtimeBaseDir: runtimeDir },
+        );
+        const second = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { size: 1, cursor: first.nextCursor },
+          { runtimeBaseDir: runtimeDir },
+        );
+
+        expect(first.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: upperSessionId,
+            displayName: 'upper twin',
+            clientCount: 0,
+            hasActivePrompt: false,
+          }),
+        ]);
+        expect(second.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: liveSessionId,
+            displayName: 'Live lower twin',
+            clientCount: 9,
+            hasActivePrompt: true,
+          }),
+        ]);
+      } finally {
+        listSessions.mockRestore();
+        aliasLookup.mockRestore();
+      }
+    });
+
     it('batches mixed-case probes for live rows outside the persisted page', async () => {
       const liveSessionIds = [
         '550e8400-e29b-41d4-a716-446655440020',
@@ -17977,6 +18063,80 @@ describe('createServeApp', () => {
         }
       },
     );
+
+    it('keeps case twins distinct across the organized scan cap', async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-446655440198';
+      const upperSessionId = liveSessionId.toUpperCase();
+      const items: SessionListItem[] = Array.from(
+        { length: 50_001 },
+        (_, index) => ({
+          sessionId:
+            index === 49_999
+              ? upperSessionId
+              : index === 50_000
+                ? liveSessionId
+                : `session-${index}`,
+          cwd: WS_BOUND,
+          startTime: '2026-05-17T12:00:00.000Z',
+          mtime: index,
+          prompt: index === 49_999 ? 'upper twin' : `prompt ${index}`,
+          filePath: `/tmp/session-${index}.jsonl`,
+          sourceType: 'default',
+        }),
+      );
+      const listSessions = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({ items, nextCursor: 1, hasMore: true });
+      const aliasLookup = vi
+        .spyOn(SessionService.prototype, 'findSessionIdsIgnoringCase')
+        .mockRejectedValue(new SessionIdCaseConflictError(liveSessionId));
+      mockWt.readSidecar = () => Promise.resolve(null);
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2099-05-17T12:00:00.000Z',
+            updatedAt: '2099-05-17T12:00:01.000Z',
+            displayName: 'Live lower twin',
+            sourceType: 'default',
+            clientCount: 9,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+
+      try {
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { view: 'organized' },
+          { runtimeBaseDir: runtimeDir },
+        );
+
+        expect(result.truncated).toBe(true);
+        expect(result.sessions).toContainEqual(
+          expect.objectContaining({
+            sessionId: upperSessionId,
+            displayName: 'upper twin',
+            clientCount: 0,
+            hasActivePrompt: false,
+          }),
+        );
+        expect(result.sessions).toContainEqual(
+          expect.objectContaining({
+            sessionId: liveSessionId,
+            displayName: 'Live lower twin',
+            clientCount: 9,
+            hasActivePrompt: true,
+          }),
+        );
+      } finally {
+        listSessions.mockRestore();
+        aliasLookup.mockRestore();
+        mockWt.readSidecar = undefined;
+      }
+    });
 
     it('stops organized session scans when a cursor page is empty', async () => {
       const listSessionsSpy = vi

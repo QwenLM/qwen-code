@@ -483,6 +483,47 @@ function persistedSessionIdForLiveEntry(
   return byCanonicalId.get(normalizeSessionIdForLookup(liveSessionId));
 }
 
+async function verifyPersistedAliasUniqueness(
+  sessionService: SessionService,
+  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
+  byCanonicalId: ReadonlyMap<string, string | undefined>,
+  lookupSessionIds: Iterable<string>,
+  signal?: AbortSignal,
+): Promise<Map<string, string | undefined>> {
+  const verified = new Map(byCanonicalId);
+  const lookupByCanonicalId = new Map<string, string>();
+  for (const sessionId of lookupSessionIds) {
+    if (bySessionId.has(sessionId)) continue;
+    const canonicalId = normalizeSessionIdForLookup(sessionId);
+    if (verified.get(canonicalId) !== undefined) {
+      lookupByCanonicalId.set(canonicalId, sessionId);
+    }
+  }
+  if (lookupByCanonicalId.size === 0) return verified;
+
+  const lookupIds = [...lookupByCanonicalId.values()];
+  let resolved: Map<string, string | undefined>;
+  try {
+    resolved = await sessionService.findSessionIdsIgnoringCase(lookupIds);
+  } catch {
+    signal?.throwIfAborted();
+    for (const canonicalId of lookupByCanonicalId.keys()) {
+      verified.set(canonicalId, undefined);
+    }
+    return verified;
+  }
+  signal?.throwIfAborted();
+
+  for (const [canonicalId, lookupId] of lookupByCanonicalId) {
+    if (resolved.get(lookupId) !== verified.get(canonicalId)) {
+      // A page-local spelling is not an alias when another readable case twin
+      // exists elsewhere in the catalog, or when uniqueness cannot be proven.
+      verified.set(canonicalId, undefined);
+    }
+  }
+  return verified;
+}
+
 async function persistedSessionExistsForLiveEntry(
   sessionService: SessionService,
   liveSessionId: string,
@@ -904,17 +945,27 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
-  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
     persisted.sessions.map((session) => session.sessionId),
   );
   for (const session of persisted.sessions) {
+    bySessionId.set(session.sessionId, clonePersistedSummary(session));
+  }
+  persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
+    sessionService,
+    bySessionId,
+    persistedSessionIdByCanonicalId,
+    snapshot.sessions.keys(),
+    readOptions.signal,
+  );
+  for (const [sessionId, session] of bySessionId) {
     bySessionId.set(
-      session.sessionId,
+      sessionId,
       applyOrganization(
-        clonePersistedSummary(session),
+        session,
         organizationForListedSession(
           snapshot.sessions,
-          session.sessionId,
+          sessionId,
           persistedSessionIdByCanonicalId,
         ),
       ),
@@ -932,6 +983,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+      persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
+        sessionService,
+        bySessionId,
+        persistedSessionIdByCanonicalId,
+        liveSessions.map((session) => session.sessionId),
+        readOptions.signal,
+      );
       for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
@@ -1093,7 +1151,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
-  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
     bySessionId.keys(),
   );
   // Activity floors: the key a row falls back to once its live entry is gone.
@@ -1109,6 +1167,13 @@ async function listWorkspaceSessionsByMetadataForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+      persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
+        sessionService,
+        bySessionId,
+        persistedSessionIdByCanonicalId,
+        liveSessions.map((session) => session.sessionId),
+        readOptions.signal,
+      );
       for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
@@ -1317,7 +1382,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
-  const persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
+  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
     bySessionId.keys(),
   );
 
@@ -1329,6 +1394,13 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
+    sessionService,
+    bySessionId,
+    persistedSessionIdByCanonicalId,
+    liveSessions.map((session) => session.sessionId),
+    readOptions.signal,
+  );
   const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
     sessionService,
     liveSessions.map((session) => session.sessionId),
