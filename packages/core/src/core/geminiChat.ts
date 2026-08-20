@@ -2025,8 +2025,8 @@ export class GeminiChat {
    * count for compaction decisions, so this is always populated regardless
    * of whether the global telemetry is updated.
    */
-  getLastPromptTokenCount(): number {
-    this.invalidateTokenCountsIfRouteChanged();
+  getLastPromptTokenCount(targetRouteKey?: string): number {
+    this.invalidateTokenCountsIfRouteChanged(targetRouteKey);
     return this.lastPromptTokenCount;
   }
 
@@ -4938,11 +4938,11 @@ export class GeminiChat {
             this.telemetryService?.setLastPromptTokenCount(
               lastPromptTokenCount,
             );
-          }
-          if (cachedContentTokenCount && this.telemetryService) {
-            this.telemetryService.setLastCachedContentTokenCount(
-              cachedContentTokenCount,
-            );
+            if (cachedContentTokenCount && this.telemetryService) {
+              this.telemetryService.setLastCachedContentTokenCount(
+                cachedContentTokenCount,
+              );
+            }
           }
         }
 

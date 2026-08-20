@@ -3130,9 +3130,12 @@ export class GeminiClient {
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
+      const model = options?.modelOverride ?? this.config.getModel();
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
-        const lastPromptTokenCount = this.getChat().getLastPromptTokenCount();
+        const requestRouteKey = this.config.getModelRouteIdentity(model);
+        const lastPromptTokenCount =
+          this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
@@ -3223,9 +3226,6 @@ export class GeminiClient {
       }
 
       const turn = new Turn(this.getChat(), prompt_id, goalPermit);
-
-      // Determine the model to use for this turn
-      const model = options?.modelOverride ?? this.config.getModel();
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns

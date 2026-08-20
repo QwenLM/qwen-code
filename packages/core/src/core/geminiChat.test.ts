@@ -15656,6 +15656,41 @@ describe('GeminiChat', async () => {
       ).toHaveBeenCalledWith(0);
     });
 
+    it('does not mirror cached content without a route-stamped prompt count', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'cached' }] },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 0,
+              totalTokenCount: 0,
+              cachedContentTokenCount: 42,
+            },
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'cached-only' },
+        'prompt-cached-only',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+      switchRoute('anthropic-model@beef1234');
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).not.toHaveBeenCalledWith(42);
+    });
+
     it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
       // Hard-rescue only fires for non-exact sends, whose request route key
       // can differ from the active route's. tryCompress re-stamps the key

@@ -3084,6 +3084,35 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(telemetryCount).toBe(0);
     });
+
+    it('applies the session limit to the requested override route', async () => {
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'override-model@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'override route' }],
+          new AbortController().signal,
+          'prompt-override-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'override-model',
+          },
+        ),
+      );
+
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
   });
 
   /**
