@@ -507,10 +507,19 @@ async function verifyPersistedAliasUniqueness(
     resolved = await sessionService.findSessionIdsIgnoringCase(lookupIds);
   } catch {
     signal?.throwIfAborted();
-    for (const canonicalId of lookupByCanonicalId.keys()) {
-      verified.set(canonicalId, undefined);
+    resolved = new Map();
+    for (const sessionId of lookupIds) {
+      signal?.throwIfAborted();
+      try {
+        resolved.set(
+          sessionId,
+          await sessionService.findSessionIdIgnoringCase(sessionId),
+        );
+      } catch {
+        signal?.throwIfAborted();
+        resolved.set(sessionId, undefined);
+      }
     }
-    return verified;
   }
   signal?.throwIfAborted();
 

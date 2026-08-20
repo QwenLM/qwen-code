@@ -15370,9 +15370,19 @@ describe('createServeApp', () => {
       });
     });
 
-    it('merges live state only into the exact case twin across default pages', async () => {
+    it('preserves unique aliases when a batched default-page lookup also contains case twins', async () => {
+      const uniqueLiveSessionId = '550e8400-e29b-41d4-a716-446655440013';
+      const uniqueUpperSessionId = uniqueLiveSessionId.toUpperCase();
       const liveSessionId = '550e8400-e29b-41d4-a716-446655440012';
       const upperSessionId = liveSessionId.toUpperCase();
+      const uniqueUpperItem: SessionListItem = {
+        sessionId: uniqueUpperSessionId,
+        cwd: WS_BOUND,
+        startTime: '2026-05-17T12:06:00.000Z',
+        mtime: Date.parse('2026-05-17T12:06:00.000Z'),
+        prompt: 'unique upper alias',
+        filePath: `/tmp/${uniqueUpperSessionId}.jsonl`,
+      };
       const upperItem: SessionListItem = {
         sessionId: upperSessionId,
         cwd: WS_BOUND,
@@ -15400,14 +15410,33 @@ describe('createServeApp', () => {
         .spyOn(SessionService.prototype, 'listSessions')
         .mockImplementation(async ({ cursor }) =>
           cursor === undefined
-            ? { items: [upperItem], nextCursor: 1, hasMore: true }
+            ? {
+                items: [uniqueUpperItem, upperItem],
+                nextCursor: 1,
+                hasMore: true,
+              }
             : { items: [lowerItem], hasMore: false },
         );
-      const aliasLookup = vi
+      const batchAliasLookup = vi
         .spyOn(SessionService.prototype, 'findSessionIdsIgnoringCase')
         .mockRejectedValue(new SessionIdCaseConflictError(liveSessionId));
+      const individualAliasLookup = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => {
+          if (sessionId === uniqueLiveSessionId) return uniqueUpperSessionId;
+          throw new SessionIdCaseConflictError(sessionId);
+        });
       const bridge = fakeBridge({
         listImpl: () => [
+          {
+            sessionId: uniqueLiveSessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:06:00.000Z',
+            updatedAt: '2026-05-17T12:11:00.000Z',
+            displayName: 'Live unique alias',
+            clientCount: 7,
+            hasActivePrompt: true,
+          },
           {
             sessionId: liveSessionId,
             workspaceCwd: WS_BOUND,
@@ -15424,7 +15453,7 @@ describe('createServeApp', () => {
         const first = await listWorkspaceSessionsForResponse(
           bridge,
           WS_BOUND,
-          { size: 1 },
+          { size: 2 },
           { runtimeBaseDir: runtimeDir },
         );
         const second = await listWorkspaceSessionsForResponse(
@@ -15435,6 +15464,12 @@ describe('createServeApp', () => {
         );
 
         expect(first.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: uniqueUpperSessionId,
+            displayName: 'Live unique alias',
+            clientCount: 7,
+            hasActivePrompt: true,
+          }),
           expect.objectContaining({
             sessionId: upperSessionId,
             displayName: 'upper twin',
@@ -15452,7 +15487,8 @@ describe('createServeApp', () => {
         ]);
       } finally {
         listSessions.mockRestore();
-        aliasLookup.mockRestore();
+        batchAliasLookup.mockRestore();
+        individualAliasLookup.mockRestore();
       }
     });
 
