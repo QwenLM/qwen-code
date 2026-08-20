@@ -199,6 +199,7 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
+  renderGoalContinuationPrompt,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -553,16 +554,11 @@ function sameGoalPermit(
 function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
   return [
     {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
-        ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
+      text: renderGoalContinuationPrompt({
+        variant: 'runtime-context',
+        continuationContext: turn.continuationContext,
+        verifierFeedback: turn.verifierFeedback,
+      }),
     },
   ];
 }
