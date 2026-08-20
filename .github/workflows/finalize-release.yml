@@ -201,12 +201,13 @@ jobs:
           ${{ steps.meta.outputs.is_stable == 'true' }}
         id: 'pr'
         env:
-          # Author the PR as github-actions[bot] (installation token) so that
-          # NEITHER bot PAT is the author: GitHub forbids self-approval, and
-          # the two approve steps below need both PAT identities free to
-          # supply the branch protection's two required approvals without a
-          # human.
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # Author the PR as the review bot (a third identity) so that NEITHER
+          # approve PAT (ci-bot / dev-bot) is the author: GitHub forbids
+          # self-approval, and the two approve steps below need both PAT
+          # identities free to supply the branch protection's two required
+          # approvals without a human. GITHUB_TOKEN cannot be used here
+          # because the org disables GitHub Actions from creating PRs.
+          GITHUB_TOKEN: '${{ secrets.CI_REVIEW_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.meta.outputs.release_branch }}'
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
         run: |-
