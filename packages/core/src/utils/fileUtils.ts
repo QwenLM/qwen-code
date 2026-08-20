@@ -1208,7 +1208,9 @@ export async function processSingleFileContent(
     // a vision model can transcribe them; content sniffing must not reroute
     // text-looking image files to the text path and break that handoff (#9291).
     const bridgePreservesImage =
-      preserveUnsupportedImage && mediaMimeType.startsWith('image/');
+      preserveUnsupportedImage &&
+      mediaMimeType.startsWith('image/') &&
+      SNIFFABLE_IMAGE_MIME_TYPES.has(mediaMimeType);
     const fileType = options.textFileHandle
       ? 'text'
       : (options.fileType ??
