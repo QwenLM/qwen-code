@@ -1,0 +1,258 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { AuthType } from './contentGenerator.js';
+import type { ReasoningEffort } from './reasoning-effort.js';
+
+export type ModelReasoningConfiguration =
+  | {
+      readonly thinking: true;
+      readonly toggleOnly: true;
+      readonly canDisable?: true;
+    }
+  | {
+      readonly thinking: true;
+      readonly toggleOnly?: false;
+      readonly canDisable?: false;
+      readonly efforts: readonly ReasoningEffort[];
+      readonly defaultEffort: ReasoningEffort;
+    };
+
+export type ModelReasoningEndpointFamily =
+  | 'alibaba-coding-plan'
+  | 'alibaba-standard'
+  | 'alibaba-token-plan'
+  | 'deepseek'
+  | 'moonshot'
+  | 'zai'
+  | 'unknown';
+
+export interface ModelReasoningConfigInput {
+  readonly modelId: string | undefined;
+  readonly authType?: AuthType;
+  readonly baseUrl?: string;
+}
+
+export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
+  'dashscope.aliyuncs.com',
+  'dashscope-intl.aliyuncs.com',
+  'dashscope-us.aliyuncs.com',
+];
+
+const TOGGLE_ONLY: ModelReasoningConfiguration = {
+  thinking: true,
+  toggleOnly: true,
+};
+
+const QWEN_CONFIGURATIONS: Readonly<
+  Record<string, ModelReasoningConfiguration>
+> = {
+  'qwen3.5-plus': TOGGLE_ONLY,
+  'qwen3.6-plus': TOGGLE_ONLY,
+  'qwen3.6-flash': TOGGLE_ONLY,
+  'qwen3.7-plus': TOGGLE_ONLY,
+  'qwen3.7-max': TOGGLE_ONLY,
+  'qwen3.8-max': {
+    thinking: true,
+    efforts: ['low', 'medium', 'xhigh'],
+    defaultEffort: 'xhigh',
+  },
+};
+
+const HIGH_MAX: ModelReasoningConfiguration = {
+  thinking: true,
+  efforts: ['high', 'max'],
+  defaultEffort: 'high',
+};
+
+const DEEPSEEK_0731: ModelReasoningConfiguration = {
+  thinking: true,
+  efforts: ['low', 'high', 'max'],
+  defaultEffort: 'high',
+};
+
+const GLM_52_ZAI: ModelReasoningConfiguration = {
+  thinking: true,
+  efforts: ['high', 'max'],
+  defaultEffort: 'max',
+};
+
+const KIMI_K3: ModelReasoningConfiguration = {
+  thinking: true,
+  canDisable: false,
+  efforts: ['low', 'high', 'max'],
+  defaultEffort: 'max',
+};
+
+const GLM_52_WORKSPACE_REGIONS = [
+  'cn-beijing',
+  'ap-southeast-1',
+  'eu-central-1',
+  'us-east-1',
+  'ap-northeast-1',
+] as const;
+
+export function classifyModelReasoningEndpoint(
+  input: Pick<ModelReasoningConfigInput, 'authType' | 'baseUrl'>,
+): ModelReasoningEndpointFamily {
+  if (input.authType !== AuthType.USE_OPENAI || !input.baseUrl) {
+    return 'unknown';
+  }
+
+  let endpoint: URL;
+  try {
+    endpoint = new URL(input.baseUrl);
+  } catch {
+    return 'unknown';
+  }
+  const hostname = endpoint.hostname.toLowerCase();
+
+  if (hostname === 'api.deepseek.com') {
+    return 'deepseek';
+  }
+  if (hostname === 'api.moonshot.cn') {
+    return 'moonshot';
+  }
+  if (hostname === 'api.z.ai' || hostname === 'open.bigmodel.cn') {
+    return 'zai';
+  }
+  if (
+    hostname.startsWith('token-plan.') &&
+    hostname.endsWith('.maas.aliyuncs.com')
+  ) {
+    return 'alibaba-token-plan';
+  }
+  if (hostname.endsWith('.maas.aliyuncs.com')) {
+    return 'alibaba-standard';
+  }
+  if (
+    hostname === 'coding.dashscope.aliyuncs.com' ||
+    hostname === 'coding-intl.dashscope.aliyuncs.com'
+  ) {
+    return 'alibaba-coding-plan';
+  }
+  if (
+    DASHSCOPE_REGIONAL_HOSTS.some(
+      (host) => hostname === host || hostname.endsWith(`.${host}`),
+    )
+  ) {
+    return 'alibaba-standard';
+  }
+  return 'unknown';
+}
+
+export function resolveModelReasoningConfiguration(
+  input: ModelReasoningConfigInput,
+): ModelReasoningConfiguration | undefined {
+  if (!input.modelId) {
+    return undefined;
+  }
+
+  const qwen = QWEN_CONFIGURATIONS[input.modelId];
+  if (qwen) {
+    return qwen;
+  }
+
+  const endpoint = classifyModelReasoningEndpoint(input);
+  switch (endpoint) {
+    case 'deepseek':
+      return input.modelId === 'deepseek-v4-pro' ||
+        input.modelId === 'deepseek-v4-flash'
+        ? HIGH_MAX
+        : undefined;
+    case 'moonshot':
+      if (input.modelId === 'kimi-k3') {
+        return KIMI_K3;
+      }
+      return input.modelId === 'kimi-k2.6' ? TOGGLE_ONLY : undefined;
+    case 'zai':
+      if (input.modelId === 'GLM-5.2' || input.modelId === 'glm-5.2') {
+        return GLM_52_ZAI;
+      }
+      return undefined;
+    case 'alibaba-standard':
+      return resolveAlibabaStandardConfiguration(input.modelId, input.baseUrl);
+    case 'alibaba-token-plan':
+      return resolveAlibabaTokenPlanConfiguration(input.modelId);
+    case 'alibaba-coding-plan':
+      return input.modelId === 'kimi-k2.5' ? TOGGLE_ONLY : undefined;
+    case 'unknown':
+    default:
+      return undefined;
+  }
+}
+
+export function normalizeModelReasoningEffort(
+  configuration: ModelReasoningConfiguration,
+  effort: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  if (!effort || configuration.toggleOnly) {
+    return undefined;
+  }
+  if (configuration.efforts.includes(effort)) {
+    return effort;
+  }
+  if (
+    configuration.efforts.length === 2 &&
+    configuration.efforts[0] === 'high' &&
+    configuration.efforts[1] === 'max'
+  ) {
+    if (effort === 'low' || effort === 'medium') {
+      return 'high';
+    }
+    if (effort === 'xhigh') {
+      return 'max';
+    }
+  }
+  return undefined;
+}
+
+function resolveAlibabaStandardConfiguration(
+  modelId: string,
+  baseUrl: string | undefined,
+): ModelReasoningConfiguration | undefined {
+  if (modelId === 'deepseek-v4-pro' || modelId === 'deepseek-v4-flash') {
+    return HIGH_MAX;
+  }
+  if (modelId === 'deepseek-v4-flash-0731') {
+    return DEEPSEEK_0731;
+  }
+  if (modelId === 'glm-5.2' && isAlibabaGlm52Endpoint(baseUrl)) {
+    return HIGH_MAX;
+  }
+  return undefined;
+}
+
+function isAlibabaGlm52Endpoint(baseUrl: string | undefined): boolean {
+  if (!baseUrl) {
+    return false;
+  }
+  const hostname = new URL(baseUrl).hostname.toLowerCase();
+  if (
+    hostname === 'dashscope.aliyuncs.com' ||
+    hostname === 'dashscope-intl.aliyuncs.com' ||
+    hostname === 'dashscope-us.aliyuncs.com'
+  ) {
+    return true;
+  }
+  return GLM_52_WORKSPACE_REGIONS.some((region) =>
+    hostname.endsWith(`.${region}.maas.aliyuncs.com`),
+  );
+}
+
+function resolveAlibabaTokenPlanConfiguration(
+  modelId: string,
+): ModelReasoningConfiguration | undefined {
+  if (modelId === 'deepseek-v4-pro' || modelId === 'deepseek-v4-flash') {
+    return HIGH_MAX;
+  }
+  if (modelId === 'deepseek-v4-flash-0731') {
+    return DEEPSEEK_0731;
+  }
+  return ['glm-5.2', 'kimi-k2.5', 'kimi-k2.6'].includes(modelId)
+    ? TOGGLE_ONLY
+    : undefined;
+}

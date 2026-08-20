@@ -21,6 +21,12 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  normalizeModelReasoningEffort,
+  resolveModelReasoningConfiguration,
+  type ModelReasoningConfiguration,
+} from '../../model-reasoning-config.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -146,16 +152,29 @@ function withoutNullishThinkingKnobs(
   return sanitized;
 }
 
+function withoutNestedReasoningEffort(
+  request: Record<string, unknown>,
+): Record<string, unknown> {
+  const reasoning = request['reasoning'] as Record<string, unknown> | undefined;
+  if (!reasoning || !('effort' in reasoning)) {
+    return request;
+  }
+  const next = { ...request };
+  const { effort: _drop, ...rest } = reasoning;
+  if (Object.keys(rest).length === 0) {
+    delete next['reasoning'];
+  } else {
+    next['reasoning'] = rest;
+  }
+  return next;
+}
+
 /**
  * Official DashScope regional API hosts (matched exactly or as a parent
  * domain of the endpoint hostname). Shared with the WebSearch side channel's
  * endpoint gate (tools/web-search.ts) so a new region is added in one place.
  */
-export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
-  'dashscope.aliyuncs.com',
-  'dashscope-intl.aliyuncs.com',
-  'dashscope-us.aliyuncs.com',
-];
+export { DASHSCOPE_REGIONAL_HOSTS };
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -168,7 +187,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
-   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * ModelStudio endpoints under *.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
@@ -206,10 +225,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         (host) => hostname === host || hostname.endsWith('.' + host),
       );
 
-    const isTokenPlanOrigin =
-      hostname !== null &&
-      hostname.startsWith('token-plan.') &&
-      hostname.endsWith('.maas.aliyuncs.com');
+    const isMaasOrigin =
+      hostname !== null && hostname.endsWith('.maas.aliyuncs.com');
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -236,7 +253,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
-      !isTokenPlanOrigin &&
+      !isMaasOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -260,7 +277,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     return (
       isDashscopeOrigin ||
-      isTokenPlanOrigin ||
+      isMaasOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
@@ -366,11 +383,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
       : this.contentGeneratorConfig.extra_body;
 
-    // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
-    // models still expose only the on/off `enable_thinking` switch. User
-    // extra_body wins (merged last); the disable path (reasoning: false) is
-    // handled upstream in the pipeline.
-    const qwenEffortConfig = this.buildQwenEffortConfig(request.model);
+    // Tiered models use a top-level `reasoning_effort`. Older Qwen hybrids
+    // still expose only the on/off `enable_thinking` switch. User extra_body
+    // wins (merged last); the disable path is handled upstream in the pipeline.
+    const wireModel = this.resolveWireModel(request.model);
+    const modelReasoning = resolveModelReasoningConfiguration({
+      modelId: wireModel,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    const modelEffortConfig = this.buildModelEffortConfig(
+      request.model,
+      modelReasoning,
+    );
     const rawRequestParams = requestWithTokenLimits as unknown as Record<
       string,
       unknown
@@ -383,11 +408,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // without this copy the tier would clobber the request-level override.
     if (
       'reasoning_effort' in requestParams &&
-      'reasoning_effort' in qwenEffortConfig
+      'reasoning_effort' in modelEffortConfig
     ) {
-      qwenEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
+      modelEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
     }
-    const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
+    const hasModelEffortConfig = Object.keys(modelEffortConfig).length > 0;
+    const shouldStripNestedEffort = hasModelEffortConfig || !!modelReasoning;
     // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve the
     // highest-priority layer once; when both fields are explicit in that
     // layer, reasoning_effort keeps the pre-existing provider behavior.
@@ -396,7 +422,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
           this.resolveWireModel(request.model),
           extraBody,
           requestParams,
-          qwenEffortConfig['reasoning_effort'],
+          modelEffortConfig['reasoning_effort'],
         )
       : undefined;
 
@@ -408,20 +434,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       const dashscopeExtras: Record<string, unknown> = {
         vl_high_resolution_images: true,
         preserve_thinking: true,
-        ...qwenEffortConfig,
+        ...modelEffortConfig,
       };
-      const visionResult: Record<string, unknown> = {
+      let visionResult: Record<string, unknown> = {
         ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
         ...dashscopeExtras,
       };
-      // DashScope qwen models use top-level effort fields, not the OpenAI-style
-      // nested `reasoning` object the pipeline injects from /effort. Drop it so
-      // we don't ship two competing knobs. User extra_body still wins.
-      if (hasQwenEffortConfig && 'reasoning' in visionResult) {
-        delete visionResult['reasoning'];
+      // Supported DashScope models use top-level effort fields, not the
+      // OpenAI-style nested `reasoning` object. User extra_body still wins.
+      if (shouldStripNestedEffort) {
+        visionResult = withoutNestedReasoningEffort(visionResult);
       }
       return this.mergeExtraBodyAndResolveKnobs(
         visionResult,
@@ -435,20 +460,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // extra_body wins (merged last).
     const dashscopeExtras: Record<string, unknown> = {
       preserve_thinking: true,
-      ...qwenEffortConfig,
+      ...modelEffortConfig,
     };
-    const result: Record<string, unknown> = {
+    let result: Record<string, unknown> = {
       ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
       ...dashscopeExtras,
     };
-    // DashScope qwen models use top-level effort fields, not the OpenAI-style
-    // nested `reasoning` object the pipeline injects from /effort. Drop it so
-    // we don't ship two competing knobs. User extra_body still wins.
-    if (hasQwenEffortConfig && 'reasoning' in result) {
-      delete result['reasoning'];
+    // Supported DashScope models use top-level effort fields, not the
+    // OpenAI-style nested `reasoning` object. User extra_body still wins.
+    if (shouldStripNestedEffort) {
+      result = withoutNestedReasoningEffort(result);
     }
     return this.mergeExtraBodyAndResolveKnobs(
       result,
@@ -515,8 +539,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * disable gate) so the qwen-specific fields never leak to a non-qwen
    * model sharing the DashScope endpoint.
    */
-  private buildQwenEffortConfig(
+  private buildModelEffortConfig(
     model: string | undefined,
+    modelReasoning: ModelReasoningConfiguration | undefined,
   ): Record<string, unknown> {
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (!reasoning || reasoning.effort === undefined) {
@@ -525,6 +550,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const wireModel = this.resolveWireModel(model);
     if (isTieredEffortWireModel(wireModel)) {
       return { reasoning_effort: reasoning.effort };
+    }
+    if (modelReasoning && !modelReasoning.toggleOnly) {
+      const effort = normalizeModelReasoningEffort(
+        modelReasoning,
+        reasoning.effort,
+      );
+      return effort ? { reasoning_effort: effort } : {};
     }
     if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };

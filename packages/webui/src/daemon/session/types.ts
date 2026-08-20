@@ -115,6 +115,7 @@ export interface DaemonConnectionState {
 
 export interface DaemonReasoningControls {
   enabled: boolean;
+  canDisable?: boolean;
   effort: string;
   efforts: string[];
 }

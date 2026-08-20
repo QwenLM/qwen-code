@@ -68,6 +68,9 @@ describe('token plan provider', () => {
       extra_body: { enable_thinking: true },
       contextWindowSize: 262144,
     });
+    expect(
+      template.find((model) => model.id === 'kimi-k2.7-code')?.generationConfig,
+    ).toMatchObject({ thinkingMandatory: true });
     // Plus/2.5 variants are genuinely multimodal and stay that way.
     expect(
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig

@@ -4,51 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
+import {
+  normalizeModelReasoningEffort,
+  resolveModelReasoningConfiguration,
+  type AuthType,
+  type ModelReasoningConfiguration,
+} from '@qwen-code/qwen-code-core';
 
-export type ModelReasoningConfiguration =
-  | {
-      readonly thinking: true;
-      readonly toggleOnly: true;
-    }
-  | {
-      readonly thinking: true;
-      readonly toggleOnly?: false;
-      readonly efforts: readonly ReasoningEffort[];
-      readonly defaultEffort: ReasoningEffort;
-    };
+export { normalizeModelReasoningEffort };
+export type { ModelReasoningConfiguration };
 
-const MODEL_CONFIGURATIONS: Readonly<
-  Record<string, { readonly reasoning?: ModelReasoningConfiguration }>
-> = {
-  'qwen3.5-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
-  },
-  'qwen3.6-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
-  },
-  'qwen3.6-flash': {
-    reasoning: { thinking: true, toggleOnly: true },
-  },
-  'qwen3.7-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
-  },
-  'qwen3.7-max': {
-    reasoning: { thinking: true, toggleOnly: true },
-  },
-  'qwen3.8-max': {
-    reasoning: {
-      thinking: true,
-      efforts: ['low', 'medium', 'xhigh'],
-      defaultEffort: 'xhigh',
-    },
-  },
-};
-
-export function getModelConfiguration(modelId: string | undefined):
+export function getModelConfiguration(
+  modelId: string | undefined,
+  route?: { readonly authType?: AuthType; readonly baseUrl?: string },
+):
   | {
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
-  return modelId ? MODEL_CONFIGURATIONS[modelId] : undefined;
+  const reasoning = resolveModelReasoningConfiguration({
+    modelId,
+    authType: route?.authType,
+    baseUrl: route?.baseUrl,
+  });
+  return reasoning ? { reasoning } : undefined;
 }

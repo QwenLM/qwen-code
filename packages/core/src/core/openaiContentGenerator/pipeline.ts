@@ -20,6 +20,10 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import {
+  classifyModelReasoningEndpoint,
+  resolveModelReasoningConfiguration,
+} from '../model-reasoning-config.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -1132,7 +1136,13 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory = this.requiresThinking(model);
+    const modelReasoning = resolveModelReasoningConfiguration({
+      modelId: model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    const thinkingMandatory =
+      this.requiresThinking(model) || modelReasoning?.canDisable === false;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -1140,11 +1150,11 @@ export class ContentGenerationPipeline {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
       // guarded `in typed` check would never fire for default qwen3 configs.
-      // Hostname + model-name gate avoids leaking this qwen-specific field
-      // to non-qwen routings on the same DashScope hostname (GLM uses
-      // `extra_body.thinking.enabled`, DeepSeek-on-DashScope uses
-      // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
-      // is at best a no-op, at worst forwarded upstream and rejected).
+      // Hostname + model-name gate avoids leaking Qwen-specific behavior to
+      // unrelated models on the same DashScope hostname. Provider-aware
+      // non-Qwen models are handled by the capability resolver below; their
+      // current Alibaba OpenAI-compatible contract also uses
+      // `enable_thinking` for the off switch.
       //
       // Gate on the *wire* model (`context.model`, i.e.
       // `request.model || contentGeneratorConfig.model` — the same value
@@ -1193,6 +1203,12 @@ export class ContentGenerationPipeline {
             enable_thinking: false,
           };
         }
+      } else if (!thinkingMandatory && isDashScope) {
+        const canDisable =
+          modelReasoning?.toggleOnly || modelReasoning?.canDisable !== false;
+        if (modelReasoning && canDisable) {
+          typed['enable_thinking'] = false;
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
@@ -1213,7 +1229,22 @@ export class ContentGenerationPipeline {
       // DeepSeek versions may not accept the V4 thinking parameter, so
       // we don't push it there. See https://api-docs.deepseek.com/.
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+        delete typed['enable_thinking'];
         typed['thinking'] = { type: 'disabled' };
+      } else {
+        const endpoint = classifyModelReasoningEndpoint(
+          this.contentGeneratorConfig,
+        );
+        const canDisable =
+          modelReasoning?.toggleOnly || modelReasoning?.canDisable !== false;
+        if (
+          modelReasoning &&
+          canDisable &&
+          (endpoint === 'moonshot' || endpoint === 'zai')
+        ) {
+          delete typed['enable_thinking'];
+          typed['thinking'] = { type: 'disabled' };
+        }
       }
     }
 
@@ -1227,6 +1258,10 @@ export class ContentGenerationPipeline {
       // it); a thinking-mandatory model rejects it like the boolean shapes.
       if (typed['reasoning_effort'] === 'none') {
         delete typed['reasoning_effort'];
+      }
+      const thinking = typed['thinking'] as Record<string, unknown> | undefined;
+      if (thinking?.['type'] === 'disabled') {
+        delete typed['thinking'];
       }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
@@ -1245,20 +1280,22 @@ export class ContentGenerationPipeline {
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
     const thinkingBudget = typed['thinking_budget'];
+    const dashScopeModelReasoning = isDashScope ? modelReasoning : undefined;
     // DashScope rejects forced tool selection while thinking is enabled
     // ("The tool_choice parameter does not support being set to required or
-    // object in thinking mode"). Both field clauses are family-gated like
-    // the disable path above: `enable_thinking` and `reasoning_effort` are
-    // qwen thinking switches, but on non-qwen models sharing the endpoint
-    // they are opaque parameters that do not put the request in thinking
-    // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
-    // dropping `required` there only degrades their forced-tool side
-    // queries. `thinkingMandatory` stays ungated: it is explicit
-    // "thinking is on" knowledge, model-agnostic by design.
+    // object in thinking mode"). Registered Alibaba models default to
+    // thinking on, so the absence of an explicit disable is enough to drop
+    // the forced choice. The Qwen-family fallback preserves support for older
+    // Qwen IDs outside the exact capability registry. `thinkingMandatory`
+    // stays model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
       (thinkingMandatory ||
+        (dashScopeModelReasoning &&
+          !isQwenFamilyWireModel(model) &&
+          typed['enable_thinking'] !== false &&
+          reasoningEffort !== 'none') ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||

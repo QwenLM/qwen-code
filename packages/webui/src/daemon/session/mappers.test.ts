@@ -94,6 +94,29 @@ describe('mapReasoningControls', () => {
       efforts: [],
     });
   });
+
+  it('maps mandatory reasoning tiers without an off option', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'max',
+          options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: 'max',
+              canDisable: false,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      canDisable: false,
+      effort: 'max',
+      efforts: ['low', 'high', 'max'],
+    });
+  });
 });
 
 describe('getReplayTokenCount', () => {

@@ -200,6 +200,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for a ModelStudio workspace URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://workspace-id.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
     it('should return true for internal alibaba-inc.com subdomain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -311,7 +323,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
@@ -729,6 +740,76 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
       },
     );
+
+    it.each([
+      {
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        effort: 'max',
+      },
+      {
+        model: 'deepseek-v4-flash-0731',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        effort: 'low',
+      },
+      {
+        model: 'glm-5.2',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        effort: 'medium',
+        expectedEffort: 'high',
+      },
+    ])(
+      'flattens $model effort on its documented Alibaba route',
+      ({ model, baseUrl, effort, expectedEffort }) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            model,
+            reasoning: { effort },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe(expectedEffort ?? effort);
+        expect(result['reasoning']).toBeUndefined();
+      },
+    );
+
+    it('drops stale effort for toggle-only Token Plan GLM 5.2', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['reasoning']).toBeUndefined();
+    });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(

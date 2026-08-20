@@ -798,10 +798,32 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: 'required',
       },
       {
-        name: 'preserve required tool selection for a non-qwen model with a user reasoning_effort',
+        name: 'remove required tool selection for Standard GLM reasoning effort',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when GLM thinking is disabled',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
         model: 'glm-5.2',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'preserve required tool selection for direct mandatory Kimi K3',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        model: 'kimi-k3',
         extraBody: { reasoning_effort: 'high' },
         thinkingMandatory: undefined,
         reasoning: undefined,
@@ -998,21 +1020,18 @@ describe('ContentGenerationPipeline', () => {
       }
     });
 
-    it('keeps forced tool selection for a non-qwen preset shape end to end', async () => {
+    it('drops forced tool selection for a GLM thinking preset end to end', async () => {
       // The table above mocks buildRequest as a plain extra_body merge, so
       // the real provider never executes there. Run the actual DashScope
-      // provider instead: its family-gated drop keeps the glm preset's
-      // enable_thinking, and the pipeline's enable_thinking clause is
-      // family-gated too — on glm the field is an opaque no-op (GLM reads
-      // thinking.enabled), not a thinking switch, so tool_choice=required
-      // must survive for its forced-tool side queries.
+      // provider instead and verify the pipeline recognizes GLM's documented
+      // Alibaba thinking fields before shipping tool_choice=required.
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
         model: 'glm-5.2',
-        authType: AuthType.QWEN_OAUTH,
-        extra_body: { enable_thinking: true, reasoning_effort: 'high' },
+        authType: AuthType.USE_OPENAI,
+        extra_body: { enable_thinking: true },
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -1070,8 +1089,7 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(true);
-      expect(apiCall.reasoning_effort).toBe('high');
-      expect(apiCall.tool_choice).toBe('required');
+      expect(apiCall.tool_choice).toBeUndefined();
     });
 
     it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
@@ -1597,6 +1615,10 @@ describe('ContentGenerationPipeline', () => {
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest next' },
       ]);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        enable_thinking: true,
+      }));
       (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
@@ -1610,6 +1632,7 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.enable_thinking).toBeUndefined();
     });
 
     it('emits thinking:disabled on DeepSeek hostname when reasoning is configured to false', async () => {
@@ -1726,6 +1749,96 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it.each([
+      ['https://api.z.ai/api/paas/v4', 'GLM-5.2'],
+      ['https://api.moonshot.cn/v1', 'kimi-k2.6'],
+    ])('emits thinking:disabled for %s model %s', async (baseUrl, model) => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl,
+        model,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model,
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        enable_thinking: true,
+      }));
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('strips stale disable shapes from mandatory Kimi K3', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.moonshot.cn/v1',
+        model: 'kimi-k3',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const request: GenerateContentParameters = {
+        model: 'kimi-k3',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        enable_thinking: false,
+        reasoning_effort: 'none',
+        thinking: { type: 'disabled' },
+        chat_template_kwargs: {
+          enable_thinking: false,
+          preserved: true,
+        },
+      }));
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toBeUndefined();
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toEqual({ preserved: true });
     });
 
     it('emits enable_thinking:false on DashScope hostname when includeThoughts is false', async () => {
@@ -2070,16 +2183,11 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
-      // DashScope's compatible-mode endpoint routes multiple model families
-      // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
-      // `extra_body.thinking.enabled` and DeepSeek-on-DashScope uses
-      // `thinking: { type: 'disabled' }`, so sending `enable_thinking` is
-      // at best a no-op and at worst forwarded upstream and rejected.
+    it('emits enable_thinking false for a supported GLM routed through DashScope', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model: 'glm-5',
+        model: 'glm-5.2',
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -2088,7 +2196,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'glm-5',
+        model: 'glm-5.2',
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -2108,14 +2216,51 @@ describe('ContentGenerationPipeline', () => {
 
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
-      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.enable_thinking).toBe(false);
     });
 
-    it('gates on the wire model, not config: qwen config + non-qwen request.model does NOT emit', async () => {
+    it('does not emit a disable field for thinking-only Kimi K2.7', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'kimi-k2.7-code',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'kimi-k2.7-code',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: qwen config + supported GLM request emits false', async () => {
       // buildRequest ships `context.model` (= request.model || config.model).
       // A qwen *config* with a non-qwen *request* model must gate on the
-      // request model — otherwise the qwen-only field leaks to the non-qwen
-      // routing that is actually on the wire (e.g. GLM rejecting it upstream).
+      // request model. GLM has its own route-aware capability and also uses the
+      // documented Alibaba enable_thinking switch.
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -2128,7 +2273,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'glm-5', // request-level override to a non-qwen wire model
+        model: 'glm-5.2', // request-level override to a non-qwen wire model
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -2148,7 +2293,7 @@ describe('ContentGenerationPipeline', () => {
 
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
-      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.enable_thinking).toBe(false);
     });
 
     it('gates on the wire model, not config: non-qwen config + qwen request.model emits false', async () => {
