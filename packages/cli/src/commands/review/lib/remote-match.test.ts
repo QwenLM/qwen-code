@@ -430,6 +430,21 @@ describe('hostsEquivalent', () => {
     expect(hostsEquivalent('github.com', 'gitlab.alibaba-inc.com')).toBe(false);
     expect(hostsEquivalent('a.com', 'b.com')).toBe(false);
   });
+
+  it('equates the alias across spelling variants (port, dot, case)', () => {
+    // The CR-URL grammar keeps `(?::\d+)?` inside the host capture, so a
+    // review recorded from `code.alibaba-inc.com:443` must still bind a
+    // submission carrying the skill-mandated `gitlab.alibaba-inc.com` —
+    // raw spelling equality died at the gate after the whole review ran.
+    expect(
+      hostsEquivalent('code.alibaba-inc.com:443', 'gitlab.alibaba-inc.com'),
+    ).toBe(true);
+    expect(
+      hostsEquivalent('CODE.ALIBABA-INC.COM', 'gitlab.alibaba-inc.com.'),
+    ).toBe(true);
+    // Same-host spellings with variants are identical too.
+    expect(hostsEquivalent('github.com:443', 'GITHUB.COM')).toBe(true);
+  });
 });
 
 describe('isAoneCanonicalHost', () => {
