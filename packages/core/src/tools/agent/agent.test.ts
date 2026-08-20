@@ -536,6 +536,9 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.description).toContain(
         'an explicit false is rejected',
       );
+      expect(properties.properties.run_in_background.description).toContain(
+        'explicit run_in_background: true is rejected',
+      );
     });
 
     it('declares the optional todo association', () => {
@@ -688,10 +691,22 @@ describe('AgentTool', () => {
           plan_mode_required?: {
             description?: string;
           };
+          read_only?: {
+            description?: string;
+          };
         };
       };
       expect(parameters.properties.plan_mode_required?.description).toContain(
         'named teammate',
+      );
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'Cannot be combined with read_only',
+      );
+      expect(parameters.properties.read_only?.description).toContain(
+        'named teammate in an active team',
+      );
+      expect(parameters.properties.read_only?.description).toContain(
+        'Cannot be combined with plan_mode_required',
       );
 
       vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
