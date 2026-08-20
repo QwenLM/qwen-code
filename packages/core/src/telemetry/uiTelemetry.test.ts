@@ -1329,6 +1329,16 @@ describe('UiTelemetryService', () => {
       expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
     });
 
+    it('emits an update after restoring a replay snapshot', () => {
+      const snapshot = service.snapshotForReplay(SESSION_B);
+      const onUpdate = vi.fn();
+      service.on('update', onUpdate);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(onUpdate).toHaveBeenCalledOnce();
+    });
+
     it('keeps bySource prototype-free across a snapshot/restore round trip', () => {
       // R5-1: `structuredClone` copies own properties onto a fresh object with
       // `Object.prototype`, so a plain clone silently re-arms the crash the
