@@ -75,7 +75,7 @@ import { auditCommand } from '../commands/audit.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { isValidSessionId } from './session-id.js';
+import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -2105,12 +2105,26 @@ export async function loadCliConfig(
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
-    // Check if session ID is already in use
+    // Check if session ID is already in use — case-insensitively: a legacy
+    // mixed-case transcript still occupies the id, and creating a
+    // case-only twin would make both spellings permanently unrestorable.
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExistsInAnyState(
-      argv['sessionId'],
-    );
-    if (exists) {
+    let occupied: boolean;
+    try {
+      occupied =
+        (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
+        undefined;
+    } catch (error) {
+      // Any read failure leaves the id unproven, and the resolver propagates
+      // non-ENOENT errors. Assume occupied, as the previous existence check
+      // did: startup must reach the guarded conflict message and honour
+      // `throwOnSessionIdConflict` rather than die on a raw errno.
+      debugLogger.debug(
+        `Session id occupancy check failed for ${argv['sessionId']}: ${error}`,
+      );
+      occupied = true;
+    }
+    if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       if (throwOnSessionIdConflict) {
         throw new SessionIdConflictError(argv['sessionId'], message);
@@ -2118,7 +2132,7 @@ export async function loadCliConfig(
       writeStderrLine(message);
       process.exit(1);
     }
-    sessionId = argv['sessionId'];
+    sessionId = normalizeSessionIdForLookup(argv['sessionId']);
   }
 
   const modelProvidersConfig = settings.modelProviders;

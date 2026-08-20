@@ -22,6 +22,10 @@ import { describe, expect, it } from 'vitest';
 import { getWorkflowJob } from './workflow-helpers.js';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// Long-form rationale moved out of the YAML when the file approached
+// GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
+// than a code line) read it here.
+const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
@@ -3864,13 +3868,11 @@ describe('qwen-autofix workflow', () => {
     // idle candidates hit `continue` before the TARGETS append, so they
     // never contend for it; the real win is inspection budget + walk
     // latency, and the comment says so.
-    expect(reviewScanJob).toContain(
-      'Idle PRs never reach the\n          # 10-target budget',
-    );
+    expect(designDoc).toContain('Idle PRs never reach the\n10-target budget');
     // The two scan-only signals updatedAt cannot see are named, not
     // papered over by an absolute invariant.
-    expect(reviewScanJob).toContain('base conflict');
-    expect(reviewScanJob).toContain('still-red checks');
+    expect(designDoc).toContain('base conflict');
+    expect(designDoc).toContain('still-red checks');
   });
 
   it('fails closed on busy-enumeration failure, keeps explicit dispatches, and signals the issue phase', () => {

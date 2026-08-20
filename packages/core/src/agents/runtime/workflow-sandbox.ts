@@ -363,6 +363,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -470,6 +471,19 @@ export interface WorkflowOrchestratorEmitter {
   agentDispatched?(label?: string): void;
   /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
   agentCompleted?(label?: string, error?: string): void;
+  /** A dispatch was issued and joined to the runtime dependency graph. */
+  dispatchQueued?(event: {
+    id: string;
+    label?: string;
+    prompt: string;
+    dependsOn: string[];
+    queuedAt: number;
+    cached?: boolean;
+  }): void;
+  /** A queued dispatch acquired a scheduler slot. */
+  dispatchStarted?(id: string, startedAt: number): void;
+  /** A dispatch reached a terminal state. */
+  dispatchSettled?(id: string, error?: string, endedAt?: number): void;
   /**
    * P5: cumulative `spent` re-snapshot after each successful agent
    * completion. `total` is `null` when no per-run cap is set
@@ -684,13 +698,7 @@ export interface WorkflowSandbox {
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
-  /**
-   * Append a log line produced by a nested workflow run. Nested logs
-   * reach no production surface on their own (the nested sandbox's
-   * buffer is never read by the orchestrator), so the orchestrator
-   * merges them into the parent run's logs at nested settlement —
-   * including the nested unconsumed-rejection mirror lines.
-   */
+  /** Merge a nested workflow log into the parent buffer without re-emitting. */
   appendLog(line: string): void;
   /**
    * The script's `export const meta = {...}` declaration, validated and
@@ -751,26 +759,36 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const phases: string[] = [];
   const logs: string[] = [];
 
-  const safeLog = (msg: unknown): void => {
+  const emitLog = (line: string): void => {
+    try {
+      opts.emitter?.logAppended?.(line);
+    } catch (e) {
+      debugLogger.warn('emitter.logAppended threw:', e);
+    }
+  };
+
+  const safeLog = (msg: unknown, notify = true): void => {
     if (logs.length < MAX_LOG_LINES) {
       const line = String(msg);
       logs.push(line);
       // P4b: emit to host-side subscriber (registry). Defensive try/catch
       // because a subscriber error must not interrupt script execution
       // — the script body has no business knowing about UI plumbing.
-      try {
-        opts.emitter?.logAppended?.(line);
-      } catch (e) {
-        debugLogger.warn('emitter.logAppended threw:', e);
-      }
+      if (notify) emitLog(line);
     } else if (logs.length === MAX_LOG_LINES) {
-      logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
+      const line = `[workflow log truncated at ${MAX_LOG_LINES} lines]`;
+      logs.push(line);
+      if (notify) emitLog(line);
     }
   };
 
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
-      const t = String(title);
+      // Normalize before collapse/push/emit so the sandbox list and the
+      // registry mirror (same rule at its boundary) compare the same value:
+      // titles colliding only after ANSI/control stripping or the 200-char
+      // cap previously diverged the two phase surfaces of the same run.
+      const t = stripAnsiAndControl(String(title)).slice(0, 200) || 'phase';
       // R7 (wenshao): collapse consecutive identical titles so the
       // sandbox is the single source of truth for the phase list.
       // Without this, `outcome.phases` (terminal `returnDisplay` JSON)
@@ -1876,7 +1894,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
-    appendLog: (line: string) => safeLog(line),
+    appendLog: (line: string) => safeLog(line, false),
     getMeta: () => extractedMeta,
   };
 }
