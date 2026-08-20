@@ -2198,6 +2198,12 @@ describe('Session', () => {
     } as PromptRequest);
 
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+      'notification text',
+      undefined,
+      undefined,
+      'test-session-id########1',
+    );
     expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
       'qwen3-code-plus',
       expect.any(Object),
@@ -2220,6 +2226,12 @@ describe('Session', () => {
     } as PromptRequest);
 
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+      'token-limit retry',
+      undefined,
+      undefined,
+      'test-session-id########1',
+    );
     expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
       'qwen3-code-plus',
       expect.any(Object),
@@ -2252,6 +2264,12 @@ describe('Session', () => {
     } as PromptRequest);
 
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+      'second failed prompt',
+      undefined,
+      undefined,
+      'test-session-id########1',
+    );
     expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
       'qwen3-code-plus',
       expect.any(Object),
@@ -3515,6 +3533,73 @@ describe('Session', () => {
       ]);
     });
 
+    it('counts a legacy turn that mixes genuine text with a media-clear placeholder', () => {
+      // Microcompaction rebuilds entries as { ...content, parts: newParts }
+      // and preserves sibling text parts, so an entry mixing real text with
+      // a placeholder is a genuine legacy turn — only placeholder-ONLY
+      // entries are structural and may be skipped by the partial-coverage
+      // loop.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: 'describe this' },
+            { text: '[Old inline media cleared: image/png]' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'legacy reply' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+      ];
+      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        'prompt-new',
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+    });
+
+    it('fails closed on legacy snapshot pairing when turns lack snapshots', () => {
+      // A resumed legacy prefix carries no snapshots, so zipping snapshot
+      // indexes against positional turn indexes past the prefix would land
+      // on the wrong turn's boundary — refuse the pairing instead.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'legacy one' }] },
+        { role: 'model', parts: [{ text: 'legacy reply one' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+        { role: 'model', parts: [{ text: 'new reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        'prompt-new',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'prompt-new',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      expect(() => session.rewindToPrompt('prompt-new')).toThrow(
+        'Cannot rewind to the requested prompt',
+      );
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+      });
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'unidentified prompt' }] },
@@ -3735,6 +3820,41 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.restoreRewindCheckpoint,
       ).toHaveBeenCalledWith({}, snapshots, false);
+    });
+
+    it('drops the rewind checkpoint when a new session is rebound', () => {
+      // /clear swaps in fresh recording/file-history services; the
+      // checkpoint captured the old services' state, and a later
+      // restoreSessionHistory carrying the still-held pair must not apply
+      // session-1's rollback to session-2's recorder.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+      ]);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      session.rewindToPrompt('prompt-1', { rewindFiles: false });
+      session.rebindGoalRuntimeForNewSession();
+      session.restoreHistory(history, ['prompt-1', null]);
+
+      expect(mockChat.setHistory).toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.restoreRewindCheckpoint,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
     });
 
     it('uses legacy recording identities when restored history omits prompt ids', () => {
@@ -18216,6 +18336,53 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordBranchCheckpointTransaction,
         ).not.toHaveBeenCalled();
+      });
+
+      it('snapshots file state for goal-runtime turns to keep legacy rewind aligned', async () => {
+        // A goal-runtime turn still counts as a positional user turn
+        // (#isUserTextContent passes its plain text) and is unmarked, so
+        // the legacy rewind path zips snapshot indexes against positional
+        // turn indexes. Skipping its snapshot would desync every slot
+        // after the first goal turn.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-snapshot',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-snapshot' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+          expect.any(String),
+        );
       });
 
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {

@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   CompressionStatus,
   findApiHistoryPromptIndex,
+  getApiHistoryPromptIndexes,
   getStartupContextLength,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
@@ -156,7 +157,21 @@ export function computeApiTruncationIndex(
 
   const target = uiHistory[targetIndex]!;
   if (isRealUserTurn(target) && target.promptId) {
-    return findApiHistoryPromptIndex(apiHistory, target.promptId);
+    const identifiedIndex = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+    );
+    // Fail closed only when the API history actually carries identities.
+    // /restore installs a checkpoint round-tripped through JSON.stringify,
+    // which drops the symbol-keyed identity from clientHistory while the
+    // persisted UI items keep their string promptId — the target textually
+    // exists in API history, so the positional fallback below is still
+    // sound and must run instead of aborting the rewind with -1.
+    const historyCarriesIdentities =
+      (getApiHistoryPromptIndexes(apiHistory) ?? []).length > 0;
+    if (identifiedIndex !== -1 || historyCarriesIdentities) {
+      return identifiedIndex;
+    }
   }
 
   // Legacy sessions have no promptId and still need the positional fallback.

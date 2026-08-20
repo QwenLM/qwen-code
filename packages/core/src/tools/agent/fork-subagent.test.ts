@@ -175,6 +175,37 @@ describe('selectForkHistory', () => {
     ).toEqual([firstUser, firstModel, placeholder, secondUser, secondModel]);
   });
 
+  it('falls back to positional turns when identity coverage is partial', () => {
+    // A session resumed from before stable identities existed rebuilds its
+    // legacy entries unmarked; the first new prompt lands marked. Slicing
+    // from the marked indexes alone would hand the fork only post-resume
+    // turns and silently drop the requested legacy context.
+    const identifiedNew = structuredClone(secondUser);
+    markApiHistoryPrompt(identifiedNew, 'prompt-new');
+
+    expect(
+      selectForkHistory(
+        [
+          startup,
+          firstUser,
+          firstModel,
+          secondUser,
+          secondModel,
+          identifiedNew,
+          { role: 'model', parts: [{ text: 'new answer' }] },
+        ],
+        2,
+      ),
+    ).toEqual([
+      secondUser,
+      secondModel,
+      // selectForkHistory structuredClones its result, which drops the
+      // symbol-keyed identity by design.
+      { role: 'user', parts: [{ text: 'second question' }] },
+      { role: 'model', parts: [{ text: 'new answer' }] },
+    ]);
+  });
+
   it('keeps all available context when fewer turns exist than requested', () => {
     expect(selectForkHistory([startup, firstUser, firstModel], 3)).toEqual([
       firstUser,

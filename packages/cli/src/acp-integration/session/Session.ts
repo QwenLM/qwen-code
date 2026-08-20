@@ -2069,6 +2069,13 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
+    // /clear swaps in a fresh ChatRecordingService/FileHistoryService via
+    // startNewSession. The checkpoint captured the OLD services' state; a
+    // later restoreSessionHistory carrying the pair the client still holds
+    // passes the positional promptIds guard and would apply session-1's
+    // rollback to session-2's recorder — resurrecting the cleared
+    // conversation and re-rooting the new transcript into the old one.
+    this.rewindCheckpoint = undefined;
     this.#bindGoalRuntime();
   }
 
@@ -3514,6 +3521,7 @@ export class Session implements SessionContext {
       projection!.mode,
       apiHistory,
       opts,
+      projection!.mode === 'legacy' ? projection!.turns.length : undefined,
     );
   }
 
@@ -3534,12 +3542,21 @@ export class Session implements SessionContext {
     let target = projection?.turns.find((turn) => turn.promptId === promptId);
     if (projection?.mode === 'legacy') {
       const snapshots = this.config.getFileHistoryService().getSnapshots();
-      const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
-      const targetTurnIndex = snapshotIndexes?.get(promptId);
-      target =
-        targetTurnIndex === undefined
-          ? undefined
-          : projection.turns[targetTurnIndex];
+      // A snapshot's array index is a positional turn index only while every
+      // positional turn has a snapshot. A resumed legacy prefix has none, so
+      // any pairing past it is misaligned — fail closed instead of rewinding
+      // to the wrong turn's boundary.
+      if (snapshots.length >= projection.turns.length) {
+        const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
+        const targetTurnIndex = snapshotIndexes?.get(promptId);
+        target =
+          targetTurnIndex === undefined
+            ? undefined
+            : projection.turns[targetTurnIndex];
+        if (target?.promptId && target.promptId !== promptId) {
+          target = undefined;
+        }
+      }
     }
     if (!target) {
       throw RequestError.invalidParams(
@@ -3553,6 +3570,7 @@ export class Session implements SessionContext {
       projection!.mode,
       apiHistory,
       opts,
+      projection!.mode === 'legacy' ? projection!.turns.length : undefined,
     );
   }
 
@@ -3570,6 +3588,7 @@ export class Session implements SessionContext {
     mode: RewindTurnProjection['mode'],
     apiHistory: Content[],
     opts?: { rewindFiles?: boolean },
+    legacyTurnCount?: number,
   ): SessionRewindResult {
     if (target.recordingTurnIndex === undefined) {
       throw RequestError.invalidParams(
@@ -3579,9 +3598,18 @@ export class Session implements SessionContext {
     }
     const fileHistoryService = this.config.getFileHistoryService();
     const snapshots = fileHistoryService.getSnapshots();
+    // Legacy mode pairs snapshot indexes with positional turn indexes; the
+    // pairing is only sound while every positional turn has a snapshot
+    // (resumed legacy turns have none).
+    const legacySnapshotsAligned =
+      mode === 'legacy' &&
+      legacyTurnCount !== undefined &&
+      snapshots.length >= legacyTurnCount;
     const effectivePromptId =
       target.promptId ??
-      (mode === 'legacy' ? snapshots[target.turnIndex]?.promptId : undefined);
+      (legacySnapshotsAligned
+        ? snapshots[target.turnIndex]?.promptId
+        : undefined);
     const rewindFiles = opts?.rewindFiles !== false;
     let survivingSnapshots:
       | ReturnType<typeof fileHistoryService.getSnapshots>
@@ -3600,7 +3628,10 @@ export class Session implements SessionContext {
           targetSnapshotIndex = effectivePromptId
             ? snapshotIndexes.get(effectivePromptId)
             : undefined;
-        } else if (target.turnIndex < snapshots.length) {
+        } else if (
+          legacySnapshotsAligned &&
+          target.turnIndex < snapshots.length
+        ) {
           targetSnapshotIndex = target.turnIndex;
         }
         if (targetSnapshotIndex !== undefined) {
@@ -3695,18 +3726,23 @@ export class Session implements SessionContext {
     // structural replacements inside an identified session, not legacy
     // turns. The shared predicate matches only complete placeholders, so a
     // genuine user prompt that merely starts with the prefix still counts.
+    // Skip only placeholder-ONLY entries: microcompaction rebuilds entries
+    // as { ...content, parts: newParts } and preserves sibling text parts,
+    // so an entry mixing genuine text with a placeholder is a real legacy
+    // turn and must force the positional fallback (mirrors the TUI twin's
+    // documented rule in historyMapping.ts).
     for (let index = startIndex; index < apiHistory.length; index++) {
       const content = apiHistory[index]!;
       if (!this.#isUserTextContent(content)) continue;
       if (getApiHistoryPromptId(content)) continue;
-      if (
-        content.parts?.some(
-          (part) =>
-            'text' in part &&
-            typeof part.text === 'string' &&
-            isClearedMediaPlaceholder(part.text),
-        )
-      ) {
+      const textParts =
+        content.parts
+          ?.filter(
+            (part): part is Part & { text: string } =>
+              'text' in part && typeof part.text === 'string',
+          )
+          .map((part) => part.text) ?? [];
+      if (textParts.length > 0 && textParts.every(isClearedMediaPlaceholder)) {
         continue;
       }
       return { mode: 'legacy', turns: positionalTurns() };
@@ -3775,6 +3811,10 @@ export class Session implements SessionContext {
     const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
     if (!snapshotIndexes) return [];
     if (projection.mode === 'legacy') {
+      // Same positional zip as the rewind path: unsound once a resumed
+      // legacy prefix leaves turns without snapshots — advertise nothing
+      // rather than mispaired slots.
+      if (snapshots.length < projection.turns.length) return [];
       return snapshots
         .slice(0, projection.turns.length)
         .map((snapshot, turnIndex) => ({
@@ -5098,7 +5138,13 @@ export class Session implements SessionContext {
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Resubmissions keep updating the original turn's latest snapshot.
-            if (!isContinue && !isRetry && goalTurn?.origin !== 'runtime') {
+            // Goal-runtime turns MUST keep their snapshot: they still count
+            // as positional user turns (#isUserTextContent passes their plain
+            // text) and the legacy rewind path zips snapshot indexes against
+            // positional turn indexes — skipping the snapshot desyncs every
+            // slot after the first goal turn (file restore lands on the wrong
+            // snapshot or is silently skipped).
+            if (!isContinue && !isRetry) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
                 await fileHistoryService.makeSnapshot(promptId);

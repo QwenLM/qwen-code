@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
@@ -8,7 +8,11 @@ import {
   getStartupContextLength,
   isSystemReminderContent,
 } from '../../utils/environmentContext.js';
-import { getApiHistoryPromptIndexes } from '../../services/session-api-history.js';
+import {
+  getApiHistoryPromptId,
+  getApiHistoryPromptIndexes,
+} from '../../services/session-api-history.js';
+import { isClearedMediaPlaceholder } from '../../services/microcompaction/microcompact.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -241,9 +245,43 @@ export function selectForkHistory(
     const identifiedTurns = getApiHistoryPromptIndexes(history);
     const realUserTurnIndexes =
       identifiedTurns?.filter((index) => index >= syntheticPrefixLength) ?? [];
+    // Partial identity coverage: a session resumed from before stable
+    // identities existed gains one marked entry as soon as a new prompt
+    // lands. Slicing from the marked indexes alone would silently drop
+    // every older (unmarked) turn from the fork window, so while any
+    // identity-less real user turn exists, fall back to the positional
+    // enumeration — the same guard Session.#getRewindTurnProjection keeps,
+    // including its exception for placeholder-ONLY entries (structural
+    // media-clear replacements inside an identified session; an entry
+    // mixing genuine text with a placeholder is still a real legacy turn).
+    let hasUnmarkedRealUserTurn = false;
+    if (identifiedTurns !== undefined && realUserTurnIndexes.length > 0) {
+      for (let index = syntheticPrefixLength; index < history.length; index++) {
+        const content = history[index]!;
+        if (!isRealUserTurn(content) || getApiHistoryPromptId(content)) {
+          continue;
+        }
+        const textParts =
+          content.parts
+            ?.filter(
+              (part): part is Part & { text: string } =>
+                typeof part.text === 'string',
+            )
+            .map((part) => part.text) ?? [];
+        if (
+          textParts.length > 0 &&
+          textParts.every(isClearedMediaPlaceholder)
+        ) {
+          continue;
+        }
+        hasUnmarkedRealUserTurn = true;
+        break;
+      }
+    }
     if (identifiedTurns === undefined) {
       selected = [];
-    } else if (realUserTurnIndexes.length === 0) {
+    } else if (realUserTurnIndexes.length === 0 || hasUnmarkedRealUserTurn) {
+      realUserTurnIndexes.length = 0;
       for (let index = syntheticPrefixLength; index < history.length; index++) {
         const content = history[index]!;
         if (isRealUserTurn(content)) {
