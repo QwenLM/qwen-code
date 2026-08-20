@@ -378,6 +378,9 @@ export enum CompressionStatus {
    * splitter). (R5.2)
    */
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+
+  /** The compression input could not leave enough room for a usable summary. */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
 
 /**
