@@ -143,7 +143,7 @@ describe('GetGoalTool', () => {
           evidenceCursor: { recordId: 'record-1' },
           turnCount: 27,
           activeTimeMs: 1_763_705,
-          tokensUsed: 0,
+          tokensUsed: 4_500,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -174,7 +174,7 @@ describe('GetGoalTool', () => {
         status: 'usage_limited',
         turnCount: 27,
         activeTimeMs: 1_763_705,
-        tokensUsed: 0,
+        tokensUsed: 4_500,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });

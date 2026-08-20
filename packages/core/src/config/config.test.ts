@@ -99,6 +99,7 @@ import {
   GoalPersistenceUnavailableError,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -2634,6 +2635,29 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('bills Goal turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const permit = started[0]!;
+
+      config.getChatRecordingService()!.recordAssistantTurn({
+        model: 'test-model',
+        tokens: { totalTokenCount: 4_500 },
+        goalContext: permit,
+      });
+      await runtime.finishTurn(permit);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {

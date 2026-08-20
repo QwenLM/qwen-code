@@ -1919,16 +1919,6 @@ export class ChatRecordingService {
   }
 
   /**
-   * Records an assistant turn with all available data.
-   * Queues the write immediately on the serialized async writer.
-   *
-   * @param data.message The raw PartListUnion object from the model response
-   * @param data.model The model name
-   * @param data.tokens Token usage statistics
-   * @param data.contextWindowSize Context window size of the model
-   * @param data.toolCallsMetadata Enriched tool call info for UI recovery
-   */
-  /**
    * Tokens billed to the Goal turn that is currently open.
    *
    * One entry, not a map: the Goal runtime holds a single permit at a time, so
@@ -1965,6 +1955,16 @@ export class ChatRecordingService {
     return tokens;
   }
 
+  /**
+   * Records an assistant turn with all available data.
+   * Queues the write immediately on the serialized async writer.
+   *
+   * @param data.message The raw PartListUnion object from the model response
+   * @param data.model The model name
+   * @param data.tokens Token usage statistics
+   * @param data.contextWindowSize Context window size of the model
+   * @param data.toolCallsMetadata Enriched tool call info for UI recovery
+   */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
