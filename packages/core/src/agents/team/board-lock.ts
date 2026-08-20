@@ -224,7 +224,9 @@ export async function pruneCollection(
           return;
         }
         await fsp.unlink(full);
-        removed.push(file);
+        // Report the item id, so callers can reconcile against the ids the
+        // rest of the board surface reports.
+        removed.push(path.basename(file, '.json'));
       },
       () => {},
     );

@@ -160,4 +160,17 @@ describe('board asks', () => {
     await expect(pruning).resolves.toEqual([]);
     await expect(listAsks('demo')).resolves.toMatchObject([{ state: 'open' }]);
   });
+
+  it('reports pruned items by id, not by filename', async () => {
+    const ask = await createAsk({
+      board: 'demo',
+      from: 'api',
+      to: 'web',
+      question: 'settled',
+      ttlMs: 1000,
+    });
+    await declineAsk('demo', ask.id, 'web', 'not my area');
+    await expect(pruneAsks('demo', 0)).resolves.toEqual([ask.id]);
+    await expect(listAsks('demo')).resolves.toEqual([]);
+  });
 });
