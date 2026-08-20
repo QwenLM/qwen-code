@@ -1239,10 +1239,24 @@ export function persistRecoveredLedger(
         return;
       }
       mkdirSync(dirname(sideFilePath), { recursive: true });
+      // An ANONYMOUS recovery cannot vouch for the volume it adopts. Without
+      // a `me` every marker walks as foreign, so the upstream strip
+      // (`if (me && best.foreign)`) never fires and `ownMax` is 0 — any
+      // marker inside the headroom wins. Kept, a stranger's counts become
+      // this loop's baseline: the trend evaluates against them, the
+      // paragraph cites them as own history, and they are stamped into this
+      // account's own next marker as `prevPosted`, which later recovery
+      // trusts. The counter-advance branch already sheds the group for this
+      // exact reason; this seam takes the same "not recorded" degradation.
+      const recoveredOut = identityKnown
+        ? recovered.ledger
+        : (withoutVolume(
+            recovered.ledger as unknown as Record<string, unknown>,
+          ) as unknown as Ledger);
       writeAtomic(
         JSON.stringify(
           {
-            ...recovered.ledger,
+            ...recoveredOut,
             ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
             reviewId: recovered.reviewId,
             // Provenance travels WITH the list it describes. Written even

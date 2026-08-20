@@ -596,7 +596,14 @@ describe('persistRecoveredLedger', () => {
       persistRecoveredLedger(
         side,
         {
-          ledger: { ...ledger, round: 4 },
+          ledger: {
+            ...ledger,
+            round: 4,
+            posted: 7,
+            prevPosted: 3,
+            fresh: 4,
+            floor: 'c',
+          },
           commitId: null,
           reviewId: 40,
           // What recovery actually hands this branch anonymously.
@@ -613,6 +620,14 @@ describe('persistRecoveredLedger', () => {
       // may well have posted.
       expect(written.foreign).toBe(false);
       expect(written.merged).toBe(false);
+      // ...but it cannot VOUCH for the volume either. Without a `me` every
+      // marker walks as foreign, so the upstream strip never fires and any
+      // marker inside the headroom wins — kept, a stranger's counts become
+      // this loop's baseline and are stamped into the next own marker.
+      expect(written.posted).toBeUndefined();
+      expect(written.prevPosted).toBeUndefined();
+      expect(written.fresh).toBeUndefined();
+      expect(written.floor).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
