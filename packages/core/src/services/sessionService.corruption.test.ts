@@ -60,6 +60,90 @@ function writeJsonl(name: string, content: string): string {
   return p;
 }
 
+function createCreationMetadataHarness() {
+  const runtimeBaseDir = fs.mkdtempSync(path.join(tmpRoot, 'metadata-'));
+  const cwd = path.join(runtimeBaseDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+  const service = new SessionService(cwd, { runtimeBaseDir });
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+  type Privates = {
+    getSessionFilePath: (id: string, state: 'active' | 'archived') => string;
+  };
+  const filePath = (service as unknown as Privates).getSessionFilePath(
+    sessionId,
+    'active',
+  );
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  const baseRecord = {
+    uuid: 'u1',
+    parentUuid: null,
+    sessionId,
+    timestamp: '2026-08-17T00:00:00.000Z',
+    cwd,
+    version: 'test',
+  };
+  const user = {
+    ...baseRecord,
+    type: 'user',
+    message: { role: 'user', parts: [{ text: 'hello' }] },
+  };
+
+  return { service, sessionId, filePath, baseRecord, user };
+}
+
+describe('SessionService.readCreationMetadataIfReadable', () => {
+  it('distinguishes clean legacy metadata from an unreadable transcript head', async () => {
+    const { service, filePath, user } = createCreationMetadataHarness();
+    fs.writeFileSync(filePath, `${JSON.stringify(user)}\n`, 'utf8');
+
+    await expect(
+      service.readCreationMetadataIfReadable(user.sessionId, 'active'),
+    ).resolves.toEqual({});
+
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify(user)}\n{"type":"system","subtype":"session_source","systemPayload":{"sourceType":"default","sourceId":"realtime_voice:call-1"}\n`,
+      'utf8',
+    );
+
+    await expect(
+      service.readCreationMetadataIfReadable(user.sessionId, 'active'),
+    ).resolves.toBeUndefined();
+    await expect(service.readCreationMetadata(user.sessionId)).resolves.toEqual(
+      {},
+    );
+  });
+
+  it('accepts fully recovered glued creation records', async () => {
+    const { service, sessionId, filePath, baseRecord, user } =
+      createCreationMetadataHarness();
+    const source = {
+      ...baseRecord,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType: 'default',
+        sourceId: 'realtime_voice:call-1',
+      },
+    };
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify(user)}${JSON.stringify(source)}\n`,
+      'utf8',
+    );
+
+    await expect(
+      service.readCreationMetadataIfReadable(sessionId, 'active'),
+    ).resolves.toEqual({
+      sourceType: 'default',
+      sourceId: 'realtime_voice:call-1',
+    });
+  });
+});
+
 describe('SessionService.countSessionMessagesFromPath (corruption recovery)', () => {
   // The method is private; cast is the cheapest way to test the unit
   // without exposing it on the public surface. The public

@@ -25,6 +25,10 @@
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
     },
+    "./subSessionConstants": {
+      "types": "./dist/src/tools/sub-session-constants.d.ts",
+      "import": "./dist/src/tools/sub-session-constants.js"
+    },
     "./toolWriteOrigin": {
       "types": "./dist/src/services/tool-write-origin.d.ts",
       "import": "./dist/src/services/tool-write-origin.js"
@@ -57,6 +61,7 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.0.1",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",

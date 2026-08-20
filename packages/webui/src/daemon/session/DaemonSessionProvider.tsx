@@ -20,8 +20,10 @@ import {
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   extractServerTimestamp,
+  isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -32,6 +34,8 @@ import {
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
+  type DaemonUnrecognizedDiagnostic,
+  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -63,6 +67,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -157,6 +162,7 @@ interface TranscriptHistoryMaterialization {
   nextOrdinal: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -274,6 +280,11 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  for (const diagnostic of current.unrecognizedDiagnostics) {
+    for (const recordId of diagnostic.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -298,6 +309,10 @@ function materializeTranscriptHistory(
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: history.toolBlockByCallId,
     permissionBlockByRequestId: history.permissionBlockByRequestId,
+    // History pages can carry frames recorded by newer daemon versions, exactly
+    // forward-compat case the sidechannel exists for (#8823); keep them
+    // instead of dropping the throwaway store's diagnostics.
+    unrecognizedDiagnostics: history.unrecognizedDiagnostics,
   };
 }
 
@@ -317,6 +332,12 @@ function applyTranscriptHistory(
       ...history.permissionBlockByRequestId,
       ...current.permissionBlockByRequestId,
     },
+    // History entries are older than anything received live, so they go
+    // first; the slice keeps the newest entries within the sidechannel cap.
+    unrecognizedDiagnostics: [
+      ...history.unrecognizedDiagnostics,
+      ...current.unrecognizedDiagnostics,
+    ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
   };
 }
 
@@ -500,6 +521,7 @@ interface HeartbeatFailureState {
 // is a history-preservation tradeoff rather than a claim that large transcripts
 // are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
 const DEFAULT_MAX_BLOCKS = 200_000;
+const TRANSCRIPT_DISPATCH_BATCH_MS = 16;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -784,8 +806,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // drains already-buffered events back-to-back via microtasks, so a
     // microtask flush would run between every event and never coalesce. A
     // macrotask only runs once the generator blocks on a genuinely new network
-    // event, so a whole burst collapses into a single dispatch while steady
-    // streaming stays at ~one dispatch per network chunk.
+    // event. Holding the batch for one frame also coalesces steady streaming:
+    // copying a 50k-block immutable snapshot once per token otherwise consumes
+    // the main thread before the render throttle can help. Control and terminal
+    // paths call flushTranscriptSync below, so ordering and completion are not
+    // delayed by the window.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
     const runTranscriptFlush = (force = false) => {
@@ -822,7 +847,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (events.length === 0) return;
       for (const event of events) pendingTranscriptEvents.push(event);
       if (transcriptFlushTimer === undefined) {
-        transcriptFlushTimer = setTimeout(runTranscriptFlush, 0);
+        transcriptFlushTimer = setTimeout(
+          runTranscriptFlush,
+          TRANSCRIPT_DISPATCH_BATCH_MS,
+        );
       }
     };
     // Apply buffered transcript events immediately. Called before any control
@@ -1792,6 +1820,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
+            goalState:
+              current.sessionId === activeSession.sessionId
+                ? current.goalState
+                : undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -1822,24 +1854,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.context !== undefined);
           const configGeneration =
             sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const goalStateAtLoadStart =
+            connectionRef.current.sessionId === activeSession.sessionId
+              ? connectionRef.current.goalState
+              : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [providerResult, commandResult, contextResult, gitResult] =
-            await Promise.allSettled([
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.supportedCommands(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.context(),
-              gitPromise,
-            ]);
+          const [
+            providerResult,
+            commandResult,
+            contextResult,
+            gitResult,
+            goalResult,
+          ] = await Promise.allSettled([
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : client.workspaceProviders(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.supportedCommands(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.context(),
+            gitPromise,
+            activeSession.goal(),
+          ]);
           if (
             disposed ||
             abort.signal.aborted ||
@@ -1863,6 +1905,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
               : undefined;
+          const goalState =
+            goalResult.status === 'fulfilled'
+              ? goalResult.value.snapshot
+              : undefined;
+          // A failed goal fetch on a session with no known state still needs a
+          // snapshot so consumers stop treating the state as hydrating; it must
+          // never reconcile against a state a frame installed meanwhile.
+          const goalStateFallback =
+            goalResult.status === 'fulfilled' ||
+            goalStateAtLoadStart !== undefined
+              ? undefined
+              : ({
+                  v: 2,
+                  goal: null,
+                  activity: 'idle',
+                } satisfies GoalSnapshotV2);
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models
@@ -1952,6 +2010,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: configSnapshotCurrent
                 ? (context ?? current.context)
                 : current.context,
+              // Reconcile rather than reference-compare: the load response and
+              // any frame that arrived during the load window share a revision
+              // domain, and routing through `selectGoalState` is what registers
+              // the cleared-goal tombstone that keeps a later stale frame from
+              // resurrecting a cleared goal. The read is stamped with the goal
+              // observed when it was issued (`goalStateAtLoadStart`) — a create
+              // that lands inside the load window must not be wiped, and
+              // tombstoned, by a bare-null answer that predates it.
+              goalState: goalState
+                ? selectGoalStateFromRead(
+                    current.goalState,
+                    goalState,
+                    goalStateAtLoadStart?.goal?.goalId,
+                  )
+                : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -2184,25 +2257,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              const hasBlockPathDebugEvent = uiEvents.some(
+                (e) =>
+                  e.type === 'debug' &&
+                  !isUnrecognizedDiagnosticReason(e.debugReason),
+              );
               // The debug guard below reads the committed store's active
               // assistant block, but batching leaves earlier chunks from this
               // same burst in the pending buffer until the macrotask flush. An
               // observer burst that interleaves a debug event between assistant
               // chunks would otherwise miss the still-pending assistant block
               // and let the debug event split it. Commit the buffer first so the
-              // guard sees the effective state. Scoped to observer-mode debug
-              // events (rare) so steady streaming keeps batching.
-              if (
-                !hasSessionActivePrompt() &&
-                uiEvents.some((e) => e.type === 'debug')
-              ) {
+              // guard sees the effective state. Scoped to block-path debug events
+              // because unrecognized diagnostics route to the sidechannel.
+              if (!hasSessionActivePrompt() && hasBlockPathDebugEvent) {
                 flushTranscriptSync();
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
+              // `unrecognized_*` debug events route to the sidechannel
+              // instead of `blocks[]` (#8823), so they cannot split the
+              // streaming assistant block and must not be dropped here;
+              // only block-path debug events still need the guard.
               const eventsToDispatch = shouldGuardAssistant
-                ? transcriptUiEvents.filter((e) => e.type !== 'debug')
+                ? transcriptUiEvents.filter(
+                    (e) =>
+                      e.type !== 'debug' ||
+                      isUnrecognizedDiagnosticReason(e.debugReason),
+                  )
                 : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
@@ -2427,6 +2510,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              goalState: undefined,
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
@@ -2572,6 +2656,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
                   errorStatus,
@@ -2597,6 +2682,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 errorStatus,
@@ -2925,6 +3011,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
                       }

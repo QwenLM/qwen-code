@@ -203,10 +203,57 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('normalizes an unchanged tool block content to a stable reference', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'body' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const second = transcriptBlocksToDaemonMessages([block]);
+
+    const firstContent = (first[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    const secondContent = (second[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    // The normalizer caches by the original block reference, so a block that
+    // did not change yields the same content array across frames,
+    // allowing MessageItem's JSON cache to avoid re-serializing the output.
+    expect(secondContent).toBe(firstContent);
+    expect(Object.isFrozen(firstContent)).toBe(true);
+  });
+
+  it('renormalizes content when a caller replaces the tool block', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'before' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const content = block.content as Array<{
+      type: 'content';
+      content: { type: 'text'; text: string };
+    }>;
+    content[0].content.text = 'after';
+    const second = transcriptBlocksToDaemonMessages([{ ...block }]);
+
+    expect(
+      (first[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'before' } }]);
+    expect(
+      (second[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'after' } }]);
+  });
+
   it('preserves user file attachment metadata', () => {
+    const data = new Blob(['line one']);
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'check this', 1, false, {
-        files: [{ name: 'app.log', mimeType: 'text/plain' }],
+        files: [
+          {
+            name: 'app.log',
+            mimeType: 'text/plain',
+            data,
+            text: 'line one',
+            attachmentId: 'app.log',
+          },
+        ],
       }),
     ]);
 
@@ -214,8 +261,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
       id: 'user-1',
       role: 'user',
       content: 'check this',
-      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+      files: [
+        {
+          name: 'app.log',
+          mimeType: 'text/plain',
+          data,
+          text: 'line one',
+          attachmentId: 'app.log',
+        },
+      ],
     });
+  });
+
+  it('preserves literal attachment-looking user text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this\n\n@attachment:///data.json', 1),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this\n\n@attachment:///data.json',
+    });
+    expect(messages[0]).not.toHaveProperty('files');
   });
 
   it('preserves user input annotations metadata', () => {
@@ -572,6 +640,45 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('extracts file attachments from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'explain this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['explain this'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 5,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'explain this',
+        source: 'mid_turn_message_injected',
+        files: [
+          {
+            name: 'notes.txt',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      }),
+    ]);
+  });
+
   it('shows the degraded-media notice when the echo text is empty', () => {
     // When the stored media is gone at drain, the daemon echoes an empty
     // messages array whose items carry only the placeholder text block; the
@@ -588,7 +695,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
               content: [
                 {
                   type: 'text',
-                  text: '[Attached media is no longer available]',
+                  text: '[Attachment is no longer available]',
                 },
               ],
             },
@@ -600,7 +707,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '[Attached media is no longer available]',
+        content: '[Attachment is no longer available]',
         source: 'mid_turn_message_injected',
       }),
     ]);

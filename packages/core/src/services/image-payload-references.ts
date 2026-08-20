@@ -11,8 +11,12 @@ import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 const IMAGE_ID_LENGTH = 12;
+// Anchor the match to the full output of `imageReferenceText` so only the
+// markers eviction actually wrote resolve against the store. A bare
+// `Image #<id>` echo (a model reply quoting the id, or a post-compaction
+// summary that retained marker text) must not resurrect the stored payload.
 const IMAGE_REFERENCE_PATTERN = new RegExp(
-  `Image #([a-f0-9]{${IMAGE_ID_LENGTH}})`,
+  `\\[Image #([a-f0-9]{${IMAGE_ID_LENGTH}}): [^\\]]+\\]`,
   'gi',
 );
 
@@ -49,16 +53,7 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
 
 export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
-  for (const content of contents) {
-    for (const part of content.parts ?? []) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) count++;
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (const inner of nested) {
-        if (inner.inlineData?.mimeType?.startsWith('image/')) count++;
-      }
-    }
-  }
+  for (const _part of inlineImageParts(contents)) count++;
   return count;
 }
 
@@ -76,58 +71,63 @@ export function replaceImagePayloadsInPlace(
   skipContent?: Content,
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
-  for (const content of contents) {
-    if (content === skipContent) continue;
-    if (!content.parts) continue;
-    for (let i = 0; i < content.parts.length; i++) {
-      const part = content.parts[i]!;
-      if (
-        part.inlineData?.mimeType?.startsWith('image/') &&
-        part.inlineData.data
-      ) {
-        const stored = store.put(part);
-        replaced.push(stored);
-        content.parts[i] = { text: imageReferenceText(stored) };
-        continue;
-      }
-      const nested = getFunctionResponseParts(part);
-      if (!nested) continue;
-      for (let j = 0; j < nested.length; j++) {
-        const inner = nested[j]!;
-        if (
-          inner.inlineData?.mimeType?.startsWith('image/') &&
-          inner.inlineData.data
-        ) {
-          const stored = store.put(inner);
-          replaced.push(stored);
-          nested[j] = { text: imageReferenceText(stored) };
-        }
-      }
-    }
+  for (const part of inlineImageParts(contents, skipContent)) {
+    const stored = store.put(part);
+    replaced.push(stored);
+    part.text = imageReferenceText(stored);
+    delete part.inlineData;
   }
   return replaced;
 }
 
 /**
- * Build the reattach parts for the most recent unique images from a
- * replacement pass. Used after `replaceImagePayloadsInPlace` to append
- * recent image bytes to the outgoing request.
+ * Build reattach parts from images replaced in the current pass and stored
+ * payloads referenced by markers in `referencedContents`, even when the
+ * current pass replaced nothing.
  */
 export function buildReattachParts(
   replaced: StoredImagePayload[],
   maxRecentImages: number,
+  referencedContents: Content[] = [],
+  store?: ImagePayloadStore,
 ): Part[] {
-  if (maxRecentImages <= 0 || replaced.length === 0) return [];
-  const recent: StoredImagePayload[] = [];
-  const seen = new Set<string>();
-  for (let i = replaced.length - 1; i >= 0; i--) {
-    const img = replaced[i]!;
-    if (seen.has(img.id)) continue;
-    seen.add(img.id);
-    recent.push(img);
-    if (recent.length === maxRecentImages) break;
+  const referencedIds = collectReferencedImageIds(referencedContents);
+  if (replaced.length === 0 && (!store || referencedIds.size === 0)) return [];
+  const inlineIds = collectInlineImageIds(referencedContents);
+  const last = referencedContents.at(-1);
+  const lastReferencedIds = collectReferencedImageIds(
+    last?.role === 'user' ? [last] : [],
+  );
+  const candidates: CollectedImage[] = replaced
+    .filter(
+      (image) => !inlineIds.has(image.id) && !lastReferencedIds.has(image.id),
+    )
+    .map((stored) => ({ stored }));
+
+  if (store) {
+    for (const id of referencedIds) {
+      if (inlineIds.has(id) || lastReferencedIds.has(id)) continue;
+      const stored = store.get(id);
+      if (stored) candidates.push({ stored });
+    }
   }
-  recent.reverse();
+  const recent = recentUniqueImages(candidates, maxRecentImages).map(
+    ({ stored }) => stored,
+  );
+  const reattachLimit = Math.max(maxRecentImages, 1);
+  if (store) {
+    for (const id of lastReferencedIds) {
+      if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
+        continue;
+      }
+      const stored = store.get(id);
+      if (stored) {
+        if (recent.length >= reattachLimit) recent.shift();
+        recent.push(stored);
+      }
+    }
+  }
+  if (recent.length === 0) return [];
   return [
     {
       text:
@@ -147,7 +147,9 @@ export function prepareImagePayloadsForRequest(
     store: ImagePayloadStore;
   },
 ): Content[] {
-  const referencedIds = collectReferencedImageIds(contents.at(-1));
+  const referencedIds = collectReferencedImageIds(
+    contents.at(-1) ? [contents.at(-1)!] : [],
+  );
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
     if (index === options.preserveImagePartsForContentIndex) {
@@ -243,15 +245,52 @@ function transformPart(
   return part;
 }
 
-function collectReferencedImageIds(content: Content | undefined): Set<string> {
+function collectInlineImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
-  for (const part of content?.parts ?? []) {
-    const text = part.text;
-    if (!text) continue;
-    for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
-      const id = match[1];
-      if (id) ids.add(id.toLowerCase());
+  for (const part of inlineImageParts(contents)) {
+    ids.add(imagePartToStoredPayload(part).id);
+  }
+  return ids;
+}
+
+function* inlineImageParts(
+  contents: Content[],
+  skipContent?: Content,
+): Generator<Part> {
+  for (const content of contents) {
+    if (content === skipContent) continue;
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        yield part;
+      }
+      for (const inner of getFunctionResponseParts(part) ?? []) {
+        if (
+          inner.inlineData?.mimeType?.startsWith('image/') &&
+          inner.inlineData.data
+        ) {
+          yield inner;
+        }
+      }
     }
+  }
+}
+
+function collectReferencedImageIds(contents: Content[]): Set<string> {
+  const ids = new Set<string>();
+  const collect = (parts: Part[] | undefined): void => {
+    for (const part of parts ?? []) {
+      for (const match of part.text?.matchAll(IMAGE_REFERENCE_PATTERN) ?? []) {
+        const id = match[1];
+        if (id) ids.add(id.toLowerCase());
+      }
+      collect(getFunctionResponseParts(part));
+    }
+  };
+  for (const content of contents) {
+    collect(content.parts);
   }
   return ids;
 }

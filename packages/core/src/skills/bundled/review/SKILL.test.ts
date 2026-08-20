@@ -143,10 +143,32 @@ describe('bundled review skill', () => {
       'Every other reason is deterministic for the same sha and must NOT be retried',
     );
     expect(body).toContain('Retry that one, once.');
-    // …and the exception's OTHER condition: a null merge base has two causes
-    // and only the fetch-failure one is retryable.
+    // The once-cap's re-keyed shape: a base-less `capture-failed` is the
+    // retryable class, but git's exit status cannot split its transient
+    // member from its deterministic one (a deleted remote base exits 128
+    // identically), so the retry is bounded to one.
+    expect(body).toContain(
+      'One shape of `capture-failed` retries ONCE, not forever',
+    );
     expect(body).toContain('`baseFetchFailed: true`');
+    // The re-key's premise: a planless partition failure cannot be
+    // base-less, so the cap no longer keys on `partition-failed` at all.
+    expect(body).toContain(
+      'a planless `partition-failed` always carries a `mergeBaseSha`',
+    );
+    // The narrowing reason is deterministic for the same sha like every other
+    // non-infrastructure one: the same two captures select the same hunks. A
+    // future edit moving it into the retryable set would re-narrow to nothing
+    // every round, forever.
+    expect(body).toContain('`nothing-to-narrow` re-narrows identically');
     expect(body).toContain('found no common ancestor at all');
+    // The narrowing reason's definition in the enumeration and the retryable
+    // set's membership, pinned outright: the recovery loop reads both, and a
+    // rename of the one or a widening of the other ships green without them.
+    expect(body).toContain(
+      '`nothing-to-narrow` (the narrowing found nothing it could publish',
+    );
+    expect(body).toContain('(`base-untrusted`, `capture-failed`:');
   });
 
   it('records the range the round actually reviewed in provenance', () => {
@@ -485,6 +507,44 @@ describe('bundled review skill', () => {
     expect(body).toContain('has no cross-round record on the PR at all');
     expect(body).toContain(
       "when the budget trims it, the terminal summary is where the author's copy comes from",
+    );
+  });
+
+  it('pins the resume branch on Step 1', () => {
+    // The resume flow is prose over three subcommands (`fetch-pr --resume`,
+    // `recover-findings`, the round re-entry); a later edit dropping any leg
+    // leaves `--resume` silently starting fresh runs. Pin the load-bearing
+    // sentences.
+    const body = skillBody();
+    expect(body).toContain('Resuming an interrupted run (`--resume`)');
+    expect(body).toContain('review recover-findings');
+    expect(body).toContain('`{"resumed": true, ...}`');
+    expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
+    expect(body).toContain('resumes at round `k+1`');
+    expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+    // The restart bound survives a resume only through this reader; the
+    // effort pin and the lightweight inertness disclosure are the two
+    // silent-surprise fixes.
+    expect(body).toContain('`restartsSpent`');
+    expect(body).toContain('`effort-mismatch`');
+    expect(body).toContain('no effect in lightweight mode');
+    // R13-2: the effort rule must key on `effortSource`, so a `--comment`
+    // forced-high is passed through on a resume (a recorded lower level then
+    // refuses and runs fresh at high) rather than silently pinned — dropping
+    // the `forced-by-comment` arm re-creates the "comment at medium" state.
+    expect(body).toContain('`forced-by-comment`');
+    // R15-11: a resumed run must NOT re-take the incremental decision — the
+    // previous attempt's `incremental` field is history, so the continuation
+    // never enters the `upToDate` stop/cleanup branch that would destroy the
+    // reused worktree/lease.
+    expect(body).toContain('is now HISTORY, not a decision to re-take');
+    expect(body).toContain('This branch does not apply on a resumed run');
+    // The Step 7 half specifically: `restartsSpent` also appears in Step 1,
+    // so these anchor the restart-bound blockquote's own survival sentences —
+    // deleting or inverting them must fail here, not ship silently.
+    expect(body).toContain('One slice of this fact survives a resume');
+    expect(body).toContain(
+      "Only a never-resumed run's re-entry records nothing",
     );
   });
 

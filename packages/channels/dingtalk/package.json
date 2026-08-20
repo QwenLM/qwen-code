@@ -2,6 +2,11 @@
   "name": "@qwen-code/channel-dingtalk",
   "version": "0.21.14",
   "description": "DingTalk channel adapter for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/channels/dingtalk"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
