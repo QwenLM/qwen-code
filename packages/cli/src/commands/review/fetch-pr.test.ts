@@ -239,6 +239,11 @@ const producerMocks = vi.hoisted(() => ({
   refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
+  // The exit-status-aware probe as its own vi.fn: the default mapping (set
+  // in beforeEach) can only produce exit 0 and the DEFINITIVE no (exit 1),
+  // so a test that wants a git-surface-unavailable shape — an exit-128
+  // fatal, a timeout kill's null status — overrides this.
+  gitExit: vi.fn(),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
     (..._args: unknown[]): MergeBaseResult => ({
@@ -310,13 +315,7 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
   gitOpt: producerMocks.gitOpt,
-  // The exit-code-aware probe, expressed in terms of the same mock: a null
-  // answer is the DEFINITIVE no (exit 1), which is what these fixtures mean.
-  // A test that wants the git-surface-unavailable shape overrides this.
-  gitProbe: (...args: string[]) => {
-    const out = producerMocks.gitOpt(...args);
-    return { out, status: out === null ? 1 : 0 };
-  },
+  gitProbe: (...args: string[]) => producerMocks.gitExit(...args),
   gitRaw: producerMocks.gitRaw,
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
@@ -358,6 +357,12 @@ describe('fetch-pr report assembly', () => {
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
     producerMocks.gitOpt.mockImplementation(() => null);
+    // The default exit-status mapping, expressed over gitOpt: a null answer
+    // is the DEFINITIVE no (exit 1), which is what these fixtures mean.
+    producerMocks.gitExit.mockImplementation((...args: string[]) => {
+      const out = producerMocks.gitOpt(...args);
+      return { out, status: out === null ? 1 : 0 };
+    });
     producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
     producerMocks.resolveMergeBase.mockImplementation(() => ({
       sha: null,
@@ -1506,6 +1511,76 @@ describe('fetch-pr report assembly', () => {
     // flow acts on.
     expect(fetchFailed.diffPath).toBeNull();
     expect(noAncestor.diffPath).toBeNull();
+  });
+
+  it('splits merge-base probe exits — only exit 1 is "no common ancestor"', async () => {
+    // The probe folded every non-zero `git merge-base` exit onto the same
+    // null, so the nothing-to-narrow arm stamped its deterministic reason
+    // over exit-128 fatals and the 120s timeout kill. Only exit 1 is "no
+    // common ancestor"; the rest are the surface, and they demote to the
+    // retryable class instead.
+    producerMocks.refExists.mockReturnValue(true);
+    // Drive the seam the way the real resolveMergeBase does, so it is the
+    // REAL probe's exit split — and its throw — that runs.
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as {
+        fetch: (remote: string, ref: string) => boolean;
+        refExists: (ref: string) => boolean;
+        mergeBase: (a: string, b: string) => string | null;
+      };
+      const baseFetchFailed = !probe.fetch('origin', 'main');
+      const sha = probe.refExists('refs/remotes/origin/main')
+        ? probe.mergeBase('refs/remotes/origin/main', 'refs/heads/feat/x')
+        : null;
+      return { sha, baseFetchFailed };
+    });
+    const drive = (mergeBase: {
+      out: string | null;
+      status: number | null;
+    }) => {
+      producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+        args[0] === 'fetch' ||
+        args[0] === 'cat-file' ||
+        args[0] === 'merge-base'
+          ? ''
+          : args[0] === 'rev-parse'
+            ? ANCHOR
+            : null,
+      );
+      producerMocks.gitExit.mockImplementation((...args: string[]) => {
+        if (args[0] === 'merge-base' && !args.includes('--is-ancestor')) {
+          return mergeBase;
+        }
+        const out = producerMocks.gitOpt(...args);
+        return { out, status: out === null ? 1 : 0 };
+      });
+    };
+    servesBothRanges();
+    // Exit 128 (a fatal) and the timeout kill (a null status) are the
+    // surface, not the history: the retryable reason, nothing published.
+    for (const mergeBase of [
+      { out: null, status: 128 },
+      { out: null, status: null },
+    ]) {
+      drive(mergeBase);
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: false,
+        reason: 'capture-failed',
+      });
+      expect(report.diffPath).toBeNull();
+      expect(report.mergeBaseSha).toBeNull();
+      expect(report.baseFetchFailed).toBe(false);
+    }
+    // Exit 1 alone is the deterministic member: no throw, the deterministic
+    // reason, and the probe answers null.
+    drive({ out: null, status: 1 });
+    expect((await reportFor({ since: ANCHOR })).incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'nothing-to-narrow',
+    });
   });
 
   it('keeps upToDate through a partition failure — the stop flow needs no plan', async () => {

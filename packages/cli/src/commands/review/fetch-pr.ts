@@ -43,7 +43,6 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   git,
-  gitOpt,
   gitProbe as gitExit,
   gitRaw,
   refExists,
@@ -229,7 +228,8 @@ type FetchPrResult = PlanReport & {
    * this history has never seen (`unknown-commit`), an anchor older than the
    * merge base that would scope WIDER than the PR's diff
    * (`behind-merge-base`), a merge base too stale to rule the clamp on
-   * (`base-untrusted`), a capture that threw (`capture-failed`), a
+   * (`base-untrusted`), a capture that threw OR a base-side fault — the
+   * base fetch or the merge-base resolution — failed (`capture-failed`), a
    * partitioner that refused to tile (`partition-failed`), or a narrowing
    * that found nothing it could publish (`nothing-to-narrow`). That last one
    * exists because the scope is BUILT from the PR's own diff rather than
@@ -458,15 +458,36 @@ const gitProbe: GitProbe = {
   // refs/tags and refs/heads FIRST, so a tag or branch named
   // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
   // satisfy the check with no tracking ref present.
+  //
+  // The exit status is KEPT (gitExit, not gitOpt), like the sibling probes,
+  // but it splits nothing here: git exits 128 identically for a transient
+  // fault and for a deterministic refusal (the base branch deleted on the
+  // remote — the refspec fetch fails every time), so the bound on retrying
+  // the deterministic member lives where the class is ruled — the demotion
+  // arm below and SKILL.md's once-cap — never on the status.
   fetch: (remote, ref) =>
-    gitOpt(
+    gitExit(
       'fetch',
       remote,
       '--',
       `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
-    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
+    ).status === 0 && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
-  mergeBase: (a, b) => gitOpt('merge-base', a, b),
+  mergeBase: (a, b) => {
+    // Three-way exit split like the anchor probes: exit 1 is the only
+    // deterministic "no common ancestor"; any other status — an exit-128
+    // fatal, the 120s timeout kill, a spawn failure — is the surface being
+    // unavailable, thrown so the round demotes to the retryable class
+    // instead of folding onto the same null and stamping the deterministic
+    // reason. One member folds in anyway, and no exit-status resolution can
+    // split it: git ALSO exits 1 when it cannot read the object store on
+    // the walk, so a fault there is indistinguishable from an orphan
+    // history. The arm below discloses it.
+    const { out, status } = gitExit('merge-base', a, b);
+    if (status === 0) return out;
+    if (status === 1) return null;
+    throw new GitUnavailable();
+  },
 };
 
 function tryRemove(action: () => void): void {
@@ -683,14 +704,29 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
     //    the round trip does not do is normalise CRLF (that would rewrite
     //    every hunk of a CRLF file) or drop the trailing newline.
-    const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
-      remote,
-      meta.baseRefName,
-      // QUALIFIED — the head side is dwim-shadowable exactly like the
-      // fetchedSha read above.
-      `refs/heads/${ref}`,
-      gitProbe,
-    );
+    let mergeBaseSha: string | null;
+    let baseFetchFailed: boolean;
+    /** The merge-base probe threw: the surface, not the history. */
+    let mergeBaseUnavailable = false;
+    try {
+      ({ sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
+        remote,
+        meta.baseRefName,
+        // QUALIFIED — the head side is dwim-shadowable exactly like the
+        // fetchedSha read above.
+        `refs/heads/${ref}`,
+        gitProbe,
+      ));
+    } catch (err) {
+      if (!(err instanceof GitUnavailable)) throw err;
+      // An exit other than the deterministic "no common ancestor" — the
+      // probe's exit split throws it. The round degrades like any base-less
+      // one; the fetch result is lost in the throw, and with no sha and the
+      // retryable reason stamped below, nothing rules on it.
+      mergeBaseSha = null;
+      baseFetchFailed = false;
+      mergeBaseUnavailable = true;
+    }
     if (baseFetchFailed) {
       writeStderrLine(
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
@@ -942,13 +978,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
+      } else if (mergeBaseUnavailable) {
+        // `git merge-base` could not answer: the probe's exit split throws on
+        // every status except the deterministic exit-1 "no common ancestor"
+        // — an exit-128 fatal, the 120s timeout kill, a spawn failure.
+        // Something did fail, and the re-run re-runs exactly that probe, so
+        // this is the retryable class — the same ruling the anchor probes'
+        // GitUnavailable gets.
+        demote('capture-failed');
       } else if (mergeBaseSha === null && baseFetchFailed) {
-        // No merge base because the FETCH failed, and no local base ref
-        // remained to resolve one from — a fresh CI clone whose base fetch hit
-        // a transient fault. Something did fail, and the re-run re-runs
-        // exactly the component that failed, so this is the retryable class:
-        // the same split SKILL.md's recovery paragraph already draws for a
-        // planless `partition-failed`.
+        // No merge base because the FETCH failed and no local base ref
+        // remained to resolve one from. The class has TWO members the exit
+        // status cannot split — git exits 128 for BOTH: a transient fault (a
+        // fresh CI clone whose base fetch hit a network blip), where the
+        // re-run re-runs exactly the component that failed and can succeed,
+        // and a deterministic refusal (the base branch deleted on the remote
+        // — the refspec fetch fails identically every time), where it never
+        // will. Something did fail, so this keeps the retryable reason;
+        // SKILL.md's recovery paragraph bounds the retry to ONCE so the
+        // deterministic member cannot re-fail every round until the cap.
         demote('capture-failed');
       } else if (mergeBaseSha === null) {
         // No merge base although the fetch SUCCEEDED: `git merge-base` found
@@ -957,7 +1005,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // it `capture-failed` asserts an infrastructure fault that did not
         // happen and puts the round in the class SKILL.md's recovery flow
         // retries. A re-run reproduces this exactly, so it names the
-        // deterministic reason instead.
+        // deterministic reason instead. Exit 1 is the only "no common
+        // ancestor" signal the probe keeps — every other exit takes the
+        // retryable arm above. One member folds in anyway: git ALSO exits 1
+        // when it cannot read the object store on the walk, so a fault there
+        // stamps this reason at any exit-status resolution, and the
+        // determinism claimed here is unprovable for that member.
         demote('nothing-to-narrow');
       } else if (fullBytes === null || fullText === null) {
         // A base WAS resolved and its capture threw — the 120s git timeout the
