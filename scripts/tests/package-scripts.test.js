@@ -478,6 +478,51 @@ describe('package scripts', () => {
     );
   });
 
+  it('meets npm trusted publishing requirements', () => {
+    for (const [workflowPath, jobName, publishStepName] of [
+      [
+        '.github/workflows/release.yml',
+        'publish',
+        'Publish @qwen-code/audio-capture',
+      ],
+      [
+        '.github/workflows/release-sdk.yml',
+        'release-sdk',
+        'Publish @qwen-code/sdk',
+      ],
+      ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
+    ]) {
+      const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
+      const installStep = getWorkflowStep(publishJob, 'Install npm 11');
+      expect(installStep).toContain('npm install --global npm@11.19.0');
+      expect(publishJob.indexOf(installStep)).toBeLessThan(
+        publishJob.indexOf(getWorkflowStep(publishJob, publishStepName)),
+      );
+    }
+
+    for (const packageDirectory of [
+      'packages/audio-capture',
+      'packages/cli',
+      'packages/channels/base',
+      'packages/channels/dingtalk',
+      'packages/channels/feishu',
+      'packages/channels/github',
+      'packages/channels/qqbot',
+      'packages/channels/telegram',
+      'packages/channels/wecom',
+      'packages/channels/weixin',
+      'packages/mobile-mcp',
+      'packages/sdk-typescript',
+    ]) {
+      const packageJson = JSON.parse(
+        readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
+      );
+      expect(packageJson.repository?.url?.replace(/^git\+/, '')).toBe(
+        'https://github.com/QwenLM/qwen-code.git',
+      );
+    }
+  });
+
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
     const issueJob = getWorkflowJob(workflow, 'issue-autofix');
