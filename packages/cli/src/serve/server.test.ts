@@ -15012,7 +15012,7 @@ describe('createServeApp', () => {
       },
     );
 
-    it('updates organization through a mixed-case persisted identity after the live entry is gone', async () => {
+    it('preserves organization when an exact lookup aliases a mixed-case persisted identity', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440009';
       const persistedSessionId = sessionId.toUpperCase();
       await writeStoredSession({
@@ -15029,7 +15029,7 @@ describe('createServeApp', () => {
         name: 'Legacy mixed-case',
         color: 'blue',
       });
-      await organizationService.updateSessionOrganization(sessionId, {
+      await organizationService.updateSessionOrganization(persistedSessionId, {
         isPinned: false,
         groupId: group.id,
         color: 'red',
@@ -15040,7 +15040,7 @@ describe('createServeApp', () => {
         .spyOn(qwenCore.SessionService.prototype, 'sessionExistsInAnyState')
         .mockImplementation(function (candidateSessionId) {
           return candidateSessionId === sessionId
-            ? Promise.resolve(false)
+            ? Promise.resolve(true)
             : sessionExistsInAnyState.call(this, candidateSessionId);
         });
       const app = createServeApp(
@@ -17800,13 +17800,17 @@ describe('createServeApp', () => {
       ).send({ name: 'Frontend', color: 'blue' });
       expect(groupRes.status).toBe(201);
 
+      let aliasProbeCalled = false;
       const findSessionId = vi
         .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-        .mockRejectedValue(
-          Object.assign(new Error('disk I/O failed'), {
-            code: 'EIO',
-          }),
-        );
+        .mockImplementation(() => {
+          aliasProbeCalled = true;
+          return Promise.reject(
+            Object.assign(new Error('disk I/O failed'), {
+              code: 'EIO',
+            }),
+          );
+        });
       const organizationRes = await (async () => {
         try {
           return await auth(
@@ -17817,7 +17821,7 @@ describe('createServeApp', () => {
         }
       })();
       expect(organizationRes.status).toBe(200);
-      expect(findSessionId).not.toHaveBeenCalled();
+      expect(aliasProbeCalled).toBe(true);
 
       const organized = await auth(
         request(app).get(

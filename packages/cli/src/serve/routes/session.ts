@@ -5396,25 +5396,26 @@ export function registerSessionRoutes(
             let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
+            let liveExists = false;
             if (!exists) {
               try {
                 const summary = runtime.bridge.getSessionSummary(sessionId);
-                exists = summary.workspaceCwd === runtime.workspaceCwd;
+                liveExists = summary.workspaceCwd === runtime.workspaceCwd;
+                exists = liveExists;
               } catch {
                 exists = false;
               }
             }
-            if (!exists) {
+            try {
               const persistedSessionId =
                 await sessionService.findSessionIdIgnoringCase(sessionId);
-              if (
-                persistedSessionId !== undefined &&
-                (await sessionService.sessionExistsInAnyState(
-                  persistedSessionId,
-                ))
-              ) {
+              if (persistedSessionId !== undefined) {
                 organizationSessionId = persistedSessionId;
                 exists = true;
+              }
+            } catch (error) {
+              if (!liveExists || error instanceof SessionIdCaseConflictError) {
+                throw error;
               }
             }
             if (!exists) {

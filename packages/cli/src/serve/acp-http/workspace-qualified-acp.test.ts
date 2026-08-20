@@ -958,7 +958,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(response['error']).toMatchObject({ code: -32602 });
   });
 
-  it('updates persisted organization in the selected workspace only', async () => {
+  it('preserves aliased organization in the selected workspace only', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440180';
     const persistedSessionId = sessionId.toUpperCase();
     await writeStoredSession(persistedSessionId, '/ws-b');
@@ -967,7 +967,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       name: 'Legacy mixed-case',
       color: 'blue',
     });
-    await organizationService.updateSessionOrganization(sessionId, {
+    await organizationService.updateSessionOrganization(persistedSessionId, {
       groupId: group.id,
       color: 'purple',
     });
@@ -977,7 +977,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
       .mockImplementation(function (this: SessionService, candidateSessionId) {
         return candidateSessionId === sessionId
-          ? Promise.resolve(false)
+          ? Promise.resolve(true)
           : sessionExistsInAnyState.call(this, candidateSessionId);
       });
 

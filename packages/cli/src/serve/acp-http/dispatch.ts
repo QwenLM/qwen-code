@@ -2938,25 +2938,26 @@ export class AcpDispatcher {
             let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
+            let liveExists = false;
             if (!exists) {
               try {
                 const liveSummary = this.bridge.getSessionSummary(sessionId);
-                exists = liveSummary.workspaceCwd === this.boundWorkspace;
+                liveExists = liveSummary.workspaceCwd === this.boundWorkspace;
+                exists = liveExists;
               } catch {
                 exists = false;
               }
             }
-            if (!exists) {
+            try {
               const persistedSessionId =
                 await sessionService.findSessionIdIgnoringCase(sessionId);
-              if (
-                persistedSessionId !== undefined &&
-                (await sessionService.sessionExistsInAnyState(
-                  persistedSessionId,
-                ))
-              ) {
+              if (persistedSessionId !== undefined) {
                 organizationSessionId = persistedSessionId;
                 exists = true;
+              }
+            } catch (error) {
+              if (!liveExists || error instanceof SessionIdCaseConflictError) {
+                throw error;
               }
             }
             if (!exists) {
