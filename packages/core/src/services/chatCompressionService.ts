@@ -43,6 +43,7 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import { microcompactHistory } from './microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('COMPRESSION');
 
@@ -67,6 +68,7 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
  * rejects the request with a 400 that propagates to the caller.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
+const MIN_COMPACTION_OUTPUT_TOKENS = 1_024;
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
@@ -75,11 +77,11 @@ export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
  * generating, so on small-window deployments (e.g. vLLM with a reduced
  * max_model_len) an unclamped ceiling can push the request over the window
  * and the backend rejects it with a 400 before the model runs
- * (https://github.com/QwenLM/qwen-code/issues/7960). Floored at 1 so
- * `maxOutputTokens` stays provider-valid even when the estimate already
- * fills the window — the request itself may still be rejected when the
- * prompt alone leaves no room. The estimate runs on the already-slimmed
- * history, so stripped media is no longer counted.
+ * (https://github.com/QwenLM/qwen-code/issues/7960). The pure calculation is
+ * floored at 1 so it always returns a provider-valid value; the caller's
+ * admission check rejects requests that cannot leave a usable output budget.
+ * The estimate runs on the already-slimmed history, so stripped media is no
+ * longer counted.
  *
  * The main send path enforces the same `prompt + max_tokens <= window`
  * invariant via clampOutputTokensToWindow in core/tokenLimits.ts, with
@@ -702,7 +704,7 @@ export class ChatCompressionService {
     // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
-      const slim = getColdInput();
+      let slim = getColdInput();
       if (
         slim.stats.imagesStripped > 0 ||
         slim.stats.documentsStripped > 0 ||
@@ -716,12 +718,54 @@ export class ChatCompressionService {
               `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
       }
+      const directiveTokenCount = Math.ceil(
+        COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN,
+      );
+      let coldRequestInputTokens = getColdInputEstimate() + directiveTokenCount;
+      if (
+        coldRequestInputTokens +
+          COMPACTION_BUDGET_SAFETY_MARGIN +
+          MIN_COMPACTION_OUTPUT_TOKENS >
+        budgetWindow
+      ) {
+        const reduced = microcompactHistory(
+          slim.slimmedHistory,
+          null,
+          config.getClearContextOnIdle?.() ?? {},
+          { force: true },
+        );
+        if (reduced.history !== slim.slimmedHistory) {
+          coldInput = { ...slim, slimmedHistory: reduced.history };
+          cachedColdInputEstimate = undefined;
+          slim = coldInput;
+          coldRequestInputTokens = getColdInputEstimate() + directiveTokenCount;
+          config
+            .getDebugLogger()
+            .debug(
+              `[chat-compression] microcompacted ${reduced.meta?.toolsCleared ?? 0} ` +
+                `old tool result(s) before cold request admission`,
+            );
+        }
+      }
+      if (
+        coldRequestInputTokens +
+          COMPACTION_BUDGET_SAFETY_MARGIN +
+          MIN_COMPACTION_OUTPUT_TOKENS >
+        budgetWindow
+      ) {
+        compactionWarning =
+          `Compression input too large: estimated input ` +
+          `${coldRequestInputTokens.toLocaleString()} tokens cannot leave ` +
+          `${MIN_COMPACTION_OUTPUT_TOKENS.toLocaleString()} usable output tokens ` +
+          `within the ${budgetWindow.toLocaleString()}-token context window.`;
+        config.getDebugLogger().warn(`[chat-compression] ${compactionWarning}`);
+        return undefined;
+      }
       // Clamp the output budget to the receiving model's remaining window so
       // `prompt + max_tokens <= window` holds even on small-window
       // deployments (issue #7960).
       coldOutputBudget = computeCompactionOutputBudget(
-        getColdInputEstimate() +
-          Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
+        coldRequestInputTokens,
         budgetWindow,
       );
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
@@ -789,6 +833,27 @@ export class ChatCompressionService {
     const sharedDirectiveTokenCount = Math.ceil(
       sharedRequestText.length / CHARS_PER_TOKEN,
     );
+    const sharedGenerationConfig = {
+      ...(chat.getGenerationConfig?.() ?? {}),
+      ...opts.requestGenerationConfig,
+    };
+    const sharedRouteOverheadTokenEstimate = Math.ceil(
+      JSON.stringify({
+        systemInstruction: sharedGenerationConfig.systemInstruction,
+        tools: sharedGenerationConfig.tools,
+      }).length / CHARS_PER_TOKEN,
+    );
+    const sharedCurrentRouteTokenEstimate =
+      estimateContentTokens(
+        sideQueryHistory,
+        slimmingConfig.imageTokenEstimate,
+      ) +
+      sharedDirectiveTokenCount +
+      sharedRouteOverheadTokenEstimate;
+    const sharedAdmissionTokenCount = Math.max(
+      sharedPromptTokenCount + sharedDirectiveTokenCount,
+      sharedCurrentRouteTokenEstimate,
+    );
     const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
@@ -801,10 +866,7 @@ export class ChatCompressionService {
       (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
       chat.isLastPromptTokenCountEstimated?.() !== true;
     const sharedRequestFits =
-      sharedPromptTokenCount +
-        sharedDirectiveTokenCount +
-        COMPACT_MAX_OUTPUT_TOKENS <=
-      contextLimit;
+      sharedAdmissionTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextLimit;
     const canShareCache =
       usesMainModel &&
       providerSupportsCacheSharing &&
@@ -825,18 +887,16 @@ export class ChatCompressionService {
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
             : !sharedRequestFits
-              ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
-                `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+              ? `shared request exceeds context window: admission=${sharedAdmissionTokenCount}, ` +
+                `provider=${sharedPromptTokenCount}, currentRoute=${sharedCurrentRouteTokenEstimate}, ` +
+                `reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
                 `window=${contextLimit}`
               : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
       try {
-        const generationConfig = {
-          ...chat.getGenerationConfig(),
-          ...opts.requestGenerationConfig,
-        };
+        const generationConfig = { ...sharedGenerationConfig };
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
@@ -934,6 +994,18 @@ export class ChatCompressionService {
           },
         };
       }
+    }
+    if (!summaryResult) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          ...(compactionWarning && { warning: compactionWarning }),
+        },
+      };
     }
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>

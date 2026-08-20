@@ -1361,7 +1361,7 @@ describe('ChatCompressionService', () => {
     );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 10_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
     const debug = vi.fn();
     (
@@ -3161,6 +3161,43 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(coldSpy).not.toHaveBeenCalled();
   });
 
+  it('does not let a stale provider anchor approve a larger current-route payload', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'original request' }] },
+      { role: 'model', parts: [{ text: 'previous response' }] },
+    ];
+    const { chat, config, generateText } = makeFixture({
+      history,
+      contextWindowSize: 50_000,
+      lastPromptTokenCount: 1_000,
+    });
+    vi.mocked(chat.getGenerationConfig).mockReturnValue({
+      systemInstruction: 'current-route-system'.repeat(8_000),
+      tools,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 42_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 42_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 1_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('skips cache sharing when the chat has no provider token-count anchor', async () => {
     const { chat, config, generateText } = makeFixture({
       lastPromptTokenCount: 0,
@@ -4927,6 +4964,163 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
   });
 });
 
+describe('issue #9455: compression request admission', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeFixture(history: Content[], contextWindowSize: number) {
+    const getHistory = vi.fn().mockReturnValue(history);
+    const generateText = vi.fn();
+    const chat = {
+      getHistory,
+      getHistoryShallow: getHistory,
+      getLastPromptTokenCount: vi.fn().mockReturnValue(0),
+      isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+      getLastOutputTokenCount: vi.fn().mockReturnValue(0),
+    } as unknown as GeminiChat;
+    const config = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi
+        .fn()
+        .mockReturnValue({ generateText } as unknown as BaseLlmClient),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({ contextWindowSize }),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getModel: () => 'test-model',
+      getCompactionModel: vi.fn().mockReturnValue('test-model'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      }),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+    return { chat, config, generateText };
+  }
+
+  it('uses bounded tool-result slimming before sending an oversized cold request', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'keep the original user intent' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'old-call',
+              name: 'run_shell_command',
+              args: { command: 'old' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'old-call',
+              name: 'run_shell_command',
+              response: { output: 'x'.repeat(240_000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'recent-call',
+              name: 'run_shell_command',
+              args: { command: 'recent' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'recent-call',
+              name: 'run_shell_command',
+              response: { output: 'recent output' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'latest context' }] },
+    ];
+    const { chat, config } = makeFixture(history, 50_000);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 40_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 40_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 65_000,
+    });
+
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    const contents = coldSpy.mock.calls[0]![1].contents as Content[];
+    const serialized = JSON.stringify(contents);
+    expect(serialized).toContain('keep the original user intent');
+    expect(serialized).toContain('latest context');
+    expect(serialized).toContain('old-call');
+    expect(serialized).toContain('recent-call');
+    expect(serialized).toContain('[Old tool result content cleared]');
+    expect(serialized).toContain('recent output');
+    expect(serialized).not.toContain('x'.repeat(100));
+  });
+
+  it('fails locally when an irreducible cold request cannot leave usable output room', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(240_000) }] },
+      { role: 'model', parts: [{ text: 'latest response' }] },
+    ];
+    const { chat, config, generateText } = makeFixture(history, 50_000);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>should not be sent</state_snapshot>',
+        usage: {
+          promptTokenCount: 61_000,
+          candidatesTokenCount: 1,
+          totalTokenCount: 61_001,
+        },
+      } as never);
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 60_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+    expect(result.info.warning).toMatch(/input too large/i);
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+});
+
 // Regression tests for https://github.com/QwenLM/qwen-code/issues/7960
 // The compression side-query used to always request a fixed
 // maxOutputTokens=COMPACT_MAX_OUTPUT_TOKENS (20K). On a small-window
@@ -5161,12 +5355,10 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
   });
 
-  it('rejects any output at a floored budget of 1 instead of persisting a degenerate summary', async () => {
-    // When the slimmed estimate already fills the window the budget floors
-    // at 1. A 1-token cap cannot hold a usable summary, so the single token
-    // the model emits is definitionally truncated and must be dropped —
-    // persisting it would replace the entire history with a 1-token fragment
-    // while resetting the failure breaker.
+  it('rejects locally instead of sending with a floored output budget', async () => {
+    // When the slimmed estimate already fills the window, the old path
+    // floored maxOutputTokens at 1 and sent a request that could not produce
+    // a usable summary. Admission must stop locally before that request.
     // 257,900 chars (~64.5K tokens) puts the estimate inside the narrow
     // floor band where estimate >= window - margin (budget floors at 1) yet
     // estimate + 1 still fits the window, so the backend accepts the request
@@ -5184,18 +5376,16 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       consecutiveFailures: 0,
       originalTokenCount: 65_000,
     });
-    expect(capturedMaxOutputTokens).toBe(1);
+    expect(capturedMaxOutputTokens).toBeUndefined();
     expect(result.info.compressionStatus).toBe(
-      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     );
     expect(result.newHistory).toBeNull();
   });
 
-  it('rejects a floored-budget fragment even when usage metadata is missing', async () => {
-    // Same floor band as above, but the provider omits usage so the output
-    // count is a local estimate. The floor regime must drop estimates too:
-    // no complete summary can exist at a 1-token cap, so the estimator
-    // false-positive rationale for the 20K threshold cannot apply here.
+  it('rejects locally before provider usage metadata can matter', async () => {
+    // Same floor band as above. The provider's usage behavior is irrelevant
+    // because an input that cannot leave usable output room is never sent.
     vi.mocked(mockChat.getHistory).mockReturnValue([
       { role: 'user', parts: [{ text: 'x'.repeat(257_900) }] },
       { role: 'model', parts: [{ text: 'ok' }] },
@@ -5209,9 +5399,9 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       consecutiveFailures: 0,
       originalTokenCount: 65_000,
     });
-    expect(capturedMaxOutputTokens).toBe(1);
+    expect(capturedMaxOutputTokens).toBeUndefined();
     expect(result.info.compressionStatus).toBe(
-      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     );
     expect(result.newHistory).toBeNull();
   });
