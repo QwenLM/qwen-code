@@ -206,6 +206,7 @@ export default {
   'toolDisplayName.TeamCreate': '创建团队',
   'toolDisplayName.TeamDelete': '删除团队',
   'toolDisplayName.TeamPlanApproval': '团队计划审批',
+  'toolDisplayName.RequestShutdown': '请求下线',
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',

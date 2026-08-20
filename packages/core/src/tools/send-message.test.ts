@@ -18,7 +18,6 @@ function makeTeamConfig(opts?: {
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
-    requestShutdown?: (...args: unknown[]) => Promise<void>;
   } | null;
   approvalMode?: ApprovalMode;
 }) {
@@ -101,62 +100,48 @@ describe('SendMessageTool — team mode', () => {
     expect(result.llmContent).toContain('No active team');
   });
 
-  it('routes shutdown_request via requestShutdown', async () => {
-    const requestShutdown = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi.fn(),
-          broadcast: vi.fn(),
-          requestShutdown,
-        },
-      }),
-    );
+  it('exposes no shutdown control discriminator', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
 
-    const invocation = tool.build({
-      to: 'bob',
-      message: 'Please shut down.',
-      type: 'shutdown_request',
-    });
-    const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('Shutdown');
-    expect(result.llmContent).toContain('bob');
-    expect(requestShutdown).toHaveBeenCalledWith('bob');
+    expect(schema.properties).not.toHaveProperty('type');
+    expect(JSON.stringify(schema)).not.toContain('shutdown_request');
   });
 
-  it('rejects shutdown_request from a teammate (leader-only)', async () => {
-    // A teammate calling shutdown_request would impersonate the
-    // leader, since requestShutdown writes the mailbox entry with
-    // `from: LEADER_NAME` and arms shutdown_approved tracking.
-    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+  it("delivers a teammate's ordinary report to the leader", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
         teamManager: {
-          sendMessage: vi.fn(),
+          sendMessage,
           broadcast: vi.fn(),
-          requestShutdown,
         },
       }),
     );
 
     const invocation = tool.build({
-      to: 'bob',
-      message: 'Please shut down.',
-      type: 'shutdown_request',
+      to: 'leader',
+      message: 'Task completed and verified.',
     });
     const result = await runWithTeammateIdentity(
       {
-        agentName: 'attacker',
+        agentName: 'worker',
         teamName: 'team',
-        agentId: 'attacker@team',
+        agentId: 'worker@team',
         isTeamLead: false,
       },
       () => invocation.execute(new AbortController().signal),
     );
-    expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('Only the team leader');
-    expect(requestShutdown).not.toHaveBeenCalled();
+
+    expect(result.error).toBeUndefined();
+    expect(sendMessage).toHaveBeenCalledWith(
+      'leader',
+      'Task completed and verified.',
+      'worker',
+      undefined,
+    );
   });
 
   it('blocks plan-required teammates before leader approval', async () => {

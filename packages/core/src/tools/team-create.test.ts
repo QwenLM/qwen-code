@@ -59,6 +59,13 @@ describe('TeamCreateTool', () => {
     expect(tool.name).toBe('team_create');
   });
 
+  it('directs leaders to the dedicated shutdown tool', () => {
+    const description = new TeamCreateTool(makeConfig()).description;
+
+    expect(description).toContain('request_shutdown');
+    expect(description).not.toContain('type: "shutdown_request"');
+  });
+
   it('does not promise peer-DM summaries the idle notification never carries (#9283)', () => {
     const description = new TeamCreateTool(makeConfig()).description;
 

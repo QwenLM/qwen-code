@@ -205,6 +205,7 @@ export default {
   'toolDisplayName.TeamCreate': '建立團隊',
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.SendMessage': '傳送訊息',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
