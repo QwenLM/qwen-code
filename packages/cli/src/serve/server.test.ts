@@ -10168,7 +10168,7 @@ describe('createServeApp', () => {
         {
           sessionId: 's-1',
           message: 'read this',
-          options: { content: [resource] },
+          options: { rejectIfIdle: true, content: [resource] },
         },
       ]);
     });
