@@ -50,7 +50,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
 
 jobs:
   classify_pr:
@@ -288,6 +288,15 @@ jobs:
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
+
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
@@ -581,6 +590,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
+          npx tsc -p integration-tests/tsconfig.json --pretty false
           npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'

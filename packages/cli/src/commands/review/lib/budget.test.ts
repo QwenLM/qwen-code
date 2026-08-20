@@ -356,6 +356,201 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('drops the SAME non-answers written in Chinese', () => {
+    // Measured on a live review of PR #9094 under `outputLanguage: 中文`: the
+    // reverse-audit agent returned the first line below — "none — all checks
+    // completed, the tool budget was NOT reached" — and the composed body
+    // published `Not explored to full depth (tool budget reached)` quoting it.
+    // The line DETECTOR was already bilingual; only this classifier was not.
+    for (const line of [
+      'Budget gap: 无 — 所有检查均完成，未触及工具预算上限。',
+      '预算缺口：无 — 所有检查均完成，未触及工具预算上限。',
+      'Budget gap: 无',
+      'Budget gap: 无。',
+      'Budget gap: 没有',
+      'Budget gap: 不适用',
+      'Budget gap: 暂无缺口',
+      'Budget gap: 没有跳过的检查',
+      'Budget gap: 无，所有计划内的检查均已完成',
+      'Budget gap: 无 — 所有计划检查均已完成。',
+      'Budget gap: (无 — 所有检查均完成)',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+  });
+
+  it('keeps the REAL Chinese gaps the first cut of this branch swallowed', () => {
+    // Probed on a live review of this very change (PR #9175, R1-1). Each line
+    // is a real disclosure the unnarrowed branch classified as "nothing to
+    // disclose", which is the direction that certifies depth nobody reached.
+    for (const line of [
+      // The lookbehinds see ONE character: the char before 完成 is 有.
+      'Budget gap: 无 — 检查还没有完成',
+      'Budget gap: 无 — 单元测试尚未完成',
+      // A gap clause AFTER the completion word: the tail is a budget
+      // adverbial, not forty free characters.
+      'Budget gap: 无 — 安全检查完成，渗透测试未进行',
+      'Budget gap: 无 — 所有单元测试完成，集成测试没有运行',
+      // A gap clause BEFORE it: the completion clause must open with an
+      // all-done head, exactly as the English branch requires.
+      'Budget gap: 无 — 3 项未运行，其余完成',
+      'Budget gap: 无 — 渗透测试失败，单元测试完成',
+      'Budget gap: 无 — 除 Windows 矩阵外均已完成',
+      'Budget gap: 无 — 所有检查均未完成',
+    ]) {
+      expect(budgetGapDisclosures(line)).toHaveLength(1);
+    }
+  });
+
+  it('keeps every evasion two live review rounds found', () => {
+    // Round 2 of the review on this change walked through the span-based
+    // clause four different ways. The closed vocabulary answers all of them
+    // structurally: a sentence carrying a gap is built from pieces the clause
+    // does not contain, so it cannot match at all.
+    for (const line of [
+      // Inability modifiers the one-character lookbehind could not see.
+      'Budget gap: 无 — 所有检查未能完成',
+      'Budget gap: 无 — 所有检查没法完成',
+      'Budget gap: 无 — 所有检查不能完成',
+      'Budget gap: 无 — 所有检查难以完成',
+      'Budget gap: 无 — 所有检查不曾完成',
+      // A negation separated from the completion word by an adverbial.
+      'Budget gap: 无 — 所有检查均未按时完成',
+      // A hedged completion.
+      'Budget gap: 无 — 所有检查基本完成',
+      // The span sliding past a negated completion to a later affirmed one.
+      'Budget gap: 无 — 集成测试未完成，单元测试完成',
+      // A gap clause the span swallowed on either side of the completion word.
+      'Budget gap: 无 — 3 项未运行，其余完成',
+      'Budget gap: 无 — 安全检查完成，渗透测试未进行',
+      'Budget gap: 无 — 所有单元测试完成，但集成测试没有运行',
+      // A real gap that merely opens with the token's characters.
+      'Budget gap: 无法验证 Windows 矩阵的集成测试',
+      'Budget gap: 无障碍检查未运行',
+      // "did not check" — a live gap the bare-noun token shape swallowed: the
+      // brief mandates a Budget gap line ONLY when a check was cut short, so a
+      // compliant agent writing these is asserting one.
+      'Budget gap: 没有检查',
+      'Budget gap: 无检查',
+      'Budget gap: 暂无检查',
+    ]) {
+      expect(budgetGapDisclosures(line)).toHaveLength(1);
+    }
+  });
+
+  it('still drops the real-world no-answer it was built for', () => {
+    // The live sentence from PR #9094, plus the shapes a model actually
+    // writes around it. These are the ONLY thing the clause may swallow.
+    for (const line of [
+      'Budget gap: 无 — 所有检查均完成，未触及工具预算上限。',
+      'Budget gap: 无 —— 所有计划内的检查均已完成',
+      'Budget gap: 无：全部检查均已完成',
+      'Budget gap: 无，上述工作均已完成',
+      'Budget gap: 暂无缺口',
+      'Budget gap: 没有跳过的检查',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+  });
+
+  it('strips full-width parens too — a CJK IME wraps the same no-answer', () => {
+    // The strip knew only the ASCII pair, so `（无 — 所有检查均完成）`
+    // survived as a phantom gap in exactly the output language the ZH
+    // branch exists for — the #9094 incident shape, wearing the paren
+    // form a Chinese keyboard produces by default.
+    for (const line of [
+      'Budget gap: （无 — 所有检查均完成）',
+      'Budget gap: （无）',
+      '预算缺口：（没有跳过的检查）',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // A wrapped placeholder's inner tail judges identically to the bare
+    // form: bare `无？`/`无、` lose those tails to the fold-key strip before
+    // the classifier sees them, so the wrapped forms drop too — identical
+    // content cannot split bare-vs-wrapped.
+    for (const line of ['Budget gap: （无？）', 'Budget gap: （无、）']) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // Only a SYMMETRIC pair unwraps, and a real gap inside full-width
+    // parens survives — over-disclosure is the safe direction.
+    expect(
+      budgetGapDisclosures('Budget gap: （无法验证 Windows 矩阵的集成测试）'),
+    ).toEqual(['（无法验证 Windows 矩阵的集成测试）']);
+  });
+
+  it('closes the same split for ENGLISH no-answers wearing a CJK tail', () => {
+    // The normalize strip (TRAILING_GAP_CHAR_RE) is bilingual, so bare
+    // `none。` judges as `none` and drops — but a wrapped twin kept its
+    // inner tail: the EN tail classes in PLACEHOLDER_GAP_RE are ASCII-only,
+    // so `(none。)` survived as a phantom gap while its identical bare form
+    // dropped. The exact bare-vs-wrapped split the test above closed for
+    // the ZH branch, left open on the EN one — measured by the review on
+    // this PR: under a CJK output language `Budget gap: (none。)` spends a
+    // MAX_GAPS_PER_AGENT slot and an orchestrator ruling on a no-answer.
+    // The inner text must judge character-for-character as its bare twin,
+    // so the wrapped forms drop too — in both paren shapes.
+    for (const line of [
+      'Budget gap: none。',
+      'Budget gap: (none。)',
+      'Budget gap: （none。）',
+      'Budget gap: none - stayed under budget。',
+      'Budget gap: (none - stayed under budget。)',
+      'Budget gap: (N/A - stayed under budget。)',
+      'Budget gap: (none — all checks completed。)',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // A REAL gap keeps its CJK tail in both forms — the strip equalizes
+    // judgment, never swallows.
+    expect(budgetGapDisclosures('Budget gap: (渗透测试未进行。)')).toEqual([
+      '(渗透测试未进行。)',
+    ]);
+  });
+
+  it('folds a Chinese gap restated with and without a trailing full stop', () => {
+    // The fold key promises one disclosure per gap; a key that stripped only
+    // ASCII trailing punctuation kept `渗透测试未进行。` and `渗透测试未进行`
+    // as two, double-spending MAX_GAPS_PER_AGENT slots.
+    const text = [
+      'Budget gap: 渗透测试未进行。',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(text)).toEqual(['渗透测试未进行。']);
+
+    // Both CJK full stops — 。(U+3002) and ．(U+FF0E) — are ZH_TAIL
+    // characters, and the fold key must strip both: covering only one left
+    // the double-spend open for the other.
+    const ff0e = [
+      'Budget gap: 渗透测试未进行．',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(ff0e)).toEqual(['渗透测试未进行．']);
+  });
+
+  it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
+    // Chinese has no word boundary, so a token is only a token when
+    // punctuation, whitespace or end-of-text follows it. `无法验证…`
+    // ("unable to verify…") is the exact failure this guard exists for:
+    // dropping it would certify work that never happened.
+    expect(
+      budgetGapDisclosures('Budget gap: 无法验证 Windows 矩阵的集成测试'),
+    ).toEqual(['无法验证 Windows 矩阵的集成测试']);
+    // A completion clause that is negated, or that carves out an exception,
+    // is a real gap in either language.
+    expect(budgetGapDisclosures('Budget gap: 无 — 所有检查均未完成')).toEqual([
+      '无 — 所有检查均未完成',
+    ]);
+    expect(
+      budgetGapDisclosures('Budget gap: 无 — 除 Windows 矩阵外均已完成'),
+    ).toEqual(['无 — 除 Windows 矩阵外均已完成']);
+    expect(budgetGapDisclosures('Budget gap: 无障碍检查未运行')).toEqual([
+      '无障碍检查未运行',
+    ]);
+  });
+
   it('keeps a REAL gap in parentheses — the paren strip fires only for placeholders', () => {
     // The strip exists for `(none — all planned checks completed)`; a
     // genuine parenthesized disclosure must survive it …
@@ -520,6 +715,14 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const t2 = performance.now();
     expect(budgetGapDisclosures(indented)).toEqual(['ok']);
     expect(performance.now() - t2).toBeLessThan(1000);
+    // The Chinese clause's own hazard shape: a token, a separator, then a long
+    // run that never reaches a completion word. Its first cut chained four
+    // optional groups across `\s*` — the overlapping shape this test exists
+    // for — and this input is what walks it.
+    const zhPathological = `Budget gap: 无 — ${'检查 '.repeat(20_000)}`;
+    const t3 = performance.now();
+    expect(budgetGapDisclosures(zhPathological)).toHaveLength(1);
+    expect(performance.now() - t3).toBeLessThan(1000);
     // And a deep-indented bullet disclosure still matches — the leading
     // whitespace lives inside the optional bullet group, not beside it.
     expect(

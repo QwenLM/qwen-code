@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
   isSessionLevelNotFound,
@@ -34,6 +34,9 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // call appears in the transcript, so a first `session_not_found` can race
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
+// Insight JSON can split one growing text block into multiple projected
+// messages, so prefix identity reuse is unsafe once its marker appears.
+const INSIGHT_CONTENT_MARKER = '"insight_';
 
 export interface BackgroundAgentResolution {
   status: string;
@@ -55,11 +58,83 @@ export function transcriptBlocksToLocalizedMessages(
     labels: {
       promptCancelled: t('request.cancelled'),
       branchSuccess: (name) => t('branch.success', { name }),
-      midTurnInserted: (message) => t('midTurn.inserted', { message }),
       modelStreamInterrupted: t('error.modelStreamInterrupted'),
       loopDetected: t('error.loopDetected'),
     },
   });
+}
+
+function reuseUnchangedProjectedPrefix(
+  previous:
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined,
+  blocks: readonly DaemonTranscriptBlock[],
+  messages: Message[],
+  t: Translator,
+): Message[] {
+  if (
+    !previous ||
+    previous.t !== t ||
+    previous.blocks.length !== blocks.length ||
+    previous.messages.length !== messages.length ||
+    messages.length === 0 ||
+    blocks.length === 0
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < blocks.length - 1; i += 1) {
+    if (previous.blocks[i] !== blocks[i]) return messages;
+  }
+  const before = previous.blocks[blocks.length - 1];
+  const after = blocks[blocks.length - 1];
+  if (
+    (before.kind !== 'assistant' && before.kind !== 'thought') ||
+    after.kind !== before.kind ||
+    before.id !== after.id ||
+    before.streaming !== true ||
+    after.streaming !== true ||
+    before.parentToolCallId !== undefined ||
+    after.parentToolCallId !== undefined ||
+    before.meta !== after.meta ||
+    before.usage !== after.usage ||
+    before.branchRecordId !== after.branchRecordId ||
+    before.clientReceivedAt !== after.clientReceivedAt ||
+    typeof before.text !== 'string' ||
+    typeof after.text !== 'string' ||
+    !after.text.startsWith(before.text) ||
+    after.text.includes(INSIGHT_CONTENT_MARKER)
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const previousMessage = previous.messages[i];
+    const message = messages[i];
+    if (
+      previousMessage.id !== message.id ||
+      previousMessage.role !== message.role
+    ) {
+      return messages;
+    }
+  }
+  const previousTail = previous.messages[previous.messages.length - 1];
+  const tail = messages[messages.length - 1];
+  if (
+    previousTail.id !== tail.id ||
+    previousTail.role !== tail.role ||
+    (tail.role !== 'assistant' && tail.role !== 'thinking') ||
+    tail.isStreaming !== true
+  ) {
+    return messages;
+  }
+  const result = messages.slice();
+  for (let i = 0; i < result.length - 1; i += 1) {
+    result[i] = previous.messages[i];
+  }
+  return result;
 }
 
 function isTerminalBackgroundAgentStatus(status: string): boolean {
@@ -126,6 +201,36 @@ export function getPendingBackgroundAgentKey(
   return callIds.join('|');
 }
 
+type DaemonPermissionTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'permission' }
+>;
+
+/**
+ * CallIds whose permission request is still unanswered. Such an agent has not
+ * spawned yet, so its subagent session legitimately does not exist and the
+ * reconciliation 404 probe must not count toward the missing-agent grace.
+ */
+function getPendingPermissionCallIds(
+  blocks: readonly DaemonTranscriptBlock[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind !== 'permission') continue;
+    const perm = block as DaemonPermissionTranscriptBlock;
+    if (perm.resolved) continue;
+    const toolCall = getRecord(perm.toolCall);
+    const callId =
+      typeof toolCall?.['toolCallId'] === 'string'
+        ? toolCall['toolCallId']
+        : typeof toolCall?.['id'] === 'string'
+          ? toolCall['id']
+          : undefined;
+    if (callId) ids.add(callId);
+  }
+  return ids;
+}
+
 export function reconcileBackgroundAgentResolutions(
   messages: Message[],
   resolutions: ReadonlyMap<string, BackgroundAgentResolution>,
@@ -184,10 +289,27 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const previousProjectionRef = useRef<
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined
+  >(undefined);
   const messages = useMemo(
-    () => transcriptBlocksToLocalizedMessages(blocks, t),
+    () =>
+      reuseUnchangedProjectedPrefix(
+        previousProjectionRef.current,
+        blocks,
+        transcriptBlocksToLocalizedMessages(blocks, t),
+        t,
+      ),
     [blocks, t],
   );
+  useLayoutEffect(() => {
+    previousProjectionRef.current = { blocks, messages, t };
+  }, [blocks, messages, t]);
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
@@ -207,6 +329,13 @@ export function useMessagesFromBlocks(
   const pendingBackgroundAgentKey = useMemo(
     () => getPendingBackgroundAgentKey(reconciledMessages),
     [reconciledMessages],
+  );
+  // A stable primitive key for the effect dependency: the Set's identity
+  // changes on every transcript delta, which would re-run the reconciliation
+  // effect on each streamed update and defeat the retry backoff.
+  const pendingPermissionKey = useMemo(
+    () => [...getPendingPermissionCallIds(blocks)].sort().join('|'),
+    [blocks],
   );
   const backgroundAgentNotificationKey = useMemo(
     () => getBackgroundAgentNotificationKey(blocks),
@@ -235,6 +364,13 @@ export function useMessagesFromBlocks(
     errorAttempts: new Map(),
   });
   const missingAgentMissesRef = useRef(new Map<string, number>());
+  // Last 404 timestamp per callId. The grace ladder is wall-clock paced: a
+  // miss only counts toward the grace once the base backoff has elapsed since
+  // the previous miss, so a re-probe triggered by an unrelated transcript
+  // change (for example another permission appearing) cannot collapse the
+  // retry ladder into two immediate misses.
+  const missTimestampsRef = useRef(new Map<string, number>());
+  const errorTimestampsRef = useRef(new Map<string, number>());
   const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -246,6 +382,8 @@ export function useMessagesFromBlocks(
     if (lastConnectionKeyRef.current !== connectionKey) {
       lastConnectionKeyRef.current = connectionKey;
       missingAgentMissesRef.current.clear();
+      missTimestampsRef.current.clear();
+      errorTimestampsRef.current.clear();
       retryBackoffRef.current = {
         key: '',
         attempts: 0,
@@ -273,11 +411,26 @@ export function useMessagesFromBlocks(
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
     const retryScopeKey = `${sessionId}:${pendingBackgroundAgentKey}`;
     const cachedRound = reconciliationRequestRef.current;
-    const callIds = pendingBackgroundAgentKey.split('|');
+    // Agents still under approval have not spawned their subagent session
+    // yet: exclude them so the 404 probe cannot accumulate missing-agent
+    // misses and paint a failure while the dialog is unanswered. Rebuild the
+    // membership from the stable key — the effect depends on the key, not the
+    // Set, so a transcript delta with unchanged permission content does not
+    // re-run this effect.
+    const pendingPermissionCallIds = new Set(
+      pendingPermissionKey ? pendingPermissionKey.split('|') : [],
+    );
+    const callIds = pendingBackgroundAgentKey
+      .split('|')
+      .filter((callId) => !pendingPermissionCallIds.has(callId));
     for (const callId of [...missingAgentMissesRef.current.keys()]) {
       if (!callIds.includes(callId)) {
         missingAgentMissesRef.current.delete(callId);
+        missTimestampsRef.current.delete(callId);
       }
+    }
+    for (const callId of [...errorTimestampsRef.current.keys()]) {
+      if (!callIds.includes(callId)) errorTimestampsRef.current.delete(callId);
     }
     const roundErrors: Array<{ callId: string; error: unknown }> = [];
     const roundNotFounds: string[] = [];
@@ -352,11 +505,26 @@ export function useMessagesFromBlocks(
         round.processed = true;
         // Grace-miss accounting lives in the active handler, not the per-call
         // closure: a superseded round's late 404 must not consume grace that
-        // belongs to the live round.
+        // belongs to the live round. The handler also re-checks the current
+        // probe set: a round that straddles a permission transition settles
+        // with misses for an agent that is now excluded, and those must not
+        // be counted (or re-added after the exclusion cleanup ran).
         for (const callId of succeeded) {
           missingAgentMissesRef.current.delete(callId);
+          missTimestampsRef.current.delete(callId);
+          errorTimestampsRef.current.delete(callId);
+        }
+        for (const callId of [...resolutions.keys()]) {
+          if (!callIds.includes(callId)) resolutions.delete(callId);
         }
         for (const callId of notFounds) {
+          if (!callIds.includes(callId)) continue;
+          const now = Date.now();
+          const lastMiss = missTimestampsRef.current.get(callId) ?? 0;
+          if (now - lastMiss < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS) {
+            continue;
+          }
+          missTimestampsRef.current.set(callId, now);
           const misses = (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
           missingAgentMissesRef.current.set(callId, misses);
           if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
@@ -383,7 +551,18 @@ export function useMessagesFromBlocks(
           // never consume the budget.
           const errorAttempts = new Map<string, number>();
           for (const entry of errors) {
-            const count = (previous.errorAttempts.get(entry.callId) ?? 0) + 1;
+            if (!callIds.includes(entry.callId)) continue;
+            const now = Date.now();
+            const lastError = errorTimestampsRef.current.get(entry.callId);
+            const previousCount = previous.errorAttempts.get(entry.callId) ?? 0;
+            const count =
+              lastError !== undefined &&
+              now - lastError < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS
+                ? previousCount
+                : previousCount + 1;
+            if (count !== previousCount) {
+              errorTimestampsRef.current.set(entry.callId, now);
+            }
             errorAttempts.set(entry.callId, count);
             if (count >= BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
               failedCallIds.push(entry.callId);
@@ -460,6 +639,7 @@ export function useMessagesFromBlocks(
     connection.sessionId,
     connection.status,
     pendingBackgroundAgentKey,
+    pendingPermissionKey,
     reconciliationAttempt,
     workspace.client,
   ]);
