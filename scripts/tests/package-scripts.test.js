@@ -441,7 +441,11 @@ describe('package scripts', () => {
       publishJob.indexOf(commitStep),
     );
     expect(commitStep).toContain("CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'");
-    expect(commitStep).toContain('GH_TOKEN="${CI_BOT_PAT}" gh auth setup-git');
+    expect(commitStep).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
+    expect(commitStep).toContain('gh auth setup-git');
+    expect(commitStep.indexOf('export GH_TOKEN="${CI_BOT_PAT}"')).toBeLessThan(
+      commitStep.indexOf('gh auth setup-git'),
+    );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 
