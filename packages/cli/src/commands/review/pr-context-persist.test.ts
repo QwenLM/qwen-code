@@ -175,6 +175,20 @@ describe('persistRecoveredLedger', () => {
         { noOwnReview: false, identityKnown: true },
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).merged).toBe(true);
+      // And it clears when the list empties, the same conjunct `foreign`
+      // carries — nothing merged can still be in a list holding nothing.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 5, findings: [] },
+          commitId: null,
+          reviewId: 11,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).merged).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -207,7 +221,12 @@ describe('persistRecoveredLedger', () => {
           ledger: { ...ledger, round: 6 },
           commitId: null,
           reviewId: 60,
-          foreign: true,
+          // FALSE in the input, true in the file: the assertion below then
+          // proves the flag came from the kept list rather than being
+          // echoed back. (Production feeds `true` here — without a `me`
+          // every marker walks as foreign — which is exactly the value that
+          // must not be stamped over this account's own certified list.)
+          foreign: false,
           merged: false,
         },
         { noOwnReview: false, identityKnown: false },
@@ -301,6 +320,35 @@ describe('persistRecoveredLedger', () => {
       });
       expect(written.round).toBe(3);
       expect(written.sha).toBe('deadbeef00112233');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries the volume group through the ordinary recovered write', () => {
+    // The common path own volumes reach disk. The DROP is pinned at the
+    // anonymous seam and the KEEP at the threw-strip seam, but survival on
+    // a successful recovery held only by construction — and "harmonize the
+    // seams" is a plausible follow-up now that the group is one list.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, posted: 4, prevPosted: 2, fresh: 3, floor: 'c' },
+          commitId: null,
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.posted).toBe(4);
+      expect(written.prevPosted).toBe(2);
+      expect(written.fresh).toBe(3);
+      expect(written.floor).toBe('c');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -496,6 +544,9 @@ describe('persistRecoveredLedger', () => {
   });
 
   it('an ANONYMOUS recovery with no existing file still writes whole', () => {
+    // Production shape: without a `me` every marker walks as foreign, this
+    // account's own included, so the recorded provenance must be "unknown"
+    // rather than "another account's".
     // Nothing to protect: a machine with no side file gains round context
     // from the write, and the list it gains is exactly what a healthy
     // foreign-only recovery would have handed it — THEIR claims, no anchor.
@@ -508,14 +559,20 @@ describe('persistRecoveredLedger', () => {
           ledger: { ...ledger, round: 4 },
           commitId: null,
           reviewId: 40,
-          foreign: false,
-          merged: false,
+          // What recovery actually hands this branch anonymously.
+          foreign: true,
+          merged: true,
         },
         { noOwnReview: false, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written.round).toBe(4);
       expect(written.findings).toEqual(ledger.findings);
+      // An unknown identity is not a foreign author: recorded `true`, the
+      // next round publishes the foreign caveat about a marker this account
+      // may well have posted.
+      expect(written.foreign).toBe(false);
+      expect(written.merged).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

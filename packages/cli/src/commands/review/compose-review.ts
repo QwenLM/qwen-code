@@ -1382,6 +1382,15 @@ export function composeReview(
     prevFacts.posted,
     floorKind,
     severityFloorKnown(input.severityFloor),
+    {
+      ids: new Set(prevFacts.findings.map((f) => f.id)),
+      // A round that recovered NO predecessor knows nothing about which ids
+      // were real — the id space is shared across environments and a first
+      // round on a machine with no side file is the ordinary case — so it
+      // cannot call a claimed id a stray. Only a recovered, untruncated list
+      // is evidence of absence.
+      complete: prevRound > 0 && !prevFacts.truncated,
+    },
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -1559,6 +1568,7 @@ function ledgerMarkerFor(
   prevPostedInline: number | undefined,
   floorKind: CriticalFloorKind | undefined,
   floorKnown: boolean,
+  carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -1679,6 +1689,7 @@ function ledgerMarkerFor(
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
         ],
+        carriedWorkList,
       ),
       // The pair falls together: a sha with no model reads to the next
       // round as a pre-field marker rather than as "nobody certified this".
@@ -4777,12 +4788,32 @@ export function buildLedger(
   round: number,
   drafted: Array<{ path?: unknown; line?: unknown; body?: unknown }>,
   bodyCriticals: string[],
+  /**
+   * The previous round's work list, when this round recovered one, and
+   * whether that list was COMPLETE.
+   *
+   * A claimed id that names no entry in a complete list is a stray — a
+   * model-written token, not a carry — and recording it mints a finding
+   * under a round that never held it, which the next round's recurrence
+   * join then CITES in a posted paragraph and counts toward the depth key.
+   * The completeness flag is what separates a stray from a legitimately
+   * re-voiced entry the marker's byte budget shed: over a shortened list
+   * this cannot be told apart, so the id is retained and continuity wins.
+   */
+  carriedWorkList?: { ids: ReadonlySet<string>; complete: boolean },
 ): Ledger {
   const findings: LedgerFinding[] = [];
   const taken = new Set<string>();
   let next = 0;
+  /** Is this claimed id one the previous round actually recorded? */
+  const isCarry = (claimed: string): boolean =>
+    carriedWorkList === undefined ||
+    !carriedWorkList.complete ||
+    carriedWorkList.ids.has(claimed);
   /** A carried id if it is free, else the next unused id of THIS round. */
-  const idFor = (carried: string | undefined): string => {
+  const idFor = (claimed: string | undefined): string => {
+    const carried =
+      claimed !== undefined && isCarry(claimed) ? claimed : undefined;
     if (carried && !taken.has(carried)) {
       taken.add(carried);
       return carried;

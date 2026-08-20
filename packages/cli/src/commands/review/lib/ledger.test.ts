@@ -21,6 +21,7 @@ import {
   LEDGER_MAX_MODEL,
   LEDGER_MAX_VOLUME,
   LEDGER_MAX_ID,
+  LEDGER_ID_SHAPE,
   LEDGER_MAX_ROUND,
   isLedgerFinding,
   type Ledger,
@@ -614,6 +615,42 @@ describe('a shortened work list must never read as complete', () => {
       '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"fresh":5} -->',
     )!;
     expect(bare.fresh).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than emitting a cut one under it', () => {
+    // The cut can still match the grammar — `R3-` plus twenty-two nines
+    // slices to a well-formed twenty-four — so validating after the slice
+    // emitted a DIFFERENT id under the same entry: the next round's readback
+    // of the posted claim returns the full id, matches no ledger entry, and
+    // the finding retires with no ruling while the list reads as complete.
+    const cuttable = `R3-${'9'.repeat(22)}`;
+    expect(cuttable.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(LEDGER_ID_SHAPE.test(cuttable.slice(0, LEDGER_MAX_ID))).toBe(true);
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { ...f('R3-1'), file: 'a.ts' },
+        { ...f(cuttable), file: 'b.ts' },
+      ],
+      sha: 'deadbeef00112233',
+    });
+    expect(marker).not.toContain(cuttable.slice(0, LEDGER_MAX_ID));
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R3-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('clamps the SUMMED dropped, not only its declared term', () => {
+    // `raw.findings.length` is attacker-chosen — a body of tens of thousands
+    // of single-character invalid entries fits GitHub's limit — and the
+    // total is interpolated verbatim into the model-facing PARTIAL line.
+    const junk = Array.from({ length: 400 }, () => ({ id: 'x' }));
+    const parsed = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":3,"dropped":${LEDGER_MAX_VOLUME},"findings":${JSON.stringify(junk)}} -->`,
+    )!;
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
   });
 
   it('normalises an unrecognised clustering hint instead of dropping the finding', () => {

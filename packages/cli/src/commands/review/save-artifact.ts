@@ -306,6 +306,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
       zh: string(c['zh'], 'Composed verdict.convergence.zh'),
     };
   }
+  // The fresh count reads by the same rules as the total it is part of.
   const rawFresh = verdict['postedFresh'];
   const freshAbsent = rawFresh === undefined || rawFresh === null;
   const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);

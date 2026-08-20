@@ -1599,6 +1599,32 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.prevPosted).toBeUndefined();
   });
 
+  it('restores an own TRUE-ZERO volume even with nothing to merge', () => {
+    // A clean own round — LGTM, findings empty, `posted: 0` — has a real
+    // baseline, and zero survives the persistence chain precisely so it can
+    // be one. Gated on the list, any stranger's parseable marker blinded the
+    // trend for that round with a good count in hand.
+    const own =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[],' +
+      '"posted":0,"fresh":0,"floor":"o"} -->';
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":99,"fresh":97,"floor":"c"} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    // Nothing merged — there was no own list — but the own counts came back.
+    expect(found?.merged).toBe(false);
+    expect(found?.ledger.posted).toBe(0);
+    expect(found?.ledger.fresh).toBe(0);
+    expect(found?.ledger.floor).toBe('o');
+  });
+
   it('merges a foreign winner OVER the own findings — displacement is dead', () => {
     // One comment used to suppress a certified entry: a drive-by marker at
     // ownMax + 1 with empty findings won round-first selection, the own

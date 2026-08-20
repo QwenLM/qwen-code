@@ -9590,6 +9590,52 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.postedFresh).toBe(1);
   });
 
+  it('re-mints a stray id, and keeps one a shortened list may have shed', () => {
+    // A claimed id naming no entry in a COMPLETE work list is a stray, and
+    // recording it mints a finding under a round that never held it — which
+    // the next round's recurrence join then cites in a posted paragraph.
+    // Over a SHORTENED list the two cannot be told apart, so continuity
+    // wins: the marker's byte budget sheds entries the model may legitimately
+    // re-voice.
+    const draft = [
+      { path: 'src/a.ts', line: 1, body: '**[Suggestion]** R2-99: a new one' },
+    ];
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const complete = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: draft,
+    });
+    expect(parseLedger(complete.body)?.findings.map((x) => x.id)).toEqual([
+      'R5-1',
+    ]);
+
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      dropped: 3,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const shortened = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: draft,
+    });
+    expect(parseLedger(shortened.body)?.findings.map((x) => x.id)).toEqual([
+      'R2-99',
+    ]);
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body

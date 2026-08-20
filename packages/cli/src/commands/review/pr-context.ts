@@ -975,6 +975,20 @@ export function recoverLedger(
   // shape `merged` made the provenance wording claim own-certified entries
   // exist when none do (and misattributed the PARTIAL note's sum). The
   // foreign winner recovers as pure-foreign, which is exactly what it is.
+  if (best.foreign && bestOwn) {
+    // The volume comes back whether or not there is a LIST to merge. The
+    // union exists so a foreign marker cannot erase own data, and the
+    // volume is own data too: this account's own marker was walked in the
+    // same pass and its counts are trustworthy. Gated on the list, an own
+    // round that posted nothing — a clean LGTM, findings empty, `posted: 0`
+    // — lost its true-zero baseline to any stranger's parseable marker, and
+    // zero survives the whole persistence chain precisely so it can be one.
+    // Derived from the shared list, not re-enumerated — see `pickVolume`.
+    ledger = {
+      ...ledger,
+      ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
+    };
+  }
   if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
     mergedOverOwn = true;
     const ownIds = new Set(bestOwn.ledger.findings.map((f) => f.id));
@@ -991,14 +1005,6 @@ export function recoverLedger(
       ...ledger,
       findings: capped,
       ...(dropped > 0 ? { dropped } : {}),
-      // The union exists so a foreign marker cannot erase own data, and the
-      // volume is own data too: this account's own marker was walked in the
-      // same pass and its counts are trustworthy. Restoring only `findings`
-      // let any second bot or maintainer posting one parseable marker at a
-      // round at-or-above this account's blind the trend for that round,
-      // with a good count in hand. Derived from the shared list, not
-      // re-enumerated — see `pickVolume`.
-      ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
     };
   }
   return {

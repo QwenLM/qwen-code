@@ -354,25 +354,26 @@ const CLOSE = ' -->';
  * `Ledger` later cannot reintroduce the hazard by being forgotten below.
  */
 export function serializeLedger(ledger: Ledger): string {
+  const roundOut = Math.min(ledger.round, LEDGER_MAX_ROUND);
   const capped = ledger.findings
+    // Admitted BEFORE anything is sliced, the way the parse side does it. An
+    // over-long id cut at the cap can still match the grammar — `R3-` plus
+    // twenty-two nines slices to a well-formed twenty-four — so validating
+    // after the slice emitted a DIFFERENT id under the same entry: the next
+    // round's readback of the posted claim line returns the full id, matches
+    // no ledger entry, and the finding retires with no ruling while the list
+    // reads as complete and the anchor still scopes past it. A carried id the
+    // model minted out of range (`R0-1`) is refused here for the same reason.
+    .filter((f) => isLedgerFinding(f, roundOut))
     .slice(0, LEDGER_MAX_FINDINGS)
     .map((f) => ({
       ...f,
+      // Length-safe by construction now: the admission test bounds the id,
+      // so this slice can only be a no-op on it.
       id: f.id.slice(0, LEDGER_MAX_ID),
       title: f.title.slice(0, LEDGER_MAX_TITLE),
       file: f.file.slice(0, LEDGER_MAX_FILE),
-    }))
-    // Re-validated AFTER the slice, through the reader's OWN admission test,
-    // because the slice can create what the parser refuses: an over-long id
-    // cut mid-token (`R123456789012345678901234-7` →
-    // `R12345678901234567890123`) is no longer the grammar, and a carried id
-    // the model minted out of range (`R0-1`) never was. Either way the next
-    // round's filter drops the entry — the posted finding retires with no
-    // ruling — and the loss is invisible unless it is counted. Dropped here,
-    // where `dropped` still counts it.
-    .filter((f) =>
-      isLedgerFinding(f, Math.min(ledger.round, LEDGER_MAX_ROUND)),
-    );
+    }));
   const render = (
     findings: LedgerFinding[],
     dropped: number,
@@ -383,7 +384,7 @@ export function serializeLedger(ledger: Ledger): string {
       v: 1,
       // Mirrored on the write side like every other cap: a serializer that can
       // emit what its own parser refuses would round-trip to nothing.
-      round: Math.min(ledger.round, LEDGER_MAX_ROUND),
+      round: roundOut,
       findings,
     };
     // The volume telemetry rides OUTSIDE the truncation rule that governs the
@@ -615,9 +616,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // filter's share was uncounted while the reasons to reject were few and
     // pipeline-impossible; it is now the larger share, and `dropped` is no
     // longer internal — it publishes the "may be an undercount" caveat.
+    // The SUM is clamped, not merely the declared term: `raw.findings.length`
+    // is attacker-chosen (a body of ~32,700 single-character invalid entries
+    // fits GitHub's limit), and the total is interpolated verbatim into the
+    // model-facing PARTIAL line — a forged count instructing the model to
+    // hedge about findings that never existed, which unlike a forged finding
+    // cannot be re-ruled.
     const rejected = raw.findings.length - valid.length;
     const dropped =
-      declared + rejected + (valid.length - findings.length) || undefined;
+      volumeOf(declared + rejected + (valid.length - findings.length)) ||
+      undefined;
     const sha =
       // Normalised on READ as the serializer holds on WRITE: a hand-edited
       // marker carrying both `dropped` and `sha` would certify a range its

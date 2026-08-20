@@ -176,15 +176,17 @@ describe('diagnoseConvergence — the trigger table', () => {
   });
 
   it('holds the volume signal until round 3 — one step is not a trend', () => {
-    expect(
-      diagnoseConvergence({
-        round: 2,
-        posted: 9,
-        prev: { posted: 5, fresh: 5, findings: [] },
-        drafts: [d('a.ts')],
-        floor: 'o',
-      }),
-    ).toBeNull();
+    // The counts must SATISFY every other conjunct, or the round guard is
+    // not what the assertion measures: one fresh draft against `prev.fresh: 5`
+    // already fails `1 >= 5`, and the test passed with or without the gate.
+    const shape = {
+      posted: 9,
+      prev: { posted: 5, fresh: 1, findings: [] },
+      drafts: [d('a.ts')],
+      floor: 'o' as const,
+    };
+    expect(diagnoseConvergence({ ...shape, round: 2 })).toBeNull();
+    expect(diagnoseConvergence({ ...shape, round: 3 })).not.toBeNull();
   });
 
   it('cannot evaluate a trend it never recovered', () => {
@@ -565,6 +567,27 @@ describe('diagnoseConvergence — the trigger table', () => {
       floor: 'o',
     })!;
     expect(own.clusters[0].file).toBe('src/planted.ts');
+
+    // And the drop is keyed on `foreign` ALONE — a purely foreign marker
+    // adopted without a union is the ordinary shape when this account has
+    // no surviving marker of its own.
+    const foreignOnly = diagnoseConvergence({
+      round: 6,
+      posted: 2,
+      prev: {
+        posted: 9,
+        fresh: 9,
+        foreign: true,
+        findings: [...planted, f('R5-1', 'src/genuine.ts')],
+      },
+      drafts: [d('src/planted.ts'), d('src/genuine.ts')],
+      floor: 'o',
+    })!;
+    expect(foreignOnly.mergedEvidence).toBe(false);
+    expect(foreignOnly.clusters.map((c) => c.file)).toEqual([
+      'src/genuine.ts',
+      'src/planted.ts',
+    ]);
   });
 
   it('will not compare a recorded floor against one this round never named', () => {
@@ -617,7 +640,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('the previous round posted 4');
     expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5, 2 more now)');
     expect(r.zh).toContain('第 6 轮发布了 4 条行内评论，其中 2 条是首次提出');
-    expect(r.zh).toContain('第 3、5 轮已出过发现');
+    expect(r.zh).toContain('第 3、5 轮已出过发现，本轮又有 2 条');
   });
 
   it('pluralises the prior-round list by how many rounds it names', () => {
@@ -657,6 +680,8 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     const r = renderConvergenceDiagnosis({ ...base, clusters: [] });
     expect(r.en).toContain('The rate of new findings is not falling.');
     expect(r.en).toContain('--severity-floor critical');
+    expect(r.zh).toContain('把剩余修复攒成一批');
+    expect(r.zh).toContain('或将本 PR 的评审降到 `--severity-floor critical`');
   });
 
   it('does not recommend a floor the round is already running under', () => {
@@ -701,8 +726,12 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       truncatedEvidence: true,
       foreignEvidence: true,
     });
+    expect(r.en).toContain(
+      "the previous round's work list was truncated to fit the marker",
+    );
     expect(r.en).toContain('may be an undercount');
     expect(r.en).toContain('a marker this account did not post');
+    expect(r.zh).toContain('上一轮的工作清单为放进标记而被截断');
     expect(r.zh).toContain('可能少计');
     expect(r.zh).toContain('并非本账号发布的标记');
   });
@@ -722,7 +751,12 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       foreignEvidence: true,
     });
     expect(volumeOnly.en).not.toContain('the rounds named above');
+    expect(volumeOnly.en).toContain(
+      "the previous round's work list was truncated to fit the marker",
+    );
     expect(volumeOnly.en).toContain('may be overstated');
+    expect(volumeOnly.zh).toContain('上一轮的工作清单为放进标记而被截断');
+    expect(volumeOnly.zh).toContain('首次提出的条数可能高估');
     expect(volumeOnly.en).toContain('those counts');
     expect(volumeOnly.en).toContain('a marker this account did not post');
     expect(volumeOnly.zh).toContain('该计数');
@@ -767,6 +801,10 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('shared root cause');
     expect(r.en).toContain('--severity-floor critical');
     expect(r.zh).toContain('新发现的产出速度没有下降。');
+    // Both halves of the zh advice, which no assertion reached: the cluster
+    // reading and the batching clause the floor reading opens with.
+    expect(r.zh).toContain('一个不断再生兄弟发现的簇');
+    expect(r.zh).toContain('把剩余修复攒成一批');
   });
 
   it('says "some of" when the foreign list was merged over this account\'s own', () => {
@@ -781,6 +819,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain("merged over this account's own entries");
     expect(r.en).toContain('so some of those rounds');
     expect(r.zh).toContain('并与本账号自己的条目合并');
+    expect(r.zh).toContain('中的部分可能不属于本账号');
   });
 
   it('states both previous-round numbers, not just the total', () => {
@@ -801,6 +840,8 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     });
     expect(older.en).toContain('the previous round posted 9');
     expect(older.en).not.toContain('new)');
+    expect(older.zh).toContain('上一轮发布了 9 条');
+    expect(older.zh).not.toContain('首次提出）');
   });
 
   it('names both citations when the reading rests on both', () => {
