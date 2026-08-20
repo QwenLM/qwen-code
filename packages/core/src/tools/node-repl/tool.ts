@@ -19,7 +19,6 @@ import {
 import type { PermissionDecision } from '../../permissions/types.js';
 import {
   NodeReplKernelManager,
-  type KernelManagerOptions,
   type NodeReplExecOutcome,
 } from './kernel-manager.js';
 import { convertOutcomeToToolResult } from './result-converter.js';
@@ -43,15 +42,10 @@ function errorResult(message: string, type: ToolErrorType): ToolResult {
  */
 export class NodeReplSession {
   private manager: NodeReplKernelManager | null = null;
+  private readonly policy = NodeReplSecurityPolicy.default();
   private disposed = false;
 
-  constructor(
-    private readonly config: Config,
-    private readonly policy: NodeReplSecurityPolicy = NodeReplSecurityPolicy.default(),
-    private readonly managerOptions: Partial<
-      Pick<KernelManagerOptions, 'capabilities' | 'initialModuleRoots'>
-    > = {},
-  ) {}
+  constructor(private readonly config: Config) {}
 
   getManager(): NodeReplKernelManager {
     if (this.disposed) {
@@ -67,7 +61,6 @@ export class NodeReplSession {
         ),
         policy: this.policy,
         readableRoots: [...this.config.getWorkspaceContext().getDirectories()],
-        ...this.managerOptions,
       });
     }
     return this.manager;
@@ -138,7 +131,6 @@ class NodeReplInvocation extends BaseToolInvocation<
       outcome = await this.session.getManager().exec({
         code: this.params.code,
         timeoutMs: this.params.timeout_ms ?? DEFAULT_TIMEOUT_MS,
-        title: this.params.title,
         signal,
       });
     } catch (e) {
@@ -162,17 +154,22 @@ export class NodeReplTool extends BaseDeclarativeTool<
       NodeReplTool.Name,
       ToolDisplayNames.NODE_REPL,
       'Execute JavaScript in a task-persistent Node.js REPL (30 second ' +
-        'default timeout) with top-level await. Top-level bindings persist ' +
-        'across calls as real references; a failed cell keeps bindings ' +
-        'committed before the failure. The final expression, console output, ' +
-        'and nodeRepl.write(value) are returned. Use nodeRepl.emitImage(image) ' +
-        'for PNG/JPEG/WebP bytes or an approved data:/file: URL, ' +
-        'nodeRepl.setResponseMeta(meta) for current-call ' +
-        'metadata, and nodeRepl.getHeapStatus() for a read-only memory ' +
-        'snapshot. When rerunning code, reuse an existing binding, assign it, ' +
-        'choose a new name, use var or a block scope, or call node_repl_reset. ' +
+        'default timeout) with top-level await. Use nodeRepl.cwd, ' +
+        'nodeRepl.homeDir, and nodeRepl.tmpDir to inspect the task paths. ' +
+        'Use nodeRepl.write(value) for final text without an added newline: ' +
+        'strings are unchanged and other values use safe console-style ' +
+        'formatting. console.log() remains useful for debugging or multiple ' +
+        'values. Use await nodeRepl.emitImage(image) for PNG/JPEG/WebP bytes ' +
+        'or an approved data:/file: URL, and nodeRepl.getHeapStatus() for a ' +
+        'read-only memory snapshot. Ordinary expression values are silent. ' +
+        'Top-level bindings persist across calls as real references; a failed ' +
+        'cell keeps bindings committed before the failure. Reuse existing ' +
+        'bindings when possible; for rerunnable names, prefer top-level var, ' +
+        'or choose a new name, use a short block scope, or call ' +
+        'node_repl_reset. User-exported declarations stay local to their cell. ' +
         'A timeout or cancellation replaces the kernel and loses its bindings. ' +
-        'Use dynamic import() for local .js/.mjs modules and packages from ' +
+        'Top-level static imports are unsupported; use await import() for ' +
+        'local .js/.mjs modules and packages from ' +
         'node_repl_add_node_module_dir roots. The untrusted runtime exposes ' +
         'no process or environment variables, require, Node builtins, worker ' +
         'threads, shell, or nested Qwen tool access.',
@@ -188,7 +185,6 @@ export class NodeReplTool extends BaseDeclarativeTool<
           timeout_ms: {
             type: 'integer',
             minimum: 1,
-            maximum: 2 ** 31 - 1,
             description: `Execution timeout in milliseconds (default ${DEFAULT_TIMEOUT_MS}).`,
           },
           title: {
@@ -221,12 +217,8 @@ export class NodeReplTool extends BaseDeclarativeTool<
       return 'Missing or empty "code".';
     }
     if (params.timeout_ms !== undefined) {
-      if (
-        !Number.isInteger(params.timeout_ms) ||
-        params.timeout_ms <= 0 ||
-        params.timeout_ms > 2 ** 31 - 1
-      ) {
-        return '"timeout_ms" must be an integer from 1 through 2147483647.';
+      if (!Number.isSafeInteger(params.timeout_ms) || params.timeout_ms <= 0) {
+        return '"timeout_ms" must be a positive safe integer.';
       }
     }
     if (params.title !== undefined) {
@@ -323,8 +315,10 @@ export class NodeReplResetTool extends BaseDeclarativeTool<
       NodeReplResetTool.Name,
       ToolDisplayNames.NODE_REPL_RESET,
       'Clears all state in the persistent node_repl session (top-level ' +
-        'bindings and loaded modules) without ending the session. Approved ' +
-        'module roots registered via node_repl_add_node_module_dir are kept.',
+        'bindings and loaded modules) without ending the task. Use this when ' +
+        'reusing an existing binding, top-level var, a short block, or a fresh ' +
+        'name cannot recover from conflicting declarations. Approved module ' +
+        'roots registered via node_repl_add_node_module_dir are kept.',
       Kind.Execute,
       {
         type: 'object',
@@ -390,15 +384,14 @@ class NodeReplAddNodeModuleDirInvocation extends BaseToolInvocation<
       );
     }
     try {
-      const resolved = await this.session
+      const registration = await this.session
         .getManager()
         .addModuleRoot(this.params.path, this.approvedCanonicalPath);
       return {
-        llmContent:
-          `Module root registered: ${resolved}. Packages under it can now be ` +
-          'loaded with dynamic import() in node_repl (as untrusted code). ' +
-          'The registration survives node_repl_reset.',
-        returnDisplay: `Added module root: ${resolved}`,
+        llmContent: String(registration.added),
+        returnDisplay: registration.added
+          ? `Added module root: ${registration.path}`
+          : `Module root already registered: ${registration.path}`,
       };
     } catch (e) {
       return errorResult(
@@ -424,13 +417,16 @@ export class NodeReplAddNodeModuleDirTool extends BaseDeclarativeTool<
       'Registers an absolute path to a node_modules directory so packages ' +
         'inside it can be imported (untrusted) with dynamic import() in ' +
         'node_repl. Registration persists across node_repl_reset for the ' +
-        'rest of the session. It never grants elevated (trusted) execution.',
+        'rest of the task. Returns true when newly added and false when the ' +
+        'same canonical root was already registered. It never grants elevated ' +
+        '(trusted) execution.',
       Kind.Execute,
       {
         type: 'object',
         properties: {
           path: {
             type: 'string',
+            minLength: 1,
             description:
               'Absolute path to a node_modules directory to allow imports from.',
           },

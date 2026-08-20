@@ -13,7 +13,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { URL, fileURLToPath } from 'node:url';
-import { types as utilTypes } from 'node:util';
+import { inspect, types as utilTypes } from 'node:util';
 import {
   setTimeout as hostSetTimeout,
   setInterval as hostSetInterval,
@@ -31,13 +31,11 @@ const MAX_TEXT_EVENT_CHARS = 8 * 1024 * 1024;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
 const MAX_ERROR_CHARS = 256 * 1024;
-const MAX_RESPONSE_META_CHARS = 512 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_PERCENT_ENCODED_IMAGE_CHARS = MAX_IMAGE_BYTES * 3;
 const MAX_RAW_IMAGES = 64;
 const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
-const MAX_REQUEST_META_ENTRIES = 1024;
 const MAX_PENDING_CAPABILITIES = 4096;
 const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
@@ -59,14 +57,12 @@ let generation = 0;
 let capabilityToken = '';
 let untrustedContext = null;
 let trustedContext = null;
-let untrustedControls = null;
 let loader = null;
 let bindings = new Map();
 let activeExec = null;
 let operationChain = Promise.resolve();
 let shuttingDown = false;
 
-const requestMetadata = new Map();
 const pendingCapabilities = new Map();
 const timers = new Map();
 let nextTimerId = 1;
@@ -92,14 +88,6 @@ function capText(value, limit = MAX_TEXT_EVENT_CHARS) {
 function currentExecId() {
   const store = asyncContext.getStore();
   return store && typeof store.execId === 'string' ? store.execId : null;
-}
-
-function rememberRequestMeta(execId, metadata) {
-  requestMetadata.set(execId, { ...metadata });
-  while (requestMetadata.size > MAX_REQUEST_META_ENTRIES) {
-    const oldest = requestMetadata.keys().next().value;
-    requestMetadata.delete(oldest);
-  }
 }
 
 function describeThrown(error) {
@@ -136,6 +124,46 @@ function describeThrown(error) {
       MAX_ERROR_CHARS,
     ),
   };
+}
+
+function formatValue(value) {
+  if (typeof value === 'string') return value;
+  if (utilTypes.isNativeError(value)) {
+    let name = 'Error';
+    let message = '';
+    try {
+      if (typeof value.name === 'string' && value.name) name = value.name;
+    } catch {
+      // Keep the default name.
+    }
+    try {
+      message = typeof value.message === 'string' ? value.message : '';
+    } catch {
+      message = '[unreadable]';
+    }
+    return `${name}: ${message}`;
+  }
+  try {
+    return inspect(value, {
+      colors: false,
+      compact: true,
+      breakLength: Infinity,
+      customInspect: false,
+      getters: false,
+    });
+  } catch (error) {
+    return `[Uninspectable: ${describeThrown(error).message}]`;
+  }
+}
+
+function formatArgs(args) {
+  if (!Array.isArray(args)) return formatValue(args);
+  let formatted = '';
+  for (let index = 0; index < args.length; index++) {
+    if (index > 0) formatted += ' ';
+    formatted += formatValue(args[index]);
+  }
+  return formatted;
 }
 
 function emitText(kind, level, text) {
@@ -264,9 +292,19 @@ function resolveImagePayload(payload) {
         throw new Error(`image exceeds ${MAX_IMAGE_BYTES} bytes`);
       }
       declaredMime = match[1].toLowerCase();
-      buffer = match[2]
-        ? Buffer.from(match[3], 'base64')
-        : Buffer.from(decodeURIComponent(match[3]), 'utf8');
+      if (match[2]) {
+        const encoded = match[3];
+        if (
+          encoded.length === 0 ||
+          encoded.length % 4 !== 0 ||
+          !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+        ) {
+          throw new Error('malformed base64 data URL');
+        }
+        buffer = Buffer.from(encoded, 'base64');
+      } else {
+        buffer = Buffer.from(decodeURIComponent(match[3]), 'utf8');
+      }
     } else if (value.startsWith('file:')) {
       let filePath;
       try {
@@ -409,18 +447,15 @@ function heapStatus() {
 const BOOTSTRAP_SOURCE = String.raw`
 'use strict';
 
-const intrinsicObject = Object;
 const intrinsicArrayBuffer = ArrayBuffer;
 const intrinsicError = Error;
 const intrinsicUint8Array = Uint8Array;
 const intrinsicWeakSet = WeakSet;
 const intrinsicString = String;
 const intrinsicNumber = Number;
-const intrinsicObjectPrototype = Object.prototype;
 const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
 const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
@@ -454,83 +489,13 @@ function deepFreeze(value, seen) {
   return value;
 }
 
-function serializeOne(value) {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'bigint') return intrinsicString(value) + 'n';
-  if (typeof value === 'function') {
-    let name = 'anonymous';
-    try {
-      if (typeof value.name === 'string' && value.name) name = value.name;
-    } catch {}
-    return '[function ' + name + ']';
-  }
-  if (typeof value === 'symbol') return intrinsicString(value);
-  if (value === undefined) return 'undefined';
-  try {
-    if (value instanceof intrinsicError) {
-      let name = 'Error';
-      let message = '';
-      try { if (typeof value.name === 'string' && value.name) name = value.name; } catch {}
-      try { message = intrinsicString(value.message); } catch { message = '[unreadable]'; }
-      return name + ': ' + message;
-    }
-  } catch {}
-  const seen = new intrinsicWeakSet();
-  try {
-    const json = intrinsicJSONStringify(value, function (_key, item) {
-      if (typeof item === 'bigint') return intrinsicString(item) + 'n';
-      if (typeof item === 'function') {
-        return '[function ' + (item.name || 'anonymous') + ']';
-      }
-      if (typeof item === 'symbol') return intrinsicString(item);
-      if (item instanceof intrinsicError) {
-        return { name: item.name, message: item.message };
-      }
-      if (item && typeof item === 'object') {
-        if (intrinsicReflectApply(intrinsicWeakSetHas, seen, [item])) return '[Circular]';
-        intrinsicReflectApply(intrinsicWeakSetAdd, seen, [item]);
-      }
-      return item;
-    });
-    return json === undefined ? intrinsicString(value) : json;
-  } catch (error) {
-    let message = 'unknown serialization error';
-    try { message = intrinsicString(error && error.message ? error.message : error); } catch {}
-    return '[Unserializable: ' + message + ']';
-  }
-}
-
-function serializeArgs(args) {
-  let serialized = '';
-  for (let index = 0; index < args.length; index++) {
-    if (index > 0) serialized += ' ';
-    serialized += serializeOne(args[index]);
-  }
-  return serialized;
-}
-
-function parseFrozenRecord(json) {
-  const value = intrinsicJSONParse(json);
-  if (!value || typeof value !== 'object' || intrinsicArrayBufferIsView(value)) {
-    throw new intrinsicError('host bridge returned invalid metadata');
-  }
-  return deepFreeze(value);
-}
-
 const runtime = {
   cwd: intrinsicString(metadata.cwd),
   homeDir: intrinsicString(metadata.homeDir),
   tmpDir: intrinsicString(metadata.tmpDir),
-  get requestMeta() {
-    try {
-      return parseFrozenRecord(bridge.requestMeta());
-    } catch (error) {
-      throw bridgeError(error);
-    }
-  },
   write(value) {
     try {
-      bridge.emitText('write', null, serializeOne(value));
+      bridge.emitText('write', null, bridge.formatValue(value));
     } catch (error) {
       throw bridgeError(error);
     }
@@ -561,20 +526,6 @@ const runtime = {
     }
     try {
       await bridge.emitImage(payload);
-    } catch (error) {
-      throw bridgeError(error);
-    }
-  },
-  setResponseMeta(value) {
-    if (!value || typeof value !== 'object' || intrinsicArrayBufferIsView(value)) {
-      throw new TypeError('response metadata must be a plain object');
-    }
-    const prototype = intrinsicObjectGetPrototypeOf(value);
-    if (prototype !== intrinsicObjectPrototype && prototype !== null) {
-      throw new TypeError('response metadata must be a plain object');
-    }
-    try {
-      bridge.setResponseMeta(intrinsicJSONStringify(value));
     } catch (error) {
       throw bridgeError(error);
     }
@@ -624,7 +575,7 @@ const consoleObject = {};
 for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
   consoleObject[level] = function (...args) {
     try {
-      bridge.emitText('console', level, serializeArgs(args));
+      bridge.emitText('console', level, bridge.formatArgs(args));
     } catch (error) {
       throw bridgeError(error);
     }
@@ -685,7 +636,6 @@ if (privileged) {
   });
 }
 
-return intrinsicObjectFreeze({ serialize: serializeOne });
 `;
 
 function createContext(name, privileged) {
@@ -695,6 +645,8 @@ function createContext(name, privileged) {
   });
   const bridge = Object.freeze({
     emitText,
+    formatValue,
+    formatArgs,
     emitImage(payload) {
       const execId = currentExecId();
       if (!activeExec || activeExec.execId !== execId) return;
@@ -710,29 +662,6 @@ function createContext(name, privileged) {
       activeExec.imageChars += image.data.length;
       send({ type: 'image', execId, ...image });
     },
-    setResponseMeta(json) {
-      const execId = currentExecId();
-      if (!activeExec || activeExec.execId !== execId) return;
-      if (typeof json !== 'string' || json.length > MAX_RESPONSE_META_CHARS) {
-        throw new Error('response metadata is too large');
-      }
-      const value = JSON.parse(json);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('response metadata must be an object');
-      }
-      const merged = Object.assign(
-        Object.create(null),
-        activeExec.responseMeta,
-        value,
-      );
-      if (JSON.stringify(merged).length > MAX_RESPONSE_META_CHARS) {
-        throw new Error('response metadata is too large');
-      }
-      activeExec.responseMeta = merged;
-    },
-    requestMeta() {
-      return JSON.stringify(requestMetadata.get(currentExecId()) ?? {});
-    },
     heapStatus() {
       return JSON.stringify(heapStatus());
     },
@@ -747,7 +676,7 @@ function createContext(name, privileged) {
     ['bridge', 'metadata', 'privileged'],
     { parsingContext: context, filename: '<node-repl-bootstrap>' },
   );
-  const controls = bootstrap(
+  bootstrap(
     bridge,
     {
       cwd: config.cwd,
@@ -761,7 +690,7 @@ function createContext(name, privileged) {
     },
     privileged,
   );
-  return { context, controls };
+  return context;
 }
 
 function initialize(message) {
@@ -785,11 +714,8 @@ function initialize(message) {
     trustedPackages: [...message.trustedPackages],
     readableRoots: [...message.readableRoots],
   };
-  const untrusted = createContext('qwen-node-repl-untrusted', false);
-  const trusted = createContext('qwen-node-repl-trusted', true);
-  untrustedContext = untrusted.context;
-  trustedContext = trusted.context;
-  untrustedControls = untrusted.controls;
+  untrustedContext = createContext('qwen-node-repl-untrusted', false);
+  trustedContext = createContext('qwen-node-repl-trusted', true);
   loader = createModuleLoader({
     untrustedContext,
     trustedContext,
@@ -814,17 +740,40 @@ function sortedBindingNames() {
   return [...bindings.keys()].sort();
 }
 
-function sameNames(left, right) {
-  if (!Array.isArray(left) || left.length !== right.length) return false;
-  return left.every((name, index) => name === right[index]);
+function sortedBindingDescriptors() {
+  return [...bindings]
+    .map(([name, binding]) => ({ name, kind: binding.kind }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function readPartialSnapshot(module, exportName) {
+function sameBindings(left, right) {
+  if (!Array.isArray(left) || left.length !== right.length) return false;
+  return left.every(
+    (binding, index) =>
+      binding &&
+      binding.name === right[index].name &&
+      binding.kind === right[index].kind,
+  );
+}
+
+function bindingKinds(bindingExports) {
+  return new Map(
+    bindingExports.map(({ bindingName, bindingKind }) => [
+      bindingName,
+      bindingKind,
+    ]),
+  );
+}
+
+function readPartialSnapshot(module, exportName, kinds) {
   try {
     const snapshot = module.namespace[exportName];
     if (!snapshot || typeof snapshot !== 'object') return null;
     const next = new Map();
-    for (const name of Object.keys(snapshot)) next.set(name, snapshot[name]);
+    for (const name of Object.keys(snapshot)) {
+      const kind = kinds.get(name);
+      if (kind) next.set(name, { value: snapshot[name], kind });
+    }
     return next;
   } catch {
     return null;
@@ -833,8 +782,11 @@ function readPartialSnapshot(module, exportName) {
 
 function readSuccessfulBindings(module, bindingExports) {
   const next = new Map();
-  for (const { bindingName, exportName } of bindingExports) {
-    next.set(bindingName, module.namespace[exportName]);
+  for (const { bindingName, bindingKind, exportName } of bindingExports) {
+    next.set(bindingName, {
+      value: module.namespace[exportName],
+      kind: bindingKind,
+    });
   }
   return next;
 }
@@ -842,14 +794,14 @@ function readSuccessfulBindings(module, bindingExports) {
 async function handleExec(message) {
   if (!config || !loader) throw new Error('kernel is not initialized');
   if (activeExec) throw new Error('kernel received overlapping executions');
-  const expected = sortedBindingNames();
-  if (!sameNames(message.previousBindingNames, expected)) {
+  const expected = sortedBindingDescriptors();
+  if (!sameBindings(message.previousBindings, expected)) {
     throw new Error('host and kernel binding snapshots are out of sync');
   }
+  const nextBindingKinds = bindingKinds(message.bindingExports);
 
   activeExec = {
     execId: message.execId,
-    responseMeta: Object.create(null),
     rawTextBytes: 0,
     textEventCount: 0,
     rawTextTruncated: false,
@@ -857,7 +809,6 @@ async function handleExec(message) {
     imageChars: 0,
     imagesDropped: 0,
   };
-  rememberRequestMeta(message.execId, message.requestMeta ?? {});
   let cellModule = null;
   try {
     await asyncContext.run({ execId: message.execId }, async () => {
@@ -869,10 +820,6 @@ async function handleExec(message) {
       cellModule = cell.module;
       await cell.evaluate();
       bindings = readSuccessfulBindings(cell.module, message.bindingExports);
-      if (message.resultExportName) {
-        const result = cell.module.namespace[message.resultExportName];
-        emitText('result', null, untrustedControls.serialize(result));
-      }
     });
     send({
       type: 'execResult',
@@ -881,13 +828,13 @@ async function handleExec(message) {
       bindingNames: sortedBindingNames(),
       rawTextTruncated: activeExec.rawTextTruncated,
       imagesDropped: activeExec.imagesDropped,
-      responseMeta: activeExec.responseMeta,
     });
   } catch (error) {
     if (cellModule) {
       const partial = readPartialSnapshot(
         cellModule,
         message.snapshotExportName,
+        nextBindingKinds,
       );
       if (partial) bindings = partial;
     }
@@ -902,7 +849,6 @@ async function handleExec(message) {
       errorName: described.name,
       errorMessage: described.message,
       ...(described.stack ? { errorStack: described.stack } : {}),
-      responseMeta: activeExec.responseMeta,
     });
   } finally {
     rejectCapabilitiesForExec(

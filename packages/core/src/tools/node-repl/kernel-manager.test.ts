@@ -38,10 +38,7 @@ function texts(outcome: NodeReplExecOutcome): string[] {
 
 function makeManager(
   overrides: Partial<
-    Pick<
-      KernelManagerOptions,
-      'initialModuleRoots' | 'policy' | 'capabilities' | 'readableRoots'
-    >
+    Pick<KernelManagerOptions, 'policy' | 'capabilities' | 'readableRoots'>
   > = {},
 ): NodeReplKernelManager {
   return new NodeReplKernelManager({
@@ -91,12 +88,13 @@ afterEach(() => {
 
 describe('NodeReplKernelManager', () => {
   it(
-    'persists declarations and captures the final expression',
+    'persists declarations without returning ordinary expressions',
     async () => {
       expect((await run('const answer = 41;')).status).toBe('ok');
       const result = await run('answer + 1;');
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['42']);
+      expect(texts(result)).toEqual([]);
+      expect(texts(await run('nodeRepl.write(answer + 1);'))).toEqual(['42']);
       expect(manager.getBindingNames()).toEqual(['answer']);
     },
     TEST_TIMEOUT,
@@ -109,7 +107,7 @@ describe('NodeReplKernelManager', () => {
         'const box = { count: 0 }; const same = box; const next = () => ++box.count;',
       );
       const result = await run(
-        'const first = next(); `${first}|${next()}|${box === same}`;',
+        'const first = next(); nodeRepl.write(`${first}|${next()}|${box === same}`);',
       );
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual(['1|2|true']);
@@ -118,10 +116,10 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps an earlier closure when a later cell shadows its binding',
+    'keeps an earlier closure when a later cell assigns its carried binding',
     async () => {
-      await run('const x = 1; const readX = () => x;');
-      const result = await run('const x = 2; `${readX()}|${x}`;');
+      await run('let x = 1; const readX = () => x;');
+      const result = await run('x = 2; nodeRepl.write(`${readX()}|${x}`);');
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual(['1|2']);
     },
@@ -132,8 +130,8 @@ describe('NodeReplKernelManager', () => {
     'commits direct assignments to carried bindings',
     async () => {
       await run('let count = 1;');
-      expect(texts(await run('count += 2;'))).toEqual(['3']);
-      expect(texts(await run('count;'))).toEqual(['3']);
+      expect(texts(await run('nodeRepl.write(count += 2);'))).toEqual(['3']);
+      expect(texts(await run('nodeRepl.write(count);'))).toEqual(['3']);
     },
     TEST_TIMEOUT,
   );
@@ -149,15 +147,41 @@ describe('NodeReplKernelManager', () => {
         ].join('\n'),
       );
       expect(first.status).toBe('ok');
-      expect(texts(await run('new Box(double(awaited)).value;'))).toEqual([
-        '14',
-      ]);
+      expect(
+        texts(await run('nodeRepl.write(new Box(double(awaited)).value);')),
+      ).toEqual(['14']);
     },
     TEST_TIMEOUT,
   );
 
   it(
-    'persists var, static imports, and Unicode bindings',
+    'keeps function and class bindings mutable but non-redeclarable',
+    async () => {
+      await run(
+        'function mutableFunction() { return 1; } class MutableClass { static value() { return 1; } }',
+      );
+      expect(
+        texts(
+          await run(
+            'mutableFunction = () => 2; MutableClass = class { static value() { return 2; } }; nodeRepl.write(`${mutableFunction()}|${MutableClass.value()}`);',
+          ),
+        ),
+      ).toEqual(['2|2']);
+      expect((await run('function mutableFunction() {}')).status).toBe('error');
+      expect((await run('class MutableClass {}')).status).toBe('error');
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write(`${mutableFunction()}|${MutableClass.value()}`);',
+          ),
+        ),
+      ).toEqual(['2|2']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'persists var, dynamic imports, and Unicode bindings',
     async () => {
       fs.writeFileSync(
         path.join(workDir, 'static-helper.mjs'),
@@ -165,7 +189,7 @@ describe('NodeReplKernelManager', () => {
       );
       const first = await run(
         [
-          'import { seed as importedSeed } from "./static-helper.mjs";',
+          'const { seed: importedSeed } = await import("./static-helper.mjs");',
           'var mutable = importedSeed;',
           'if (true) { var fromBlock = 8; }',
           'const 变量 = "你好";',
@@ -175,14 +199,133 @@ describe('NodeReplKernelManager', () => {
       expect(
         texts(
           await run(
-            'mutable += 1; `${mutable}|${importedSeed}|${fromBlock}|${变量}`;',
+            'mutable += 1; nodeRepl.write(`${mutable}|${importedSeed}|${变量}|${typeof fromBlock}`);',
           ),
         ),
-      ).toEqual(['5|4|8|你好']);
+      ).toEqual(['5|4|你好|undefined']);
       expect((await run('var mutable = 9;')).status).toBe('ok');
-      expect(texts(await run('mutable;'))).toEqual(['9']);
+      expect(texts(await run('nodeRepl.write(mutable);'))).toEqual(['9']);
       expect((await run(String.raw`const \u0061 = 1;`)).status).toBe('ok');
-      expect(texts(await run('const a = 2; a;'))).toEqual(['2']);
+      expect((await run('const a = 2;')).status).toBe('error');
+      expect(texts(await run('nodeRepl.write(a);'))).toEqual(['1']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps control-flow var declarations local to their cell',
+    async () => {
+      expect(
+        texts(
+          await run(
+            'if (true) { var nestedVar = 8; } nodeRepl.write(nestedVar);',
+          ),
+        ),
+      ).toEqual(['8']);
+      expect(texts(await run('nodeRepl.write(typeof nestedVar);'))).toEqual([
+        'undefined',
+      ]);
+
+      await run('for (var loopVar = 0; loopVar < 1; loopVar++) {}');
+      expect(texts(await run('nodeRepl.write(loopVar);'))).toEqual(['1']);
+
+      await run('for (var loopKey in { key: true }) {}');
+      expect(texts(await run('nodeRepl.write(loopKey);'))).toEqual(['key']);
+
+      await run('for (; false;) var bareLoopBody = 1;');
+      expect(texts(await run('nodeRepl.write(typeof bareLoopBody);'))).toEqual([
+        'undefined',
+      ]);
+
+      await run('for (const value of []) var bareForOfBody = value;');
+      expect(texts(await run('nodeRepl.write(typeof bareForOfBody);'))).toEqual(
+        ['undefined'],
+      );
+
+      const failed = await run(
+        'if (true) { var nestedBeforeThrow = 1; } throw new Error("boom");',
+      );
+      expect(failed.status).toBe('error');
+      expect(
+        texts(await run('nodeRepl.write(typeof nestedBeforeThrow);')),
+      ).toEqual(['undefined']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves const, let, and var declaration semantics across cells',
+    async () => {
+      await run('const fixed = 1; let changeable = 1; var rerunnable = 1;');
+
+      const fixedAssignment = await run('fixed = 2;');
+      expect(fixedAssignment.status).toBe('error');
+      expect(fixedAssignment.error?.message).toContain(
+        'Assignment to constant variable',
+      );
+      expect((await run('const fixed = 2;')).status).toBe('error');
+      expect((await run('var fixed = 2;')).status).toBe('error');
+
+      expect(
+        texts(await run('changeable = 2; nodeRepl.write(changeable);')),
+      ).toEqual(['2']);
+      expect((await run('let changeable = 3;')).status).toBe('error');
+
+      expect(
+        texts(await run('var rerunnable; nodeRepl.write(rerunnable);')),
+      ).toEqual(['1']);
+      expect((await run('var rerunnable = 2;')).status).toBe('ok');
+      expect(
+        texts(
+          await run('nodeRepl.write(`${fixed}|${changeable}|${rerunnable}`);'),
+        ),
+      ).toEqual(['1|2|2']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps exported declarations local to their cell',
+    async () => {
+      expect(
+        texts(
+          await run(
+            'export const exportedProbe = 7; nodeRepl.write(exportedProbe);',
+          ),
+        ),
+      ).toEqual(['7']);
+      expect(texts(await run('nodeRepl.write(typeof exportedProbe);'))).toEqual(
+        ['undefined'],
+      );
+      expect((await run('export default 7;')).status).toBe('ok');
+
+      await run('const exportedCollision = 3;');
+      const collision = await run(
+        'export const exportedCollision = 7; nodeRepl.write(exportedCollision);',
+      );
+      expect(collision.status).toBe('error');
+      expect(texts(await run('nodeRepl.write(exportedCollision);'))).toEqual([
+        '3',
+      ]);
+
+      await run('var exportedVarCollision = 4;');
+      expect((await run('export var exportedVarCollision = 8;')).status).toBe(
+        'error',
+      );
+      expect(texts(await run('nodeRepl.write(exportedVarCollision);'))).toEqual(
+        ['4'],
+      );
+
+      expect(
+        texts(
+          await run(
+            'export var cellLocalExport = 1; var cellLocalExport = 2; nodeRepl.write(cellLocalExport);',
+          ),
+        ),
+      ).toEqual(['2']);
+      expect(
+        texts(await run('nodeRepl.write(typeof cellLocalExport);')),
+      ).toEqual(['undefined']);
     },
     TEST_TIMEOUT,
   );
@@ -197,7 +340,9 @@ describe('NodeReplKernelManager', () => {
       expect(failed.status).toBe('error');
       expect(failed.error?.message).toContain('boom');
       expect(
-        texts(await run('`${existing}|${kept}|${typeof ghost}`;')),
+        texts(
+          await run('nodeRepl.write(`${existing}|${kept}|${typeof ghost}`);'),
+        ),
       ).toEqual(['old|safe|undefined']);
     },
     TEST_TIMEOUT,
@@ -209,17 +354,17 @@ describe('NodeReplKernelManager', () => {
       await run('const anchor = { value: 9 };');
       expect((await run('const = ;')).status).toBe('error');
       expect(
-        (await run('import "./missing.mjs"; const leaked = 1;')).status,
+        (await run('await import("./missing.mjs"); const leaked = 1;')).status,
       ).toBe('error');
-      expect(texts(await run('`${anchor.value}|${typeof leaked}`;'))).toEqual([
-        '9|undefined',
-      ]);
+      expect(
+        texts(await run('nodeRepl.write(`${anchor.value}|${typeof leaked}`);')),
+      ).toEqual(['9|undefined']);
     },
     TEST_TIMEOUT,
   );
 
   it(
-    'preserves ordered console, write, and result events',
+    'preserves ordered explicit outputs and ignores the final expression',
     async () => {
       const result = await run(
         'console.log("one"); nodeRepl.write("two"); console.warn("three"); "four";',
@@ -229,7 +374,6 @@ describe('NodeReplKernelManager', () => {
         { type: 'text', kind: 'console', level: 'log', text: 'one' },
         { type: 'text', kind: 'write', text: 'two' },
         { type: 'text', kind: 'console', level: 'warn', text: 'three' },
-        { type: 'text', kind: 'result', text: 'four' },
       ]);
     },
     TEST_TIMEOUT,
@@ -256,38 +400,45 @@ describe('NodeReplKernelManager', () => {
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual([
         '1n',
-        '{"self":"[Circular]"}',
-        '[function named]',
+        '<ref *1> { self: [Circular *1] }',
+        '[Function: named]',
         'Symbol(token)',
         'Error: expected',
-        '[function anonymous]',
-        '[Unserializable: opaque]',
+        '[Function (anonymous)]',
+        '{}',
       ]);
     },
     TEST_TIMEOUT,
   );
 
   it(
-    'exposes frozen request metadata only for its owning execution',
+    'formats values without invoking getters or custom inspection hooks',
     async () => {
-      const first = await manager.exec({
-        code: 'nodeRepl.write(JSON.stringify({ meta: nodeRepl.requestMeta, frozen: Object.isFrozen(nodeRepl.requestMeta) })); const done = true;',
-        timeoutMs: EXEC_TIMEOUT,
-        title: 'metadata probe',
-      });
-      const payload = JSON.parse(texts(first)[0]!) as {
-        meta: Record<string, unknown>;
-        frozen: boolean;
-      };
-      expect(payload.frozen).toBe(true);
-      expect(payload.meta['title']).toBe('metadata probe');
-      expect(payload.meta['generation']).toBe(first.stats.generation);
-      expect(payload.meta['execId']).toEqual(expect.any(String));
-
-      const second = await run(
-        'nodeRepl.write(String("title" in nodeRepl.requestMeta)); const doneAgain = true;',
+      const result = await run(
+        [
+          'let getterCalled = false;',
+          'let customInspectCalled = false;',
+          'const inspected = {};',
+          'Object.defineProperty(inspected, "value", { enumerable: true, get() { getterCalled = true; return 1; } });',
+          'Object.defineProperty(inspected, Symbol.for("nodejs.util.inspect.custom"), { value() { customInspectCalled = true; return "escaped"; } });',
+          'nodeRepl.write(inspected);',
+          'nodeRepl.write(`${getterCalled}|${customInspectCalled}`);',
+        ].join('\n'),
       );
-      expect(texts(second)).toEqual(['false']);
+      expect(result.status).toBe('ok');
+      expect(texts(result).at(-1)).toBe('false|false');
+      expect(texts(result)[0]).not.toBe('escaped');
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'does not fabricate request or response metadata APIs',
+    async () => {
+      const result = await run(
+        'nodeRepl.write(`${typeof nodeRepl.requestMeta}|${typeof nodeRepl.setResponseMeta}`);',
+      );
+      expect(texts(result)).toEqual(['undefined|undefined']);
     },
     TEST_TIMEOUT,
   );
@@ -305,15 +456,13 @@ describe('NodeReplKernelManager', () => {
           '};',
           'JSON.parse = () => { throw new Error("poisoned parse"); };',
           'Number = () => { throw new Error("poisoned number"); };',
-          'const metaAfterPoison = nodeRepl.requestMeta;',
           'const heapAfterPoison = nodeRepl.getHeapStatus();',
-          '`${metaAfterPoison.title}|${heapAfterPoison.pid > 0}|${objectKeysProbe}`;',
+          'nodeRepl.write(`${heapAfterPoison.pid > 0}|${objectKeysProbe}`);',
         ].join('\n'),
         timeoutMs: EXEC_TIMEOUT,
-        title: 'intrinsic probe',
       });
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['intrinsic probe|true|not-called']);
+      expect(texts(result)).toEqual(['true|not-called']);
     },
     TEST_TIMEOUT,
   );
@@ -337,12 +486,12 @@ describe('NodeReplKernelManager', () => {
           'try { await import("node:fs"); } catch (error) {',
           '  try { error.constructor.constructor("return process")(); } catch (inner) { importErrorProbe = inner.name; }',
           '}',
-          '[typeof process, typeof require, typeof module, typeof Buffer, typeof nodeRepl.callHost, functionProbe, constructorProbe, wasmProbe, imageErrorProbe, importErrorProbe].join(",");',
+          'nodeRepl.write([typeof globalThis.qwenSession, typeof process, typeof require, typeof module, typeof Buffer, typeof nodeRepl.callHost, functionProbe, constructorProbe, wasmProbe, imageErrorProbe, importErrorProbe].join(","));',
         ].join('\n'),
       );
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual([
-        'undefined,undefined,undefined,undefined,undefined,EvalError,EvalError,CompileError,EvalError,EvalError',
+        'undefined,undefined,undefined,undefined,undefined,undefined,EvalError,EvalError,CompileError,EvalError,EvalError',
       ]);
     },
     TEST_TIMEOUT,
@@ -355,7 +504,7 @@ describe('NodeReplKernelManager', () => {
       process.env['NODE_OPTIONS'] =
         '--require=/definitely/missing/qwen-node-repl-preload.cjs';
       try {
-        const result = await run('21 * 2;');
+        const result = await run('nodeRepl.write(21 * 2);');
         expect(result.status).toBe('ok');
         expect(texts(result)).toEqual(['42']);
       } finally {
@@ -383,7 +532,7 @@ describe('NodeReplKernelManager', () => {
           '} });',
           'setTimeout(timerCallback, 0);',
           'await new Promise((resolve) => setTimeout(resolve, 50));',
-          '`${timerApplyProbe}|${timerThenProbe}`;',
+          'nodeRepl.write(`${timerApplyProbe}|${timerThenProbe}`);',
         ].join('\n'),
       );
       expect(result.status).toBe('ok');
@@ -413,7 +562,7 @@ describe('NodeReplKernelManager', () => {
       expect(
         texts(
           await run(
-            'const helper = await import("./helper.mjs"); `${helper.value}/${helper.default}`;',
+            'const helper = await import("./helper.mjs"); nodeRepl.write(`${helper.value}/${helper.default}`);',
           ),
         ),
       ).toEqual(['123/dflt']);
@@ -455,18 +604,21 @@ describe('NodeReplKernelManager', () => {
       );
       fs.writeFileSync(path.join(cjsDir, 'index.js'), 'module.exports = 3;');
 
-      await manager.addModuleRoot(root);
+      await expect(manager.addModuleRoot(root)).resolves.toEqual({
+        path: fs.realpathSync(root),
+        added: true,
+      });
       expect(
         texts(
           await run(
-            'const demo = await import("demo-esm"); demo.multiply(6, 7);',
+            'const demo = await import("demo-esm"); nodeRepl.write(demo.multiply(6, 7));',
           ),
         ),
       ).toEqual(['42']);
       expect(
         texts(
           await run(
-            'const demoAgain = await import("demo-esm"); `${demo.bump()}|${demoAgain.bump()}`;',
+            'const demoAgain = await import("demo-esm"); nodeRepl.write(`${demo.bump()}|${demoAgain.bump()}`);',
           ),
         ),
       ).toEqual(['1|1']);
@@ -486,7 +638,7 @@ describe('NodeReplKernelManager', () => {
       expect(
         texts(
           await run(
-            'const original = await import("original-fixture"); original.value;',
+            'const original = await import("original-fixture"); nodeRepl.write(original.value);',
           ),
         ),
       ).toEqual(['1']);
@@ -640,6 +792,19 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
+    'rejects malformed base64 image data URLs',
+    async () => {
+      const result = await run(
+        `await nodeRepl.emitImage("data:image/png;base64,${PNG_BASE64}!!!!");`,
+      );
+      expect(result.status).toBe('error');
+      expect(result.error?.message).toMatch(/malformed base64 data URL/);
+      expect(result.events).toEqual([]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     'reads image views without invoking model-defined typed-array accessors',
     async () => {
       const bytes = JSON.stringify([...Buffer.from(PNG_BASE64, 'base64')]);
@@ -720,7 +885,6 @@ describe('NodeReplKernelManager', () => {
         expect(heap[name]).toEqual(expect.any(Number));
         expect(heap[name] as number).toBeGreaterThanOrEqual(0);
       }
-      expect(result.responseMeta).toBeUndefined();
     },
     TEST_TIMEOUT,
   );
@@ -755,39 +919,6 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'shallow-merges response metadata only within the current execution',
-    async () => {
-      const first = await run(
-        'nodeRepl.setResponseMeta({ first: 1, replaced: "old" }); nodeRepl.setResponseMeta({ second: 2, replaced: "new" }); const done = true;',
-      );
-      expect(first.responseMeta).toEqual({
-        first: 1,
-        second: 2,
-        replaced: 'new',
-      });
-      expect((await run('0;')).responseMeta).toBeUndefined();
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'bounds cumulative response metadata for one execution',
-    async () => {
-      const result = await run(
-        [
-          'nodeRepl.setResponseMeta({ first: "x".repeat(300 * 1024) });',
-          'nodeRepl.setResponseMeta({ second: "y".repeat(300 * 1024) });',
-        ].join('\n'),
-      );
-      expect(result.status).toBe('error');
-      expect(result.error?.message).toMatch(/metadata is too large/);
-      expect(result.responseMeta?.['first']).toHaveLength(300 * 1024);
-      expect(result.responseMeta?.['second']).toBeUndefined();
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
     'replaces the process on reset, clears bindings, and retains roots',
     async () => {
       const root = path.join(workDir, 'node_modules');
@@ -806,7 +937,7 @@ describe('NodeReplKernelManager', () => {
       expect(() => process.kill(oldPid, 0)).toThrow();
 
       const result = await run(
-        'const pkg = await import("reset-esm"); `${typeof gone}|${pkg.tag}`;',
+        'const pkg = await import("reset-esm"); nodeRepl.write(`${typeof gone}|${pkg.tag}`);',
       );
       expect(texts(result)).toEqual(['undefined|retained']);
       expect(result.stats.pid).not.toBe(oldPid);
@@ -837,7 +968,7 @@ describe('NodeReplKernelManager', () => {
       expect(cancelled.stats.kernelReplaced).toBe(true);
       expect(cancelled.stats.pid).not.toBe(timeoutPid);
 
-      const recovered = await run('typeof oldBinding;');
+      const recovered = await run('nodeRepl.write(typeof oldBinding);');
       expect(texts(recovered)).toEqual(['undefined']);
       expect(recovered.stats.pid).not.toBe(cancelled.stats.pid);
     },
@@ -872,7 +1003,7 @@ describe('NodeReplKernelManager', () => {
       expect(crashed.status).toBe('crashed');
       expect(manager.getKernelPid()).toBeNull();
 
-      const recovered = await run('typeof crashBinding;');
+      const recovered = await run('nodeRepl.write(typeof crashBinding);');
       expect(texts(recovered)).toEqual(['undefined']);
       expect(recovered.stats.pid).not.toBe(pid);
     },
@@ -914,7 +1045,7 @@ describe('NodeReplKernelManager', () => {
       );
       await manager.addModuleRoot(root);
       const result = await run(
-        'const fixture = await import("plain-fixture"); fixture.authority;',
+        'const fixture = await import("plain-fixture"); nodeRepl.write(fixture.authority);',
       );
       expect(texts(result)).toEqual(['undefined/undefined']);
     },
@@ -950,7 +1081,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'trusted-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
         capabilities: {
@@ -972,7 +1102,7 @@ describe('NodeReplKernelManager', () => {
           'let constructorProbe;',
           'try { fixture.echo.constructor("return process")(); } catch (error) { constructorProbe = error.name; }',
           'const echoed = await fixture.echo("ok");',
-          '`${fixture.privileged}|${fixture.runtimeFrozen}|${Object.isFrozen(nodeRepl)}|${fixture.processFacade}|${typeof nodeRepl.callHost}|${constructorProbe}|${echoed.echoed.value}|${fixture.bump()}`;',
+          'nodeRepl.write(`${fixture.privileged}|${fixture.runtimeFrozen}|${Object.isFrozen(nodeRepl)}|${fixture.processFacade}|${typeof nodeRepl.callHost}|${constructorProbe}|${echoed.echoed.value}|${fixture.bump()}`);',
         ].join('\n'),
       );
       expect(result.status).toBe('ok');
@@ -984,7 +1114,6 @@ describe('NodeReplKernelManager', () => {
 
       const denied = await run(
         [
-          'const fixture = await import("trusted-fixture");',
           'let capabilityErrorProbe;',
           'let capabilityMessage;',
           'const cachedCall = fixture.bump();',
@@ -992,7 +1121,7 @@ describe('NodeReplKernelManager', () => {
           '  capabilityMessage = error.message;',
           '  try { error.constructor.constructor("return process")(); } catch (inner) { capabilityErrorProbe = inner.name; }',
           '}',
-          '`${capabilityMessage}|${capabilityErrorProbe}|${cachedCall}`;',
+          'nodeRepl.write(`${capabilityMessage}|${capabilityErrorProbe}|${cachedCall}`);',
         ].join('\n'),
       );
       expect(denied.status).toBe('ok');
@@ -1000,10 +1129,9 @@ describe('NodeReplKernelManager', () => {
 
       const inherited = await run(
         [
-          'const fixture = await import("trusted-fixture");',
           'let inheritedMessage;',
           'try { await fixture.inherited(); } catch (error) { inheritedMessage = error.message; }',
-          'inheritedMessage;',
+          'nodeRepl.write(inheritedMessage);',
         ].join('\n'),
       );
       expect(inherited.status).toBe('ok');
@@ -1015,7 +1143,7 @@ describe('NodeReplKernelManager', () => {
         [
           'const fixture = await import("trusted-fixture");',
           'const echoed = await fixture.echo("again");',
-          '`${fixture.bump()}|${echoed.echoed.value}`;',
+          'nodeRepl.write(`${fixture.bump()}|${echoed.echoed.value}`);',
         ].join('\n'),
       );
       expect(texts(resetSingleton)).toEqual(['1|again']);
@@ -1051,14 +1179,13 @@ describe('NodeReplKernelManager', () => {
             packageName: 'external-trusted-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
       });
 
       try {
         const result = await run(
-          'const fixture = await import("external-trusted-fixture"); fixture.privileged;',
+          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(fixture.privileged);',
         );
         expect(result.status).toBe('ok');
         expect(texts(result)).toEqual(['true']);
@@ -1162,7 +1289,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'changed-fixture',
             entryPath: entry,
             entrySha256: '0'.repeat(64),
-            allowModelImport: true,
           },
         ]),
       });
@@ -1192,7 +1318,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'entry-pinned-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
       });
@@ -1230,7 +1355,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'root-pinned-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
       });
@@ -1285,7 +1409,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'workspace-fixture',
             entryPath: first.entryPath,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
       });
@@ -1323,7 +1446,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'dependent-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
       });
@@ -1335,26 +1457,16 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'loads only hash-pinned trusted files and declared trusted packages',
+    'loads only hash-pinned trusted files and rejects bare dependencies',
     async () => {
       const root = path.join(workDir, 'node_modules');
-      const dependencyEntry = createEsmPackage(
-        root,
-        'trusted-dependency',
-        'export const dependency = 40;',
-      );
-      const unlistedEntry = createEsmPackage(
-        root,
-        'unlisted-dependency',
-        'export const value = 1;',
-      );
+      createEsmPackage(root, 'unlisted-dependency', 'export const value = 1;');
       const entry = createEsmPackage(
         root,
         'trusted-multifile',
         [
           'import { helper } from "./helper.js";',
-          'import { dependency } from "trusted-dependency";',
-          'export const value = helper + dependency;',
+          'export const value = helper;',
           'export const loadUnlisted = () => import("unlisted-dependency");',
           'export const loadBuiltin = () => import("node:path");',
         ].join('\n'),
@@ -1372,34 +1484,17 @@ describe('NodeReplKernelManager', () => {
             entryPath: entry,
             entrySha256: digest(entry),
             additionalFiles: [{ path: helperPath, sha256: digest(helperPath) }],
-            dependencies: ['trusted-dependency'],
-            allowModelImport: true,
-          },
-          {
-            root,
-            packageName: 'trusted-dependency',
-            entryPath: dependencyEntry,
-            entrySha256: digest(dependencyEntry),
-          },
-          {
-            root,
-            packageName: 'unlisted-dependency',
-            entryPath: unlistedEntry,
-            entrySha256: digest(unlistedEntry),
           },
         ]),
       });
 
       const result = await run(
-        'const fixture = await import("trusted-multifile"); fixture.value;',
+        'const fixture = await import("trusted-multifile"); nodeRepl.write(fixture.value);',
       );
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['42']);
+      expect(texts(result)).toEqual(['2']);
 
       await manager.addModuleRoot(root);
-      const hiddenDependency = await run('await import("trusted-dependency");');
-      expect(hiddenDependency.status).toBe('error');
-      expect(hiddenDependency.error?.message).toMatch(/not available to model/);
       const directTrustedFile = await run(
         `await import(${JSON.stringify(pathToFileURL(helperPath).href)});`,
       );
@@ -1414,11 +1509,11 @@ describe('NodeReplKernelManager', () => {
           'for (const load of [fixture.loadUnlisted, fixture.loadBuiltin]) {',
           '  try { await load(); } catch (error) { deniedMessages.push(error.message); }',
           '}',
-          'deniedMessages.join("|");',
+          'nodeRepl.write(deniedMessages.join("|"));',
         ].join('\n'),
       );
       expect(texts(denied)[0]).toMatch(
-        /no approved dependency.*Node builtin.*is not available/,
+        /cannot import bare dependency.*Node builtin.*is not available/,
       );
 
       await manager.reset();
@@ -1453,7 +1548,6 @@ describe('NodeReplKernelManager', () => {
             packageName: 'waiting-fixture',
             entryPath: entry,
             entrySha256: digest,
-            allowModelImport: true,
           },
         ]),
         capabilities: {
@@ -1527,7 +1621,7 @@ describe('NodeReplKernelManager', () => {
       expect(cancelled.events).toEqual([]);
       expect(cancelled.stats.kernelReplaced).toBe(true);
       expect(manager.getKernelPid()).toBeNull();
-      expect(texts(await run('"alive";'))).toEqual(['alive']);
+      expect(texts(await run('nodeRepl.write("alive");'))).toEqual(['alive']);
     },
     TEST_TIMEOUT,
   );
@@ -1536,11 +1630,11 @@ describe('NodeReplKernelManager', () => {
     'clamps oversized timeouts and serializes concurrent calls',
     async () => {
       const largeTimeout = manager.exec({
-        code: 'let order = "a"; order;',
+        code: 'let order = "a"; nodeRepl.write(order);',
         timeoutMs: 2 ** 31 + 1000,
       });
-      const second = run('order += "b";');
-      const third = run('order += "c";');
+      const second = run('nodeRepl.write(order += "b");');
+      const third = run('nodeRepl.write(order += "c");');
       const [firstResult, secondResult, thirdResult] = await Promise.all([
         largeTimeout,
         second,

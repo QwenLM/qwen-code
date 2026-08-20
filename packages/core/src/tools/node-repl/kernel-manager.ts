@@ -20,6 +20,7 @@ import {
   type CapabilityRequestMessage,
   type ExecResultMessage,
   type KernelToHostMessage,
+  type NodeReplBindingKind,
 } from './protocol.js';
 import type { NodeReplSecurityPolicy } from './security-policy.js';
 
@@ -30,7 +31,7 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
 const TERMINATE_GRACE_MS = 500;
-const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
 const MAX_RAW_IMAGES = 64;
@@ -50,7 +51,7 @@ const KERNEL_ENV_KEYS = [
 
 export interface NodeReplTextEvent {
   type: 'text';
-  kind: 'write' | 'console' | 'result' | 'stdout' | 'stderr';
+  kind: 'write' | 'console' | 'stdout' | 'stderr';
   level?: string;
   text: string;
 }
@@ -76,7 +77,6 @@ export interface NodeReplExecOutcome {
   rawTextTruncated: boolean;
   imagesDropped: number;
   error?: { name: string; message: string; stack?: string };
-  responseMeta?: Record<string, unknown>;
   stats: {
     durationMs: number;
     generation: number;
@@ -91,7 +91,6 @@ export interface NodeReplExecOutcome {
 export interface NodeReplExecRequest {
   code: string;
   timeoutMs: number;
-  title?: string;
   signal?: AbortSignal;
 }
 
@@ -113,7 +112,6 @@ export interface KernelManagerOptions {
   tmpRootDir: string;
   policy: NodeReplSecurityPolicy;
   readableRoots: string[];
-  initialModuleRoots?: string[];
   capabilities?: Readonly<Record<string, NodeReplCapabilityHandler>>;
 }
 
@@ -129,7 +127,7 @@ interface InflightExec {
   imageCount: number;
   imageChars: number;
   droppedStaleFrames: number;
-  allowedBindingNames: Set<string>;
+  allowedBindingKinds: Map<string, NodeReplBindingKind>;
   seenCapabilityRequests: Set<string>;
   capabilityAbort: AbortController;
   settled: boolean;
@@ -172,12 +170,6 @@ function resolveKernelPath(): string {
   throw new Error('node_repl kernel runtime asset was not found');
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
 function safeErrorMessage(error: unknown): string {
   try {
     if (error && typeof error === 'object') {
@@ -217,7 +209,7 @@ function createKernelEnv(): NodeJS.ProcessEnv {
 export class NodeReplKernelManager {
   private kernel: KernelHandle | null = null;
   private generation = 0;
-  private bindingNames: string[] = [];
+  private readonly bindingKinds = new Map<string, NodeReplBindingKind>();
   private readonly moduleRoots: string[];
   private readonly readableRoots: string[];
   private readonly capabilities: Readonly<
@@ -234,13 +226,7 @@ export class NodeReplKernelManager {
   >();
 
   constructor(private readonly options: KernelManagerOptions) {
-    this.moduleRoots = [
-      ...new Set(
-        (options.initialModuleRoots ?? []).map((root) =>
-          options.policy.validateModuleRoot(root),
-        ),
-      ),
-    ];
+    this.moduleRoots = [];
     this.readableRoots = [
       ...new Set(
         [options.cwd, ...options.readableRoots].map((root) =>
@@ -269,7 +255,7 @@ export class NodeReplKernelManager {
   }
 
   getBindingNames(): string[] {
-    return [...this.bindingNames];
+    return [...this.bindingKinds.keys()].sort();
   }
 
   getSessionTmpDir(): string | null {
@@ -297,7 +283,7 @@ export class NodeReplKernelManager {
   async addModuleRoot(
     rawPath: string,
     approvedCanonicalPath?: string,
-  ): Promise<string> {
+  ): Promise<{ path: string; added: boolean }> {
     this.assertNotDisposed();
     const canonical = this.options.policy.validateModuleRoot(rawPath);
     if (
@@ -316,13 +302,15 @@ export class NodeReplKernelManager {
           'module root canonical target changed before registration',
         );
       }
-      if (this.moduleRoots.includes(canonical)) return canonical;
+      if (this.moduleRoots.includes(canonical)) {
+        return { path: canonical, added: false };
+      }
       if (this.kernel) await this.sendAddRoot(canonical);
       this.moduleRoots.push(canonical);
       debugLogger.debug(
         `[node-repl] untrusted module root added (count=${this.moduleRoots.length})`,
       );
-      return canonical;
+      return { path: canonical, added: true };
     });
     this.operationChain = run.catch(() => undefined);
     return run;
@@ -340,7 +328,7 @@ export class NodeReplKernelManager {
       });
     }
     this.inflight = null;
-    this.bindingNames = [];
+    this.bindingKinds.clear();
     this.rejectPending('node_repl task disposed');
     const handle = this.kernel;
     this.kernel = null;
@@ -370,7 +358,9 @@ export class NodeReplKernelManager {
     let prepared;
     try {
       prepared = await prepareNodeReplCell(request.code, {
-        previousBindingNames: this.bindingNames,
+        previousBindings: [...this.bindingKinds]
+          .map(([name, kind]) => ({ name, kind }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
         cellId: execId,
       });
     } catch (error) {
@@ -416,8 +406,11 @@ export class NodeReplKernelManager {
       imageCount: 0,
       imageChars: 0,
       droppedStaleFrames: 0,
-      allowedBindingNames: new Set(
-        prepared.bindingExports.map(({ bindingName }) => bindingName),
+      allowedBindingKinds: new Map(
+        prepared.bindingExports.map(({ bindingName, bindingKind }) => [
+          bindingName,
+          bindingKind,
+        ]),
       ),
       seenCapabilityRequests: new Set(),
       capabilityAbort: new AbortController(),
@@ -430,17 +423,11 @@ export class NodeReplKernelManager {
         type: 'exec',
         execId,
         source: prepared.source,
-        previousBindingNames: [...this.bindingNames],
+        previousBindings: [...this.bindingKinds]
+          .map(([name, kind]) => ({ name, kind }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
         bindingExports: prepared.bindingExports,
         snapshotExportName: prepared.snapshotExportName,
-        ...(prepared.resultExportName
-          ? { resultExportName: prepared.resultExportName }
-          : {}),
-        requestMeta: {
-          execId,
-          generation: handle.generation,
-          ...(request.title ? { title: request.title } : {}),
-        },
       });
     } catch (error) {
       return this.hostOutcome(
@@ -470,7 +457,7 @@ export class NodeReplKernelManager {
         inflight.settle({ hostStatus: status, message });
       });
     };
-    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMEOUT_MS);
+    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     const timeout = setTimeout(
       () =>
         stop(
@@ -539,7 +526,10 @@ export class NodeReplKernelManager {
       );
     }
 
-    this.bindingNames = [...terminal.bindingNames].sort();
+    this.bindingKinds.clear();
+    for (const name of terminal.bindingNames) {
+      this.bindingKinds.set(name, inflight.allowedBindingKinds.get(name)!);
+    }
     const status = terminal.status === 'ok' ? 'ok' : 'error';
     const error =
       terminal.status === 'error'
@@ -549,19 +539,12 @@ export class NodeReplKernelManager {
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
           }
         : undefined;
-    return this.outcomeFromInflight(
-      inflight,
-      status,
-      startedAt,
-      error,
-      false,
-      isPlainRecord(terminal.responseMeta) ? terminal.responseMeta : undefined,
-    );
+    return this.outcomeFromInflight(inflight, status, startedAt, error, false);
   }
 
   private async resetInner(): Promise<void> {
     this.assertNotDisposed();
-    this.bindingNames = [];
+    this.bindingKinds.clear();
     this.advanceGeneration();
     const handle = this.kernel;
     this.kernel = null;
@@ -702,7 +685,7 @@ export class NodeReplKernelManager {
         if (
           typeof message.execId !== 'string' ||
           typeof message.text !== 'string' ||
-          !['write', 'console', 'result'].includes(kind) ||
+          !['write', 'console'].includes(kind) ||
           (kind === 'console'
             ? typeof message.level !== 'string' ||
               !CONSOLE_LEVELS.has(message.level)
@@ -713,7 +696,7 @@ export class NodeReplKernelManager {
         }
         this.collectText(
           message.execId,
-          kind as 'write' | 'console' | 'result',
+          kind as 'write' | 'console',
           message.text,
           typeof message.level === 'string' ? message.level : undefined,
         );
@@ -826,11 +809,11 @@ export class NodeReplKernelManager {
       !Array.isArray(message.bindingNames) ||
       message.bindingNames.some(
         (name) =>
-          typeof name !== 'string' || !inflight.allowedBindingNames.has(name),
+          typeof name !== 'string' || !inflight.allowedBindingKinds.has(name),
       ) ||
       new Set(message.bindingNames).size !== message.bindingNames.length ||
       (message.status === 'ok' &&
-        message.bindingNames.length !== inflight.allowedBindingNames.size) ||
+        message.bindingNames.length !== inflight.allowedBindingKinds.size) ||
       !(
         message.rawTextTruncated === undefined ||
         typeof message.rawTextTruncated === 'boolean'
@@ -850,10 +833,6 @@ export class NodeReplKernelManager {
       !(
         message.errorStack === undefined ||
         typeof message.errorStack === 'string'
-      ) ||
-      !(
-        message.responseMeta === undefined ||
-        isPlainRecord(message.responseMeta)
       )
     ) {
       this.handleProtocolError(handle, new Error('invalid exec result'));
@@ -1122,7 +1101,7 @@ export class NodeReplKernelManager {
   ): void {
     if (this.kernel !== handle) return;
     this.kernel = null;
-    this.bindingNames = [];
+    this.bindingKinds.clear();
     handle.generationAbort.abort();
     this.advanceGeneration();
     this.rejectPending('node_repl kernel exited');
@@ -1142,7 +1121,7 @@ export class NodeReplKernelManager {
       `[node-repl] revoking generation (reason=${reason}, generation=${handle.generation}, pid=${handle.pid})`,
     );
     this.kernel = null;
-    this.bindingNames = [];
+    this.bindingKinds.clear();
     handle.generationAbort.abort();
     this.advanceGeneration();
     this.inflight?.capabilityAbort.abort();
@@ -1287,7 +1266,6 @@ export class NodeReplKernelManager {
     startedAt: number,
     error?: { name: string; message: string; stack?: string },
     kernelReplaced = false,
-    responseMeta?: Record<string, unknown>,
   ): NodeReplExecOutcome {
     const outcome: NodeReplExecOutcome = {
       status,
@@ -1295,9 +1273,6 @@ export class NodeReplKernelManager {
       rawTextTruncated: inflight?.rawTextTruncated ?? false,
       imagesDropped: inflight?.imagesDropped ?? 0,
       ...(error ? { error } : {}),
-      ...(responseMeta && Object.keys(responseMeta).length > 0
-        ? { responseMeta: { ...responseMeta } }
-        : {}),
       stats: {
         durationMs: Date.now() - startedAt,
         generation: inflight?.generation ?? this.generation,

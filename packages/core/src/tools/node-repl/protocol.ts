@@ -8,6 +8,13 @@ import { StringDecoder } from 'node:string_decoder';
 
 export const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
+export type NodeReplBindingKind = 'const' | 'let' | 'var';
+
+export interface NodeReplBindingDescriptor {
+  name: string;
+  kind: NodeReplBindingKind;
+}
+
 export interface TrustedPackageFile {
   path: string;
   sha256: string;
@@ -19,8 +26,6 @@ export interface TrustedPackagePolicyEntry {
   entryPath: string;
   entrySha256: string;
   additionalFiles?: TrustedPackageFile[];
-  dependencies?: string[];
-  allowModelImport?: boolean;
 }
 
 export interface TrustedPackageEntry {
@@ -30,8 +35,6 @@ export interface TrustedPackageEntry {
   entryPath: string;
   entrySha256: string;
   additionalFiles: TrustedPackageFile[];
-  dependencies: string[];
-  allowModelImport: boolean;
 }
 
 export interface InitMessage {
@@ -50,14 +53,13 @@ export interface ExecMessage {
   type: 'exec';
   execId: string;
   source: string;
-  previousBindingNames: string[];
+  previousBindings: NodeReplBindingDescriptor[];
   bindingExports: Array<{
     bindingName: string;
+    bindingKind: NodeReplBindingKind;
     exportName: string;
   }>;
   snapshotExportName: string;
-  resultExportName?: string;
-  requestMeta: Record<string, unknown>;
 }
 
 export interface AddModuleRootMessage {
@@ -94,7 +96,7 @@ export interface ReadyMessage {
 export interface TextOutputMessage {
   type: 'output';
   execId: string | null;
-  kind: 'write' | 'console' | 'result';
+  kind: 'write' | 'console';
   level?: string;
   text: string;
 }
@@ -116,7 +118,6 @@ export interface ExecResultMessage {
   errorName?: string;
   errorMessage?: string;
   errorStack?: string;
-  responseMeta?: Record<string, unknown>;
 }
 
 export interface AddModuleRootResultMessage {

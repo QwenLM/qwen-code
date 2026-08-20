@@ -1,8 +1,10 @@
 # Session-Persistent Node REPL Runtime
 
 Issue: QwenLM/qwen-code#9333. This is phase 1 of the persistent-kernel
-Computer Use roadmap; #9334 supplies the first production trusted package and
-desktop capabilities.
+Computer Use roadmap. #9334 modifies cua-driver and wraps it as an independent
+JavaScript SDK. #9335 adds the Skill that guides Qwen Code to load and call that
+SDK through Node REPL as an ordinary untrusted package. This phase does not
+register the SDK or its operations into the Qwen host.
 
 ## Scope
 
@@ -69,7 +71,11 @@ directory named `node_modules`, then stores the canonical path in the manager.
 The permission prompt is bound to that canonical target. If the path changes
 targets before execution, registration fails; if a registered directory is
 later replaced by a symlink to another target, the root stops resolving.
-Adding it never changes the trusted-package policy.
+Adding it never changes the trusted-package policy. A successful call returns
+`true` when the canonical root was newly added and `false` when it was already
+registered. Unlike the Codex reference's pre-registration behavior, Qwen
+requires the directory to exist at approval time so permission is bound to a
+real canonical target; this is an intentional safety restriction.
 
 The `node_repl` description tells the model about the 30-second default,
 top-level await, persistent bindings, redeclaration strategies, dynamic
@@ -85,12 +91,12 @@ shared-context async IIFE. A host-side tree-sitter transform analyzes only
 top-level JavaScript syntax and produces a module with:
 
 1. a generated `import * as <unique> from '@prev'`;
-2. mutable local bindings for previous names not redeclared by this cell;
+2. local bindings for previous names using their committed declaration kind;
 3. a null-prototype snapshot containing the last committed values;
 4. the user's source with commit snapshots inserted after top-level
    statements;
-5. generated, collision-free exports for the current live bindings, the
-   partial-commit snapshot, and an optional final-expression value.
+5. generated, collision-free exports for the current live bindings and the
+   partial-commit snapshot.
 
 `@prev` is a `vm.SyntheticModule` in the untrusted context. Its exports are
 the actual values from the preceding cell, not serialized copies. Functions
@@ -101,19 +107,29 @@ Example behavior:
 
 ```js
 // cell 1
-const x = 1;
+let x = 1;
 const readX = () => x;
 
 // cell 2
-const x = 2;
-`${readX()}|${x}`; // 1|2
+x = 2;
+nodeRepl.write(`${readX()}|${x}`); // 1|2
 ```
 
-Previous names carried into a new cell are generated as mutable locals, so
-`counter += 1` creates the next committed value. If a cell redeclares a name,
-the new module-local declaration shadows the previous export. Top-level
-`var` may be redeclared; model guidance still recommends reusing a binding,
-renaming it, using `var`, using a block, or resetting when rerunning snippets.
+The binding store retains both each value and its declaration kind. A carried
+`const` therefore rejects assignment and redeclaration, a carried `let`
+allows assignment but rejects redeclaration, and a carried `var` preserves
+normal `var` redeclaration behavior, including retaining the old value for
+`var name;`. Function and class declarations are carried as mutable lexical
+bindings: assignment is allowed but redeclaration is not. Assigning a carried
+mutable binding creates the next committed value in a new lexical environment,
+so older closures continue to observe the preceding Cell's binding. Only
+direct top-level declarations and a top-level loop's `var` initializer enter
+the binding store; a `var` nested in an `if` or loop body remains local to that
+Cell. Model guidance recommends reusing an existing binding, renaming it,
+using `var`, using a block, or resetting when rerunning snippets.
+User-exported declarations remain local to their Cell and are not added to the
+cross-Cell binding snapshot. They also cannot shadow an already committed
+binding; such a Cell fails without changing the old value.
 
 ### Partial commit
 
@@ -140,12 +156,14 @@ converting them to UTF-8 byte positions, and generated identifiers use a
 bounded collision check against parsed identifier references and carried
 binding names.
 
-### Final expression
+### Explicit output
 
-If the last top-level item is an expression statement, the transform captures
-its value in a generated export. The kernel serializes it after earlier
-console/`write` events. An execution without a final expression produces only
-explicit output.
+Ordinary expression values are not returned automatically. Only explicit
+console output, `nodeRepl.write(...)`, and `nodeRepl.emitImage(...)` enter the
+tool result. A successful execution with no explicit output has empty
+model-facing content. `nodeRepl.write` preserves strings without adding a
+newline, so consecutive writes concatenate directly. Other values use bounded,
+custom-inspection-disabled Node console formatting.
 
 ## Runtime globals
 
@@ -167,7 +185,6 @@ type NodeReplRuntime = {
   readonly cwd: string;
   readonly homeDir: string;
   readonly tmpDir: string;
-  readonly requestMeta: Readonly<Record<string, unknown>>;
   write(value: unknown): void;
   emitImage(
     image:
@@ -176,17 +193,16 @@ type NodeReplRuntime = {
       | ArrayBuffer
       | { bytes: Uint8Array | ArrayBuffer; mimeType: string },
   ): Promise<void>;
-  setResponseMeta(meta: Record<string, unknown>): void;
   getHeapStatus(): NodeReplHeapStatus;
 };
 ```
 
-The object and every returned metadata object are created and frozen inside
-the VM realm. Host callbacks are captured only by context-realm wrapper
-closures, so model code cannot obtain a parent-realm function through an API
-property. Request metadata and heap snapshots cross the bridge as JSON before
-being reconstructed in that realm. Host timers invoke a bootstrap-owned realm
-wrapper, never a model callback or thenable directly.
+The object and returned heap snapshot are created and frozen inside the VM
+realm. Host callbacks are captured only by context-realm wrapper closures, so
+model code cannot obtain a parent-realm function through an API property. Heap
+snapshots cross the bridge as JSON before being reconstructed in that realm.
+Host timers invoke a bootstrap-owned realm wrapper, never a model callback or
+thenable directly.
 
 `getHeapStatus()` is a synchronous snapshot using `process.memoryUsage()` and
 `v8.getHeapStatistics()` in the child host. It is never sampled
@@ -202,6 +218,8 @@ later call.
 
 The first release supports ESM only.
 
+- Top-level static `import ... from ...` and `export ... from ...` are rejected;
+  callers use `await import(...)` instead.
 - Relative `.js` and `.mjs` imports resolve from the current module, remain
   inside canonical readable roots, and execute in the untrusted context.
 - Bare packages resolve by scanning registered module roots in registration
@@ -211,13 +229,11 @@ The first release supports ESM only.
   `child_process` are unavailable to untrusted modules.
 - Untrusted local-module caches are cell-scoped. Explicit REPL bindings are
   the persistence mechanism.
-- A trusted entry may import only additional files whose canonical paths and
-  SHA-256 digests are pinned in its host policy. Bare dependencies must be
-  separate hash-pinned trusted-package entries and must also be named in the
-  importer's dependency allowlist. Undeclared files, packages, subpaths, CJS,
-  and Node builtins are rejected. The phase-1 builtin allowlist is deliberately
-  empty; host functionality crosses the structured capability broker instead
-  of injecting parent-realm builtin exports.
+- A trusted entry may import only additional relative files whose canonical
+  paths and SHA-256 digests are pinned in its host policy. Other bare packages,
+  subpaths, CJS, and Node builtins are rejected. Host functionality crosses the
+  structured capability broker instead of injecting parent-realm builtin
+  exports.
 - Trusted package modules may remain cached for one process generation and
   are destroyed by process-level reset.
 
@@ -229,8 +245,10 @@ after validation.
 ## Trusted context and host bridge
 
 The trusted-package registry is empty in production for #9333. Tests register
-one temporary package and one fake capability; #9334 supplies the first real
-package and handlers.
+one temporary package and one fake capability. This generic bridge is not an
+SDK registry: neither #9334 nor #9335 is assumed to register the independent
+SDK or its operations into the Qwen host. Any future activation of this bridge
+requires a separate explicit design decision.
 
 Trust requires all of the following:
 
@@ -242,15 +260,12 @@ Trust requires all of the following:
   stays under the expected package directory;
 - the entry SHA-256 matches the host-provided digest.
 
-Every additional trusted file is pinned by canonical path and SHA-256.
-Package-to-package imports require an explicit edge between two independently
-pinned trusted entries. Every entry is hidden from model imports unless the
-host separately sets its model-import flag. This lets #9334 expose only
-`@qwen-code/computer-use`, keep raw SDK dependencies non-importable, and use a
-normal multi-file workspace package without turning the workspace or its
-`node_modules` tree into a trust source. A model cannot bypass that decision
-with a `file:` URL or relative path into a trusted package directory; trusted
-files are reachable only through their approved bare package graph.
+Every additional trusted file is pinned by canonical path and SHA-256. A
+host-configured trusted package name is its only public entry; trusted packages
+cannot import other bare packages in the phase-1 bridge. A model cannot bypass
+that decision with a `file:` URL or relative path into a trusted package
+directory. Registering an ordinary module root also cannot shadow or widen a
+same-named trusted entry.
 
 Model-provided roots are never trust inputs. A matching package loads in the
 separate trusted context. An import crossing between contexts is represented
@@ -278,8 +293,8 @@ and disposal reject pending requests and revoke the old token/generation.
 Capability handlers receive both an execution-scoped abort signal and a
 generation-scoped abort signal. The former seals one Cell; the latter remains
 live across Cells and is aborted on reset, timeout, cancellation, crash, or
-task disposal so #9334 can own and immediately revoke a generation-bound
-desktop session.
+task disposal. This defines revocation semantics without creating or owning a
+desktop session in #9333.
 
 Every host-callback failure and dynamic-loader failure is converted to a new
 `Error` owned by the receiving VM realm before model code can catch it. This
@@ -326,18 +341,17 @@ but are not used as the model-context budget.
 
 The result converter then:
 
-- serializes strings, structured values, BigInt, functions, symbols, errors,
-  and cyclic objects without breaking the protocol;
+- preserves write strings exactly and formats structured values, BigInt,
+  functions, symbols, errors, and cyclic objects with safe Node console-style
+  inspection without breaking the protocol;
 - validates PNG/JPEG/WebP magic bytes and declared MIME;
 - permits `data:` URLs and canonical `file:` URLs under the workspace or
   session temp directory;
 - truncates model-facing text to approximately 10,000 tokens using Qwen's
-  token estimate and adds an explicit truncation marker;
+  existing CJK-aware token estimate and adds an explicit truncation marker;
 - preserves valid image parts in their original order after text truncation.
 
-Existing provider-wide image validation remains downstream. `setResponseMeta`
-shallow-merges plain objects for only the active request, subject to a wide
-cumulative protocol sanity limit.
+Existing provider-wide image validation remains downstream.
 
 ## Lifecycle
 

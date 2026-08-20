@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
 import { ToolErrorType } from '../tool-error.js';
+import { estimateTextTokens } from '../../utils/request-tokenizer/textTokenizer.js';
 import type { NodeReplExecOutcome } from './kernel-manager.js';
 import {
   convertOutcomeToToolResult,
@@ -50,19 +51,31 @@ describe('convertOutcomeToToolResult', () => {
           { type: 'text', kind: 'console', level: 'log', text: 'logged' },
           { type: 'text', kind: 'console', level: 'warn', text: 'careful' },
           { type: 'text', kind: 'stderr', text: 'raw' },
-          { type: 'text', kind: 'result', text: 'done' },
         ],
       }),
     );
     expect(result.llmContent).toBe(
-      'plain\nlogged\n[warn] careful\n[stderr] raw\ndone\n',
+      'plainlogged\n[warn] careful\n[stderr] raw\n',
     );
     expect(result.error).toBeUndefined();
   });
 
-  it('returns the no-output hint for a silent successful execution', () => {
+  it('preserves write strings exactly without inserting newlines', () => {
+    const result = convertOutcomeToToolResult(
+      outcome({
+        events: [
+          { type: 'text', kind: 'write', text: 'a' },
+          { type: 'text', kind: 'write', text: 'b' },
+        ],
+      }),
+    );
+    expect(result.llmContent).toBe('ab');
+    expect(result.returnDisplay).toBe('ab');
+  });
+
+  it('returns empty model content for a silent successful execution', () => {
     const result = convertOutcomeToToolResult(outcome());
-    expect(result.llmContent).toBe('(no output)\n');
+    expect(result.llmContent).toBe('');
     expect(result.returnDisplay).toBe('(no output)');
   });
 
@@ -84,6 +97,23 @@ describe('convertOutcomeToToolResult', () => {
     expect(text).toContain(
       `[node_repl text truncated near ${MAX_MODEL_TEXT_TOKENS} estimated tokens]`,
     );
+  });
+
+  it('uses the shared CJK-aware token estimate for model text', () => {
+    const result = convertOutcomeToToolResult(
+      outcome({
+        events: [
+          {
+            type: 'text',
+            kind: 'write',
+            text: '界'.repeat(MAX_MODEL_TEXT_TOKENS + 1000),
+          },
+        ],
+      }),
+    );
+    const text = result.llmContent as string;
+    expect(estimateTextTokens(text)).toBeLessThanOrEqual(MAX_MODEL_TEXT_TOKENS);
+    expect(text).toContain('text truncated');
   });
 
   it('preserves all valid images and their order after text truncation', () => {
@@ -153,14 +183,6 @@ describe('convertOutcomeToToolResult', () => {
     );
   });
 
-  it('serializes response metadata without adding automatic heap fields', () => {
-    const result = convertOutcomeToToolResult(
-      outcome({ responseMeta: { rows: 42 } }),
-    );
-    expect(result.llmContent).toBe('[responseMeta] {"rows":42}\n');
-    expect(result.llmContent as string).not.toMatch(/heap|rss/i);
-  });
-
   it('maps runtime failures to EXECUTION_FAILED with partial output', () => {
     const result = convertOutcomeToToolResult(
       outcome({
@@ -207,7 +229,6 @@ describe('convertOutcomeToToolResult', () => {
             text: 'x'.repeat(MAX_MODEL_TEXT_CHARS * 2),
           },
         ],
-        responseMeta: { detail: 'm'.repeat(MAX_MODEL_TEXT_CHARS) },
         error: {
           name: 'RangeError',
           message: 'e'.repeat(MAX_MODEL_TEXT_CHARS),
@@ -221,7 +242,6 @@ describe('convertOutcomeToToolResult', () => {
         : (result.llmContent as Part[]).map((part) => part.text ?? '').join('');
     expect(text.length).toBeLessThanOrEqual(MAX_MODEL_TEXT_CHARS);
     expect(text).toContain('text truncated');
-    expect(text).toContain('[responseMeta]');
     expect(text).toContain('RangeError:');
   });
 });

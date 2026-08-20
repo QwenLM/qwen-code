@@ -118,7 +118,7 @@ describe('node_repl family via real Config.createToolRegistry()', () => {
         })
         .execute(new AbortController().signal);
       expect(ok.error).toBeUndefined();
-      expect(ok.llmContent).toBe('integ-ok\n');
+      expect(ok.llmContent).toBe('integ-ok');
 
       // Bindings persist across separate registry-built invocations.
       const again = await repl
@@ -126,7 +126,7 @@ describe('node_repl family via real Config.createToolRegistry()', () => {
           code: 'nodeRepl.write(integ + "/2"); const emittedAgain = true;',
         })
         .execute(new AbortController().signal);
-      expect(again.llmContent).toBe('integ-ok/2\n');
+      expect(again.llmContent).toBe('integ-ok/2');
 
       // Structured failure surfaces as EXECUTION_FAILED.
       const bad = await repl
@@ -145,9 +145,9 @@ describe('node_repl family via real Config.createToolRegistry()', () => {
       expect(resetResult.error).toBeUndefined();
 
       const cleared = await repl
-        .build({ code: 'typeof integ;' })
+        .build({ code: 'nodeRepl.write(typeof integ);' })
         .execute(new AbortController().signal);
-      expect(cleared.llmContent).toBe('undefined\n');
+      expect(cleared.llmContent).toBe('undefined');
     },
     TEST_TIMEOUT,
   );

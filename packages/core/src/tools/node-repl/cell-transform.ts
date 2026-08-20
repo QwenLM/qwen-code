@@ -8,19 +8,23 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import type Parser from 'web-tree-sitter';
+import type {
+  NodeReplBindingDescriptor,
+  NodeReplBindingKind,
+} from './protocol.js';
 
 export interface PreparedNodeReplCell {
   source: string;
   bindingExports: ReadonlyArray<{
     bindingName: string;
+    bindingKind: NodeReplBindingKind;
     exportName: string;
   }>;
   snapshotExportName: string;
-  resultExportName?: string;
 }
 
 export interface PrepareNodeReplCellOptions {
-  previousBindingNames: readonly string[];
+  previousBindings: readonly NodeReplBindingDescriptor[];
   cellId: string;
 }
 
@@ -35,16 +39,6 @@ const MAX_CELL_BINDINGS = 10_000;
 const MAX_BINDING_NAME_CHARS = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_ASSIGNMENTS = 200_000;
 const MAX_TRANSFORMED_SOURCE_CHARS = 32 * 1024 * 1024;
-const VAR_SCOPE_BOUNDARY_TYPES = new Set([
-  'function_declaration',
-  'function_expression',
-  'generator_function_declaration',
-  'generator_function',
-  'arrow_function',
-  'class_declaration',
-  'class',
-  'method_definition',
-]);
 
 let parserInstance: Parser | null = null;
 let parserInitPromise: Promise<void> | null = null;
@@ -167,92 +161,93 @@ function collectPatternNames(
   }
 }
 
-function collectImportNames(node: Parser.SyntaxNode, names: Set<string>): void {
-  const clause = node.namedChildren.find(
-    (child) => child.type === 'import_clause',
-  );
-  if (!clause) return;
-
-  for (const child of clause.namedChildren) {
-    if (child.type === 'identifier') {
-      names.add(decodeIdentifierName(child.text));
-      continue;
-    }
-    if (child.type === 'namespace_import') {
-      const identifier = child.namedChildren.find(
-        (candidate) => candidate.type === 'identifier',
-      );
-      if (identifier) names.add(decodeIdentifierName(identifier.text));
-      continue;
-    }
-    if (child.type !== 'named_imports') continue;
-    for (const specifier of child.namedChildren) {
-      if (specifier.type !== 'import_specifier') continue;
-      const alias = specifier.childForFieldName('alias');
-      const name = specifier.childForFieldName('name');
-      if (alias) names.add(decodeIdentifierName(alias.text));
-      else if (name) names.add(decodeIdentifierName(name.text));
-    }
-  }
+function addPatternBindings(
+  pattern: Parser.SyntaxNode,
+  kind: NodeReplBindingKind,
+  bindings: Map<string, NodeReplBindingKind>,
+): void {
+  const names = new Set<string>();
+  collectPatternNames(pattern, names);
+  for (const name of names) bindings.set(name, kind);
 }
 
 function collectDeclarationNames(
   node: Parser.SyntaxNode,
-  names: Set<string>,
+  bindings: Map<string, NodeReplBindingKind>,
 ): void {
   switch (node.type) {
-    case 'lexical_declaration':
+    case 'lexical_declaration': {
+      const kind = node.text.trimStart().startsWith('const') ? 'const' : 'let';
+      for (const declarator of node.namedChildren) {
+        if (declarator.type !== 'variable_declarator') continue;
+        const name = declarator.childForFieldName('name');
+        if (name) addPatternBindings(name, kind, bindings);
+      }
+      return;
+    }
     case 'variable_declaration':
       for (const declarator of node.namedChildren) {
         if (declarator.type !== 'variable_declarator') continue;
         const name = declarator.childForFieldName('name');
-        if (name) collectPatternNames(name, names);
+        if (name) addPatternBindings(name, 'var', bindings);
       }
       return;
     case 'function_declaration':
-    case 'generator_function_declaration':
-    case 'class_declaration': {
+    case 'generator_function_declaration': {
       const name = node.childForFieldName('name');
-      if (name) names.add(decodeIdentifierName(name.text));
+      if (name) bindings.set(decodeIdentifierName(name.text), 'let');
       return;
     }
-    case 'import_statement':
-      collectImportNames(node, names);
+    case 'class_declaration': {
+      const name = node.childForFieldName('name');
+      if (name) bindings.set(decodeIdentifierName(name.text), 'let');
       return;
-    case 'export_statement':
-      for (const child of node.namedChildren) {
-        collectDeclarationNames(child, names);
-      }
-      return;
+    }
     default:
       return;
   }
 }
 
-function collectHoistedVarNames(
+function collectTopLevelLoopVarBindings(
   node: Parser.SyntaxNode,
-  names: Set<string>,
+  bindings: Map<string, NodeReplBindingKind>,
 ): void {
-  if (VAR_SCOPE_BOUNDARY_TYPES.has(node.type)) return;
-  if (node.type === 'variable_declaration') {
-    collectDeclarationNames(node, names);
+  if (node.type === 'for_statement') {
+    const initializer = node.childForFieldName('initializer');
+    if (initializer?.type === 'variable_declaration') {
+      collectDeclarationNames(initializer, bindings);
+    }
     return;
   }
+  if (node.type === 'for_in_statement') {
+    const kind = node.childForFieldName('kind');
+    const left = node.childForFieldName('left');
+    if (kind?.text === 'var' && left) {
+      addPatternBindings(left, 'var', bindings);
+    }
+  }
+}
+
+function collectExportDeclarationBindings(
+  node: Parser.SyntaxNode,
+  bindings: Map<string, NodeReplBindingKind>,
+): void {
+  if (node.type !== 'export_statement') return;
   for (const child of node.namedChildren) {
-    collectHoistedVarNames(child, names);
+    collectDeclarationNames(child, bindings);
   }
 }
 
 function generatedPrefix(
   root: Parser.SyntaxNode,
   cellId: string,
-  previousBindingNames: readonly string[],
+  previousBindings: readonly NodeReplBindingDescriptor[],
 ): string {
   const suffix = cellId.replace(/[^A-Za-z0-9_$]/g, '').slice(-24) || 'cell';
   const stem = `__qwen_repl_${suffix}_`;
   const forbidden = new Set<string>();
   const maxDiscriminatorLength = (
-    root.endIndex + previousBindingNames.length
+    root.endIndex + previousBindings.length
   ).toString(36).length;
 
   const inspectName = (name: string) => {
@@ -264,7 +259,7 @@ function generatedPrefix(
     const discriminator = name.slice(stem.length, end);
     if (/^[0-9a-z]+$/.test(discriminator)) forbidden.add(discriminator);
   };
-  for (const name of previousBindingNames) inspectName(name);
+  for (const { name } of previousBindings) inspectName(name);
 
   const pending = [root];
   while (pending.length > 0) {
@@ -289,12 +284,12 @@ function generatedPrefix(
 
 function snapshotAssignments(
   snapshotName: string,
-  bindingNames: Iterable<string>,
+  bindings: Iterable<NodeReplBindingDescriptor>,
   maxChars: number,
 ): string {
   const assignments: string[] = [];
   let length = 0;
-  for (const name of bindingNames) {
+  for (const { name } of bindings) {
     const assignment = `${snapshotName}[${JSON.stringify(name)}] = ${name};`;
     length += assignment.length + 1;
     if (length > maxChars) {
@@ -351,24 +346,64 @@ export async function prepareNodeReplCell(
     }
 
     const sourceItems = root.namedChildren.filter(isSourceItem);
-    const currentNames = new Set<string>();
+    const staticImport = sourceItems.find(
+      (item) =>
+        item.type === 'import_statement' ||
+        (item.type === 'export_statement' &&
+          item.childForFieldName('source') !== null),
+    );
+    if (staticImport) {
+      const source = staticImport.childForFieldName('source')?.text;
+      throw new Error(
+        `Top-level static import${source ? ` ${source}` : ''} is not supported in node_repl. Use await import(${source ?? '...'}) instead.`,
+      );
+    }
+    const currentBindings = new Map<string, NodeReplBindingKind>();
     for (const item of sourceItems) {
-      collectDeclarationNames(item, currentNames);
-      collectHoistedVarNames(item, currentNames);
+      collectDeclarationNames(item, currentBindings);
+      collectTopLevelLoopVarBindings(item, currentBindings);
     }
 
-    const previousNames = [...new Set(options.previousBindingNames)].sort();
-    const carriedNames = previousNames.filter(
-      (name) => !currentNames.has(name),
+    const previousBindingsByName = new Map<string, NodeReplBindingKind>();
+    for (const binding of options.previousBindings) {
+      const existing = previousBindingsByName.get(binding.name);
+      if (existing && existing !== binding.kind) {
+        throw new Error(
+          `Previous JavaScript binding '${binding.name}' has conflicting declaration kinds`,
+        );
+      }
+      previousBindingsByName.set(binding.name, binding.kind);
+    }
+    const previousBindings = [...previousBindingsByName]
+      .map(([name, kind]) => ({ name, kind }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const exportedBindings = new Map<string, NodeReplBindingKind>();
+    for (const item of sourceItems) {
+      collectExportDeclarationBindings(item, exportedBindings);
+    }
+    const exportedCollision = [...exportedBindings.keys()].find((name) =>
+      previousBindingsByName.has(name),
     );
-    const allNames = [...new Set([...previousNames, ...currentNames])].sort();
-    if (allNames.length > MAX_CELL_BINDINGS) {
+    if (exportedCollision) {
+      throw new Error(
+        `Identifier '${exportedCollision}' has already been declared`,
+      );
+    }
+    for (const name of exportedBindings.keys()) currentBindings.delete(name);
+    const allBindingsByName = new Map(previousBindingsByName);
+    for (const [name, kind] of currentBindings) {
+      if (!allBindingsByName.has(name)) allBindingsByName.set(name, kind);
+    }
+    const allBindings = [...allBindingsByName]
+      .map(([name, kind]) => ({ name, kind }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (allBindings.length > MAX_CELL_BINDINGS) {
       throw new Error(
         `JavaScript cell exceeds the ${MAX_CELL_BINDINGS}-binding sanity limit`,
       );
     }
     if (
-      allNames.reduce((total, name) => total + name.length, 0) >
+      allBindings.reduce((total, binding) => total + binding.name.length, 0) >
       MAX_BINDING_NAME_CHARS
     ) {
       throw new Error(
@@ -376,66 +411,55 @@ export async function prepareNodeReplCell(
       );
     }
     if (
-      sourceItems.length * Math.max(1, allNames.length) >
+      sourceItems.length * Math.max(1, allBindings.length) >
       MAX_SNAPSHOT_ASSIGNMENTS
     ) {
       throw new Error(
         'JavaScript cell has too many statement-boundary binding snapshots',
       );
     }
-    const prefix = generatedPrefix(root, options.cellId, previousNames);
+    const prefix = generatedPrefix(root, options.cellId, previousBindings);
     const previousNamespace = `${prefix}_previous`;
     const snapshotName = `${prefix}_snapshot`;
-    const resultName = `${prefix}_result`;
     const snapshotExportName = `${prefix}_snapshot_export`;
-    const resultExportName = `${prefix}_result_export`;
 
     const prelude = [
       `import * as ${previousNamespace} from '@prev';`,
       `const ${snapshotName} = { __proto__: null };`,
-      ...previousNames.map(
-        (name) =>
+      ...previousBindings.map(
+        ({ name }) =>
           `${snapshotName}[${JSON.stringify(name)}] = ${previousNamespace}[${JSON.stringify(name)}];`,
       ),
-      ...carriedNames.map(
-        (name) =>
-          `let ${name} = ${previousNamespace}[${JSON.stringify(name)}];`,
+      ...previousBindings.map(
+        ({ name, kind }) =>
+          `${kind} ${name} = ${previousNamespace}[${JSON.stringify(name)}];`,
       ),
     ].join('\n');
 
     const edits: Edit[] = [];
-    const activeNames = new Set(carriedNames);
-    const lastItem = sourceItems.at(-1);
-    let hasResult = false;
+    const activeBindings = new Map(previousBindingsByName);
     let generatedCommitChars = 0;
 
     for (const item of sourceItems) {
-      const declaredHere = new Set<string>();
+      const declaredHere = new Map<string, NodeReplBindingKind>();
       collectDeclarationNames(item, declaredHere);
-      collectHoistedVarNames(item, declaredHere);
-      for (const name of declaredHere) activeNames.add(name);
+      collectTopLevelLoopVarBindings(item, declaredHere);
+      for (const [name, kind] of declaredHere) {
+        if (!exportedBindings.has(name) && !activeBindings.has(name)) {
+          activeBindings.set(name, kind);
+        }
+      }
       const commit = snapshotAssignments(
         snapshotName,
-        activeNames,
+        [...activeBindings]
+          .map(([name, kind]) => ({ name, kind }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
         MAX_TRANSFORMED_SOURCE_CHARS -
           code.length -
           prelude.length -
           generatedCommitChars,
       );
       generatedCommitChars += commit.length;
-
-      if (item === lastItem && item.type === 'expression_statement') {
-        const expression = item.namedChildren[0];
-        if (expression) {
-          edits.push({
-            start: item.startIndex,
-            end: item.endIndex,
-            text: `const ${resultName} = (${expression.text});${commit}`,
-          });
-          hasResult = true;
-          continue;
-        }
-      }
 
       if (commit) {
         edits.push({
@@ -447,8 +471,9 @@ export async function prepareNodeReplCell(
     }
 
     const rewritten = applyEdits(code, edits);
-    const bindingExports = allNames.map((bindingName, index) => ({
-      bindingName,
+    const bindingExports = allBindings.map(({ name, kind }, index) => ({
+      bindingName: name,
+      bindingKind: kind,
       exportName: `${prefix}_binding_${index}`,
     }));
     const exports = [
@@ -456,7 +481,6 @@ export async function prepareNodeReplCell(
         ({ bindingName, exportName }) => `${bindingName} as ${exportName}`,
       ),
       `${snapshotName} as ${snapshotExportName}`,
-      ...(hasResult ? [`${resultName} as ${resultExportName}`] : []),
     ];
     const suffix = `\nexport {\n  ${exports.join(',\n  ')}\n};`;
 
@@ -469,7 +493,6 @@ export async function prepareNodeReplCell(
       source,
       bindingExports,
       snapshotExportName,
-      resultExportName: hasResult ? resultExportName : undefined,
     };
   } finally {
     tree.delete();

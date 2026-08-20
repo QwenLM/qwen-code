@@ -310,23 +310,9 @@ export function createModuleLoader(options) {
     return trustedPackages.find((entry) => isUnder(filePath, entry.packageDir));
   }
 
-  function resolveBare(specifier, trustedImporter = null) {
+  function resolveBare(specifier) {
     const { packageName, subpath } = parseBareSpecifier(specifier);
     const configuredTrust = trustedByName.get(packageName);
-    if (trustedImporter) {
-      if (!trustedImporter.dependencies.includes(packageName)) {
-        throw new Error(
-          `trusted package '${trustedImporter.packageName}' has no approved dependency '${packageName}'`,
-        );
-      }
-      if (!configuredTrust) {
-        throw new Error(`trusted dependency '${packageName}' is not pinned`);
-      }
-    } else if (configuredTrust && !configuredTrust.allowModelImport) {
-      throw new Error(
-        `trusted package '${packageName}' is not available to model code`,
-      );
-    }
     const configuredRoots = configuredTrust
       ? [configuredTrust.root]
       : moduleRoots;
@@ -486,10 +472,12 @@ export function createModuleLoader(options) {
         localDefaultEsm: referencingRecord.localDefaultEsm,
       };
     }
-    return resolveBare(
-      specifier,
-      referencingRecord.trusted ? referencingRecord.packagePolicy : null,
-    );
+    if (referencingRecord.trusted) {
+      throw new Error(
+        `trusted package '${referencingRecord.packagePolicy.packageName}' cannot import bare dependency '${specifier}'`,
+      );
+    }
+    return resolveBare(specifier);
   }
 
   function contextFor(resolved) {
@@ -612,8 +600,9 @@ export function createModuleLoader(options) {
     return new vm.SyntheticModule(
       names,
       function initialize() {
-        for (const name of names)
-          this.setExport(name, previousBindings.get(name));
+        for (const name of names) {
+          this.setExport(name, previousBindings.get(name).value);
+        }
       },
       { context: untrustedContext, identifier: '@prev' },
     );

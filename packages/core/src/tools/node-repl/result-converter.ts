@@ -5,8 +5,11 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
-import { CHARS_PER_TOKEN } from '../../services/tokenEstimation.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  estimateTextTokenUnits,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from '../../utils/request-tokenizer/textTokenizer.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TERMINAL_IMAGE_BYTES, type ToolResult } from '../tools.js';
 import type {
@@ -16,8 +19,10 @@ import type {
 } from './kernel-manager.js';
 
 export const MAX_MODEL_TEXT_TOKENS = 10_000;
-export const MAX_MODEL_TEXT_CHARS = MAX_MODEL_TEXT_TOKENS * CHARS_PER_TOKEN;
-export const MAX_META_OR_ERROR_CHARS = 16 * 1024;
+export const MAX_MODEL_TEXT_CHARS = MAX_MODEL_TEXT_TOKENS * 4;
+export const MAX_ERROR_CHARS = 16 * 1024;
+const MAX_MODEL_TEXT_UNITS =
+  MAX_MODEL_TEXT_TOKENS * TOKEN_ESTIMATE_UNITS_PER_TOKEN;
 
 const debugLogger = createDebugLogger('NODE_REPL');
 
@@ -89,18 +94,74 @@ function validateImage(
 function renderText(event: NodeReplTextEvent): string {
   if (event.kind === 'console') {
     const level = event.level ?? 'log';
-    return level === 'log' || level === 'info'
-      ? event.text
-      : `[${level}] ${event.text}`;
+    const text =
+      level === 'log' || level === 'info'
+        ? event.text
+        : `[${level}] ${event.text}`;
+    return text.endsWith('\n') ? text : `${text}\n`;
   }
   if (event.kind === 'stdout' || event.kind === 'stderr') {
-    return `[${event.kind}] ${event.text}`;
+    const text = `[${event.kind}] ${event.text}`;
+    return text.endsWith('\n') ? text : `${text}\n`;
   }
   return event.text;
 }
 
 function capChars(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+function takeTextWithinTokenUnits(
+  text: string,
+  maxUnits: number,
+): { text: string; units: number; complete: boolean } {
+  if (maxUnits <= 0 || text.length === 0) {
+    return { text: '', units: 0, complete: text.length === 0 };
+  }
+  const totalUnits = estimateTextTokenUnits(text);
+  if (totalUnits <= maxUnits) {
+    return { text, units: totalUnits, complete: true };
+  }
+
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (estimateTextTokenUnits(text.slice(0, middle)) <= maxUnits) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (
+    low > 0 &&
+    low < text.length &&
+    text.charCodeAt(low - 1) >= 0xd800 &&
+    text.charCodeAt(low - 1) <= 0xdbff &&
+    text.charCodeAt(low) >= 0xdc00 &&
+    text.charCodeAt(low) <= 0xdfff
+  ) {
+    low--;
+  }
+  const prefix = text.slice(0, low);
+  return {
+    text: prefix,
+    units: estimateTextTokenUnits(prefix),
+    complete: false,
+  };
+}
+
+function capTextToTokenUnits(
+  text: string,
+  maxUnits: number,
+): { text: string; truncated: boolean } {
+  const taken = takeTextWithinTokenUnits(text, maxUnits);
+  if (taken.complete) return { text: taken.text, truncated: false };
+  const ellipsis = '…';
+  const ellipsisUnits = estimateTextTokenUnits(ellipsis);
+  if (maxUnits < ellipsisUnits) return { text: taken.text, truncated: true };
+  const withRoom = takeTextWithinTokenUnits(text, maxUnits - ellipsisUnits);
+  return { text: `${withRoom.text}${ellipsis}`, truncated: true };
 }
 
 function pushText(parts: Part[], text: string): void {
@@ -128,59 +189,56 @@ export function convertOutcomeToToolResult(
     outcome.imagesDropped > 0
       ? `[${outcome.imagesDropped} image(s) dropped by the raw sanity limit]\n`
       : '';
-  let metadataNotice = '';
-  if (outcome.responseMeta && Object.keys(outcome.responseMeta).length > 0) {
-    let metadata = '(not JSON-serializable)';
-    try {
-      metadata = capChars(
-        JSON.stringify(outcome.responseMeta),
-        MAX_META_OR_ERROR_CHARS,
-      );
-    } catch {
-      // Keep the fallback.
-    }
-    metadataNotice = `[responseMeta] ${metadata}\n`;
-  }
   let errorText: string | undefined;
-  let errorNotice = '';
+  let rawErrorNotice = '';
   if (outcome.status !== 'ok') {
     const error = outcome.error ?? {
       name: 'Error',
       message: `node_repl execution ${outcome.status}`,
     };
-    errorText = `${capChars(error.name, 1024)}: ${capChars(error.message, MAX_META_OR_ERROR_CHARS)}`;
+    errorText = `${capChars(error.name, 1024)}: ${capChars(error.message, MAX_ERROR_CHARS)}`;
     if (outcome.status === 'error' && error.stack) {
       errorText += `\n${capChars(error.stack, 2048)}`;
     }
-    errorNotice = `${errorText}\n`;
+    rawErrorNotice = `${errorText}\n`;
   }
-  const reservedTextChars =
-    truncationNotice.length +
-    droppedImagesNotice.length +
-    metadataNotice.length +
-    errorNotice.length;
-  let remainingTextChars = Math.max(
-    0,
-    MAX_MODEL_TEXT_CHARS - reservedTextChars,
+  const noticeSeparators = '\n\n\n';
+  const fixedNoticeUnits = estimateTextTokenUnits(
+    truncationNotice + droppedImagesNotice + noticeSeparators,
   );
-  let textWasTruncated = false;
+  const cappedErrorNotice = capTextToTokenUnits(
+    rawErrorNotice,
+    Math.max(0, MAX_MODEL_TEXT_UNITS - fixedNoticeUnits),
+  );
+  const errorNotice = cappedErrorNotice.text;
+  const reservedTextUnits =
+    fixedNoticeUnits + estimateTextTokenUnits(errorNotice);
+  let remainingTextUnits = Math.max(
+    0,
+    MAX_MODEL_TEXT_UNITS - reservedTextUnits,
+  );
+  let textWasTruncated = cappedErrorNotice.truncated;
   let validImages = 0;
 
   const addBudgetedText = (text: string) => {
     if (text.length === 0) return;
-    const withSeparator = text.endsWith('\n') ? text : `${text}\n`;
-    if (remainingTextChars <= 0) {
+    if (remainingTextUnits <= 0) {
       textWasTruncated = true;
       return;
     }
-    if (withSeparator.length <= remainingTextChars) {
-      pushText(parts, withSeparator);
-      remainingTextChars -= withSeparator.length;
-      return;
+    const taken = takeTextWithinTokenUnits(text, remainingTextUnits);
+    pushText(parts, taken.text);
+    remainingTextUnits -= taken.units;
+    textWasTruncated ||= !taken.complete;
+  };
+
+  const pushNotice = (notice: string) => {
+    if (notice.length === 0) return;
+    const previous = parts.at(-1);
+    if (previous?.text !== undefined && !previous.text.endsWith('\n')) {
+      pushText(parts, '\n');
     }
-    pushText(parts, withSeparator.slice(0, remainingTextChars));
-    remainingTextChars = 0;
-    textWasTruncated = true;
+    pushText(parts, notice);
   };
 
   for (const event of outcome.events) {
@@ -203,15 +261,10 @@ export function convertOutcomeToToolResult(
     debugLogger.debug(
       `[node-repl] model text truncated (generation=${outcome.stats.generation}, pid=${outcome.stats.pid ?? 'none'}, modelBudgetTokens=${MAX_MODEL_TEXT_TOKENS}, rawTextTruncated=${outcome.rawTextTruncated})`,
     );
-    pushText(parts, truncationNotice);
+    pushNotice(truncationNotice);
   }
-  pushText(parts, droppedImagesNotice);
-  pushText(parts, metadataNotice);
-  pushText(parts, errorNotice);
-
-  if (outcome.status === 'ok' && parts.length === 0) {
-    pushText(parts, '(no output)\n');
-  }
+  pushNotice(droppedImagesNotice);
+  pushNotice(errorNotice);
 
   const llmContent = modelContent(parts);
   const displayText = parts

@@ -21,13 +21,12 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
  *
  * Trust is decided ONLY here: a package is trusted iff its module root,
  * canonical package target, package name, entry path, and every loaded-file
- * sha256 match a host-configured entry. Package dependency edges and direct
- * model visibility are separate host-only allowlists.
+ * sha256 match a host-configured entry.
  * Model code and model-supplied paths (node_repl_add_node_module_dir) can
  * never create or widen trust — they only add *untrusted* resolution roots.
  *
- * Phase 1 ships with an empty trusted set; the mechanism exists and is
- * tested so phase 2 can register real SDK packages without redesign.
+ * Phase 1 ships with an empty trusted set. Activating this generic mechanism
+ * later requires an explicit host policy; it is not an SDK registration path.
  */
 export class NodeReplSecurityPolicy {
   private readonly trusted: TrustedPackageEntry[];
@@ -36,18 +35,11 @@ export class NodeReplSecurityPolicy {
     this.trusted = trustedPackages.map((entry) =>
       this.normalizeTrustedPackage(entry),
     );
-    const names = new Set(this.trusted.map((entry) => entry.packageName));
-    if (names.size !== this.trusted.length) {
+    if (
+      new Set(this.trusted.map((entry) => entry.packageName)).size !==
+      this.trusted.length
+    ) {
       throw new Error('duplicate trusted package identity');
-    }
-    for (const entry of this.trusted) {
-      for (const dependency of entry.dependencies) {
-        if (!names.has(dependency)) {
-          throw new Error(
-            `trusted package ${entry.packageName} declares unknown dependency: ${dependency}`,
-          );
-        }
-      }
     }
   }
 
@@ -59,7 +51,6 @@ export class NodeReplSecurityPolicy {
     return this.trusted.map((entry) => ({
       ...entry,
       additionalFiles: entry.additionalFiles.map((file) => ({ ...file })),
-      dependencies: [...entry.dependencies],
     }));
   }
 
@@ -153,24 +144,6 @@ export class NodeReplSecurityPolicy {
       }
       filePaths.add(file.path);
     }
-    const dependencies = [...(entry.dependencies ?? [])];
-    const dependencyNames = new Set<string>();
-    for (const dependency of dependencies) {
-      if (
-        !this.isValidPackageName(dependency) ||
-        dependency === entry.packageName
-      ) {
-        throw new Error(
-          `invalid trusted dependency for ${entry.packageName}: ${dependency}`,
-        );
-      }
-      if (dependencyNames.has(dependency)) {
-        throw new Error(
-          `duplicate trusted dependency for ${entry.packageName}: ${dependency}`,
-        );
-      }
-      dependencyNames.add(dependency);
-    }
     return {
       root,
       packageName: entry.packageName,
@@ -178,8 +151,6 @@ export class NodeReplSecurityPolicy {
       entryPath,
       entrySha256: entry.entrySha256.toLowerCase(),
       additionalFiles,
-      dependencies,
-      allowModelImport: entry.allowModelImport === true,
     };
   }
 

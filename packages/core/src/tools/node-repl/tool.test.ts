@@ -61,7 +61,10 @@ describe('NodeReplTool', () => {
     expect(() => tool.build({ code: '' })).toThrow();
     expect(() => tool.build({ code: '1;', timeout_ms: 0 })).toThrow();
     expect(() => tool.build({ code: '1;', timeout_ms: 1.5 })).toThrow();
-    expect(() => tool.build({ code: '1;', timeout_ms: 2 ** 31 })).toThrow();
+    expect(() =>
+      tool.build({ code: '1;', timeout_ms: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toThrow();
+    expect(() => tool.build({ code: '1;', timeout_ms: 2 ** 31 })).not.toThrow();
     expect(() => tool.build({ code: '1;', title: '' })).toThrow();
     expect(() => tool.build({ code: '1;', title: '界'.repeat(81) })).toThrow();
     expect(() => tool.build({ code: '1;', extra: true } as never)).toThrow();
@@ -106,7 +109,7 @@ describe('NodeReplTool', () => {
       .build({ code: 'nodeRepl.write("via tool"); const done = true;' })
       .execute(new AbortController().signal);
     expect(ok.error).toBeUndefined();
-    expect(ok.llmContent).toBe('via tool\n');
+    expect(ok.llmContent).toBe('via tool');
 
     const failed = await tool
       .build({ code: 'throw new Error("nope");' })
@@ -150,9 +153,9 @@ describe('NodeReplResetTool', () => {
     expect(manager.getKernelPid()).toBeNull();
 
     const after = await repl
-      .build({ code: 'typeof value;' })
+      .build({ code: 'nodeRepl.write(typeof value);' })
       .execute(new AbortController().signal);
-    expect(after.llmContent).toBe('undefined\n');
+    expect(after.llmContent).toBe('undefined');
     expect(manager.getKernelPid()).not.toBe(oldPid);
   }, 30_000);
 });
@@ -181,11 +184,16 @@ describe('NodeReplAddNodeModuleDirTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(String(result.llmContent)).toContain(fs.realpathSync(root));
+    expect(result.llmContent).toBe('true');
     expect(session.getManager().getModuleRoots()).toEqual([
       fs.realpathSync(root),
     ]);
     expect(session.getManager().getKernelPid()).toBeNull();
+
+    const repeated = await tool
+      .build({ path: root })
+      .execute(new AbortController().signal);
+    expect(repeated.llmContent).toBe('false');
   });
 
   it.skipIf(process.platform === 'win32')(

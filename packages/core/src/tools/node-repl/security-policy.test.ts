@@ -52,7 +52,6 @@ describe('NodeReplSecurityPolicy', () => {
         packageName: '@scope/pkg',
         entryPath,
         entrySha256: SHA.toUpperCase(),
-        allowModelImport: true,
       },
     ]);
     const first = policy.getTrustedPackages();
@@ -64,14 +63,12 @@ describe('NodeReplSecurityPolicy', () => {
         entryPath: fs.realpathSync(entryPath),
         entrySha256: SHA,
         additionalFiles: [],
-        dependencies: [],
-        allowModelImport: true,
       },
     ]);
-    first[0]?.dependencies.push('mutated');
+    first[0]?.additionalFiles.push({ path: 'mutated', sha256: SHA });
     first.pop();
     expect(policy.getTrustedPackages()).toEqual([
-      expect.objectContaining({ dependencies: [] }),
+      expect.objectContaining({ additionalFiles: [] }),
     ]);
   });
 
@@ -206,12 +203,11 @@ describe('NodeReplSecurityPolicy', () => {
     ).toThrow(/escapes its package directory/);
   });
 
-  it('normalizes exact additional files and declared package dependencies', () => {
+  it('normalizes exact additional files', () => {
     const root = makeModuleRoot();
     const entryPath = makePackageEntry(root, 'pkg');
     const helperPath = path.join(path.dirname(entryPath), 'helper.js');
     fs.writeFileSync(helperPath, 'export const helper = true;');
-    const dependencyEntry = makePackageEntry(root, 'dependency');
     const policy = new NodeReplSecurityPolicy([
       {
         root,
@@ -219,25 +215,17 @@ describe('NodeReplSecurityPolicy', () => {
         entryPath,
         entrySha256: SHA,
         additionalFiles: [{ path: helperPath, sha256: SHA.toUpperCase() }],
-        dependencies: ['dependency'],
-      },
-      {
-        root,
-        packageName: 'dependency',
-        entryPath: dependencyEntry,
-        entrySha256: SHA,
       },
     ]);
 
     expect(policy.getTrustedPackages()[0]).toEqual(
       expect.objectContaining({
         additionalFiles: [{ path: fs.realpathSync(helperPath), sha256: SHA }],
-        dependencies: ['dependency'],
       }),
     );
   });
 
-  it('rejects unpinned files and invalid dependency graphs', () => {
+  it('rejects unpinned files outside the trusted package', () => {
     const root = makeModuleRoot();
     const entryPath = makePackageEntry(root, 'pkg');
     const siblingEntry = makePackageEntry(root, 'sibling');
@@ -253,29 +241,5 @@ describe('NodeReplSecurityPolicy', () => {
           },
         ]),
     ).toThrow(/file escapes/);
-    expect(
-      () =>
-        new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'pkg',
-            entryPath,
-            entrySha256: SHA,
-            dependencies: ['missing'],
-          },
-        ]),
-    ).toThrow(/unknown dependency/);
-    expect(
-      () =>
-        new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'pkg',
-            entryPath,
-            entrySha256: SHA,
-            dependencies: ['pkg'],
-          },
-        ]),
-    ).toThrow(/invalid trusted dependency/);
   });
 });
