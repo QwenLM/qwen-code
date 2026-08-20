@@ -24,6 +24,7 @@ import {
   parseLineTolerant,
   read,
   readLines,
+  readLinesWithIntegrity,
   write,
   writeLine,
   writeLineSync,
@@ -241,6 +242,30 @@ describe('read() / readLines() with malformed lines', () => {
     ]);
   });
 
+  it('reports complete recovery for glued object records', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 5),
+    ).resolves.toEqual({
+      records: [{ i: 1 }, { i: 2 }, { i: 3 }],
+      complete: true,
+    });
+  });
+
+  it.each([
+    ['a truncated record', '{"i":1}{"i":\n{"i":3}\n'],
+    ['trailing garbage', '{"i":1}garbage\n{"i":3}\n'],
+    ['an invalid middle fragment', '{"i":1}{"invalid":}{"i":2}\n{"i":3}\n'],
+    ['a non-object value', '{"i":1}\nnull\n{"i":3}\n'],
+  ])('reports incomplete recovery for %s', async (_name, content) => {
+    const file = tmpFile(content);
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 5),
+    ).resolves.toMatchObject({ complete: false });
+  });
+
   it('skips blank lines', async () => {
     const file = tmpFile('{"a":1}\n\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
@@ -323,6 +348,16 @@ describe('reader resource cleanup', () => {
     );
 
     expect(result).toEqual([{ i: 1 }]);
+  });
+
+  it('closes the file stream after an integrity-aware read', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    const result = await withCapturedReadStream(() =>
+      readLinesWithIntegrity<{ i: number }>(file, 1),
+    );
+
+    expect(result).toEqual({ records: [{ i: 1 }], complete: true });
   });
 
   it('closes the file stream after read consumes all lines', async () => {

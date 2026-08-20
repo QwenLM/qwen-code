@@ -16,6 +16,15 @@ import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
+const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+  URL,
+  'createObjectURL',
+);
+const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(
+  URL,
+  'revokeObjectURL',
+);
+
 const {
   mockActions,
   mockWorkspace,
@@ -312,6 +321,16 @@ afterEach(() => {
     container.remove();
   }
   mounted.length = 0;
+  if (originalCreateObjectURL) {
+    Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL);
+  } else {
+    Reflect.deleteProperty(URL, 'createObjectURL');
+  }
+  if (originalRevokeObjectURL) {
+    Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectURL);
+  } else {
+    Reflect.deleteProperty(URL, 'revokeObjectURL');
+  }
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
   mockWorkspaceActions.readFileBytes.mockReset();
@@ -577,6 +596,214 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
     expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
+  it('switches supplied Markdown attachments from source to preview without reading the workspace', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:notes.md',
+                kind: 'file',
+                title: 'notes.md',
+                workspacePath: 'notes.md',
+                workspaceCwd: '/removed',
+                workspaceId: 'removed-id',
+                previewData: new Blob(['# Hello attachment'], {
+                  type: 'text/markdown',
+                }),
+                previewMimeType: 'text/markdown',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:notes.md"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(
+      container.querySelector('[role="tab"] .lucide-file-text'),
+    ).not.toBeNull();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
+      '# Hello attachment',
+    );
+    act(() => {
+      (
+        container.querySelector(
+          'button[aria-label="Preview"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    expect(container.querySelector('h1')?.textContent).toBe('Hello attachment');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('switches supplied HTML text from source to preview', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:page.html',
+                kind: 'file',
+                title: 'page.html',
+                workspacePath: 'page.html',
+                previewContent: '<h1>Attachment page</h1>',
+                previewMimeType: 'text/html',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:page.html"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
+      '<h1>Attachment page</h1>',
+    );
+    act(() => {
+      (
+        container.querySelector(
+          'button[aria-label="Preview"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
+      '<h1>Attachment page</h1>',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('shows a clear unsupported state for binary attachments', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.xlsx',
+                kind: 'file',
+                title: 'report.xlsx',
+                workspacePath: 'report.xlsx',
+                previewData: new Blob(['PK'], {
+                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                }),
+                previewMimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:report.xlsx"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Preview is not available for this file type.',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('opens PDF attachments in the browser PDF preview', async () => {
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:attachment-pdf'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.pdf',
+                kind: 'file',
+                title: 'report.pdf',
+                workspacePath: 'report.pdf',
+                previewData: new Blob(['%PDF-1.7'], {
+                  type: 'application/pdf',
+                }),
+                previewMimeType: 'application/pdf',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:report.pdf"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector<HTMLIFrameElement>('iframe')?.src).toContain(
+      'blob:attachment-pdf',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
   });
 
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
