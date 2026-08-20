@@ -112,6 +112,33 @@ async function withDockerStub(scriptBody, fn) {
   }
 }
 
+// The resolver's invocation contract shared by the e2e pins below — arg
+// passing plus the three env names the export depends on. One copy, so a
+// contract change cannot update one test and leave the other green (#9527
+// review).
+function runResolver(stub) {
+  const envFile = join(dirname(stub), 'env');
+  const outFile = join(dirname(stub), 'out');
+  const scriptPath = fileURLToPath(
+    new URL('./resolve-sandbox-image.mjs', import.meta.url),
+  );
+  execFileSync(
+    process.execPath,
+    [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
+    {
+      env: {
+        ...process.env,
+        SANDBOX_COMMAND: stub,
+        GITHUB_ENV: envFile,
+        GITHUB_OUTPUT: outFile,
+      },
+      timeout: 15_000,
+      stdio: 'pipe',
+    },
+  );
+  return { envFile, outFile };
+}
+
 test('repoDigestOf resolves a pulled image to its content digest', async () => {
   await withDockerStub(
     "printf '%s\\n' '[\"ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef\"]'",
@@ -524,25 +551,9 @@ test('the resolver refuses to export when the pull reports no Digest line', asyn
     (stub) => {
       const envFile = join(dirname(stub), 'env');
       const outFile = join(dirname(stub), 'out');
-      const scriptPath = fileURLToPath(
-        new URL('./resolve-sandbox-image.mjs', import.meta.url),
-      );
       let error;
       try {
-        execFileSync(
-          process.execPath,
-          [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
-          {
-            env: {
-              ...process.env,
-              SANDBOX_COMMAND: stub,
-              GITHUB_ENV: envFile,
-              GITHUB_OUTPUT: outFile,
-            },
-            timeout: 15_000,
-            stdio: 'pipe',
-          },
-        );
+        runResolver(stub);
       } catch (thrown) {
         error = thrown;
       }
@@ -581,26 +592,8 @@ test('the resolver exports the digest-bound reference on the success path', asyn
       `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
     ].join('\n'),
     (stub) => {
-      const envFile = join(dirname(stub), 'env');
-      const outFile = join(dirname(stub), 'out');
-      const scriptPath = fileURLToPath(
-        new URL('./resolve-sandbox-image.mjs', import.meta.url),
-      );
       const expected = `ghcr.io/qwenlm/qwen-code@${GENUINE}`;
-      execFileSync(
-        process.execPath,
-        [scriptPath, 'ghcr.io/qwenlm/qwen-code:1.2.3'],
-        {
-          env: {
-            ...process.env,
-            SANDBOX_COMMAND: stub,
-            GITHUB_ENV: envFile,
-            GITHUB_OUTPUT: outFile,
-          },
-          timeout: 15_000,
-          stdio: 'pipe',
-        },
-      );
+      const { envFile, outFile } = runResolver(stub);
       assert.equal(
         readFileSync(envFile, 'utf8'),
         `QWEN_SANDBOX_IMAGE=${expected}\n`,
@@ -609,6 +602,91 @@ test('the resolver exports the digest-bound reference on the success path', asyn
     },
   );
 });
+
+function checkWorkflowSandboxBindings(name, doc) {
+  let totalConsumers = 0;
+  for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
+    const steps = job.steps ?? [];
+    const consumers = steps.filter(
+      (step) =>
+        (typeof step.run === 'string' &&
+          step.run.includes('QWEN_SANDBOX_IMAGE')) ||
+        (typeof step.env?.SETTINGS_JSON === 'string' &&
+          step.env.SETTINGS_JSON.includes('"sandbox": "docker"')),
+    );
+    if (consumers.length === 0) continue;
+    totalConsumers += consumers.length;
+    const resolvers = steps.filter(
+      (step) =>
+        typeof step.run === 'string' &&
+        step.run.includes('resolve-sandbox-image.mjs'),
+    );
+    assert.ok(
+      resolvers.length > 0,
+      `${name} job '${jobName}': consumes the sandbox image but has no resolver step`,
+    );
+    for (const resolver of resolvers) {
+      assert.ok(
+        resolver.id,
+        `${name} job '${jobName}': the resolver step needs an id so its image output is addressable`,
+      );
+      // The export is derived from this binary's stdout: an unpinned
+      // SANDBOX_COMMAND (or the bare `docker` default) is steerable
+      // through the same $GITHUB_ENV-append channel the DOCKER_HOST pin
+      // closes, and a PATH shadow in the runner-writable qwen-bin dir
+      // defeats a bare-name pin — so step env must bind an absolute
+      // path (#9527 review).
+      assert.equal(
+        resolver.env?.SANDBOX_COMMAND,
+        '/usr/bin/docker',
+        `${name} job '${jobName}': pin SANDBOX_COMMAND to an absolute docker path so neither an appended $GITHUB_ENV value nor a $GITHUB_PATH shadow can steer the exported digest`,
+      );
+    }
+    const bindings = resolvers.map(
+      (resolver) => `\${{ steps.${resolver.id}.outputs.image }}`,
+    );
+    for (const step of consumers) {
+      assert.ok(
+        bindings.includes(step.env?.QWEN_SANDBOX_IMAGE),
+        `${name} job '${jobName}' step '${step.name}': bind QWEN_SANDBOX_IMAGE to the resolver step output, not the appendable $GITHUB_ENV value`,
+      );
+      // The digest-bound reference is only as strong as the daemon that
+      // resolves it: a DOCKER_HOST appended to $GITHUB_ENV (or a rewritten
+      // currentContext in the pool-shared $DOCKER_CONFIG/config.json)
+      // steers the sandbox this step spawns unless the step env pins the
+      // endpoint the same way the resolver's own spawns do (#9527 review).
+      assert.equal(
+        step.env?.DOCKER_HOST,
+        '',
+        `${name} job '${jobName}' step '${step.name}': set DOCKER_HOST to '' so step env outranks an appended value (the docker CLI skips an empty value)`,
+      );
+      assert.equal(
+        step.env?.DOCKER_CONTEXT,
+        'default',
+        `${name} job '${jobName}' step '${step.name}': pin DOCKER_CONTEXT so the pool-shared currentContext cannot steer the docker endpoint`,
+      );
+      // always() and failure() can both run a consumer when the resolver
+      // FAILED, and its image binding is then empty — an empty
+      // QWEN_SANDBOX_IMAGE relaunches the CLI without any sandbox, so such
+      // a consumer must also gate on the resolver's outcome to fail closed
+      // (#9527 review).
+      if (/always\(\)|failure\(\)/.test(String(step.if ?? ''))) {
+        assert.ok(
+          resolvers.some((resolver) =>
+            String(step.if).includes(
+              `steps.${resolver.id}.outcome == 'success'`,
+            ),
+          ),
+          `${name} job '${jobName}' step '${step.name}': a consumer that can run after a resolver failure must also gate on the resolver step outcome`,
+        );
+      }
+    }
+  }
+  assert.ok(
+    totalConsumers > 0,
+    `${name}: no sandbox consumers detected — the contract test would pass vacuously`,
+  );
+}
 
 // Workflow contract: the resolver's step OUTPUT is the value every agent and
 // gate must consume — $GITHUB_ENV is appendable by later steps, so a consumer
@@ -650,88 +728,26 @@ test('every sandbox-image consumer binds the resolver step output', () => {
       `${name} no longer runs the resolver — drop it from UNBOUND_WORKFLOWS`,
     );
   }
+
   for (const { name, doc } of workflows) {
-    if (UNBOUND_WORKFLOWS.includes(name)) continue;
-    let totalConsumers = 0;
-    for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
-      const steps = job.steps ?? [];
-      const consumers = steps.filter(
-        (step) =>
-          (typeof step.run === 'string' &&
-            step.run.includes('QWEN_SANDBOX_IMAGE')) ||
-          (typeof step.env?.SETTINGS_JSON === 'string' &&
-            step.env.SETTINGS_JSON.includes('"sandbox": "docker"')),
-      );
-      if (consumers.length === 0) continue;
-      totalConsumers += consumers.length;
-      const resolvers = steps.filter(
-        (step) =>
-          typeof step.run === 'string' &&
-          step.run.includes('resolve-sandbox-image.mjs'),
-      );
-      assert.ok(
-        resolvers.length > 0,
-        `${name} job '${jobName}': consumes the sandbox image but has no resolver step`,
-      );
-      for (const resolver of resolvers) {
-        assert.ok(
-          resolver.id,
-          `${name} job '${jobName}': the resolver step needs an id so its image output is addressable`,
-        );
-        // The export is derived from this binary's stdout: an unpinned
-        // SANDBOX_COMMAND (or the bare `docker` default) is steerable
-        // through the same $GITHUB_ENV-append channel the DOCKER_HOST pin
-        // closes, and a PATH shadow in the runner-writable qwen-bin dir
-        // defeats a bare-name pin — so step env must bind an absolute
-        // path (#9527 review).
-        assert.equal(
-          resolver.env?.SANDBOX_COMMAND,
-          '/usr/bin/docker',
-          `${name} job '${jobName}': pin SANDBOX_COMMAND to an absolute docker path so neither an appended $GITHUB_ENV value nor a $GITHUB_PATH shadow can steer the exported digest`,
-        );
-      }
-      const bindings = resolvers.map(
-        (resolver) => `\${{ steps.${resolver.id}.outputs.image }}`,
-      );
-      for (const step of consumers) {
-        assert.ok(
-          bindings.includes(step.env?.QWEN_SANDBOX_IMAGE),
-          `${name} job '${jobName}' step '${step.name}': bind QWEN_SANDBOX_IMAGE to the resolver step output, not the appendable $GITHUB_ENV value`,
-        );
-        // The digest-bound reference is only as strong as the daemon that
-        // resolves it: a DOCKER_HOST appended to $GITHUB_ENV (or a rewritten
-        // currentContext in the pool-shared $DOCKER_CONFIG/config.json)
-        // steers the sandbox this step spawns unless the step env pins the
-        // endpoint the same way the resolver's own spawns do (#9527 review).
-        assert.equal(
-          step.env?.DOCKER_HOST,
-          '',
-          `${name} job '${jobName}' step '${step.name}': set DOCKER_HOST to '' so step env outranks an appended value (the docker CLI skips an empty value)`,
-        );
-        assert.equal(
-          step.env?.DOCKER_CONTEXT,
-          'default',
-          `${name} job '${jobName}' step '${step.name}': pin DOCKER_CONTEXT so the pool-shared currentContext cannot steer the docker endpoint`,
-        );
-        // always() runs a consumer even when the resolver FAILED, and its
-        // image binding is then empty — an empty QWEN_SANDBOX_IMAGE
-        // relaunches the CLI without any sandbox, so such a consumer must
-        // also gate on the resolver's outcome to fail closed (#9527 review).
-        if (String(step.if ?? '').includes('always()')) {
-          assert.ok(
-            resolvers.some((resolver) =>
-              String(step.if).includes(
-                `steps.${resolver.id}.outcome == 'success'`,
-              ),
-            ),
-            `${name} job '${jobName}' step '${step.name}': an always()-gated consumer must also gate on the resolver step outcome`,
-          );
-        }
-      }
+    const exempt = UNBOUND_WORKFLOWS.includes(name);
+    let checkError;
+    try {
+      checkWorkflowSandboxBindings(name, doc);
+    } catch (thrown) {
+      checkError = thrown;
     }
-    assert.ok(
-      totalConsumers > 0,
-      `${name}: no sandbox consumers detected — the contract test would pass vacuously`,
-    );
+    if (exempt) {
+      // Inverted tripwire: the exemption exists ONLY while the binding
+      // is absent, so the same check must fail once the workflow binds
+      // the resolver output — a stale entry would silently re-open the
+      // hole the derived set closes (#9527 review).
+      assert.ok(
+        checkError,
+        `${name} now binds the resolver output — drop it from UNBOUND_WORKFLOWS`,
+      );
+    } else if (checkError) {
+      throw checkError;
+    }
   }
 });
