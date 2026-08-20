@@ -413,12 +413,14 @@ describe('requiredAgents — Step 3B', () => {
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
   });
 
-  it('a heavy INTERACTION file in an incremental plan gets no invariant agents', () => {
-    // `heavy` is computed from the file's full-range slice, which for an
-    // interaction file is the code the previous round already cleared —
-    // three from-scratch whole-file walks are the re-review incremental
-    // scope exists to avoid. A heavy DELTA file keeps them; a malformed
-    // block widens (both keep them), never narrows.
+  it('a heavy INTERACTION file KEEPS its invariant agents', () => {
+    // The skip that used to live here rested on the merge base holding still
+    // between rounds: an interaction file's full-range slice is only "already
+    // cleared" while the base it is measured against has not moved. Nothing
+    // enforces that — a backward base move (retargeting the PR to an older
+    // base) is accepted by the anchor gate — and then the file's slice
+    // carries hunks no round has read, with these three the only agents that
+    // would walk them. Its chunk agent is briefed for the seam alone.
     const base = {
       ...BIG,
       files: [
@@ -440,43 +442,9 @@ describe('requiredAgents — Step 3B', () => {
     };
     const k = keys(incremental as typeof base);
     expect(k).toContain('invariant-a--src/delta.ts');
-    expect(k).not.toContain('invariant-a--src/seam.ts');
-    // An array of junk passes Array.isArray but names nothing to subtract.
-    const junkDelta = {
-      ...base,
-      incremental: {
-        scope: {
-          anchor: 'abc1234def567890',
-          deltaFiles: [null, 42],
-          interaction: [
-            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
-          ],
-        },
-      },
-    };
-    expect(keys(junkDelta as typeof base)).toContain(
-      'invariant-a--src/seam.ts',
-    );
-    const mangled = {
-      ...base,
-      incremental: { scope: { interaction: 'nope' } },
-    };
-    expect(keys(mangled as typeof base)).toContain('invariant-a--src/seam.ts');
-    // A path in BOTH lists is a DELTA file (its change is live): the delta
-    // classification wins and the invariant agents stay.
-    const both = {
-      ...base,
-      incremental: {
-        scope: {
-          anchor: 'abc1234def567890',
-          deltaFiles: ['src/seam.ts'],
-          interaction: [
-            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
-          ],
-        },
-      },
-    };
-    expect(keys(both as typeof base)).toContain('invariant-a--src/seam.ts');
+    expect(k).toContain('invariant-a--src/seam.ts');
+    expect(k).toContain('invariant-b--src/seam.ts');
+    expect(k).toContain('invariant-c--src/seam.ts');
   });
 });
 

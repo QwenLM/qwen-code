@@ -68,8 +68,6 @@ export interface RosterPlan {
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
-  /** Present only on a `--since`-scoped plan — see incrementalInteractionPaths. */
-  incremental?: unknown;
   /**
    * The review's effort, as the capturing command recorded it (`--effort`).
    * `'medium'` is the balanced tier and drops the adversarial personas; anything
@@ -157,60 +155,6 @@ function heavyFiles(plan: RosterPlan): string[] {
   return files
     .filter((f) => f?.heavy === true && typeof f.path === 'string')
     .map((f) => f.path as string);
-}
-
-/**
- * The interaction-file paths of a `--since`-scoped plan, defensively parsed — the
- * plan is disk JSON, and a malformed block must widen the roster (invariant
- * agents run), never narrow it.
- */
-function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
-  // `incremental.scope`, for the reason `incrementalScopeOf` records: the
-  // outer block is the anchor ruling, the scope it produced is nested.
-  const raw = (plan.incremental as { scope?: unknown } | null | undefined)
-    ?.scope as
-    | { interaction?: unknown; deltaFiles?: unknown }
-    | null
-    | undefined;
-  const out = new Set<string>();
-  // Same validation the brief renderer applies (`incrementalScopeOf`): an
-  // anchor-less block is not an incremental plan, and an entry with no
-  // surviving edge is not an interaction — treating either as one NARROWS
-  // the roster, and every malformation here must widen instead.
-  if (
-    !raw ||
-    typeof (raw as { anchor?: unknown }).anchor !== 'string' ||
-    (raw as { anchor: string }).anchor === '' ||
-    !Array.isArray(raw.interaction)
-  ) {
-    return out;
-  }
-  // A malformed `deltaFiles` disables the delta-wins subtraction below, so
-  // it must disable the narrowing entirely: with no trustworthy delta list
-  // there is no way to tell a seam-only file from a live one.
-  if (
-    !Array.isArray(raw.deltaFiles) ||
-    raw.deltaFiles.some((p) => typeof p !== 'string')
-  ) {
-    // An array of junk passes `Array.isArray` but leaves the delta-wins
-    // subtraction unable to name what it must subtract — the same reason a
-    // missing list disables the narrowing.
-    return out;
-  }
-  for (const e of raw.interaction) {
-    const path = (e as { path?: unknown } | null)?.path;
-    const edges = (e as { importsChanged?: unknown } | null)?.importsChanged;
-    const hasEdge =
-      Array.isArray(edges) &&
-      edges.some((x) => typeof x === 'string' && x.length > 0);
-    if (typeof path === 'string' && path.length > 0 && hasEdge) out.add(path);
-  }
-  // A path in BOTH lists is a DELTA file (its change is live): the delta
-  // classification wins and its invariant agents stay.
-  for (const p of raw.deltaFiles) {
-    if (typeof p === 'string') out.delete(p);
-  }
-  return out;
 }
 
 /**
@@ -314,16 +258,26 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
-  // An incremental plan's INTERACTION files get no invariant agents even when
-  // heavy: `heavy` is computed from the file's full-range slice, which for an
-  // interaction file is exactly the code the previous round already cleared —
-  // three whole-file agents re-walking it from scratch is the re-review the
-  // incremental scope exists to avoid, and the chunk agent for the same file
-  // is briefed for the seam only. Delta files keep them: their change is live.
-  const interactionPaths = incrementalInteractionPaths(plan);
+  // A heavy INTERACTION file keeps its invariant agents, even though its
+  // chunk agent is briefed for the seam only.
+  //
+  // Skipping them was tempting and wrong. The premise was that an interaction
+  // file's full-range slice is code the previous round already cleared — true
+  // only while the MERGE BASE holds still between rounds, and nothing
+  // enforces that. The anchor gate validates `--since` against head history;
+  // neither the round cache nor the posted ledger carries a base identity, so
+  // a BACKWARD base move — the author retargets the PR to an older base, an
+  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
+  // hunks no round has read, they arrive inside a heavy interaction file's
+  // full-range slice, and these three agents are the only ones that would
+  // have walked them. A clean verdict re-anchors past them for good.
+  //
+  // So the skip is off until the anchor can prove base continuity. It costs
+  // three agents on a rare shape — heavy, unchanged since the anchor, and
+  // importing something that moved — and it buys back the one direction this
+  // whole design refuses to lose in.
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
-      if (interactionPaths.has(file)) continue;
       add('invariant-a', file);
       add('invariant-b', file);
       add('invariant-c', file);
