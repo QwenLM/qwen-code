@@ -960,9 +960,11 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(path.join(projectsDir, '-glued'))).toBe(false);
   });
 
-  it('collects cwds from a final record without a trailing newline (R4-5)', async () => {
-    // Crash-mid-append residue: the last record has no '\n', so it is
-    // only reachable via the EOF-leftover branch of the stream scan.
+  it('treats an unterminated final record as torn residue (R4-5, R10-11)', async () => {
+    // Crash-mid-append residue: every writer terminates records with
+    // '\n', so a missing terminator means the append was killed — even
+    // if the tail happens to parse, the writer may have been cut off
+    // mid-record. Fail closed: the entry survives without a marker.
     const chats = path.join(projectsDir, '-no-newline', 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
     actualFs.writeFileSync(
@@ -970,10 +972,15 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       JSON.stringify({ cwd: goneCwd }),
     );
     ageEntry('-no-newline');
-    await sweepPastMarkerGrace('-no-newline');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-no-newline'))).toBe(
-      false,
+      true,
     );
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-no-newline', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
   });
 
   it('recovers a live cwd from a record straddling a chunk boundary (R4-5)', async () => {
@@ -1061,23 +1068,74 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  it('keeps an entry when a record is unreadable (R9-5)', async () => {
-    // Mixed evidence: one transcript records a gone cwd, another cannot
-    // be opened. The unreadable one might hold a live cwd, so the scan
-    // is incomplete and must veto deletion — no marker either.
-    const entry = path.join(projectsDir, '-incomplete-scan');
+  // chmod 0o000 only blocks reads on non-root POSIX: on Windows libuv
+  // maps it to the read-only attribute (still readable) and root
+  // bypasses it outright — the merge-queue Windows leg would fail.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps an entry when a record is unreadable (R9-5)',
+    async () => {
+      // Mixed evidence: one transcript records a gone cwd, another cannot
+      // be opened. The unreadable one might hold a live cwd, so the scan
+      // is incomplete and must veto deletion — no marker either.
+      const entry = path.join(projectsDir, '-incomplete-scan');
+      actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+      actualFs.writeFileSync(
+        path.join(entry, 'chats', 'a.jsonl'),
+        JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
+      );
+      const unreadable = path.join(entry, 'chats', 'b.jsonl');
+      actualFs.writeFileSync(
+        unreadable,
+        JSON.stringify({ cwd: '/real/project', type: 'qwen' }) + '\n',
+      );
+      actualFs.chmodSync(unreadable, 0o000);
+      ageEntry('-incomplete-scan');
+      await Storage.cleanOrphanProjectDirs('current');
+      expect(actualFs.existsSync(entry)).toBe(true);
+      expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it('treats a torn final record as incomplete evidence (R10-11)', async () => {
+    // All writers terminate records with '\n', so a non-terminated tail
+    // at EOF is a torn write (kill -9 mid-append). Its cwd — possibly
+    // the only live one — was cut off, so the sibling's gone cwd alone
+    // must not start the marker flow.
+    const entry = path.join(projectsDir, '-torn-tail');
     actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
     actualFs.writeFileSync(
-      path.join(entry, 'chats', 'a.jsonl'),
+      path.join(entry, 'chats', 'torn.jsonl'),
+      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) +
+        '\n' +
+        '{"cwd":"/live/proj',
+    );
+    ageEntry('-torn-tail');
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+      false,
+    );
+  });
+
+  it('treats a torn sidecar as incomplete evidence (self-review)', async () => {
+    // Sidecars are rewritten in place on runtime status updates; a
+    // kill -9 mid-write leaves torn JSON. Its work_dir — possibly the
+    // only live cwd — is lost, so the sibling's gone cwd alone must
+    // not start the marker flow. (Torn JSON, not chmod, so the test is
+    // platform- and uid-independent.)
+    const entry = path.join(projectsDir, '-torn-sidecar');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.writeFileSync(
+      path.join(entry, 'chats', 'gone.jsonl'),
       JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
     );
-    const unreadable = path.join(entry, 'chats', 'b.jsonl');
     actualFs.writeFileSync(
-      unreadable,
-      JSON.stringify({ cwd: '/real/project', type: 'qwen' }) + '\n',
+      path.join(entry, 'chats', 'sess-1.runtime.json'),
+      '{"work_dir":"/live/proj',
     );
-    actualFs.chmodSync(unreadable, 0o000);
-    ageEntry('-incomplete-scan');
+    ageEntry('-torn-sidecar');
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
     expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
@@ -1127,7 +1185,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   describe('containsOnlySessionArtifacts', () => {
-    it('requires exact artifact names, not prefixes (R9-2)', () => {
+    it('requires exact artifact names, not prefixes or suffixes (R9-2, R10-1)', () => {
       const dir = actualFs.mkdtempSync(path.join(projectsDir, 'ownership-'));
       actualFs.mkdirSync(path.join(dir, 'chats'));
       actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
@@ -1136,6 +1194,15 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       // `sess-1.` prefix — a startsWith check would claim its files.
       actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.b.jsonl'), '');
       expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+      actualFs.rmSync(path.join(dir, 'chats', 'sess-1.b.jsonl'));
+      actualFs.rmSync(path.join(dir, 'chats', 'sess-1.jsonl'));
+      // The reverse direction: our id is a strict suffix of a sibling's
+      // (`team-worker-1`) — an endsWith check would claim its files.
+      actualFs.writeFileSync(
+        path.join(dir, 'chats', 'team-worker-1.jsonl'),
+        '',
+      );
+      expect(Storage.containsOnlySessionArtifacts(dir, 'worker-1')).toBe(false);
     });
   });
 

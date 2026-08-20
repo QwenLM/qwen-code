@@ -703,7 +703,7 @@ export class Storage {
       } else if (dirent.name.endsWith('.jsonl')) {
         vetoed = Storage.scanFileForCwds(entryPath, cwds, state);
       } else if (dirent.name.endsWith('.runtime.json')) {
-        const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
+        const cwd = Storage.readJsonStringField(entryPath, 'work_dir', state);
         if (cwd) {
           cwds.add(cwd);
           vetoed = Storage.isVetoCwd(cwd);
@@ -711,7 +711,11 @@ export class Storage {
       } else if (dirent.name.endsWith('.worktree.json')) {
         // `worktreePath`, not `originalCwd`: the repo root stays alive
         // after the worktree is removed and would veto cleanup forever.
-        const cwd = Storage.readJsonStringField(entryPath, 'worktreePath');
+        const cwd = Storage.readJsonStringField(
+          entryPath,
+          'worktreePath',
+          state,
+        );
         if (cwd) {
           cwds.add(cwd);
           vetoed = Storage.isVetoCwd(cwd);
@@ -744,8 +748,14 @@ export class Storage {
         }
         const text = leftover + decoder.write(buf.subarray(0, bytesRead));
         if (bytesRead === 0) {
-          if (leftover && Storage.extractLineCwds(leftover, cwds)) {
-            return true;
+          if (leftover) {
+            if (Storage.extractLineCwds(leftover, cwds)) {
+              return true;
+            }
+            // Every writer terminates records with '\n', so a
+            // non-terminated tail at EOF is a torn write — its cwd may
+            // be lost; fail closed.
+            state.incomplete = true;
           }
           return false;
         }
@@ -820,6 +830,7 @@ export class Storage {
   private static readJsonStringField(
     filePath: string,
     field: string,
+    state: { incomplete: boolean },
   ): string | null {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<
@@ -829,6 +840,10 @@ export class Storage {
       const value = parsed[field];
       return typeof value === 'string' && value ? value : null;
     } catch {
+      // A torn or unreadable sidecar (rewritten in place on runtime
+      // status updates) loses its cwd evidence — fail closed, like an
+      // unreadable transcript.
+      state.incomplete = true;
       return null;
     }
   }
@@ -920,9 +935,14 @@ export class Storage {
     } catch {
       return true;
     }
+    // Exact names, not prefix/suffix matching: session ids are
+    // caller-supplied SDK input, so one id can be a strict prefix or
+    // suffix of a sibling's (`sess-1` vs `sess-1.b`, `worker-1` vs
+    // `team-worker-1`) and artifacts are named exactly
+    // `${sessionId}${suffix}`.
     return files.every((file) =>
-      ['.jsonl', '.runtime.json', '.worktree.json'].some((suffix) =>
-        file.endsWith(`${sessionId}${suffix}`),
+      ['.jsonl', '.runtime.json', '.worktree.json'].some(
+        (suffix) => file === `${sessionId}${suffix}`,
       ),
     );
   }
