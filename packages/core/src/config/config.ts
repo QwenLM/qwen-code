@@ -116,6 +116,7 @@ import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
@@ -7006,7 +7007,7 @@ export class Config {
 
     const routeMatches = this.getAllConfiguredModels().filter(
       (model) =>
-        model.imageOnly === true &&
+        isImageGenerationCapable(model) &&
         !model.fastOnly &&
         !model.voiceOnly &&
         model.id === selector.modelId &&

@@ -1031,6 +1031,23 @@ describe('fastOnly and voiceOnly flags', () => {
     ).toBe(true);
   });
 
+  it('should propagate image generation capability without excluding the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        {
+          id: 'dual-role-model',
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+
+    const available = registry.getModelsForAuthType(AuthType.USE_OPENAI)[0];
+    expect(available?.supportsImageGeneration).toBe(true);
+    expect(registry.getDefaultModelForAuthType(AuthType.USE_OPENAI)?.id).toBe(
+      'dual-role-model',
+    );
+  });
+
   it('should warn when both fastOnly and voiceOnly are set', () => {
     const config: ModelProvidersConfig = {
       openai: [
