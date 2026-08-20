@@ -89,6 +89,7 @@ import type {
   EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
+import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -140,7 +141,10 @@ import {
   getFileChangePreviewContent,
   TURN_OUTPUT_KINDS,
 } from './components/artifacts/TurnOutputs';
-import { useArtifactWorkspaceTarget } from './components/artifacts/useArtifactWorkspaceTarget';
+import {
+  resolveArtifactWorkspaceOwner,
+  useArtifactWorkspaceTarget,
+} from './components/artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -270,6 +274,7 @@ import {
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import { base64ToBlob } from './utils/base64';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
@@ -1173,6 +1178,7 @@ function imageTabId(src: string): string {
   }
   return `image:${hash.toString(36)}`;
 }
+
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -2304,6 +2310,14 @@ export function App({
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
+  const artifactWorkspaceCwd = artifactWorkspaceTarget?.workspaceCwd;
+  const artifactWorkspaceActions = artifactWorkspaceTarget?.actions;
+  const artifactWorkspaceCwdRef = useRef(artifactWorkspaceCwd);
+  const artifactWorkspaceActionsRef = useRef(artifactWorkspaceActions);
+  const workspaceCapabilitiesRef = useRef(workspace.capabilities);
+  artifactWorkspaceCwdRef.current = artifactWorkspaceCwd;
+  artifactWorkspaceActionsRef.current = artifactWorkspaceActions;
+  workspaceCapabilitiesRef.current = workspace.capabilities;
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -3486,6 +3500,107 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openAttachmentPanel = useCallback(
+    (
+      file: AttachmentPreviewRequest,
+      workspaceCwd = connection.workspaceCwd,
+      sourceSessionId = connection.sessionId,
+    ) => {
+      const open = (resolvedFile: AttachmentPreviewRequest) => {
+        const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
+        const workspaceId = resolveArtifactWorkspaceOwner(
+          workspaceCapabilitiesRef.current,
+          workspaceCwd,
+        )?.id;
+        const previewOnly =
+          resolvedFile.text !== undefined ||
+          resolvedFile.data !== undefined ||
+          resolvedFile.attachmentId !== undefined;
+        const tab: ArtifactPanelTab = {
+          id: previewOnly
+            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            : `file:${workspaceCwd ?? ''}:${workspacePath}`,
+          kind: 'file',
+          title: resolvedFile.name,
+          workspacePath,
+          ...(resolvedFile.text !== undefined
+            ? { previewContent: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.data ? { previewData: resolvedFile.data } : {}),
+          ...(resolvedFile.mimeType
+            ? { previewMimeType: resolvedFile.mimeType }
+            : {}),
+          ...(previewOnly ? { previewOnly: true } : {}),
+          ...(workspaceCwd ? { workspaceCwd } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+        };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id)
+            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            : [tab, ...tabs],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+      };
+      if (
+        file.attachmentId &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void sessionActions
+          .readAttachment(file.attachmentId)
+          .then((attachment) => {
+            if (!owner.isCurrent()) return;
+            open({
+              ...file,
+              data: base64ToBlob(attachment.data, attachment.mimeType),
+              mimeType: attachment.mimeType,
+            });
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast(
+              'error',
+              formatError(error, 'Failed to preview attachment'),
+            );
+          });
+        return;
+      }
+      if (
+        file.workspacePath &&
+        file.text === undefined &&
+        file.data === undefined &&
+        artifactWorkspaceCwdRef.current === workspaceCwd &&
+        artifactWorkspaceActionsRef.current
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void artifactWorkspaceActionsRef.current
+          .stat(file.workspacePath)
+          .then((stat) => {
+            if (!owner.isCurrent() || stat.type !== 'file') return;
+            open(file);
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast('error', formatError(error, 'Failed to preview file'));
+          });
+        return;
+      }
+      open(file);
+    },
+    [
+      connection.workspaceCwd,
+      connection.sessionId,
+      getDefaultReviewPanelWidth,
+      pushToast,
+      sessionActions,
+      sessionOwnerGuard,
+    ],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3631,6 +3746,22 @@ export function App({
         openImagePanel(request.src, request.alt);
         return;
       }
+      if (request.kind === 'attachment') {
+        openAttachmentPanel(
+          {
+            name: request.title,
+            ...(request.mimeType ? { mimeType: request.mimeType } : {}),
+            ...(request.data ? { data: request.data } : {}),
+            ...(request.text !== undefined ? { text: request.text } : {}),
+            ...(request.workspacePath
+              ? { workspacePath: request.workspacePath }
+              : {}),
+          },
+          request.workspaceCwd,
+          request.sourceSessionId,
+        );
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3687,6 +3818,7 @@ export function App({
       openReviewPanel,
       openScheduledTaskPanel,
       openImagePanel,
+      openAttachmentPanel,
       openSubagentPanelForSession,
     ],
   );
@@ -6349,7 +6481,7 @@ export function App({
       'session_mid_turn_message_query',
     ) === true;
   const canInjectMidTurnMedia =
-    connection.capabilities?.features.includes('session_media') === true;
+    connection.capabilities?.features.includes('session_attachments') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -12450,6 +12582,7 @@ export function App({
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
                                 onImagePreview={openImagePanel}
+                                onAttachmentPreview={openAttachmentPanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -12752,6 +12885,7 @@ export function App({
                           }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
+                          onAttachmentPreview={openAttachmentPanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
