@@ -337,6 +337,74 @@ describe('extractCertificateBlocks', () => {
     ]);
   });
 
+  it('reads past a headed NON-certificate block to the certificates behind it', () => {
+    // Oracle: authorized=true for every label below, measured through real
+    // NODE_EXTRA_CA_CERTS handshakes on Node v22.23.0 / OpenSSL 3.0.13. The
+    // loader inspects a header section only on a block it tries to consume,
+    // and it consumes certificate labels alone — so RFC 1421's
+    // `Proc-Type`-first rule binds there and NOWHERE else. Applying it to
+    // every label made this module return `undefined` for an operator file the
+    // workers' own loader reads, and the merge then discarded the operator CA
+    // and blamed marker defects the file does not have.
+    //
+    // `TRUSTED CERTIFICATE` belongs in this list, not with the certificate
+    // labels: the loader takes no certificate from it either.
+    for (const label of [
+      'PRIVATE KEY',
+      'RSA PRIVATE KEY',
+      'ENCRYPTED PRIVATE KEY',
+      'TRUSTED CERTIFICATE',
+      'X509 CRL',
+      'CERTIFICATE REQUEST',
+      'PUBLIC KEY',
+    ]) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN ${label}-----\nComment: exported by hand\n\nQUJD\n-----END ${label}-----\n${ROOT_PEM}`,
+        ),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops at a Proc-Type header section under a certificate label', () => {
+    // Oracle: authorized=false. A `Proc-Type` header does not spare a
+    // certificate block — the loader goes on to DECRYPT it and aborts the file
+    // `bad decrypt` with a `DEK-Info` line and `not dek info` without one.
+    // Skipping such a block the way a well-formed encrypted KEY is skipped
+    // read straight past a stop; the trailing leaf makes that visible.
+    for (const headers of [
+      'Proc-Type: 4,ENCRYPTED\nDEK-Info: DES-EDE3-CBC,0123456789ABCDEF',
+      'Proc-Type: 4,ENCRYPTED',
+    ]) {
+      for (const label of ['CERTIFICATE', 'X509 CERTIFICATE']) {
+        expect(
+          extractCertificateBlocks(
+            `-----BEGIN ${label}-----\n${headers}\n\n${bodyLines(ROOT_PEM).join('\n')}\n-----END ${label}-----\n${LEAF_PEM}`,
+          ),
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  it('stops at a headed block whose body below the headers cannot decode', () => {
+    // Oracle: authorized=false, `bad base64 decode`. The loader decodes the
+    // body BELOW a header section too, so skipping a headed block without
+    // judging its base64 read past a stop and reported the trailing root as an
+    // anchor the workers never got. `AAAAA` is alphabet-valid and still fails,
+    // and a header section with no body at all takes nothing either.
+    for (const body of ['!!!!', 'AAAAA', '']) {
+      expect(
+        extractCertificateBlocks(
+          '-----BEGIN RSA PRIVATE KEY-----\n' +
+            'Proc-Type: 4,ENCRYPTED\n' +
+            'DEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n' +
+            `\n${body === '' ? '' : `${body}\n`}` +
+            `-----END RSA PRIVATE KEY-----\n${ROOT_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
   it('takes a body wrapped at a non-canonical column', () => {
     // Oracle: authorized=true. The decoder judges the joined body, not each
     // line, so a 63-column rewrap (some exporters do this) still loads.

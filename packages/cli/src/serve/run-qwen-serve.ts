@@ -767,10 +767,34 @@ export function describeWorkerTlsTrustGaps(opts: {
   // gaps, but it must not pretend the operator CA reached the workers — and it
   // must reason from the SAME leaf boot parsed, so the loose split only ever
   // supplies the rest of the chain.
-  const servingChain = servingBlocks ?? [
-    x509,
-    ...chain.filter((member) => member.fingerprint256 !== x509.fingerprint256),
-  ];
+  const servingChain =
+    servingBlocks === undefined
+      ? [
+          x509,
+          ...chain.filter(
+            (member) => member.fingerprint256 !== x509.fingerprint256,
+          ),
+        ]
+      : // The loader can read blocks out of the file and still not read the
+        // block the daemon SERVES — a leaf exported by `openssl x509
+        // -trustout` carries the `TRUSTED CERTIFICATE` label, which is not one
+        // the loader takes a certificate from, so a `trusted leaf + plain root`
+        // serving file yields `servingBlocks = [root]`. Starting the walk at
+        // that root put it at depth 0, where the leaf-depth exemption below
+        // waives the CA-capability check, and the walk returned anchored with
+        // zero gaps: measured `gaps: []` at boot for a CA:FALSE root
+        // (handshake INVALID_PURPOSE) and for a CA:TRUE root without
+        // keyCertSign (handshake UNSPECIFIED), while `createSecureContext`
+        // accepts the file and the daemon boots green and silent.
+        //
+        // So anchor the walk at the certificate boot parsed, the way the
+        // `servingBlocks === undefined` fallback above already does; the
+        // remaining blocks supply the rest of the chain.
+        servingBlocks.some(
+            (block) => block.fingerprint256 === x509.fingerprint256,
+          )
+        ? servingBlocks
+        : [x509, ...servingBlocks];
   const workerTrustStore =
     operatorChain && servingBlocks
       ? [...servingChain, ...operatorChain]

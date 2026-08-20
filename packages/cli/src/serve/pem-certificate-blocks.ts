@@ -177,21 +177,29 @@ export function extractCertificateBlocks(
     // `DEK-Info:`) aborted this scan while the loader consumed it as headers,
     // skipped the block and loaded every certificate after it.
     const separator = body.findIndex(isHeaderSeparatorLine);
-    if (separator > 0) {
-      // Headers present. `PEM_get_EVP_CIPHER_INFO` demands `Proc-Type` first
-      // and fails the whole load with `not proc type` otherwise — measured for
-      // a `Comment:`-headed CERTIFICATE block, and for the blank line a
-      // hand-edited body picks up mid-base64, both of which take NOTHING.
-      if (!body[0]!.startsWith('Proc-Type:')) break;
-      // A well-formed encrypted block: no certificate comes out of it, and the
-      // loader reads straight on past it.
-      index = cursor + 1;
-      continue;
-    }
+    const headed = separator > 0;
+    // A header section is only ever INSPECTED on a block the loader tries to
+    // consume, and `NODE_EXTRA_CA_CERTS` consumes certificate labels alone. On
+    // one of those the file stops whatever the headers say, because
+    // `PEM_get_EVP_CIPHER_INFO` runs either way: `not proc type` when
+    // `Proc-Type` is not the first header, and — since the loader then tries to
+    // DECRYPT — `bad decrypt` or `not dek info` when it is. All three take
+    // NOTHING from the file (measured, Node v22.23.0 / OpenSSL 3.0.13).
+    //
+    // Under every OTHER label the headers are not read at all. Enforcing RFC
+    // 1421's `Proc-Type`-first rule for all labels was a divergence with live
+    // harm: the same `Comment:`-headed section that kills a CERTIFICATE block
+    // loads the root behind it fine under `PRIVATE KEY`, `RSA PRIVATE KEY`,
+    // `X509 CRL`, `TRUSTED CERTIFICATE` and every other label tried
+    // (`authorized: true` for all of them), yet this scan returned `undefined`
+    // for such an operator file — so `resolveWorkerCaCertPath` fired the
+    // no-operator-blocks fallback, discarded a CA the workers' own loader
+    // reads, and blamed marker defects the file does not have.
+    if (headed && CERTIFICATE_LABELS.has(label)) break;
     // A header section with no blank line after it needs no separate stop: its
     // `Name: value` line carries a colon, which the base64 judgment below
     // already refuses — measured `authorized: false` for that shape too.
-    const data = separator === 0 ? body.slice(1) : body;
+    const data = separator >= 0 ? body.slice(separator + 1) : body;
     // Interior and leading whitespace in a body line is skipped by the
     // decoder, not an error, so join first and judge the base64 afterwards.
     // A BOM is NOT whitespace to the decoder: one inside a base64 line is
@@ -206,6 +214,17 @@ export function extractCertificateBlocks(
     // for `bad-key-block + good root`, and for an empty body under any label,
     // against `authorized: true` for the same file with the block removed).
     if (encoded.length === 0 || !decodesAsBase64(encoded)) break;
+    if (headed) {
+      // A well-formed encrypted or otherwise headed non-certificate block: no
+      // certificate comes out of it, and the loader reads straight on past it.
+      // The base64 judgment above still had to run first — the loader decodes
+      // the body BELOW the headers too, so an encrypted key with an
+      // undecodable body is `bad base64 decode` and stops the file (measured
+      // for `!!!!` and for `AAAAA` under `Proc-Type:`/`DEK-Info:`), and a
+      // header section with no body at all takes nothing either.
+      index = cursor + 1;
+      continue;
+    }
     if (CERTIFICATE_LABELS.has(label)) {
       const block = renderCertificateBlock(encoded);
       try {

@@ -2382,6 +2382,59 @@ describe('describeWorkerTlsTrustGaps', () => {
     ).toBe(true);
   });
 
+  it('anchors the walk at the served leaf when its label hides it from the loader', () => {
+    // R8-1: `servingBlocks[0]` was assumed to be the served leaf, but the
+    // loader takes nothing from a `-----BEGIN TRUSTED CERTIFICATE-----` block
+    // (what `openssl x509 -trustout` writes), so a `trusted leaf + plain root`
+    // serving file yields `servingBlocks = [root]`. The walk then started at
+    // the ROOT, at depth 0, where the leaf-depth exemption waives the
+    // CA-capability check — so an incapable root was reported anchored with
+    // zero gaps while every worker handshake failed. Boot stays green either
+    // way: `X509Certificate` reads the trusted label and `createSecureContext`
+    // serves the file.
+    //
+    // Measured on Node v22.23.0 / OpenSSL 3.0.13, worker shape (the serving
+    // file as both the served chain and NODE_EXTRA_CA_CERTS): CA:FALSE root
+    // fails INVALID_PURPOSE, CA:TRUE-without-keyCertSign root fails
+    // "key usage does not include certificate signing", capable root
+    // authorizes — and before the fix the diagnostic returned `[]` for all
+    // three.
+    const trustLabelLeaf = (pem: string): string =>
+      pem.replace(
+        /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+        '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+      );
+    const caFalseGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT)),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(caFalseGaps).toHaveLength(1);
+    expect(caFalseGaps[0]).toContain('INVALID_PURPOSE');
+    expect(caFalseGaps[0]).toContain('qwen non-CA test issuer');
+
+    const keyUsageGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT),
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(keyUsageGaps).toHaveLength(1);
+    expect(keyUsageGaps[0]).toContain('CN=qwen CA-TRUE no-keyCertSign root');
+    expect(keyUsageGaps[0]).toContain('key usage does not include certificate');
+
+    // The control that stops the widened walk from crying wolf: the same
+    // label-hidden leaf over a CAPABLE root authorizes, so it must stay quiet.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN)),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
   it('judges the leaf boot parsed, not the one a loose split matched first', () => {
     // R6-2: `parseCertChain`'s regex is unanchored, so an INDENTED leading
     // block — prose to `new X509Certificate` and to the workers' loader — was
