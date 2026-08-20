@@ -188,6 +188,95 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
+  it('keeps a fitting top-anchored mount (initialScrollIndex 0) top-aligned', async () => {
+    // MainContent mounts the banner-only VP session with
+    // `initialScrollIndex={0}` (top-anchored). The mount-time re-stick must
+    // not override that explicit anchor and bottom-align the content:
+    // bottom-alignment is reserved for bottom-stuck conversations (#9300).
+    const { lastFrame, rerender } = render(
+      <VirtualizedList<Item>
+        data={makeItems(3)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    rerender(
+      <VirtualizedList<Item>
+        data={makeItems(3)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+    ]);
+  });
+
+  it('does not bottom-align a scrolled-away list when content shrinks to fit', async () => {
+    // Discriminates the `isStickingToBottom` gate of `bottomAlignGap`: the
+    // user scrolled away from the bottom, then content shrinks in place
+    // below the viewport. The frame must collapse top-aligned around the
+    // content the user is reading, not grow to the full container height
+    // with blank rows above it (#9305 review R4-2).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollTo(0);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(3);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+    ]);
+  });
+
   it('reports zero-height shrink so collapsed items leave no blank gap', async () => {
     // Mirrors VP thought groups: the head renders a 1-line summary when
     // collapsed while continuations render nothing (zero height). The zero

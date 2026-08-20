@@ -415,7 +415,17 @@ function VirtualizedList<T>(
       prevTotalHeight.current - prevContainerHeight.current - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
-    if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
+    // Fitting alone is not a bottom signal for re-sticking: a top-anchored
+    // mount (initialScrollIndex 0, e.g. the banner-only VP session) fits
+    // too, and flipping sticking there would let `bottomAlignGap`
+    // bottom-align content the host anchored to the top (#9300). Re-stick
+    // only from a real bottom position: previously overflowing with the
+    // viewport at the bottom pixels.
+    if (
+      !contentPreviouslyFit &&
+      wasScrolledToBottomPixels &&
+      actualScrollTop >= prevScrollTop.current
+    ) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
       }
