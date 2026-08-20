@@ -407,7 +407,7 @@ describe('package scripts', () => {
         / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBeGreaterThan(0);
+    expect(installSteps.length).toBe(5);
     for (const installStep of installSteps) {
       expect(installStep).toContain(
         'npm ci --ignore-scripts --no-audit --progress=false',
