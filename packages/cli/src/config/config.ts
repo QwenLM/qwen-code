@@ -74,7 +74,7 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { isValidSessionId } from './session-id.js';
+import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -2077,11 +2077,14 @@ export async function loadCliConfig(
       occupied =
         (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
         undefined;
-    } catch {
+    } catch (error) {
       // Any read failure leaves the id unproven, and the resolver propagates
       // non-ENOENT errors. Assume occupied, as the previous existence check
       // did: startup must reach the guarded conflict message and honour
       // `throwOnSessionIdConflict` rather than die on a raw errno.
+      debugLogger.debug(
+        `Session id occupancy check failed for ${argv['sessionId']}: ${error}`,
+      );
       occupied = true;
     }
     if (occupied) {
@@ -2092,7 +2095,7 @@ export async function loadCliConfig(
       writeStderrLine(message);
       process.exit(1);
     }
-    sessionId = argv['sessionId'];
+    sessionId = normalizeSessionIdForLookup(argv['sessionId']);
   }
 
   const modelProvidersConfig = settings.modelProviders;

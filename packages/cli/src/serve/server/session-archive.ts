@@ -401,7 +401,9 @@ export async function deleteDaemonSessions(params: {
     coordinatorLockHeld = false,
     onError,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -637,7 +639,9 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -797,7 +801,9 @@ export async function unarchiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);

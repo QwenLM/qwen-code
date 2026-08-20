@@ -318,6 +318,33 @@ describe('archiveDaemonSessions', () => {
     ).toBe(true);
   });
 
+  it('collapses case-variant spellings in one batch to a single archive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      archived: [sessionId],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
+
   it('disables a scheduled task bound to the archived session', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440050';
     writeSessionFile(workspaceDir, sessionId, 'active');
@@ -752,6 +779,30 @@ describe('unarchiveDaemonSessions', () => {
     ).toBe(false);
   });
 
+  it('collapses case-variant spellings in one batch to a single unarchive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      unarchived: [sessionId],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(false);
+  });
+
   it('does not unarchive while another writer holds the lease', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440015';
     writeSessionFile(workspaceDir, sessionId, 'archived');
@@ -1000,6 +1051,29 @@ describe('deleteDaemonSessions', () => {
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
+  });
+
+  it('collapses case-variant spellings in one batch to a single delete', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440170';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId.toUpperCase(), sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
   });
 
   it('does not delete while another writer holds the lease', async () => {

@@ -1990,6 +1990,27 @@ describe('loadCliConfig', () => {
     expect(config.getSessionId()).toBe(sessionId);
   });
 
+  it('canonicalizes a mixed-case caller-supplied sessionId before storing it', async () => {
+    const sessionId = '123E4567-E89B-12D3-A456-426614174000';
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId.toLowerCase());
+  });
+
   it('should use internal sandbox session ID without treating it as a new session', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
     vi.stubEnv('SANDBOX', 'sandbox-exec');
