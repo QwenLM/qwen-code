@@ -4812,18 +4812,18 @@ export class Session implements SessionContext {
                 // the resend cannot reuse the original attempt's record.
                 // Record it as a fresh turn so it commits to API history
                 // marked (below) and stays in the rewind projection.
-                const mediaReferences = readDaemonMediaReferences(
-                  promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+                const attachmentReferences = readDaemonAttachmentReferences(
+                  promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
                 );
                 const recorder = this.config.getChatRecordingService();
-                if (promptDisplayText !== undefined || mediaReferences) {
+                if (promptDisplayText !== undefined || attachmentReferences) {
                   recorder?.recordUserMessage(
                     promptText,
                     goalTurn?.permit,
                     {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
-                      ...(mediaReferences ? { mediaReferences } : {}),
+                      ...(attachmentReferences ? { attachmentReferences } : {}),
                     },
                     promptId,
                   );
@@ -4861,9 +4861,7 @@ export class Session implements SessionContext {
                   {
                     displayText: promptDisplayText ?? promptText,
                     hookContext: '',
-                    ...(attachmentReferences
-                      ? { attachmentReferences }
-                      : {}),
+                    ...(attachmentReferences ? { attachmentReferences } : {}),
                   },
                   promptId,
                 );
