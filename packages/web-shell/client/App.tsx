@@ -4671,9 +4671,6 @@ export function App({
     return () => {
       cancelled = true;
     };
-    // Skill-specific fields only: other workspaceEventSignals versions must
-    // not cancel an in-flight /workspace/skills refresh.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [
     connected,
     connection.sessionId,
