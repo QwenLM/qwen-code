@@ -1099,6 +1099,13 @@ jobs:
         id: 'sandbox_image'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -3926,6 +3933,13 @@ jobs:
 
       - name: 'Resolve sandbox image'
         id: 'sandbox_image'
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"

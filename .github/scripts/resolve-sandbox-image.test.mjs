@@ -678,6 +678,17 @@ test('every sandbox-image consumer binds the resolver step output', () => {
           resolver.id,
           `${name} job '${jobName}': the resolver step needs an id so its image output is addressable`,
         );
+        // The export is derived from this binary's stdout: an unpinned
+        // SANDBOX_COMMAND (or the bare `docker` default) is steerable
+        // through the same $GITHUB_ENV-append channel the DOCKER_HOST pin
+        // closes, and a PATH shadow in the runner-writable qwen-bin dir
+        // defeats a bare-name pin — so step env must bind an absolute
+        // path (#9527 review).
+        assert.equal(
+          resolver.env?.SANDBOX_COMMAND,
+          '/usr/bin/docker',
+          `${name} job '${jobName}': pin SANDBOX_COMMAND to an absolute docker path so neither an appended $GITHUB_ENV value nor a $GITHUB_PATH shadow can steer the exported digest`,
+        );
       }
       const bindings = resolvers.map(
         (resolver) => `\${{ steps.${resolver.id}.outputs.image }}`,
