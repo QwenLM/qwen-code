@@ -324,6 +324,14 @@ export function resplitCustomModelIdsText(
     ) {
       continue;
     }
+    if (
+      isActive &&
+      builtInModelIds.has(id) &&
+      !selectedModelIds.includes(id) &&
+      !recommendedModelIds.has(id)
+    ) {
+      continue;
+    }
     keptIds.add(id);
     parts.push(segment);
   }
@@ -386,9 +394,9 @@ function modelIdAtCaret(text: string, caret: number): string | undefined {
  * after `y` and Enter installs `my-depoyl`.
  *
  * So anchor on the SEGMENT, not on the offset. Segments that survive a
- * re-derive are kept verbatim and deduplicated (see
- * `resplitCustomModelIdsText`), which makes an exact string match an
- * unambiguous identity for them.
+ * re-derive are kept verbatim and in order (see
+ * `resplitCustomModelIdsText`), so matching the occurrence of an exact string
+ * preserves its identity even when the active segment duplicates another.
  *
  * Exported for the tests: the failure is one offset deep inside a component
  * that only shows it three keystrokes later, so it is worth pinning directly
@@ -433,7 +441,12 @@ export function remapCaretAcrossResplit(
   // context still exists. Nothing survived in front of it — every id they had
   // moved to a checkbox — leaves only the end of the new text.
   for (let i = index; i >= 0; i--) {
-    const match = next.find((segment) => segment.text === previous[i].text);
+    const occurrence = previous
+      .slice(0, i + 1)
+      .filter((segment) => segment.text === previous[i].text).length;
+    const match = next.filter((segment) => segment.text === previous[i].text)[
+      occurrence - 1
+    ];
     if (!match) {
       continue;
     }

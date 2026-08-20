@@ -1019,6 +1019,49 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('drops a pruned built-in after the caret moves back into its segment', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of 'MiniMax-M3,priv') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    for (let offset = 0; offset < 12; offset += 1) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({ modelIds: 'priv', submitModelIds });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({ modelIds: ['priv'] });
+    unmount();
+  });
+
   it('reports the post-edit caret when a separator ends an active id', async () => {
     const changeModelIds = vi.fn();
     const flow = createModelIdsFlow({ modelIds: '', changeModelIds });
@@ -1254,6 +1297,18 @@ describe('resplitCustomModelIdsText', () => {
       ),
     ).toBe('foo');
   });
+
+  it('drops an active built-in that discovery removed from flow state', () => {
+    expect(
+      resplitCustomModelIdsText(
+        'MiniMax-M3,priv',
+        ['priv'],
+        new Set(),
+        BUILT_INS,
+        2,
+      ),
+    ).toBe('priv');
+  });
 });
 
 describe('remapCaretAcrossResplit', () => {
@@ -1272,6 +1327,15 @@ describe('remapCaretAcrossResplit', () => {
     expect(remapCaretAcrossResplit('a,my-depoy', 'kept-a, x,my-depoy', 8)).toBe(
       16,
     );
+  });
+
+  it('follows the same occurrence when duplicate segments survive', () => {
+    expect(
+      remapCaretAcrossResplit('priv,priv,MiniMax-M3', 'priv,priv', 7),
+    ).toBe(7);
+    expect(
+      remapCaretAcrossResplit('MiniMax-M3,priv,priv', 'priv,priv', 21),
+    ).toBe(9);
   });
 
   it('falls in at the end of the nearest surviving segment ahead of it', () => {
