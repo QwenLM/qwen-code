@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -23,6 +24,7 @@ import {
 } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -694,6 +696,31 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         throw err;
+      }
+      if (key === 'experimental.sessionWorkflow') {
+        try {
+          await runtime.bridge.invokeWorkspaceCommand(
+            SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+            { enabled: value },
+          );
+        } catch (err) {
+          if (!(err instanceof SessionNotFoundError)) {
+            writeStderrLine(
+              `qwen serve: failed to update the live Session Workflow setting for ${runtime.workspaceCwd}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            res.status(500).json({
+              error: 'Failed to update the live Session Workflow setting',
+              code: 'runtime_update_error',
+            });
+            return;
+          }
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
       }
       deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({

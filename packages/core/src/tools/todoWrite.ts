@@ -287,9 +287,6 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const hasActivePlan = oldTodos.some(
         (todo) => todo.status !== 'completed',
       );
-      const workflowContextActive =
-        this.config.isSessionWorkflowTodoContextActive?.() === true;
-
       let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {
@@ -392,6 +389,15 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, activePlanId, sessionId);
+      const approvedWorkflowRevision =
+        this.config.getSessionWorkflowPlanRevision?.();
+      const continuesApprovedWorkflow =
+        !approvedWorkflowRevision ||
+        (finalTodos.length > 0 &&
+          resultPlanId === approvedWorkflowRevision.planId);
+      if (!continuesApprovedWorkflow) {
+        this.config.clearSessionWorkflowPlanRevision?.();
+      }
       const unfinishedTodos = finalTodos.filter(
         (todo) => todo.status !== 'completed',
       );
@@ -465,6 +471,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       }
 
       // 6. Create structured display object for rich UI rendering
+      const workflowContextActive =
+        continuesApprovedWorkflow &&
+        this.config.isSessionWorkflowTodoContextActive?.() === true;
       const todoResultDisplay = {
         type: 'todo_list' as const,
         ...(resultPlanId ? { planId: resultPlanId } : {}),

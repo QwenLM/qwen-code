@@ -580,6 +580,40 @@ describe('TodoWriteTool', () => {
       expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
     });
 
+    it('ends an approved Workflow when a new Todo plan starts', async () => {
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'approved-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['finished'],
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'approved-plan',
+          todos: [{ id: 'finished', content: 'Finished', status: 'completed' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: 'next', content: 'Next task', status: 'pending' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+      expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+    });
+
     it('should handle file write errors', async () => {
       const params: TodoWriteParams = {
         todos: [

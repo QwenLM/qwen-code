@@ -44,6 +44,7 @@ function makeBridge(): AcpSessionBridge {
     permissionPolicy: 'first-responder',
     knownClientIds: () => new Set<string>(['client-1']),
     publishWorkspaceEvent: vi.fn(),
+    invokeWorkspaceCommand: vi.fn(async () => ({})),
     isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
     runWorkspaceMemoryRemember: vi.fn(async () => ({
       summary: 'saved',
@@ -659,6 +660,22 @@ describe('workspace-qualified core REST', () => {
         30,
         expect.any(Function),
       );
+
+      const workflowSetting = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          key: 'experimental.sessionWorkflow',
+          value: true,
+        });
+      expect(workflowSetting.status).toBe(200);
+      expect(h.secondaryBridge.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/session-workflow',
+        { enabled: true },
+      );
+      expect(h.primaryBridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
 
       const badScope = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)

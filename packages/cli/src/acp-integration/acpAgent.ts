@@ -10577,8 +10577,26 @@ class QwenAgent implements Agent {
             session.clearActiveTodoPlanRevision();
           }
           session.clearTodoStopGuardTrust();
+        } else if (previous === 'plan') {
+          session.clearActiveTodoPlanRevision();
         }
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow: {
+        const enabled = params['enabled'];
+        if (typeof enabled !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Session Workflow setting',
+          );
+        }
+        for (const session of this.sessions.values()) {
+          session
+            .getConfig()
+            .setSessionWorkflowEnabledProvider?.(() => enabled);
+          session.clearActiveTodoPlanRevision();
+        }
+        return { enabled, sessionsUpdated: this.sessions.size };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
         const sessionId = params['sessionId'];
