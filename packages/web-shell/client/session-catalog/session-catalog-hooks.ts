@@ -218,13 +218,13 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd);
         });
       },
-      turnCompleted(workspaceCwd: string) {
+      turnCompleted(workspaceCwd: string, sessionId: string) {
         update(() => {
           if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) {
-            // The catalog revision doesn't advance on turn completion and
-            // the live-state overlay carries no updatedAt — flag a
-            // rate-limited reconcile so activity stamps keep refreshing.
-            store.requestWorkspaceLiveStateInvalidation(workspaceCwd);
+            // The catalog revision doesn't advance on turn completion; record
+            // the completion so the live-state loop can settle it from the
+            // response's updatedAt watermark instead of a full catalog scan.
+            store.recordSessionActivity(workspaceCwd, sessionId);
             return;
           }
           store.invalidateWorkspace(workspaceCwd);
