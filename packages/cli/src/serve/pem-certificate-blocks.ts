@@ -210,7 +210,7 @@ function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
         if (pemMarkerLabel(line, END_PREFIX) !== label) break scan;
         break;
       }
-      if (beginMarkerLabel(line) !== undefined) {
+      if (line.replace(/^\uFEFF/, '').startsWith(BEGIN_PREFIX)) {
         truncatedByBeginMarker = true;
         break;
       }

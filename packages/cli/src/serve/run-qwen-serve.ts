@@ -5,6 +5,7 @@
  */
 
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
@@ -685,6 +686,93 @@ export function formatChannelWorkerDaemonUrl(
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+export interface WorkerTlsTrustFailure {
+  code: string;
+  message: string;
+}
+
+const WORKER_TLS_TRUST_PROBE = `
+import { isIP } from 'node:net';
+import * as tls from 'node:tls';
+const url = new URL(process.argv[1]);
+const timeoutMs = Number(process.argv[2]);
+const hostname = url.hostname.replace(/^\\[|\\]$/g, '');
+let socket;
+let settled = false;
+const finish = (result) => {
+  if (settled) return;
+  settled = true;
+  process.stdout.write(JSON.stringify(result));
+  socket?.destroy();
+};
+try {
+  socket = tls.connect({
+    host: hostname,
+    port: Number(url.port || '443'),
+    rejectUnauthorized: true,
+    ...(isIP(hostname) === 0 ? { servername: hostname } : {}),
+  }, () => finish({ ok: true }));
+  socket.once('error', (error) => finish({
+    ok: false,
+    code: error.code ?? 'WORKER_TLS_VERIFY_FAILED',
+    message: error.message,
+  }));
+  socket.setTimeout(timeoutMs, () => finish({
+    ok: false,
+    code: 'WORKER_TLS_VERIFY_TIMEOUT',
+    message: 'TLS verification probe timed out.',
+  }));
+} catch (error) {
+  finish({
+    ok: false,
+    code: error.code ?? 'WORKER_TLS_VERIFY_FAILED',
+    message: error.message,
+  });
+}
+`;
+
+export async function verifyWorkerTlsTrust(opts: {
+  daemonUrl: string;
+  caCertPath: string;
+  timeoutMs?: number;
+}): Promise<WorkerTlsTrustFailure | undefined> {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        WORKER_TLS_TRUST_PROBE,
+        opts.daemonUrl,
+        String(timeoutMs),
+      ],
+      {
+        env: {
+          ...process.env,
+          NODE_EXTRA_CA_CERTS: opts.caCertPath,
+        },
+        encoding: 'utf8',
+        timeout: timeoutMs + 1_000,
+      },
+      (error, stdout) => {
+        try {
+          const result = JSON.parse(stdout) as
+            | { ok: true }
+            | { ok: false; code: string; message: string };
+          resolve(result.ok ? undefined : result);
+        } catch {
+          const failure = error as NodeJS.ErrnoException | null;
+          resolve({
+            code: failure?.code ?? 'WORKER_TLS_VERIFY_FAILED',
+            message: failure?.message ?? 'TLS verification probe failed.',
+          });
+        }
+      },
+    );
+  });
 }
 
 /**
@@ -1633,6 +1721,10 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerManagerOptions,
   ) => ChannelWorkerManager;
   findCliEntryPath(): string;
+  resolveWorkerCaCertPath(
+    daemonCertPath: string,
+    existing: string | undefined,
+  ): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -1655,6 +1747,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
         workerManager,
       ]) => ({
         createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+        resolveWorkerCaCertPath: supervisor.resolveWorkerCaCertPath,
         channelServicePidfile: pidfile,
         loadChannelsConfig: channelRuntime.loadChannelsConfig,
         createChannelWorkerGroup: workerGroup.createChannelWorkerGroup,
@@ -1827,6 +1920,7 @@ export interface RunQwenServeDeps {
   channelWorkerSupervisorFactory?: (
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
+  workerTlsTrustVerifier?: typeof verifyWorkerTlsTrust;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
@@ -7901,15 +7995,34 @@ async function runQwenServeImpl(
                   (error as NodeJS.ErrnoException)?.code ?? 'read failed';
               }
             }
-            for (const gap of describeWorkerTlsTrustGaps({
+            const predictedGaps = describeWorkerTlsTrustGaps({
               cert: tlsOptions.cert,
               certPath: tlsCertPath,
               daemonUrl: workerDaemonUrl,
               ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
               ...(operatorCaCert ? { operatorCaCert } : {}),
               ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
-            })) {
-              daemonLog.warn(gap);
+            });
+            const workerCaCertPath = workerRuntime.resolveWorkerCaCertPath(
+              tlsCertPath,
+              operatorCaCertPath,
+            );
+            const trustFailure = await (
+              deps.workerTlsTrustVerifier ?? verifyWorkerTlsTrust
+            )({
+              daemonUrl: workerDaemonUrl,
+              caCertPath: workerCaCertPath,
+            });
+            if (trustFailure) {
+              if (predictedGaps.length > 0) {
+                for (const gap of predictedGaps) daemonLog.warn(gap);
+              } else {
+                daemonLog.warn(
+                  `Channel worker TLS verification failed against the exact ` +
+                    `CA bundle workers receive (${sanitizeLogText(normalizeWorkerDiagnostic(trustFailure.code), 80)}): ` +
+                    `${sanitizeLogText(normalizeWorkerDiagnostic(trustFailure.message), 300)}`,
+                );
+              }
             }
           }
           const createSupervisor =

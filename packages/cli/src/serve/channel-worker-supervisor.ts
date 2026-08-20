@@ -527,7 +527,7 @@ export function cleanupMintedWorkerCaBundleDirs(): string[] {
   return swept;
 }
 
-function resolveWorkerCaCertPath(
+export function resolveWorkerCaCertPath(
   daemonCertPath: string,
   existing: string | undefined,
 ): string {

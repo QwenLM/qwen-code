@@ -24,6 +24,7 @@ import {
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
+  type RunQwenServeDeps,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
@@ -2048,15 +2049,21 @@ describe('describeWorkerTlsTrustGaps', () => {
   });
 
   it('requires matching subject and issuer names for a self-signed anchor', () => {
-    const gaps = describeWorkerTlsTrustGaps({
-      cert: Buffer.from(
-        `${FAKE_SELF_VERIFIED_LEAF}${FAKE_SELF_VERIFIED_INTERMEDIATE}`,
-      ),
-      certPath: '/certs/daemon.pem',
-      daemonUrl,
-    });
-    expect(gaps).toHaveLength(1);
-    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-21T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(
+          `${FAKE_SELF_VERIFIED_LEAF}${FAKE_SELF_VERIFIED_INTERMEDIATE}`,
+        ),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('models operator certificates before serving certificates', () => {
@@ -10785,6 +10792,7 @@ describe('runQwenServe channel worker supervisor', () => {
       cert: TEST_TLS_CERT,
       key: TEST_TLS_KEY,
     },
+    workerTlsTrustVerifier?: RunQwenServeDeps['workerTlsTrustVerifier'],
   ): Promise<string> {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-gap-')),
@@ -10816,6 +10824,7 @@ describe('runQwenServe channel worker supervisor', () => {
         channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: makePidfileDeps(),
         daemonLogBaseDir: logBaseDir,
+        ...(workerTlsTrustVerifier ? { workerTlsTrustVerifier } : {}),
       },
     );
     try {
@@ -10850,6 +10859,21 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(log).not.toContain('ERR_TLS_CERT_ALTNAME_INVALID');
     expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  it('reports a real verifier failure the static explanation does not model', async () => {
+    const log = await bootTlsDaemonForTrustGapLog(
+      '127.0.0.1',
+      { cert: TEST_TLS_CERT, key: TEST_TLS_KEY },
+      async () => ({
+        code: 'INVALID_PURPOSE',
+        message: 'unsuitable certificate purpose',
+      }),
+    );
+
+    expect(log).toContain('exact CA bundle workers receive');
+    expect(log).toContain('INVALID_PURPOSE');
+    expect(log).toContain('unsuitable certificate purpose');
   });
 
   const issuedLeafServing = {

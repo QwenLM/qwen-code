@@ -174,6 +174,19 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
   });
 
+  it('lets any column-zero BEGIN prefix close an open body', () => {
+    for (const marker of ['-----BEGIN BOGUS-LABEL-----', '-----BEGIN BOGUS']) {
+      const file = ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        `${marker}\n-----END CERTIFICATE-----`,
+      );
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+      expect(extractCertificateBlocks(`${marker}\n${ROOT_PEM}`)).toEqual([
+        ROOT_PEM.trim(),
+      ]);
+    }
+  });
+
   it('takes nothing behind the block a BEGIN marker closed', () => {
     // R4-2. The half that says the loader STOPS there rather than resuming at
     // the inner marker. Oracle for `[leaf without its END line][root]`:
