@@ -456,6 +456,7 @@ class FakeBridge {
     if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
+  async deleteSessionAttachments() {}
   detachClient(sessionId: string, clientId?: string): Promise<void> {
     if (this.detachThrowsSynchronously) throw new Error('sync detach failed');
     this.detached.push({ sessionId, clientId });

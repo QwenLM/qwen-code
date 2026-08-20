@@ -881,6 +881,7 @@ function makeBridge(
       closeCalls.push(sessionId);
       live.delete(sessionId);
     },
+    async deleteSessionAttachments() {},
     getPendingPrompts(sessionId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
       pendingPromptCalls.push(sessionId);

@@ -539,7 +539,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_side_task',
   'session_prompt',
   'session_turn_status',
-  'session_media',
+  'session_attachments',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -1319,7 +1319,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
-  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
+  const sessionAttachments = new Map<
+    string,
+    { data: Buffer; mimeType: string }
+  >();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -2333,21 +2336,35 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    async storeSessionMedia(_sessionId, data, mimeType) {
-      const mediaId = `media-${sessionMedia.size + 1}`;
-      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+    async storeSessionAttachment(_sessionId, data, mimeType, _context, name) {
+      const attachmentId = name ?? `image-${sessionAttachments.size + 1}.png`;
+      sessionAttachments.set(attachmentId, {
+        data: Buffer.from(data),
+        mimeType,
+      });
       return {
-        type: 'image',
-        mediaId,
+        type: [
+          'image/bmp',
+          'image/gif',
+          'image/jpeg',
+          'image/png',
+          'image/webp',
+        ].includes(mimeType)
+          ? 'image'
+          : 'resource',
+        attachmentId,
         mimeType,
         size: data.byteLength,
       };
     },
-    async readSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.get(mediaId);
+    async readSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.get(attachmentId);
     },
-    async removeSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.delete(mediaId);
+    async removeSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.delete(attachmentId);
+    },
+    async deleteSessionAttachments() {
+      sessionAttachments.clear();
     },
     enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
@@ -9550,7 +9567,119 @@ describe('createServeApp', () => {
     });
   });
 
-  describe('session media', () => {
+  describe('session attachments', () => {
+    it('uploads session-scoped text attachments', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', encodeURIComponent('notes 你好.txt'))
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'notes 你好.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      });
+    });
+
+    it('uploads empty files', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'empty.txt')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'empty.txt',
+        mimeType: 'text/plain',
+        size: 0,
+      });
+    });
+
+    it('rejects empty images as a bad request', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'empty.png')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(400);
+      expect(uploaded.body).toEqual({
+        error: 'Image attachments cannot be empty',
+      });
+    });
+
+    it('accepts attachment uploads through case-insensitive routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/SESSION/s-1/ATTACHMENTS')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'notes.txt')
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toMatchObject({
+        type: 'resource',
+        attachmentId: 'notes.txt',
+      });
+    });
+
+    it('uploads session-scoped JSON attachments as raw bytes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .set('X-Qwen-Attachment-Name', 'data.json')
+        .send('{"enabled":true}');
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'data.json',
+        mimeType: 'application/json',
+        size: 16,
+      });
+    });
+
     it('uploads and reads session-scoped binary media', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
@@ -9559,22 +9688,23 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
 
       expect(uploaded.status).toBe(201);
       expect(uploaded.body).toEqual({
         type: 'image',
-        mediaId: 'media-1',
+        attachmentId: 'image.png',
         mimeType: 'image/png',
         size: bytes.length,
       });
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9583,53 +9713,99 @@ describe('createServeApp', () => {
       expect(downloaded.body).toEqual(bytes);
 
       const removed = await request(app)
-        .delete('/session/s-1/media/media-1')
+        .delete('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(removed.status).toBe(200);
       expect(removed.body).toEqual({ removed: true });
 
       const missing = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(missing.status).toBe(404);
     });
 
-    it('rejects non-image uploads', async () => {
+    it('requires a name for uploads', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('Content-Type', 'audio/wav')
+        .set('Content-Type', 'text/plain')
         .send(Buffer.from([1]));
 
       expect(response.status).toBe(400);
     });
 
-    it('rejects SVG uploads', async () => {
-      // SVG can carry scripts and the bytes are served back to browsers on
-      // the same origin as the daemon API and Web Shell UI.
+    it('rejects malformed encoded attachment names', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', '%E0%A4%A')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'attachment name is invalid' });
+    });
+
+    it('maps attachment name and Content-Type mismatches to 400', async () => {
+      const bridge = fakeBridge();
+      bridge.storeSessionAttachment = vi.fn(async () => {
+        throw new TypeError('Attachment name and Content-Type do not match');
+      });
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'screenshot.png')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'Attachment name and Content-Type do not match',
+      });
+    });
+
+    it('uploads SVG as an ordinary file resource', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/svg+xml')
+        .set('X-Qwen-Attachment-Name', 'image.svg')
         .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
 
-      expect(response.status).toBe(415);
+      expect(response.status).toBe(201);
       expect(response.body).toEqual({
-        error: 'SVG uploads are not supported',
+        type: 'resource',
+        attachmentId: 'image.svg',
+        mimeType: 'image/svg+xml',
+        size: Buffer.byteLength(
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        ),
       });
     });
 
@@ -9641,15 +9817,16 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
       expect(uploaded.status).toBe(201);
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9665,10 +9842,11 @@ describe('createServeApp', () => {
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(Buffer.alloc(8 * 1024 * 1024 + 1));
 
       expect(response.status).toBe(413);
@@ -9798,6 +9976,31 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('forwards inline resource blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const resource = {
+        type: 'resource',
+        resource: {
+          uri: 'attachment:///notes.txt',
+          mimeType: 'text/plain',
+          text: 'hello',
+        },
+      };
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'read this',
+        content: [resource],
+      });
+
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'read this',
+          options: { content: [resource] },
+        },
+      ]);
+    });
+
     it('admits an empty message when media blocks are present', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
@@ -9821,6 +10024,22 @@ describe('createServeApp', () => {
         { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
       ],
       [
+        'resource with both text and blob',
+        {
+          message: 'hi',
+          content: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                text: 'hello',
+                blob: 'aGVsbG8=',
+              },
+            },
+          ],
+        },
+      ],
+      [
         'mismatched mimeType',
         {
           message: 'hi',
@@ -9841,9 +10060,8 @@ describe('createServeApp', () => {
     ])(
       '400 when `content` carries an SVG block: %s (raster-only policy)',
       async (_label, mimeType) => {
-        // The upload route rejects SVG after normalizing the media type;
-        // the inline-block gate must reject the same spelling variants — an
-        // exact-string match lets standards-conformant variants through.
+        // SVG files are ordinary resources, but an inline image block must
+        // reject spelling variants that could bypass an exact-string match.
         const bridge = fakeBridge();
         const res = await midTurnPost(midTurnApp(bridge), 's-1', {
           message: 'hi',
@@ -9855,12 +10073,23 @@ describe('createServeApp', () => {
       },
     );
 
-    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+    it('forwards reference-form attachment blocks to the bridge verbatim', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: 'see this',
         content: [
-          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+          {
+            type: 'image',
+            attachmentId: 'media-1',
+            mimeType: 'image/png',
+            size: 4,
+          },
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 0,
+          },
         ],
       });
       expect(res.status).toBe(200);
@@ -9872,9 +10101,15 @@ describe('createServeApp', () => {
             content: [
               {
                 type: 'image',
-                mediaId: 'media-1',
+                attachmentId: 'media-1',
                 mimeType: 'image/png',
                 size: 4,
+              },
+              {
+                type: 'resource',
+                attachmentId: 'notes.txt',
+                mimeType: 'text/plain',
+                size: 0,
               },
             ],
           },
@@ -13827,7 +14062,7 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
     });
 
-    it('202 accepts valid inline and reference media blocks', async () => {
+    it('202 accepts valid inline and reference attachment blocks', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -13841,9 +14076,15 @@ describe('createServeApp', () => {
             { type: 'image', data: 'aW1n', mimeType: 'image/png' },
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 4,
+            },
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
             },
           ],
         });
@@ -13853,7 +14094,18 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.req.prompt).toEqual([
         { type: 'text', text: 'hi' },
         { type: 'image', data: 'aW1n', mimeType: 'image/png' },
-        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        {
+          type: 'image',
+          attachmentId: 'media-1',
+          mimeType: 'image/png',
+          size: 4,
+        },
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
       ]);
     });
 

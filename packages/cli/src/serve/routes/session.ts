@@ -218,23 +218,17 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
-// 256 matches the session media store's item cap, so a message can still
-// reference every stored item.
+// Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
 
-// SVG can carry scripts; this origin also hosts the daemon API and Web
-// Shell UI, and stored bytes are served back to browsers — raster formats
-// only. Compare the normalized media type: standards-conformant spelling
-// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
-// past an exact-string match.
+// SVG is allowed as an ordinary file resource but never as an inline image.
+// Compare the normalized media type so spelling variants cannot bypass the
+// image-block check.
 function isSvgMimeType(mimeType: string | undefined): boolean {
   return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
 }
 
-// Shared per-block validation for the prompt and mid-turn routes. SVG can
-// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
-// stored bytes are served back to browsers — raster formats only, matching
-// the upload route's policy.
+// Shared per-block validation for the prompt and mid-turn routes.
 type MediaBlockParseResult =
   | { valid: true; block: BridgePromptContentBlock }
   | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
@@ -246,32 +240,50 @@ function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
   const record = block as Record<string, unknown>;
   const type = record['type'];
   const data = record['data'];
-  const mediaId = record['mediaId'];
+  const attachmentId = record['attachmentId'];
   const mimeType = record['mimeType'];
   const size = record['size'];
   const inline = typeof data === 'string' && data.length > 0;
   const reference =
-    typeof mediaId === 'string' &&
-    mediaId.length > 0 &&
+    typeof attachmentId === 'string' &&
+    attachmentId.length > 0 &&
     typeof size === 'number' &&
     Number.isSafeInteger(size) &&
-    size > 0;
+    size >= 0 &&
+    (type !== 'image' || size > 0);
+  if (type === 'resource' && !reference) {
+    const resource = record['resource'];
+    if (typeof resource !== 'object' || resource === null) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    const value = resource as Record<string, unknown>;
+    const hasText = typeof value['text'] === 'string';
+    const hasBlob = typeof value['blob'] === 'string';
+    if (
+      typeof value['uri'] !== 'string' ||
+      value['uri'].length === 0 ||
+      hasText === hasBlob
+    ) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    return { valid: true, block: block as BridgePromptContentBlock };
+  }
   if (
-    type !== 'image' ||
-    inline === reference ||
+    (type !== 'image' && type !== 'resource') ||
+    (type === 'image' ? inline === reference : inline || !reference) ||
     typeof mimeType !== 'string' ||
-    !mimeType.startsWith(`${type}/`)
+    (type === 'image' && !mimeType.startsWith('image/'))
   ) {
     return { valid: false, code: 'invalid-shape' };
   }
-  if (isSvgMimeType(mimeType)) {
+  if (type === 'image' && isSvgMimeType(mimeType)) {
     return { valid: false, code: 'svg' };
   }
   return {
     valid: true,
     block: inline
       ? ({ type, data, mimeType } as BridgePromptContentBlock)
-      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+      : ({ type, attachmentId, mimeType, size } as BridgePromptContentBlock),
   };
 }
 
@@ -285,7 +297,7 @@ function mediaBlockParseError(
   if (code === 'svg') {
     return 'SVG images are not supported';
   }
-  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+  return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
@@ -4351,9 +4363,9 @@ export function registerSessionRoutes(
   );
 
   app.post(
-    '/session/:id/media',
+    '/session/:id/attachments',
     mutate(),
-    express.raw({ type: 'image/*', limit: '8mb' }),
+    express.raw({ type: '*/*', limit: '8mb' }),
     ((error, _req, res, next) => {
       if (
         error &&
@@ -4367,44 +4379,62 @@ export function registerSessionRoutes(
       next(error);
     }) satisfies ErrorRequestHandler,
     withOwnerMutableSession(
-      'POST /session/:id/media',
+      'POST /session/:id/attachments',
       async (req, res, sessionId, runtime) => {
+        const encodedName = req.headers['x-qwen-attachment-name'];
         const contentType = req.headers['content-type']
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
-        // SVG can carry scripts; this origin also hosts the daemon API and
-        // Web Shell UI, and the bytes are served back to browsers, so an
-        // inline SVG would run same-origin. Raster formats only.
-        if (isSvgMimeType(contentType)) {
-          res.status(415).json({ error: 'SVG uploads are not supported' });
-          return;
-        }
         if (
+          typeof encodedName !== 'string' ||
           !contentType ||
-          !contentType.startsWith('image/') ||
-          !Buffer.isBuffer(req.body) ||
-          req.body.byteLength === 0
+          !Buffer.isBuffer(req.body)
         ) {
           res.status(400).json({
             error:
-              'request body must contain image/* bytes with a matching Content-Type',
+              'request body, Content-Type, and X-Qwen-Attachment-Name are required',
           });
+          return;
+        }
+        let name: string;
+        try {
+          name = decodeURIComponent(encodedName);
+        } catch {
+          res.status(400).json({ error: 'attachment name is invalid' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (
+          req.body.length === 0 &&
+          [
+            'image/bmp',
+            'image/gif',
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+          ].includes(contentType)
+        ) {
+          res.status(400).json({ error: 'Image attachments cannot be empty' });
+          return;
+        }
         try {
-          const reference = await runtime.bridge.storeSessionMedia(
+          const reference = await runtime.bridge.storeSessionAttachment(
             sessionId,
             req.body,
             contentType,
             clientId !== undefined ? { clientId } : undefined,
+            name,
           );
           res.status(201).json(reference);
         } catch (error) {
           if (error instanceof RangeError) {
             res.status(413).json({ error: error.message });
+            return;
+          }
+          if (error instanceof TypeError) {
+            res.status(400).json({ error: error.message });
             return;
           }
           throw error;
@@ -4414,52 +4444,52 @@ export function registerSessionRoutes(
   );
 
   app.get(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     withOwnerReadSession(
-      'GET /session/:id/media/:mediaId',
+      'GET /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const media = await runtime.bridge.readSessionMedia(
+        const attachment = await runtime.bridge.readSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
-        if (!media) {
-          res.status(404).json({ error: 'session media not found' });
+        if (!attachment) {
+          res.status(404).json({ error: 'session attachment not found' });
           return;
         }
-        res.setHeader('Content-Type', media.mimeType);
-        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Content-Type', attachment.mimeType);
+        res.setHeader('Content-Length', String(attachment.data.byteLength));
         res.setHeader('Cache-Control', 'private, max-age=300');
         res.setHeader('Content-Disposition', 'attachment');
         res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.status(200).send(media.data);
+        res.status(200).send(attachment.data);
       },
     ),
   );
 
   app.delete(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     mutate(),
     withOwnerMutableSession(
-      'DELETE /session/:id/media/:mediaId',
+      'DELETE /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const removed = await runtime.bridge.removeSessionMedia(
+        const removed = await runtime.bridge.removeSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json({ removed });

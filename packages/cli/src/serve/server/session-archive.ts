@@ -384,7 +384,7 @@ async function deletePersistedSessionWithLease(
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   onError?: (entry: {
@@ -413,22 +413,40 @@ export async function deleteDaemonSessions(params: {
     uniqueSessionIds.map(async (sessionId) => {
       try {
         const mutateSession = async () => {
+          const removePersistedSession = async () => {
+            const result = await deletePersistedSessionWithLease(
+              service,
+              sessionId,
+            );
+            if (result.kind === 'error') {
+              onError?.({
+                phase: 'remove',
+                sessionId,
+                error: errorMessage(result.error),
+              });
+              return result;
+            }
+            try {
+              await bridge.deleteSessionAttachments(sessionId);
+              return result;
+            } catch (error) {
+              onError?.({
+                phase: 'delete',
+                sessionId,
+                error: errorMessage(error),
+              });
+              return {
+                kind: 'error' as const,
+                error,
+                mutationApplied: result.mutationApplied,
+              };
+            }
+          };
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
             if (isSessionNotFoundError(error)) {
-              const result = await deletePersistedSessionWithLease(
-                service,
-                sessionId,
-              );
-              if (result.kind === 'error') {
-                onError?.({
-                  phase: 'remove',
-                  sessionId,
-                  error: errorMessage(result.error),
-                });
-              }
-              return result;
+              return await removePersistedSession();
             }
             onError?.({
               phase: 'close',
@@ -442,18 +460,7 @@ export async function deleteDaemonSessions(params: {
             };
           }
 
-          const result = await deletePersistedSessionWithLease(
-            service,
-            sessionId,
-          );
-          if (result.kind === 'error') {
-            onError?.({
-              phase: 'remove',
-              sessionId,
-              error: errorMessage(result.error),
-            });
-          }
-          return result;
+          return await removePersistedSession();
         };
         return await (coordinatorLockHeld
           ? mutateSession()
