@@ -12617,7 +12617,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/providers/connect preserves rich same-endpoint custom models when modelIds is explicit', async () => {
+  it('qwen/providers/connect preserves rich same-endpoint custom models when modelIds is explicit and drops them when deselected', async () => {
     const baseSettings = makeSessionSettings();
     const savedCustom = {
       id: 'my-kimi-custom',
@@ -12668,9 +12668,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         modelIds: ['kimi-k3'],
       }),
     ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+    // Deselection must win: the custom model the user removed from the
+    // field is not preserved, so the install plan can delete it instead
+    // of resurrecting it on every reconnect.
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'kimi' }),
-      expect.objectContaining({ preserveModels: [savedCustom] }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
     );
 
     mockConnectionState.resolve();

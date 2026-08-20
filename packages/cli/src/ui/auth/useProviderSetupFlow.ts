@@ -146,6 +146,18 @@ export function useProviderSetupFlow(
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
   const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
+  // Per-protocol stash of the endpoint-keyed maps above, swapped in
+  // selectProtocol so model ids typed under one protocol never pre-fill
+  // another protocol's models field at the same endpoint.
+  const endpointModelStateByProtocolRef = useRef(
+    new Map<
+      AuthType,
+      {
+        customModelIds: Map<string, string[]>;
+        trimmedDefaultModelIds: Map<string, string[]>;
+      }
+    >(),
+  );
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -172,6 +184,7 @@ export function useProviderSetupFlow(
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
+      endpointModelStateByProtocolRef.current.clear();
       setProvider(config);
       const steps = getVisibleSteps(config);
       setVisibleSteps(steps);
@@ -262,6 +275,7 @@ export function useProviderSetupFlow(
     preserveModelsRef.current = [];
     customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
+    endpointModelStateByProtocolRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -292,6 +306,29 @@ export function useProviderSetupFlow(
           apiKey,
           modelIds,
         });
+        // Swap the endpoint-keyed model-id maps alongside the field drafts:
+        // they are keyed by endpoint URL only, so without the swap ids
+        // typed under the outgoing protocol would pre-fill the incoming
+        // protocol's models field at the same endpoint.
+        endpointModelStateByProtocolRef.current.set(protocol, {
+          customModelIds: new Map(
+            [...customModelIdsByBaseUrlRef.current].map(([k, v]) => [
+              k,
+              [...v],
+            ]),
+          ),
+          trimmedDefaultModelIds: new Map(
+            [...trimmedDefaultModelIdsRef.current].map(([k, v]) => [k, [...v]]),
+          ),
+        });
+        const stashedEndpointState =
+          endpointModelStateByProtocolRef.current.get(selectedProtocol);
+        customModelIdsByBaseUrlRef.current = new Map(
+          stashedEndpointState?.customModelIds,
+        );
+        trimmedDefaultModelIdsRef.current = new Map(
+          stashedEndpointState?.trimmedDefaultModelIds,
+        );
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
           setBaseUrl(draft.baseUrl);

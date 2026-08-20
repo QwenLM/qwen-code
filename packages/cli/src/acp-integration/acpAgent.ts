@@ -2486,8 +2486,7 @@ function readProviderSetupInputs(
           (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
       return shouldPreserve ? [preserved] : [];
     }
-    const selectedByEditableFreeForm =
-      config.baseUrl !== undefined || requestedModelIdSet.has(preserved.id);
+    const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);
     const shouldPreserve =
       !defaultModelIdSet.has(preserved.id) &&
       (!hasExplicitModelIds || selectedByEditableFreeForm) &&

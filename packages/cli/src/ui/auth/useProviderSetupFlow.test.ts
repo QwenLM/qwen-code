@@ -911,6 +911,49 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('anthropic-a');
   });
 
+  it('does not leak model ids across protocols at the same endpoint', () => {
+    const proxyUrl = 'https://proxy.example/v1';
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(customProvider, AuthType.USE_OPENAI, {}, []);
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+    act(() => {
+      result.current.changeBaseUrl(proxyUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    act(() => {
+      result.current.changeModelIds('llama-70b, claude-sonnet-9');
+    });
+
+    // Switching protocol clears the fields (no draft for Anthropic yet)...
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    expect(result.current.state.modelIds).toBe('');
+
+    // ...and re-submitting the same endpoint under the new protocol must
+    // not pre-fill the models field with the OpenAI session's ids.
+    act(() => {
+      result.current.changeBaseUrl(proxyUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.modelIds).toBe('');
+
+    // The OpenAI session's ids are still there when switching back.
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+    expect(result.current.state.modelIds).toBe('llama-70b, claude-sonnet-9');
+  });
+
   it('restores the credential for a submitted custom endpoint', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';
