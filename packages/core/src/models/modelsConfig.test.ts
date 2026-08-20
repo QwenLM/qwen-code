@@ -52,6 +52,19 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getModel()).toBe('chat-model');
   });
 
+  it('allows an image-generation-capable model as the primary model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'dual-role-model');
+
+    expect(modelsConfig.getModel()).toBe('dual-role-model');
+  });
+
   it('rejects an image-only model during auth refresh without changing state', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_ANTHROPIC,
