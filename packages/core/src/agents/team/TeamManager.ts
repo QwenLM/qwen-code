@@ -229,6 +229,13 @@ export class TeamManager {
    *  radius across the rest of the session. */
   private readonly _shutdownPending = new Set<string>();
 
+  /** Tracks writes separately from delivered requests so one failed retry
+   *  cannot clear another request's pending state. */
+  private readonly shutdownRequestStates = new Map<
+    string,
+    { inFlight: number; delivered: boolean }
+  >();
+
   /** Per-agent last activity timestamp (updated on events). */
   private readonly lastActivityAt = new Map<string, number>();
 
@@ -597,7 +604,7 @@ export class TeamManager {
         shutdownResponse &&
         this._shutdownPending.has(sender.name)
       ) {
-        this._shutdownPending.delete(sender.name);
+        this.clearDeliveredShutdownRequest(sender.name);
         if (shutdownResponse === 'shutdown_approved') {
           this.getAgentFromBackend(sender.agentId)?.abort();
         }
@@ -690,6 +697,15 @@ export class TeamManager {
       throw new Error(`Teammate "${name}" not found.`);
     }
 
+    let requestState = this.shutdownRequestStates.get(member.name);
+    if (!requestState) {
+      requestState = {
+        inFlight: 0,
+        delivered: this._shutdownPending.has(member.name),
+      };
+      this.shutdownRequestStates.set(member.name, requestState);
+    }
+    requestState.inFlight += 1;
     this._shutdownPending.add(member.name);
     try {
       await sendStructuredMessage(this.teamFile.name, member.name, {
@@ -702,9 +718,13 @@ export class TeamManager {
           '"shutdown_approved" or "shutdown_rejected: <reason>".',
         summary: 'Shutdown requested by leader',
       });
-    } catch (error) {
-      this._shutdownPending.delete(member.name);
-      throw error;
+      requestState.delivered = true;
+    } finally {
+      requestState.inFlight -= 1;
+      if (requestState.inFlight === 0 && !requestState.delivered) {
+        this.shutdownRequestStates.delete(member.name);
+        this._shutdownPending.delete(member.name);
+      }
     }
 
     // If agent is idle, flush immediately (shutdown has
@@ -1329,6 +1349,20 @@ export class TeamManager {
     this._shutdownPending.add(name);
   }
 
+  private clearDeliveredShutdownRequest(name: string): void {
+    const requestState = this.shutdownRequestStates.get(name);
+    if (!requestState) {
+      this._shutdownPending.delete(name);
+      return;
+    }
+
+    requestState.delivered = false;
+    if (requestState.inFlight === 0) {
+      this.shutdownRequestStates.delete(name);
+      this._shutdownPending.delete(name);
+    }
+  }
+
   /**
    * Get an agent object from the backend by agent ID.
    * Returns undefined for backends that don't expose in-process
@@ -1533,6 +1567,7 @@ export class TeamManager {
         this.lastActivityAt.delete(agentId);
         this.agentIdentities.delete(agentId);
         this._shutdownPending.delete(agentName);
+        this.shutdownRequestStates.delete(agentName);
         this.rejectPendingPlanApprovalsForTeammate(
           agentName,
           new Error(

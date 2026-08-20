@@ -953,6 +953,62 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
+    it('keeps a successful shutdown pending when a retry write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+      const mailboxError = new Error('EIO: retry mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(mailboxError);
+
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        mailboxError,
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('keeps a concurrent shutdown pending when another write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      let releaseFirstWrite!: () => void;
+      const firstWriteGate = new Promise<void>((resolve) => {
+        releaseFirstWrite = resolve;
+      });
+      let markFirstWriteStarted!: () => void;
+      const firstWriteStarted = new Promise<void>((resolve) => {
+        markFirstWriteStarted = resolve;
+      });
+      mockSendStructuredMessage
+        .mockImplementationOnce(async () => {
+          markFirstWriteStarted();
+          await firstWriteGate;
+        })
+        .mockRejectedValueOnce(
+          new Error('EIO: concurrent mailbox write failed'),
+        );
+
+      const firstShutdown = h.teamManager.requestShutdown('target');
+      await firstWriteStarted;
+      await expect(h.teamManager.requestShutdown('target')).rejects.toThrow(
+        'EIO: concurrent mailbox write failed',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      releaseFirstWrite();
+      await firstShutdown;
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
     it('gates task assignment while the shutdown mailbox write is pending', async () => {
       const h = await createHarness();
       const target = await h.spawnTeammate('target', {
