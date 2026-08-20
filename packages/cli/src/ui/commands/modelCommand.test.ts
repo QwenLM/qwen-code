@@ -50,15 +50,26 @@ describe('modelCommand', () => {
     );
   });
 
-  it('should complete image models across providers', async () => {
+  it('should complete dual-role models in main and image modes', async () => {
     mockContext.services.config = {
       getAvailableModels: vi.fn().mockReturnValue([
         {
-          id: 'current-chat-model',
-          authType: AuthType.QWEN_OAUTH,
+          id: 'qwen-dual-role',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
         },
       ]),
       getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-dual-role',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
         {
           id: 'qwen-image-2.0',
           authType: AuthType.USE_OPENAI,
@@ -67,9 +78,14 @@ describe('modelCommand', () => {
       ]),
     } as unknown as Config;
 
-    const result = await modelCommand.completion!(mockContext, '--image q');
+    const mainResult = await modelCommand.completion!(mockContext, 'q');
+    const imageResult = await modelCommand.completion!(
+      mockContext,
+      '--image q',
+    );
 
-    expect(result).toEqual(['qwen-image-2.0']);
+    expect(mainResult).toEqual(['qwen-dual-role']);
+    expect(imageResult).toEqual(['qwen-dual-role', 'qwen-image-2.0']);
   });
 
   it('should complete compaction-eligible models for --compaction flag', async () => {
@@ -212,7 +228,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should switch the main model directly in interactive mode when args are provided', async () => {
+  it('should switch a dual-role model directly in interactive mode', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
@@ -223,9 +239,13 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.QWEN_OAUTH,
           }),
-          getAvailableModelsForAuthType: vi
-            .fn()
-            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-max',
+              label: 'Qwen Max',
+              supportsImageGeneration: true,
+            },
+          ]),
           switchModel,
         },
         settings: createMockSettings(setValue),
@@ -1408,7 +1428,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should set an imageOnly model and hot-register its tool', async () => {
+  it('should set a dual-role image model and hot-register its tool', async () => {
     const setValue = vi.fn();
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
@@ -1428,7 +1448,7 @@ describe('modelCommand', () => {
               baseUrl,
               registryBaseUrl: baseUrl,
               envKey: 'IMAGE_API_KEY',
-              imageOnly: true,
+              supportsImageGeneration: true,
             },
           ]),
           resolveImageGenerationModel: vi.fn().mockReturnValue({
