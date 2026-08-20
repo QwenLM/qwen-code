@@ -1441,7 +1441,12 @@ export function registerScheduledTasksRoutes(
                 : {}),
             }
           : {}),
-        bridge: runtime?.bridge ?? bridge,
+        // The runtime bridge only refines an ENABLED deps bridge; it must never
+        // re-enable binding when deps `bridge` is undefined. server.ts passes
+        // the bridge only when resident task-session management is on, and a
+        // bound task must always have something to keep it resident + rehydrate
+        // it — the same gate the qualified surface enforces below.
+        bridge: bridge === undefined ? undefined : (runtime?.bridge ?? bridge),
         ...(runtime?.generationGuard
           ? {
               assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),

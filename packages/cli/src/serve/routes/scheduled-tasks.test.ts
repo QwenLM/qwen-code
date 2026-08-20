@@ -658,6 +658,52 @@ describe('scheduled-tasks routes', () => {
     expect(rejected.body.code).toBe('session_binding_unavailable');
   });
 
+  it('rejects requested binding when management is off even with an active runtime bridge', async () => {
+    // Mirrors the production createServeApp wiring exactly: getRuntime is
+    // always wired to the primary runtime (active, carrying a bridge), while
+    // deps `bridge` is undefined because manageScheduledTaskSessions is off.
+    // The runtime bridge must NOT re-enable session binding in that case —
+    // nothing would keep the bound session resident or rehydrate it after a
+    // daemon restart, so caller-session requests fail closed with 409.
+    const runtimeBridge = makeStubBridge();
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no deps bridge — resident task-session management is off
+      getRuntime: () =>
+        ({
+          workspaceId: 'primary',
+          workspaceCwd: h.workspace,
+          primary: true,
+          trusted: true,
+          bridge: runtimeBridge,
+        }) as unknown as WorkspaceRuntime,
+    });
+
+    const unbound = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    expect(unbound.status).toBe(201);
+    expect(unbound.body.sessionId).toBeNull(); // unbound — fires via shared owner
+    expect(runtimeBridge.spawned).toEqual([]); // nothing was spawned
+
+    const rejected = await request(app).post('/scheduled-tasks').send({
+      cron: '0 10 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('session_binding_unavailable');
+    expect(runtimeBridge.spawned).toEqual([]);
+    // The rejected POST persisted nothing — only the unbound task remains.
+    expect(await readCronTasks(h.workspace)).toEqual([
+      expect.objectContaining({ id: unbound.body.id }),
+    ]);
+  });
+
   it('reuses a caller-owned session without minting or renaming it', async () => {
     addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
 
