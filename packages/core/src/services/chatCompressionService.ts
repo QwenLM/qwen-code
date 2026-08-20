@@ -735,20 +735,28 @@ export class ChatCompressionService {
         opts.customInstructions,
         '',
       );
-      const preHookReceivingWindow = Math.max(
-        contextLimit,
-        configuredCompactionWindow ?? 0,
-      );
+      const preHookRequestCannotFit = (inputTokens: number) => {
+        const compactionModelCouldFit =
+          effectiveCompactionModel !== config.getModel() &&
+          (configuredCompactionWindow === undefined ||
+            configuredCompactionWindow <= 0 ||
+            inputTokens + COMPACT_MAX_OUTPUT_TOKENS <=
+              configuredCompactionWindow);
+        return (
+          !compactionModelCouldFit &&
+          coldRequestCannotFit(inputTokens, contextLimit)
+        );
+      };
       let preHookInputTokens = estimateColdRequestInput(
         preHookSystemInstruction,
       );
-      if (coldRequestCannotFit(preHookInputTokens, preHookReceivingWindow)) {
+      if (preHookRequestCannotFit(preHookInputTokens)) {
         reduceColdInputForAdmission();
         preHookInputTokens = estimateColdRequestInput(preHookSystemInstruction);
-        if (coldRequestCannotFit(preHookInputTokens, preHookReceivingWindow)) {
+        if (preHookRequestCannotFit(preHookInputTokens)) {
           const warning = buildInputTooLargeWarning(
             preHookInputTokens,
-            preHookReceivingWindow,
+            contextLimit,
           );
           config.getDebugLogger().warn(`[chat-compression] ${warning}`);
           logChatCompression(

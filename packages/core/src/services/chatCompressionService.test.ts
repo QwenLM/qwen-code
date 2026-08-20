@@ -5620,6 +5620,76 @@ describe('issue #9455: compression request admission', () => {
     expect(firePreCompactEvent).not.toHaveBeenCalled();
   });
 
+  it('does not fire PreCompact when neither the main nor compaction model can admit the request', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+      { role: 'model', parts: [{ text: 'latest response' }] },
+    ];
+    const { chat, config } = makeFixture(history, 50_000);
+    vi.mocked(config.getCompactionModel).mockReturnValue('compact-model');
+    vi.mocked(config.getAllConfiguredModels).mockReturnValue([
+      { id: 'compact-model', contextWindowSize: 200_000 },
+    ] as never[]);
+    const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(config.getHookSystem).mockReturnValue({
+      firePreCompactEvent,
+    } as never);
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(firePreCompactEvent).not.toHaveBeenCalled();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects hook-expanded input at the final cold-request admission gate', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(184_400) }] },
+      { role: 'model', parts: [{ text: 'latest response' }] },
+    ];
+    const { chat, config } = makeFixture(history, 50_000);
+    const firePreCompactEvent = vi.fn().mockResolvedValue({
+      getAdditionalContext: () => 'h'.repeat(MAX_HOOK_INSTRUCTIONS_CHARS),
+    });
+    vi.mocked(config.getHookSystem).mockReturnValue({
+      firePreCompactEvent,
+    } as never);
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+    vi.mocked(logChatCompression).mockClear();
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_500,
+    });
+
+    expect(firePreCompactEvent).toHaveBeenCalledOnce();
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        tokens_before: 45_500,
+        tokens_after: 45_500,
+      }),
+    );
+  });
+
   it('accounts for admission-cleared tokens in provider usage math', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'keep intent' }] },
