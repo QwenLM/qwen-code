@@ -20,8 +20,10 @@ import {
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   extractServerTimestamp,
+  isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -32,6 +34,7 @@ import {
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
+  type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -157,6 +160,7 @@ interface TranscriptHistoryMaterialization {
   nextOrdinal: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -274,6 +278,11 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  for (const diagnostic of current.unrecognizedDiagnostics) {
+    for (const recordId of diagnostic.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -298,6 +307,10 @@ function materializeTranscriptHistory(
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: history.toolBlockByCallId,
     permissionBlockByRequestId: history.permissionBlockByRequestId,
+    // History pages can carry frames recorded by newer daemon versions, exactly
+    // forward-compat case the sidechannel exists for (#8823); keep them
+    // instead of dropping the throwaway store's diagnostics.
+    unrecognizedDiagnostics: history.unrecognizedDiagnostics,
   };
 }
 
@@ -317,6 +330,12 @@ function applyTranscriptHistory(
       ...history.permissionBlockByRequestId,
       ...current.permissionBlockByRequestId,
     },
+    // History entries are older than anything received live, so they go
+    // first; the slice keeps the newest entries within the sidechannel cap.
+    unrecognizedDiagnostics: [
+      ...history.unrecognizedDiagnostics,
+      ...current.unrecognizedDiagnostics,
+    ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
   };
 }
 
@@ -2191,25 +2210,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              const hasBlockPathDebugEvent = uiEvents.some(
+                (e) =>
+                  e.type === 'debug' &&
+                  !isUnrecognizedDiagnosticReason(e.debugReason),
+              );
               // The debug guard below reads the committed store's active
               // assistant block, but batching leaves earlier chunks from this
               // same burst in the pending buffer until the macrotask flush. An
               // observer burst that interleaves a debug event between assistant
               // chunks would otherwise miss the still-pending assistant block
               // and let the debug event split it. Commit the buffer first so the
-              // guard sees the effective state. Scoped to observer-mode debug
-              // events (rare) so steady streaming keeps batching.
-              if (
-                !hasSessionActivePrompt() &&
-                uiEvents.some((e) => e.type === 'debug')
-              ) {
+              // guard sees the effective state. Scoped to block-path debug events
+              // because unrecognized diagnostics route to the sidechannel.
+              if (!hasSessionActivePrompt() && hasBlockPathDebugEvent) {
                 flushTranscriptSync();
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
+              // `unrecognized_*` debug events route to the sidechannel
+              // instead of `blocks[]` (#8823), so they cannot split the
+              // streaming assistant block and must not be dropped here;
+              // only block-path debug events still need the guard.
               const eventsToDispatch = shouldGuardAssistant
-                ? transcriptUiEvents.filter((e) => e.type !== 'debug')
+                ? transcriptUiEvents.filter(
+                    (e) =>
+                      e.type !== 'debug' ||
+                      isUnrecognizedDiagnosticReason(e.debugReason),
+                  )
                 : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
