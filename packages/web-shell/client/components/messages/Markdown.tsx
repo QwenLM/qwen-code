@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import { writeClipboardText } from '../../utils/clipboard';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components, Options } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
@@ -314,7 +315,7 @@ function MermaidBlock({ code }: { code: string }) {
   }, [code, mermaidTheme]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
+    void writeClipboardText(code).then(
       () => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
@@ -495,7 +496,7 @@ function CodeBlock({
   }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
+    void writeClipboardText(code).then(
       () => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);

@@ -14,6 +14,7 @@ import {
   useState,
 } from 'react';
 import { usePlatform } from '../../context/PlatformContext.js';
+import { writeClipboardText } from '../../utils/clipboard.js';
 import { CopyIcon } from '../icons/EditIcons.js';
 import { CheckIcon } from '../icons/StatusIcons.js';
 
@@ -95,7 +96,7 @@ export const MessageMeta: FC<MessageMetaProps> = ({
         if (platformCopyToClipboard) {
           await platformCopyToClipboard(copyText);
         } else {
-          await navigator.clipboard.writeText(copyText);
+          await writeClipboardText(copyText);
         }
 
         setCopied(true);

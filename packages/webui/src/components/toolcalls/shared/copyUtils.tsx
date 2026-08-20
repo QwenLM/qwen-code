@@ -9,6 +9,7 @@
 import type { FC } from 'react';
 import { useState, useCallback } from 'react';
 import { usePlatform } from '../../../context/PlatformContext.js';
+import { writeClipboardText } from '../../../utils/clipboard.js';
 
 /**
  * Handle copy to clipboard using platform-specific API with fallback
@@ -23,11 +24,12 @@ export const handleCopyToClipboard = async (
 ): Promise<void> => {
   event.stopPropagation(); // Prevent triggering the row click
   try {
-    // Use platform-specific copy if available, otherwise fall back to navigator.clipboard
+    // Use platform-specific copy if available, otherwise fall back to the
+    // browser clipboard (with a legacy fallback for non-secure contexts).
     if (platformCopy) {
       await platformCopy(text);
     } else {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
     }
   } catch (err) {
     console.error('Failed to copy text:', err);
