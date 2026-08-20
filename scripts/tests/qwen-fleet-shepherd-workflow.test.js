@@ -904,14 +904,23 @@ exit 1`;
     expect(workflow).toContain(
       '${SCAN_ZOMBIES} autofix run(s) wedged in \\`queued\\`',
     );
+    // The census is status+age only (no jobs read), so the banner must not
+    // assert the runs are jobless: an offline runner pool keeps live jobs
+    // queued just as long, and deleting them kills live work. The honest
+    // phrasing points at a jobs check before any deletion.
+    expect(workflow).not.toContain('GitHub never started them');
+    expect(workflow).toContain('gh run view <id> --json jobs');
     // While the recorded liveness run stays wedged, the banner also names
     // the paused re-dispatch gate AND its escape hatch: recovery from a
-    // persistent wedge leaves the gate closed until that run leaves the
+    // persistent wedge leaves the gate closed until THAT run leaves the
     // snapshot window, and nothing else tells oncall why scans stay dark.
+    // The remedy must name the ONE id whose deletion reopens the gate —
+    // the gate replay above proves deleting any other wedged run leaves it
+    // closed, so a generic 'delete the wedged run(s)' would be a trap.
     expect(workflow).toContain(
-      'liveness re-dispatch stays paused while the recorded liveness run is among them',
+      'liveness re-dispatch stays paused while the recorded liveness run (id ${PREV_LIVENESS_RUN}) is among them',
     );
-    expect(workflow).toContain('gh run delete <id>');
+    expect(workflow).toContain('gh run delete ${PREV_LIVENESS_RUN}');
   });
 
   it('maintains one dashboard issue edited in place', () => {

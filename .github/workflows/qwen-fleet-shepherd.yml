@@ -1198,9 +1198,9 @@ jobs:
             # wedged queue is the shape of a dead loop that still reports
             # green from PR-event runs.
             if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
-              echo "> ⚠️ **${SCAN_ZOMBIES} autofix run(s) wedged in \`queued\`** (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — GitHub never started them, so they are excluded from the in-flight count. A workflow file over GitHub's 500 KB limit does exactly this."
+              echo "> ⚠️ **${SCAN_ZOMBIES} autofix run(s) wedged in \`queued\`** (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — excluded from the in-flight count. The list is status+age only and cannot see jobs: a workflow file over GitHub's 500 KB limit wedges zero-job runs, and an offline runner pool keeps live jobs queued just as long. Check \`gh run view <id> --json jobs\` before deleting any of them."
               if [[ "${PREV_LIVENESS_WEDGED}" -gt 0 ]]; then
-                echo "> 🚧 The shepherd's liveness re-dispatch stays paused while the recorded liveness run is among them — a fresh dispatch would only wedge again. Deleting the wedged run(s) (\`gh run delete <id>\`) reopens it immediately; it also reopens once they leave the 50-run snapshot window."
+                echo "> 🚧 The shepherd's liveness re-dispatch stays paused while the recorded liveness run (id ${PREV_LIVENESS_RUN}) is among them — a fresh dispatch would only wedge again. Deleting THAT run (\`gh run delete ${PREV_LIVENESS_RUN}\`) reopens it immediately; it also reopens once it leaves the 50-run snapshot window. When several runs are listed, check \`gh run view <id> --json jobs\` before deleting — an offline runner pool keeps live jobs queued."
               fi
               echo
             fi
