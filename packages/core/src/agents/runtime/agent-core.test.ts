@@ -434,7 +434,7 @@ describe('AgentCore.runInAgentFrames', () => {
 });
 
 describe('AgentCore approval response deduplication', () => {
-  it('allows one response for each hook-bounced approval emission', async () => {
+  it('emits once per approval incarnation and allows each response', async () => {
     const config = {
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -501,6 +501,7 @@ describe('AgentCore approval response deduplication', () => {
           onToolCallsUpdate?: (calls: ToolCall[]) => void;
         };
         scheduler.onToolCallsUpdate?.([firstWaiting]);
+        scheduler.onToolCallsUpdate?.([firstWaiting]);
       });
     const abortController = new AbortController();
 
@@ -511,22 +512,25 @@ describe('AgentCore approval response deduplication', () => {
       1,
       [{ name: request.name } as FunctionDeclaration],
     );
-    await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
-    await Promise.all([
-      approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
-      approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
-    ]);
-    await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
-    await Promise.all([
-      approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
-      approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
-    ]);
-    abortController.abort();
-    await processing;
+    try {
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      await Promise.all([
+        approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+        approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+      ]);
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+      await Promise.all([
+        approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+        approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+      ]);
 
-    expect(firstOnConfirm).toHaveBeenCalledOnce();
-    expect(secondOnConfirm).toHaveBeenCalledOnce();
-    scheduleSpy.mockRestore();
+      expect(firstOnConfirm).toHaveBeenCalledOnce();
+      expect(secondOnConfirm).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
   });
 });
 

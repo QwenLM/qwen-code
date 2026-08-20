@@ -25,6 +25,17 @@ import {
   type WorkflowStatus,
 } from './workflow-run-registry.js';
 
+const debugWarn = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: debugWarn,
+    error: vi.fn(),
+  }),
+}));
+
 function reg(
   runId: string,
   overrides: Partial<WorkflowTaskRegistration> = {},
@@ -548,6 +559,64 @@ describe('WorkflowRunRegistry', () => {
     expect(firstRespond).toHaveBeenCalledOnce();
     expect(duplicateRespond).not.toHaveBeenCalled();
     expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('releases the source latch when cancellation rejects an approval', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_cancelled_retry'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const firstRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_cancelled_retry', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+
+    r.cancel('wf_cancelled_retry', 2_000);
+    await vi.waitFor(() => {
+      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+    r.register(reg('wf_cancelled_retry'));
+
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_cancelled_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('warns when an active source duplicate is dropped', () => {
+    debugWarn.mockClear();
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_duplicate_warning'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_duplicate_warning', emitter);
+    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, approvalEvent());
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ timestamp: 1_700_000_000_200 }),
+    );
+
+    expect(debugWarn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Workflow approval re-emission dropped (source still latched)',
+      ),
+    );
   });
 
   it('re-parks a hook-bounced approval after the prior emission resolves', async () => {

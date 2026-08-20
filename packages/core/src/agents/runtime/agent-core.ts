@@ -1728,6 +1728,10 @@ export class AgentCore {
     // onToolCallsUpdate only fires the transition event once per callId even
     // though the callback runs repeatedly while the tool executes.
     const executionStartedEmitted = new Set<string>();
+    const emittedApprovalDetails = new Map<
+      string,
+      ToolCallConfirmationDetails
+    >();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
@@ -1850,6 +1854,11 @@ export class AgentCore {
           // Emit approval request event for UI visibility
           try {
             const { confirmationDetails } = waiting;
+            const callId = waiting.request.callId;
+            if (emittedApprovalDetails.get(callId) === confirmationDetails) {
+              continue;
+            }
+            emittedApprovalDetails.set(callId, confirmationDetails);
             const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
             // Snapshot the ambient runtime view here, while the loop frame
             // is still live. For inheriting agents (no own runtimeView)

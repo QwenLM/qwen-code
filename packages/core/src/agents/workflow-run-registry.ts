@@ -618,7 +618,12 @@ export class WorkflowRunRegistry {
         if (dispatch) dispatch.subagentId = event.subagentId;
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
-      if (seenSources.has(sourceKey)) return;
+      if (seenSources.has(sourceKey)) {
+        debugLogger.warn(
+          `Workflow approval re-emission dropped (source still latched): ${runId}/${sourceKey}`,
+        );
+        return;
+      }
       seenSources.add(sourceKey);
       const parked = this.parkPendingApproval(runId, event, dispatchId, () =>
         seenSources.delete(sourceKey),
