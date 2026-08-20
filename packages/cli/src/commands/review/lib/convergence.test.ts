@@ -23,6 +23,7 @@ const FIRE: ConvergenceFacts = {
   thisCriticals: 2,
   posted: 3,
   prevPosted: 3,
+  floorEngaged: true,
 };
 
 describe('convergenceAssessment', () => {
@@ -62,6 +63,19 @@ describe('convergenceAssessment', () => {
     expect(convergenceAssessment({ ...FIRE, thisCriticals: 0 })).toBeNull();
   });
 
+  it('suppresses when the severity floor is NOT engaged — its futility claim would be unprovable', () => {
+    // The advisory asserts the floor "will not converge" the loop; before
+    // the floor has run, the loop may still converge once it does, and a
+    // guess is the false fire this module must never ship.
+    expect(convergenceAssessment({ ...FIRE, floorEngaged: false })).toBeNull();
+  });
+
+  it('suppresses when floor engagement is UNKNOWN — absence degrades open', () => {
+    expect(
+      convergenceAssessment({ ...FIRE, floorEngaged: undefined }),
+    ).toBeNull();
+  });
+
   it('suppresses when either volume is missing — a gap says nothing', () => {
     expect(convergenceAssessment({ ...FIRE, posted: undefined })).toBeNull();
     expect(
@@ -85,12 +99,26 @@ describe('convergenceAssessment', () => {
         thisCriticals: 1,
         posted: 0,
         prevPosted: 0,
+        floorEngaged: true,
       }),
     ).not.toBeNull();
   });
 });
 
 describe('convergenceAdvisory', () => {
+  it('renders a RISING window in the right direction, in both languages', () => {
+    // Every equal-volume fixture reads the same number twice, so swapping
+    // the two interpolations keeps them all green while inverting the trend
+    // a maintainer reads when making the land decision. A rising window
+    // (posted 5, previous 3) fires and must read this-round-first.
+    const a = convergenceAssessment({ ...FIRE, posted: 5, prevPosted: 3 });
+    expect(a).not.toBeNull();
+    const { en, zh } = convergenceAdvisory(a!);
+    expect(en).toContain('this round 5, previous 3');
+    expect(zh).toContain('本轮 5');
+    expect(zh).toContain('上一轮 3');
+  });
+
   it('names the recommendation code and disclaims itself, in both languages', () => {
     const a = convergenceAssessment(FIRE);
     expect(a).not.toBeNull();

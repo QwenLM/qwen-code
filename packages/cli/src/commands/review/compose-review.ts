@@ -411,6 +411,33 @@ export function normalizeSeverityFloor(value: unknown): string | undefined {
 }
 
 /**
+ * Whether the severity floor is ENGAGED for the round being composed — an
+ * explicit `critical` floor at any round, or `auto` from round 6 with the
+ * round knowable. ONE statement shared by both consumers: the enforcement
+ * backstop below (which moves drafted Suggestions only where the floor is
+ * engaged) and the persistently-critical signal (#9410), whose "the floor
+ * will not converge it" claim is provable only where the floor is actually
+ * running. Two restatements is the predicate-drift class the shared
+ * `normalizeSeverityFloor` above exists to prevent.
+ */
+export function severityFloorEngaged(
+  severityFloor: unknown,
+  contextUnavailable: boolean,
+  prevRound: number,
+): boolean {
+  const floor = normalizeSeverityFloor(severityFloor);
+  // `prevRound` is the PREVIOUS posted round, so the review being composed
+  // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
+  // reads as a fencepost error against SKILL Step 6's "from round 6 it is
+  // critical".
+  const thisRound = prevRound + 1;
+  return (
+    floor === 'critical' ||
+    (floor === 'auto' && !contextUnavailable && thisRound >= 6)
+  );
+}
+
+/**
  * The posting floor, enforced in code — the backstop for the posture SKILL
  * Step 6 resolves in prose.
  *
@@ -446,16 +473,9 @@ export function floorEnforcedReroute(
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
 ): { indices: number[]; entries: DeferredEntry[] } {
-  const floor = normalizeSeverityFloor(severityFloor);
-  // `prevRound` is the PREVIOUS posted round, so the review being composed
-  // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
-  // reads as a fencepost error against SKILL Step 6's "from round 6 it is
-  // critical".
-  const thisRound = prevRound + 1;
-  const enforced =
-    floor === 'critical' ||
-    (floor === 'auto' && !contextUnavailable && thisRound >= 6);
-  if (!enforced) return { indices: [], entries: [] };
+  if (!severityFloorEngaged(severityFloor, contextUnavailable, prevRound)) {
+    return { indices: [], entries: [] };
+  }
   const indices: number[] = [];
   const entries: DeferredEntry[] = [];
   drafted.forEach((c, i) => {
@@ -1297,10 +1317,14 @@ function prevLedgerFacts(planPath: string | undefined): {
    * persistently-critical signal's persistence half (#9410): a loop cannot
    * be "persistently critical" unless the PREVIOUS round already stood
    * behind a Critical. `undefined` (not `false`) when no previous round was
-   * recovered — "no prior work-list" is not "no prior Critical", and the
-   * signal degrades open on the distinction. Same fail-open, decides-nothing
-   * contract as the volume fields: a tampered or missing work-list costs a
-   * missed advisory, never a false one.
+   * recovered — "no prior work-list" is not "no prior Critical"; the
+   * signal's guard (`!== true`) suppresses both alike, and this reader only
+   * ever yields `true | undefined`. A missing or corrupt work-list degrades
+   * the signal OPEN to silence, and that is the whole guarantee: recovery
+   * adopts another account's marker findings by design (see `recoverLedger`),
+   * so a hostile marker within the recovery headroom can spoof this half
+   * and the volume half — the firing conjuncts that stay unforgeable are
+   * this round's own standing Critical and the floor's engagement.
    */
   hadCritical?: boolean;
 } {
@@ -1653,6 +1677,15 @@ function composeReviewBody(
   // input degrades open to "no assessment".
   const convergence = convergenceAssessment({
     prevHadCritical: prevConvergence.hadCritical,
+    // The floor-engagement conjunct is computed by the SAME predicate the
+    // enforcement backstop keys on (#9410): the advisory's "the floor will
+    // not converge it" claim is provable only where the floor is actually
+    // running, so a pre-engagement round degrades open to silence.
+    floorEngaged: severityFloorEngaged(
+      input.severityFloor,
+      input.contextUnavailable === true,
+      prevRound,
+    ),
     thisCriticals:
       criticalsInline + bodyCriticals.length + relocatedCriticals.length,
     posted: postedInline,
@@ -3349,8 +3382,12 @@ function composeReviewBody(
     : [];
 
   // The persistently-critical convergence advisory (#9410): disclosed on
-  // every event when the carried telemetry shows the loop will not
-  // self-converge via the floor. Non-capping and advisory-only — it never
+  // every event the shape can reach when the carried telemetry shows the
+  // loop will not self-converge via the floor — the assessment only fires
+  // when this round stands behind a Critical, which is REQUEST_CHANGES by
+  // construction (or COMMENT when an unverified arm softens it), so those
+  // two branches render the block and the composed-JSON field rides every
+  // branch's return object. Non-capping and advisory-only — it never
   // moves the event, never caps, and its own text disclaims it ("does not
   // block"). Rank 1 trim like the deferral display: it is guidance the
   // operator also receives on the terminal and in the composed JSON, so it
@@ -3406,6 +3443,7 @@ function composeReviewBody(
       ...repositoryContextBlock,
       ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
+      ...convergenceBlock,
       ...continuityBlock,
       ...bodyCriticalBlock,
     ];
@@ -3427,6 +3465,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      ...(convergence ? { convergence } : {}),
     };
   }
 
@@ -3485,6 +3524,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      ...(convergence ? { convergence } : {}),
     };
   }
 

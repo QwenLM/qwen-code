@@ -36,7 +36,10 @@ import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
-  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
+  extends Omit<
+    ComposeReviewResult,
+    'postedInline' | 'prevPostedInline' | 'convergence'
+  > {
   verdictLine: string;
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
@@ -49,6 +52,12 @@ interface PersistedVerdict
    * here would advertise a field no artifact contains and license a
    * consumer into an always-undefined branch. The two-round window stays
    * recoverable from the marker chain inside `body`.
+   *
+   * `convergence` is omitted the same way: the validator's whitelist
+   * neither carries nor shape-checks it, and the advisory it summarises
+   * rides the persisted `body` — carrying the field here would advertise a
+   * shape no artifact contains, the exact trap the `prevPostedInline`
+   * omission above closes.
    */
   postedInline?: number;
 }

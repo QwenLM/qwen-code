@@ -2716,9 +2716,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     const commentsPath = join(dir, 'comments.json');
     const planPath = join(dir, 'plan.json');
     writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // The operator's `auto` floor is engaged at round 7 — without an
+    // engaged floor the advisory's floor-futility claim is unprovable and
+    // the signal degrades open to silence (#9410).
     writeFileSync(
       inputPath,
-      JSON.stringify({ modelId: MODEL, planPath }),
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
       'utf8',
     );
     // One Critical this round.
@@ -2800,7 +2803,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
     writeFileSync(
       inputPath,
-      JSON.stringify({ modelId: MODEL, planPath }),
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
       'utf8',
     );
     writeFileSync(
@@ -2822,7 +2825,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       ) as { convergence?: unknown; body?: string };
     try {
       // The predecessor carried a Critical but posted MORE (3) than this
-      // round (1): the volume is shrinking, the loop is converging.
+      // round (1): the volume is shrinking, the loop is converging. The
+      // floor is engaged (round 7 of `auto`), so the silence is pinned on
+      // the volume arm alone, not on a missing engagement.
       (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
       (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
       writeFileSync(
@@ -2845,6 +2850,156 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       const composed = stdoutJson();
       expect(composed.convergence).toBeUndefined();
       expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces the advisory on a REQUEST_CHANGES round — the motivating shape (#9410)', async () => {
+    // The motivating shape (PR 9226): verified Criticals standing every
+    // round compose REQUEST_CHANGES every round. A deterministic [build]
+    // body Critical earns its Request changes without a verifier, so the
+    // event is REQUEST_CHANGES — the branch the wiring must not leave
+    // silent. The only Critical arrives via bodyCriticals (criticalsInline
+    // is 0), so the body-only term of thisCriticals is load-bearing here:
+    // dropping it from the sum silently un-fires the advisory.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-rc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: MODEL,
+        planPath,
+        severityFloor: 'auto',
+        bodyCriticals: ['[build] tsc fails on the merge commit'],
+      }),
+      'utf8',
+    );
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        convergence?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          posted: number;
+          prevPosted: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the blocker rides the body) — flat, not shrinking. Round 7
+      // of `auto`: the floor is engaged, so the advisory's floor claim is
+      // provable and all three surfaces must carry it.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.convergence).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 0,
+        prevPosted: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('CONVERGENCE: ')),
+      ).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the advisory before the severity floor engages (#9410)', async () => {
+    // Round 2 under the default `auto` floor: the persistence and volume
+    // halves BOTH hold (a carried Critical stands again, the window is flat
+    // at 2/2), but the floor does not engage until round 6 — before
+    // engagement the advisory's "the floor will not converge it" claim is
+    // unprovable, so the signal degrades open to silence exactly like a
+    // missing volume.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-pre-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // A KNOWN `auto` floor: the silence must come from the round-2 floor
+    // not being engaged yet, not from the floor being absent.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** also posted' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { convergence?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 1,
+          findings: [{ id: 'R1-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 2,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('CONVERGENCE: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.convergence).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      // The floor-futility claim must not publish before the floor ran.
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -18,8 +18,9 @@
 //
 // This module names that shape. It is DATA the operator rules on, never
 // authority: it computes one fact from the carried telemetry (Criticals in
-// the previous round's work-list AND this round, with the two-round posting
-// window not shrinking) and, when it fires, surfaces the ONE recommendation
+// the previous round's work-list AND this round, the severity floor
+// engaged, and the two-round posting window not shrinking) and, when it
+// fires, surfaces the ONE recommendation
 // that fits — `land-with-residual-risk`, merge and accept the residual risk.
 // It decides nothing: it cannot block a post, cannot merge, cannot close, and
 // holds no numeric threshold (the "two-round window" is the shortest one the
@@ -33,18 +34,31 @@
  *
  * `prevHadCritical` is `undefined` (not `false`) when no previous round was
  * recovered: "no prior work-list" is not "the previous round had no
- * Criticals", and conflating them would fire the signal on a second round
- * that merely introduced its first Critical.
+ * Criticals". Both `false` and `undefined` suppress the signal (the guard
+ * is `!== true`); `undefined` marks "no previous round recovered" for
+ * readability, and production only ever yields `true | undefined`.
  */
 export interface ConvergenceFacts {
   /** Did the PREVIOUS round's carried work-list hold a Critical? */
   prevHadCritical: boolean | undefined;
-  /** Critical findings THIS round posts (inline + body-only). */
+  /**
+   * Critical findings THIS round posts — inline, body-only, and relocated
+   * (deferred Critical markers restored to the posting set).
+   */
   thisCriticals: number;
   /** THIS round's posting volume (inline comments it sends). */
   posted: number | undefined;
   /** The PREVIOUS round's posting volume (the ledger's two-round window). */
   prevPosted: number | undefined;
+  /**
+   * Is the severity floor ENGAGED this round — an explicit `critical`
+   * floor, or `auto` from round 6 with the round knowable? The advisory
+   * claims the floor "will not converge" the loop; that claim is provable
+   * only where the floor is actually running, so a disengaged floor (early
+   * `auto` rounds, an explicit `suggestion`, an unknowable round)
+   * suppresses the signal — fail open, like every other conjunct.
+   */
+  floorEngaged: boolean | undefined;
 }
 
 /** The one shape this module detects. */
@@ -80,6 +94,11 @@ export interface ConvergenceAssessment {
  *    signal, so a second round introducing its first Critical cannot read as
  *    "persistent");
  *  - this round posts at least one Critical;
+ *  - the severity floor is ENGAGED this round (`floorEngaged === true`) —
+ *    the advisory's "the floor will not converge it" claim is provable only
+ *    where the floor is actually running; before engagement the loop may
+ *    still converge once it does, so a disengaged floor suppresses the
+ *    signal;
  *  - the two-round posting window is present and NOT shrinking — both volumes
  *    recorded, and this round's at least the previous round's. A falling
  *    volume is a converging loop even with Criticals present (they are being
@@ -93,9 +112,11 @@ export interface ConvergenceAssessment {
 export function convergenceAssessment(
   facts: ConvergenceFacts,
 ): ConvergenceAssessment | null {
-  const { prevHadCritical, thisCriticals, posted, prevPosted } = facts;
+  const { prevHadCritical, thisCriticals, posted, prevPosted, floorEngaged } =
+    facts;
   if (prevHadCritical !== true) return null;
   if (thisCriticals <= 0) return null;
+  if (floorEngaged !== true) return null;
   if (posted === undefined || prevPosted === undefined) return null;
   if (posted < prevPosted) return null;
   return {
