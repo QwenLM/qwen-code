@@ -3863,6 +3863,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
       setReasoningEffort: vi.fn(),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -4758,7 +4759,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('updates the Session Workflow gate for every live session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.setSessionWorkflowEnabledProvider = vi.fn();
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
