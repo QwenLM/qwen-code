@@ -2890,12 +2890,12 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     };
     const poll = async () => {
+      let stopped = false;
       try {
         const events = await readAgentViewWorkerControlEvents();
         if (!disposed && events.some((event) => event.type === 'redraw')) {
           refreshStatic();
         }
-        let stopped = false;
         for (const event of events) {
           await applyAgentViewWorkerControlEventForUi(
             event,
@@ -2926,13 +2926,13 @@ export const AppContainer = (props: AppContainerProps) => {
             break;
           }
         }
-        if (!disposed && !stopped) {
-          flushPrompt();
-        }
       } catch {
         // Supervisor sideband is best-effort; normal TUI rendering continues.
       } finally {
         if (!disposed) {
+          if (!stopped) {
+            flushPrompt();
+          }
           timer = setTimeout(poll, 250);
         }
       }

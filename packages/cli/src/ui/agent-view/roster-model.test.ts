@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { buildAgentRosterRows } from './roster-model.js';
 import type {
   AgentViewActivityFile,
+  AgentViewLaunchFile,
   AgentViewRosterEntry,
   AgentViewSessionStateFile,
   AgentViewWorkerFile,
@@ -140,6 +141,28 @@ describe('buildAgentRosterRows', () => {
     });
 
     expect(rows.map((row) => row.sessionId)).toEqual(['beta']);
+  });
+
+  it('filters by the title and subtitle rendered in the roster', () => {
+    const byTitle = buildAgentRosterRows({
+      sessions: [session('alpha')],
+      launches: {
+        alpha: launch('alpha', { initialPrompt: 'refactor auth module' }),
+      },
+      activities: {
+        alpha: activity({ summary: 'Working' }),
+      },
+      filter: 'auth',
+      now,
+    });
+    const bySubtitle = buildAgentRosterRows({
+      sessions: [session('stopped', { sessionState: 'stopped' })],
+      filter: 'stopped by user',
+      now,
+    });
+
+    expect(byTitle.map((row) => row.sessionId)).toEqual(['alpha']);
+    expect(bySubtitle.map((row) => row.sessionId)).toEqual(['stopped']);
   });
 
   it('combines text filters with s:state filters', () => {
@@ -298,6 +321,24 @@ function activity(
     schemaVersion: 1,
     lastActivityAt: '2026-07-17T09:00:00.000Z',
     capabilities: [],
+    ...overrides,
+  };
+}
+
+function launch(
+  sessionId: string,
+  overrides: Partial<AgentViewLaunchFile> = {},
+): AgentViewLaunchFile {
+  return {
+    schemaVersion: 1,
+    sessionId,
+    argv: [],
+    env: {},
+    entrypoint: '/tmp/qwen',
+    projectCwd: '/workspace/qwen-code',
+    activeCwd: '/workspace/qwen-code',
+    includeDirectories: [],
+    terminal: { columns: 80, rows: 24 },
     ...overrides,
   };
 }

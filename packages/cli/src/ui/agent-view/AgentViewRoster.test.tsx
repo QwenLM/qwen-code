@@ -150,6 +150,19 @@ describe('AgentViewRoster', () => {
     expect(onDispatch).toHaveBeenCalledWith(false, 'ship it');
   });
 
+  it('dispatches and attaches legacy VSCode Shift+Enter without a backslash', () => {
+    const onDispatch = vi.fn(() => true);
+
+    renderRoster({
+      prompt: 'ship it',
+      onDispatch,
+    });
+
+    press('\\\r', {});
+
+    expect(onDispatch).toHaveBeenCalledWith(true, 'ship it');
+  });
+
   it('attaches the selected session on empty Enter or right arrow', () => {
     const onAttachSelected = vi.fn();
 
@@ -353,7 +366,7 @@ describe('AgentViewRoster', () => {
   it('edits the peek prompt separately from the main dispatch prompt', () => {
     const onPromptChange = vi.fn();
     const onPeekPromptChange = vi.fn();
-    const onSubmitPeekPrompt = vi.fn();
+    const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
       prompt: 'new task',
@@ -380,7 +393,7 @@ describe('AgentViewRoster', () => {
 
   it('does not resurrect a submitted peek reply in the same tick', () => {
     const onPeekPromptChange = vi.fn();
-    const onSubmitPeekPrompt = vi.fn();
+    const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
       peekPanel: { title: 'alpha', lines: ['Result: ready'] },
@@ -399,7 +412,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('submits a non-empty peek prompt on Enter', () => {
-    const onSubmitPeekPrompt = vi.fn();
+    const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
       peekPrompt: 'continue',
@@ -418,7 +431,7 @@ describe('AgentViewRoster', () => {
   });
 
   it('submits peek input when text and carriage return arrive together', () => {
-    const onSubmitPeekPrompt = vi.fn();
+    const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
       peekPanel: {
@@ -437,7 +450,7 @@ describe('AgentViewRoster', () => {
 
   it('keeps multi-line peek pastes in the reply instead of submitting early', () => {
     const onPeekPromptChange = vi.fn();
-    const onSubmitPeekPrompt = vi.fn();
+    const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
       peekPanel: {
@@ -546,6 +559,38 @@ describe('AgentViewRoster', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('worker is not responding');
     expect(output).not.toContain('stale result');
+  });
+
+  it('shows informational panel lines over empty row activity', () => {
+    const { lastFrame } = renderRoster({
+      rows: [row('alpha', { summary: undefined, lastResult: undefined })],
+      peekPanel: {
+        title: 'alpha',
+        lines: ['Session added to Agent View.'],
+        preferLines: true,
+      },
+    });
+
+    expect(lastFrame()).toContain('Session added to Agent View.');
+  });
+
+  it('does not attach another row from a stale error panel', () => {
+    const onAttachSelected = vi.fn();
+    renderRoster({
+      rows: [row('beta')],
+      peekPanel: {
+        title: 'alpha',
+        lines: ['worker is gone'],
+        error: true,
+      },
+      peekInputMode: 'send',
+      peekInputTarget: 'alpha',
+      onAttachSelected,
+    });
+
+    press('', { return: true });
+
+    expect(onAttachSelected).not.toHaveBeenCalled();
   });
 
   it('keeps blocking answers visible while follow-up prompts are queued', () => {
@@ -710,7 +755,7 @@ function renderRoster(overrides: Partial<AgentViewRosterProps> = {}) {
         onPromptChange={vi.fn()}
         onPeekPromptChange={vi.fn()}
         onDispatch={vi.fn(() => true)}
-        onSubmitPeekPrompt={vi.fn()}
+        onSubmitPeekPrompt={vi.fn(() => true)}
         onAttachSelected={vi.fn()}
         onPeekSelected={vi.fn()}
         onTogglePinSelected={vi.fn()}

@@ -78,7 +78,10 @@ export async function isManagedAgentViewDeleteBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  return state?.ownership === 'managed' && state.processState !== 'exited';
+  return (
+    (state?.ownership === 'managed' && state.processState !== 'exited') ||
+    state?.ownership === 'adopting'
+  );
 }
 
 /**

@@ -133,7 +133,12 @@ export function AgentViewApp({
     const row = currentRows.find((item) => item.sessionId === peekPanel.title);
     if (!row) {
       if (peekPanel.title !== 'Filter') {
-        if (peekPanel.error) return;
+        if (peekPanel.error) {
+          setPeekReplyTarget(undefined);
+          setPeekPrompt('');
+          setPeekSubmittedPreview(undefined);
+          return;
+        }
         // The peeked session disappeared; close the stale panel instead of
         // leaving a reply input aimed at a removed session.
         peekGenerationRef.current += 1;
@@ -304,10 +309,13 @@ export function AgentViewApp({
   );
 
   const submitPeekPrompt = useCallback(
-    (promptOverride?: string) => {
+    (promptOverride?: string): boolean => {
       const promptToSubmit = promptOverride ?? peekPrompt;
-      if (!peekReplyTarget || !promptToSubmit.trim()) return;
-      if (peekSubmitInFlightRef.current) return;
+      if (!peekReplyTarget || !promptToSubmit.trim()) return false;
+      if (peekSubmitInFlightRef.current) {
+        setNotice({ lines: ['Reply is still being sent.'] });
+        return false;
+      }
 
       const currentRow = currentRows.find(
         (row) => row.sessionId === peekReplyTarget.sessionId,
@@ -374,6 +382,7 @@ export function AgentViewApp({
           peekSubmitInFlightRef.current = false;
         }
       })();
+      return true;
     },
     [actions, currentRows, peekPrompt, peekReplyTarget, refreshRows],
   );
@@ -723,11 +732,13 @@ function isBlockingFilterPrompt(prompt: string): boolean {
 }
 
 function isRosterExitCommand(prompt: string): boolean {
-  return ['/quit', '/exit'].includes(prompt.trim().toLowerCase());
+  const command = prompt.trim().toLowerCase().split(/\s+/, 1)[0];
+  return command === '/quit' || command === '/exit';
 }
 
 function isRosterResumeCommand(prompt: string): boolean {
-  return ['/resume', '/continue'].includes(prompt.trim().toLowerCase());
+  const command = prompt.trim().toLowerCase().split(/\s+/, 1)[0];
+  return command === '/resume' || command === '/continue';
 }
 
 function getDispatchedSessionId(value: unknown): string | undefined {

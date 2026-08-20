@@ -11,6 +11,7 @@ import type {
 } from '../agent-view/protocol.js';
 import {
   isManagedAgentViewContinueBlocked,
+  isManagedAgentViewDeleteBlocked,
   isManagedAgentViewResumeBlocked,
   releaseExitedManagedSessionForContinue,
 } from './agent-view-resume-guard.js';
@@ -148,6 +149,9 @@ describe('managed Agent View resume guards', () => {
       true,
     );
     await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
+      true,
+    );
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
       true,
     );
   });

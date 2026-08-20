@@ -357,6 +357,61 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('Reply was not sent: worker is gone');
   });
 
+  it('does not target another session from a stale error peek', async () => {
+    let notify: (() => void) | undefined;
+    const sendToSession = vi.fn(async () => {
+      throw new Error('worker is gone');
+    });
+    const dispatchPrompt = vi.fn();
+    const onAttachRequested = vi.fn();
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1'), row('session-2')]}
+        actions={actions({
+          dispatchPrompt,
+          sendToSession,
+          loadRows: vi.fn(async () => [row('session-2')]),
+          peekSelected: async () => ({
+            title: 'session-1',
+            lines: ['Result: ready'],
+          }),
+          subscribeToChanges: (onChange) => {
+            notify = onChange;
+            return { dispose: vi.fn() };
+          },
+        })}
+        onExit={vi.fn()}
+        onAttachRequested={onAttachRequested}
+      />,
+    );
+
+    stdin.write(' ');
+    await settleInput();
+    for (const char of 'hello') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await vi.waitFor(() => expect(sendToSession).toHaveBeenCalledOnce());
+    await waitForFrame(lastFrame, 'worker is gone');
+    expect(lastFrame()).toContain('worker is gone');
+
+    await act(async () => {
+      notify?.();
+    });
+    await flushInk();
+    for (const char of 'retry') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await flushInk();
+
+    expect(sendToSession).toHaveBeenCalledOnce();
+    expect(dispatchPrompt).not.toHaveBeenCalled();
+    expect(onAttachRequested).not.toHaveBeenCalled();
+  });
+
   it('sends soft needs-input replies as follow-ups', async () => {
     const sendToSession = vi.fn(async () => ({ sent: true }));
     const answerSession = vi.fn(async () => ({ answered: true }));
@@ -444,39 +499,64 @@ describe('AgentViewApp', () => {
     expect(sendToSession).toHaveBeenCalledWith('session-1', 'continue');
   }, 10_000);
 
-  it('keeps only one peek reply in flight', async () => {
-    const sendToSession = vi.fn(() => new Promise(() => {}));
-    const { stdin } = render(
+  it('keeps a second peek reply while the first is in flight', async () => {
+    const answerSession = vi.fn(() => new Promise(() => {}));
+    const onAttachRequested = vi.fn();
+    const { stdin, lastFrame } = render(
       <AgentViewApp
         rows={[
           row('session-1', {
-            state: 'completed',
-            stateLabel: 'Completed',
+            state: 'needs_input',
+            stateGroup: 'needs_input',
+            taskState: 'waiting',
+            inputState: 'permission',
+            waitingFor: 'Edit',
+            actions: {
+              ...row('session-1').actions,
+              canReply: false,
+              needsBlockingAnswer: true,
+            },
           }),
         ]}
         actions={actions({
-          sendToSession,
+          answerSession,
           peekSelected: async () => ({
             title: 'session-1',
-            lines: ['Result: done'],
+            lines: ['Waiting: Edit'],
           }),
         })}
         onExit={vi.fn()}
+        onAttachRequested={onAttachRequested}
       />,
     );
 
     stdin.write(' ');
     await flushInk();
-    for (const char of 'continue') {
+    for (const char of 'yes') {
       stdin.write(char);
       await Promise.resolve();
     }
     stdin.write('\r');
+    await vi.waitFor(() => expect(answerSession).toHaveBeenCalledOnce());
+    await waitForFrame(lastFrame, '> reply');
+    expect(lastFrame()).toContain('> reply');
+    for (const char of 'no wait') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
     stdin.write('\r');
-    await settleInput();
+    await flushInk();
 
-    expect(sendToSession).toHaveBeenCalledOnce();
-    expect(sendToSession).toHaveBeenCalledWith('session-1', 'continue');
+    expect(answerSession).toHaveBeenCalledOnce();
+    expect(answerSession).toHaveBeenCalledWith('session-1', 'yes');
+    expect(lastFrame()).toContain('no wait');
+    expect(lastFrame()).toContain('Reply is still being sent.');
+
+    stdin.write('\r');
+    await flushInk();
+
+    expect(answerSession).toHaveBeenCalledOnce();
+    expect(onAttachRequested).not.toHaveBeenCalled();
   }, 10_000);
 
   it('shows the persisted pending prompt when reopening a peek', async () => {
@@ -948,7 +1028,7 @@ describe('AgentViewApp', () => {
     expect(onAttachRequested).not.toHaveBeenCalled();
   });
 
-  it.each(['/quit', '/exit'] as const)(
+  it.each(['/quit', '/exit', '/quit now', '/exit now'] as const)(
     'handles %s locally by exiting the roster',
     async (input) => {
       const dispatchPrompt = vi.fn();
@@ -970,6 +1050,32 @@ describe('AgentViewApp', () => {
 
       expect(dispatchPrompt).not.toHaveBeenCalled();
       expect(onExit).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['/resume named-session', '/continue named-session'] as const)(
+    'handles %s locally instead of dispatching it',
+    async (input) => {
+      const dispatchPrompt = vi.fn();
+      const onResumeRequested = vi.fn();
+      const { stdin } = render(
+        <AgentViewApp
+          rows={[row('session-1')]}
+          actions={actions({ dispatchPrompt })}
+          onExit={vi.fn()}
+          onResumeRequested={onResumeRequested}
+        />,
+      );
+
+      for (const char of input) {
+        stdin.write(char);
+        await Promise.resolve();
+      }
+      stdin.write('\r');
+      await flushInk();
+
+      expect(dispatchPrompt).not.toHaveBeenCalled();
+      expect(onResumeRequested).toHaveBeenCalledOnce();
     },
   );
 

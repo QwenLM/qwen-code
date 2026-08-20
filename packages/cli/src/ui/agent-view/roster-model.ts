@@ -229,6 +229,8 @@ function matchesStateFilter(row: AgentRosterRow, stateFilter: string): boolean {
 function getSearchText(row: AgentRosterRow): string {
   return [
     row.displayName,
+    row.title,
+    row.subtitle,
     row.sessionId,
     row.state,
     row.stateLabel,

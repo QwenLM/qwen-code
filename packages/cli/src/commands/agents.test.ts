@@ -695,6 +695,7 @@ describe('agents command', () => {
         expect(initialPeekPanel).toEqual({
           title: '123e4567-e89b-12d3-a456-426614174000',
           lines: ['Session added to Agent View.'],
+          preferLines: true,
         });
         return { type: 'exit' };
       },
@@ -740,6 +741,7 @@ describe('agents command', () => {
         expect(initialPeekPanel).toEqual({
           title: 'managed-session',
           lines: ['Session is already managed by Agent View.'],
+          preferLines: true,
         });
         return { type: 'exit' };
       },

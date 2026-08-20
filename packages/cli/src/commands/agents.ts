@@ -227,6 +227,7 @@ async function adoptResumeSessionFromPicker(
     return {
       title: sessionId,
       lines: ['Session is already managed by Agent View.'],
+      preferLines: true,
     };
   } catch {
     // Not currently managed; adopt it below.
@@ -245,6 +246,7 @@ async function adoptResumeSessionFromPicker(
     return {
       title: sessionId,
       lines: ['Session added to Agent View.'],
+      preferLines: true,
     };
   } catch (error) {
     return {

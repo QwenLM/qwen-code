@@ -59,7 +59,7 @@ export interface AgentViewRosterProps {
   onPromptEdit?: () => void;
   onPeekPromptChange: (prompt: string) => void;
   onDispatch: (attach: boolean, prompt: string) => boolean;
-  onSubmitPeekPrompt: (promptOverride?: string) => void;
+  onSubmitPeekPrompt: (promptOverride?: string) => boolean;
   onAttachSelected: (sessionId?: string) => void;
   onPeekSelected: () => void;
   onTogglePinSelected: () => void;
@@ -78,6 +78,7 @@ export interface AgentViewPeekPanel {
   // Error-shaped panels (peek load / reply failures) render their lines
   // verbatim instead of the row's structured activity fields.
   error?: boolean;
+  preferLines?: boolean;
 }
 
 export interface AgentViewNotice {
@@ -274,6 +275,11 @@ export function AgentViewRoster({
 
     const returnPrefix = getReturnInputPrefix(input, key);
     const isReturn = returnPrefix !== undefined;
+    const legacyShiftEnter = input === '\\\r';
+
+    if (isReturn && peekPanel?.error && !peekRow) {
+      return;
+    }
 
     if (sessionPeekActive && !peekInputActive) {
       if (isReturn && rows.length > 0) {
@@ -288,15 +294,18 @@ export function AgentViewRoster({
       if (peekInputActive) {
         const submittedPeekPrompt = `${peekPromptRef.current}${returnPrefix}`;
         if (submittedPeekPrompt.trim()) {
-          peekPromptRef.current = '';
-          onSubmitPeekPrompt(submittedPeekPrompt);
-        } else if (rows.length > 0) {
-          onAttachSelected(peekRow?.sessionId);
+          if (onSubmitPeekPrompt(submittedPeekPrompt)) {
+            peekPromptRef.current = '';
+          }
+        } else if (peekRow) {
+          onAttachSelected(peekRow.sessionId);
         }
       } else {
         const submittedPrompt = `${currentPrompt}${returnPrefix}`;
         if (submittedPrompt.trim()) {
-          if (onDispatch(Boolean(key.shift), submittedPrompt)) {
+          if (
+            onDispatch(Boolean(key.shift || legacyShiftEnter), submittedPrompt)
+          ) {
             promptInput.buffer.setText('');
           }
         } else if (rows.length > 0) {
@@ -446,6 +455,9 @@ function getReturnInputPrefix(
   key: RosterInputKey,
 ): string | undefined {
   if (key.return) {
+    return '';
+  }
+  if (input === '\\\r') {
     return '';
   }
   const returnIndex = input.search(/[\r\n]/);
@@ -929,7 +941,7 @@ function getSessionPeekLines(
 ): string[] {
   // Error-shaped panels (peek load / reply failures) take precedence over
   // the row's possibly stale activity fields.
-  if (panel.error) {
+  if (panel.error || panel.preferLines) {
     return panel.lines.map(stripUnsafeCharacters);
   }
   // Render from the structured row fields; never re-parse rendered text.
