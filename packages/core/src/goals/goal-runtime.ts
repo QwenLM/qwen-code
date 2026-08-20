@@ -1419,6 +1419,15 @@ export function createGoalRuntime(
           v: GOAL_STATE_VERSION,
           goal: nextGoal,
           activity: 'idle',
+          ...(request.action === 'clear' && snapshot.goal
+            ? {
+                clearedGoal: {
+                  goalId: snapshot.goal.goalId,
+                  revision: snapshot.goal.revision,
+                  updatedAt: snapshot.goal.updatedAt,
+                },
+              }
+            : {}),
         };
         try {
           await options.journal.recordGoalState(recordUuid, {
