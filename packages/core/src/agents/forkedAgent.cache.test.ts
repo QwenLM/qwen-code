@@ -420,7 +420,7 @@ describe('runForkedAgent (cache path)', () => {
     );
   });
 
-  it('preserves tools: [] even when jsonSchema is provided', async () => {
+  it('replaces parent tools with respond_in_schema when jsonSchema is provided', async () => {
     saveCacheSafeParams(
       {
         tools: [{ functionDeclarations: [{ name: 'edit' }] }],
@@ -442,7 +442,14 @@ describe('runForkedAgent (cache path)', () => {
                 {
                   content: {
                     role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                    parts: [
+                      {
+                        functionCall: {
+                          name: 'respond_in_schema',
+                          args: { suggestion: 'run tests' },
+                        },
+                      },
+                    ],
                   },
                 },
               ],
@@ -478,17 +485,82 @@ describe('runForkedAgent (cache path)', () => {
 
     const sendParams = capturedParams as {
       config?: {
-        tools?: unknown;
+        tools?: Array<{
+          functionDeclarations?: Array<{
+            name?: string;
+            parameters?: unknown;
+          }>;
+        }>;
+        toolConfig?: unknown;
         responseMimeType?: string;
         responseJsonSchema?: unknown;
       };
     };
-    // tools: [] must still be present alongside JSON schema options
-    expect(sendParams.config!.tools).toEqual([]);
+    expect(sendParams.config!.tools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: 'respond_in_schema',
+            description: 'Provide the response in provided schema',
+            parameters: schema,
+          },
+        ],
+      },
+    ]);
+    expect(sendParams.config!.toolConfig).toBeUndefined();
     expect(sendParams.config!.responseMimeType).toBe('application/json');
     expect(sendParams.config!.responseJsonSchema).toBe(schema);
 
-    // Verify JSON was parsed correctly
+    expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
+  });
+
+  it('parses loose JSON text when jsonSchema is provided', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, _params: unknown, _promptId: string) => {
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      {
+                        text:
+                          'Here is the result:\n```json\n' +
+                          '{"suggestion":"run tests"}\n```',
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest',
+      cacheSafeParams: getCacheSafeParams()!,
+      jsonSchema: {
+        type: 'object',
+        properties: { suggestion: { type: 'string' } },
+      },
+    });
+
     expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
   });
 
@@ -1058,12 +1130,29 @@ describe('runForkedAgent (cache path)', () => {
 
     const sendParams = capturedParams as {
       config?: {
-        tools?: unknown;
+        tools?: Array<{
+          functionDeclarations?: Array<{
+            name?: string;
+            parameters?: unknown;
+          }>;
+        }>;
+        toolConfig?: unknown;
         responseMimeType?: string;
         responseJsonSchema?: unknown;
       };
     };
-    expect(sendParams.config!.tools).toBeUndefined();
+    expect(sendParams.config!.tools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: 'respond_in_schema',
+            description: 'Provide the response in provided schema',
+            parameters: schema,
+          },
+        ],
+      },
+    ]);
+    expect(sendParams.config!.toolConfig).toBeUndefined();
     expect(sendParams.config!.responseMimeType).toBe('application/json');
     expect(sendParams.config!.responseJsonSchema).toBe(schema);
   });
