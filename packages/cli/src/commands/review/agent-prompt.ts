@@ -98,7 +98,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  worktreeResidue,
+  type ResidueAnchor,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -152,6 +156,8 @@ interface PlanReport {
   worktreePath?: unknown;
   /** The worktree's own admin entry, recorded at fetch time. */
   worktreeAdminDir?: unknown;
+  /** The admin entry's recorded filesystem identity (`dev:ino`). */
+  worktreeAdminDevIno?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   incremental?: unknown;
@@ -1051,19 +1057,23 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
- * The worktree's own admin entry, as fetch-pr recorded it at creation.
- * Handed to the residue probe as its out-of-band identity: a gitfile swapped
- * after creation names some OTHER entry — a foreign repository's, or a forge
- * registered under the same common dir — and the probe refuses the tree
- * instead of measuring it. Undefined when the plan carries no record — a
- * local or legacy plan — and the probe falls back to the checks its own
- * reads provide.
+ * The worktree's identity as fetch-pr recorded it at creation: its own
+ * admin entry, plus the filesystem identity of that entry. Handed to the
+ * residue probe as its out-of-band anchor — a gitfile swapped after
+ * creation names some OTHER entry (a foreign repository's, or a forge
+ * registered under the same common dir), and a replacement of what the
+ * recorded name points at no longer carries the recorded dev:ino; either
+ * refuses the tree instead of measuring it. Undefined when the plan carries
+ * no record — a local or legacy plan — and the probe falls back to the
+ * checks its own reads provide.
  */
-function recordedAdminDirOf(report: PlanReport): string | undefined {
-  return typeof report.worktreeAdminDir === 'string' &&
-    report.worktreeAdminDir.length > 0
-    ? report.worktreeAdminDir
-    : undefined;
+function recordedAnchorOf(report: PlanReport): ResidueAnchor | undefined {
+  const adminDir = report.worktreeAdminDir;
+  if (typeof adminDir !== 'string' || adminDir.length === 0) return undefined;
+  const devIno = report.worktreeAdminDevIno;
+  return typeof devIno === 'string' && devIno.length > 0
+    ? { adminDir, devIno }
+    : { adminDir };
 }
 
 /**
@@ -1075,7 +1085,7 @@ function recordedAdminDirOf(report: PlanReport): string | undefined {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt), 12, recordedAdminDirOf(report));
+  return worktreeResidue(resolve(wt), recordedAnchorOf(report));
 }
 
 /**
@@ -1399,7 +1409,7 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
-      const adminDir = recordedAdminDirOf(report);
+      const anchor = recordedAnchorOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1418,10 +1428,15 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}${adminDir === undefined ? '' : ' \\'}`,
-        ...(adminDir === undefined
+        `  --label ${label}${anchor === undefined ? '' : ' \\'}`,
+        ...(anchor === undefined
           ? []
-          : [`  --admin-dir ${shellQuotePath(adminDir)}`]),
+          : anchor.devIno === undefined
+            ? [`  --admin-dir ${shellQuotePath(anchor.adminDir)}`]
+            : [
+                `  --admin-dir ${shellQuotePath(anchor.adminDir)} \\`,
+                `  --admin-dev-ino ${shellQuotePath(anchor.devIno)}`,
+              ]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +

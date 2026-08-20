@@ -63,6 +63,7 @@ import {
   worktreeCreateFailureDetail,
   worktreeResidue,
   type DependencyFarm,
+  type ResidueAnchor,
   type SweepResult,
 } from './lib/worktree.js';
 
@@ -126,6 +127,12 @@ export interface ScratchTreeArgs {
    * the probe falls back to the checks its own reads provide.
    */
   adminDir?: string;
+  /**
+   * The admin entry's filesystem identity (`dev:ino`) recorded with it: the
+   * probe refuses an entry that no longer carries it — a replacement of what
+   * the recorded name points at passes every path check.
+   */
+  adminDevIno?: string;
   out?: string;
 }
 
@@ -478,7 +485,35 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did.
-  const residue = worktreeResidue(worktree, 12, args.adminDir);
+  const anchor: ResidueAnchor | undefined =
+    args.adminDir === undefined
+      ? undefined
+      : args.adminDevIno === undefined
+        ? { adminDir: args.adminDir }
+        : { adminDir: args.adminDir, devIno: args.adminDevIno };
+  const residue = worktreeResidue(worktree, anchor);
+  // An identity refusal refuses everything downstream as well: the head sha
+  // above was read through the same unverified discovery, and the `worktree
+  // add` below would materialise it — measured, a call that handed back
+  // `available: true` with a scratch tree descended from the very identity
+  // its own probe just refused, answering the forge's head sha.
+  if (residue.identityRefused) {
+    return {
+      available: false,
+      reused: false,
+      dependencies: null,
+      sharedTreeResidue: residue.paths,
+      sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
+      note:
+        `the review worktree's identity could not be verified (${inertPath(residue.unmeasured ?? '')}). ` +
+        'A scratch tree created now would descend from whichever repository ' +
+        'the tree currently resolves to, so none is created. Do NOT fall ' +
+        'back to probing in the review worktree — other agents are reading ' +
+        'it. A probe you cannot isolate is inconclusive, and the finding ' +
+        'keeps the reading-based verdict and its low-confidence floor.',
+    };
+  }
   const sharedTreeResidue = residue.paths;
   const residueNote = residue.unmeasured
     ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
@@ -681,6 +716,13 @@ export const scratchTreeCommand: CommandModule = {
           "The worktree's own admin entry, as the pipeline recorded it at " +
           'fetch time: the residue probe refuses a shared tree whose .git ' +
           'names any other entry',
+      })
+      .option('admin-dev-ino', {
+        type: 'string',
+        describe:
+          "The admin entry's filesystem identity (dev:ino) recorded with " +
+          '--admin-dir: the residue probe refuses an entry that no longer ' +
+          'carries it',
       })
       .option('out', {
         type: 'string',

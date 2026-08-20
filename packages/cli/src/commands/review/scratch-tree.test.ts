@@ -15,6 +15,7 @@
 // scratch tree that has failed.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import yargs from 'yargs';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -29,6 +30,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -94,7 +96,12 @@ describe('runScratchTree', () => {
     // probe's out-of-band identity: a shared tree whose gitfile names any
     // other entry — a foreign repository or a forge under the same common
     // dir — fails closed as unmeasured instead of being measured against
-    // it. The tree's own recorded admin entry measures the residue normally.
+    // it. The refusal also WITHHOLDS the scratch tree: the head sha this
+    // call derives comes through the same unverified discovery, and a tree
+    // created from it descends from the very identity the gate refused
+    // (measured at the pre-fix code: such a call answered the forge's head
+    // sha and checked out its mutant under `available: true`). The tree's
+    // own recorded admin entry measures the residue normally.
     writeFileSync(join(worktree, '__probe__.test.ts'), 'probe');
     const foreign = join(repo, 'foreign');
     mkdirSync(foreign);
@@ -110,11 +117,16 @@ describe('runScratchTree', () => {
       label: 'verify--round-1--abc123',
       adminDir: join(foreign, '.git'),
     });
-    expect(refused.available).toBe(true);
+    expect(refused.available).toBe(false);
+    expect(refused.path).toBeUndefined();
     expect(refused.sharedTreeResidue).toEqual([]);
     expect(refused.sharedTreeUnmeasured).toContain(
       'other than the one recorded',
     );
+    expect(refused.note).toContain('identity could not be verified');
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
 
     const measured = runScratchTree({
       worktree,
@@ -124,6 +136,30 @@ describe('runScratchTree', () => {
     expect(measured.available).toBe(true);
     expect(measured.sharedTreeResidue).toEqual(['__probe__.test.ts']);
     expect(measured.sharedTreeUnmeasured).toBeUndefined();
+  });
+
+  it('measures normally when the anchor carries the recorded filesystem identity', () => {
+    // fetch-pr records the entry's dev:ino beside its path, and the
+    // pipeline welds both into this call; a healthy tree carries the
+    // recorded identity and measures its residue normally under the full
+    // anchor.
+    writeFileSync(join(worktree, '__probe__.test.ts'), 'probe');
+    const own = execFileSync(
+      'git',
+      ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-dir'],
+      { encoding: 'utf8' },
+    ).trim();
+    const entry = statSync(own);
+
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      adminDir: own,
+      adminDevIno: `${entry.dev}:${entry.ino}`,
+    });
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
+    expect(r.sharedTreeUnmeasured).toBeUndefined();
   });
 
   it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
@@ -800,6 +836,10 @@ describe('runScratchTree', () => {
         });
         expect(r.sharedTreeUnmeasured).toBeTruthy();
         expect(r.note).toContain('could not be measured');
+        // A measurement failure is NOT an identity refusal: the tree's
+        // identity held, so the scratch tree is still created — only the
+        // cleanliness verdict degrades.
+        expect(r.available).toBe(true);
       } finally {
         chmodSync(index, 0o644);
       }
@@ -878,6 +918,86 @@ describe('runScratchTree', () => {
       }
     },
   );
+
+  describe('the command wiring', () => {
+    beforeEach(() => {
+      process.exitCode = undefined;
+      (writeStdoutLine as unknown as ReturnType<typeof vi.fn>).mockClear();
+    });
+    afterEach(() => {
+      process.exitCode = undefined;
+    });
+
+    it('parses --admin-dir/--admin-dev-ino into the fields the handler reads', async () => {
+      // Every other test builds args by hand with the camelCase keys; the
+      // handler does `argv as unknown as ScratchTreeArgs`, trusting yargs'
+      // camel-case expansion. Renaming either flag or field makes every
+      // real invocation run unanchored while this suite stays green — the
+      // class this repo already shipped once. Parse real tokens through the
+      // builder, drive the real handler, and use the referent-swap forge as
+      // the fixture: it passes an UNANCHORED probe (certified clean), so an
+      // anchored refusal in the printed report proves both flags reached
+      // the probe.
+      writeFileSync(join(worktree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(worktree, '__probe__.test.ts'), 'probe');
+      const expected = git(
+        worktree,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-dir',
+      );
+      const entry = statSync(expected);
+
+      const forge = join(repo, 'forge');
+      mkdirSync(forge);
+      git(forge, 'init', '-q', '-b', 'main', '--template=');
+      git(forge, 'config', 'user.email', 't@t.t');
+      git(forge, 'config', 'user.name', 't');
+      writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+      git(forge, 'add', '-A');
+      git(forge, 'commit', '-qm', 'the mutant, as if it were the commit');
+      git(forge, 'config', 'core.worktree', worktree);
+      writeFileSync(
+        join(forge, '.git', 'gitdir'),
+        `${join(worktree, '.git')}\n`,
+      );
+      // Retarget the RECORDED entry at the forge; the gitfile is untouched.
+      rmSync(expected, { recursive: true, force: true });
+      symlinkSync(join(forge, '.git'), expected);
+
+      await yargs([
+        'scratch-tree',
+        '--worktree',
+        worktree,
+        '--label',
+        'verify--round-1--wiring',
+        '--admin-dir',
+        expected,
+        '--admin-dev-ino',
+        `${entry.dev}:${entry.ino}`,
+      ])
+        .command(scratchTreeCommand)
+        .strict()
+        .exitProcess(false)
+        .fail((msg, err) => {
+          throw err ?? new Error(msg ?? 'yargs failure');
+        })
+        .parseAsync();
+
+      const printed = JSON.parse(
+        String(
+          (writeStdoutLine as unknown as ReturnType<typeof vi.fn>).mock
+            .calls[0][0],
+        ),
+      );
+      expect(printed.available).toBe(false);
+      expect(printed.sharedTreeUnmeasured).toContain(
+        'filesystem identity changed',
+      );
+      expect(process.exitCode).toBeUndefined();
+    });
+  });
 
   describe('the command handler', () => {
     beforeEach(() => {

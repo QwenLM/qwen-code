@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -183,6 +183,16 @@ type FetchPrResult = PlanReport & {
    * own reads provide.
    */
   worktreeAdminDir: string | null;
+  /**
+   * The admin entry's filesystem identity at fetch time, `dev:ino`. The
+   * identity gate's path comparison resolves both of its operands at probe
+   * time, against a filesystem the contaminator writes, so the gate also
+   * refuses an entry that no longer carries THIS identity — a replacement
+   * of what the recorded name points at (#9557). Null when the entry could
+   * not be stat'd at fetch time; the gate then degrades to its path
+   * comparison alone.
+   */
+  worktreeAdminDevIno: string | null;
   baseRefName: string;
   headRefName: string;
   isCrossRepository: boolean;
@@ -1625,6 +1635,49 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
+    // The tree's own admin entry, resolved through the gitfile
+    // `worktree add` wrote moments ago and recorded now, before any PR
+    // content runs: the residue probe refuses a tree whose gitfile names
+    // any OTHER entry (see `worktreeResidue`'s identity gate). `-C wt`
+    // because the process cwd is the creating repository, whose own
+    // `--git-dir` is the wrong directory entirely; absolute, because a
+    // relative answer would later resolve against whichever cwd reads it.
+    // The entry's filesystem identity rides with it: both operands of the
+    // gate's path comparison resolve at probe time against a filesystem the
+    // contaminator writes, so it also refuses an entry that no longer
+    // carries this dev:ino.
+    const worktreeAdminDir = gitOpt(
+      '-C',
+      wt,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    let worktreeAdminDevIno: string | null = null;
+    if (worktreeAdminDir !== null) {
+      try {
+        const entry = statSync(worktreeAdminDir);
+        worktreeAdminDevIno = `${entry.dev}:${entry.ino}`;
+      } catch {
+        // Resolved for git, unreadable to stat: the gate degrades to its
+        // path comparison rather than lose the anchor entirely.
+      }
+    }
+    if (worktreeAdminDir === null) {
+      // Without this the round silently runs with the forgeable gate this
+      // recording exists to arm — a weakened review indistinguishable from
+      // a hardened one. This function already warns on lesser degradations.
+      writeStderrLine(
+        'WARNING: could not record the worktree admin entry — the residue ' +
+          'identity gate runs unanchored for this review (#9557)',
+      );
+    } else if (worktreeAdminDevIno === null) {
+      writeStderrLine(
+        "WARNING: could not record the worktree admin entry's filesystem " +
+          'identity — the residue identity gate runs without its referent ' +
+          'check for this review (#9557)',
+      );
+    }
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1639,20 +1692,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // a padded host silently drops to github.com anchor links.
       host: args.host?.trim() || null,
       worktreePath: wt,
-      // The tree's own admin entry, resolved through the gitfile
-      // `worktree add` wrote moments ago and recorded now, before any PR
-      // content runs: the residue probe refuses a tree whose gitfile names
-      // any OTHER entry (see `worktreeResidue`'s identity gate). `-C wt`
-      // because the process cwd is the creating repository, whose own
-      // `--git-dir` is the wrong directory entirely; absolute, because a
-      // relative answer would later resolve against whichever cwd reads it.
-      worktreeAdminDir: gitOpt(
-        '-C',
-        wt,
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-dir',
-      ),
+      worktreeAdminDir,
+      worktreeAdminDevIno,
       baseRefName: meta.baseRefName,
       headRefName: meta.headRefName,
       isCrossRepository: meta.isCrossRepository,

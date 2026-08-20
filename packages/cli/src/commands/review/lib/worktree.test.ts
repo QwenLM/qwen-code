@@ -23,6 +23,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -163,8 +164,8 @@ describe('worktreeResidue', () => {
     }
     expect(worktreeResidue(tree).total).toBe(20);
     expect(worktreeResidue(tree).paths).toHaveLength(12);
-    expect(worktreeResidue(tree, 3).paths).toHaveLength(3);
-    expect(worktreeResidue(tree, 3).total).toBe(20);
+    expect(worktreeResidue(tree, undefined, 3).paths).toHaveLength(3);
+    expect(worktreeResidue(tree, undefined, 3).total).toBe(20);
   });
 
   it('says UNMEASURED, not clean, when git cannot answer', () => {
@@ -194,7 +195,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
     writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
     const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
-    const got = worktreeResidue(tree, 12, expected);
+    const got = worktreeResidue(tree, { adminDir: expected });
     expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
     expect(got.unmeasured).toBeUndefined();
   });
@@ -263,7 +264,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
     const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
     // Genuine first, anchored, so the fixture is known to measure at all.
-    expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
+    expect(worktreeResidue(tree, { adminDir: expected }).paths.sort()).toEqual([
       '__probe__.test.ts',
       'a.ts',
     ]);
@@ -300,7 +301,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(forge, '.git', 'gitdir'), `${join(tree, '.git')}\n`);
     writeFileSync(join(tree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
 
-    const got = worktreeResidue(tree, 12, expected);
+    const got = worktreeResidue(tree, { adminDir: expected });
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('other than the one recorded');
@@ -325,7 +326,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
     const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
     // Genuine first, anchored, so the fixture is known to measure at all.
-    expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
+    expect(worktreeResidue(tree, { adminDir: expected }).paths.sort()).toEqual([
       '__probe__.test.ts',
       'a.ts',
     ]);
@@ -354,11 +355,89 @@ describe('worktreeResidue', () => {
     writeFileSync(join(forgeAdmin, 'gitdir'), `${join(tree, '.git')}\n`);
     writeFileSync(join(tree, '.git'), `gitdir: ${forgeAdmin}\n`);
 
-    const got = worktreeResidue(tree, 12, expected);
+    const got = worktreeResidue(tree, { adminDir: expected });
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('other than the one recorded');
     expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
+  });
+
+  it('says UNMEASURED when the recorded admin entry is REPLACED where it stands', () => {
+    // Both operands of the anchor's path comparison resolve at PROBE time,
+    // against a filesystem the contaminator writes — so replacing what the
+    // recorded name points at passes the comparison, the round-trip and the
+    // pin with no gitfile swap. Here the entry is retargeted with a symlink
+    // (`cp -a` over it and in-place HEAD/index rewrites are siblings): the
+    // forge holds the contamination as committed content, `core.worktree`
+    // names this tree, and its fabricated backpointer round-trips. Measured
+    // at the pre-fix gate: `{paths: [], total: 0}` — certified clean — with
+    // the mutant on disk. The anchor's recorded dev:ino refuses it: an
+    // attacker chooses paths, not the inode a replacement directory lands on.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const expected = git('rev-parse', '--path-format=absolute', '--git-dir');
+    const entry = statSync(expected);
+    const anchor = {
+      adminDir: expected,
+      devIno: `${entry.dev}:${entry.ino}`,
+    };
+    // Genuine first, with the full anchor, so the fixture is known to measure.
+    expect(worktreeResidue(tree, anchor).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+    expect(worktreeResidue(tree, anchor).identityRefused).toBeUndefined();
+
+    const forge = join(repo, 'forge');
+    mkdirSync(forge);
+    const fgit = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: forge, encoding: 'utf8' },
+      );
+    fgit('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+    // Everything else the tree holds too — a forge that omitted a committed
+    // file would leak it as residue and fail for the wrong reason.
+    writeFileSync(
+      join(forge, '.gitignore'),
+      readFileSync(join(tree, '.gitignore')),
+    );
+    fgit('add', '-A');
+    fgit(
+      'commit',
+      '-qm',
+      'the mutant, as if it were the commit',
+      '--no-verify',
+    );
+    fgit('config', 'core.worktree', tree);
+    writeFileSync(join(forge, '.git', 'gitdir'), `${join(tree, '.git')}\n`);
+    // The swap: the RECORDED entry is retargeted at the forge. The tree's
+    // gitfile is untouched — it still names the recorded path.
+    rmSync(expected, { recursive: true, force: true });
+    symlinkSync(join(forge, '.git'), expected);
+
+    const got = worktreeResidue(tree, anchor);
+
+    expect(got.paths).toEqual([]);
+    expect(got.identityRefused).toBe(true);
+    expect(got.unmeasured).toContain('filesystem identity changed');
+    // The mutant is still on disk: the refusal withholds the certificate.
+    expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
+    // The honest limit, disclosed: the same forge still passes a PATH-only
+    // anchor — both of its operands resolve through the replacement. The
+    // dev:ino check raises the bar; it does not close the class.
+    expect(worktreeResidue(tree, { adminDir: expected }).paths).toEqual([]);
   });
 
   it('says UNMEASURED when the recorded admin entry does not resolve on disk', () => {
@@ -368,7 +447,9 @@ describe('worktreeResidue', () => {
     // the refusal names the recorded side specifically: an operator following
     // the message knows to inspect the fetch record.
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
-    const got = worktreeResidue(tree, 12, join(repo, 'nonexistent', 'wt-id'));
+    const got = worktreeResidue(tree, {
+      adminDir: join(repo, 'nonexistent', 'wt-id'),
+    });
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain(
       'the admin entry recorded for this tree does not resolve',
@@ -401,7 +482,7 @@ git -C "$bad" config core.worktree '${tree}'
 printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
       ]);
 
-      const got = worktreeResidue(tree, 12, expected);
+      const got = worktreeResidue(tree, { adminDir: expected });
 
       expect(got.paths).toEqual([]);
       expect(got.unmeasured).toContain(
@@ -801,7 +882,7 @@ printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
       );
       process.env['PATH'] = `${shim}:${realPath}`;
 
-      const got = worktreeResidue(tree, 12, expected);
+      const got = worktreeResidue(tree, { adminDir: expected });
 
       // The swap DID land — the shim fired, the gitfile names the plant — and
       // the measurement ignored it.

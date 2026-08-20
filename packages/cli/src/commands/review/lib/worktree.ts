@@ -289,6 +289,16 @@ export interface WorktreeResidue {
    * measured" instead of "clean" when this is set.
    */
   unmeasured?: string;
+  /**
+   * True when `unmeasured` refuses the tree's IDENTITY rather than its state:
+   * the gate never verified which repository answers at this path. A caller
+   * that CREATES from this tree's identity — a scratch tree descended from
+   * its HEAD — must refuse too, because every input to that creation
+   * resolves through the same unverified discovery. Absent for the other
+   * unmeasured reasons: a tree whose identity held but whose state could not
+   * be read is still safe to create beside.
+   */
+  identityRefused?: true;
 }
 
 /**
@@ -474,18 +484,11 @@ interface IgnoreRule {
 function ignoreSourcesOf(
   cwd: string,
   paths: string[],
-  anchor: readonly string[] = [],
+  pin: readonly string[] = [],
 ): Map<string, IgnoreRule> | null {
   const r = spawnSync(
     'git',
-    [
-      ...anchor,
-      ...pipelineExcludeArgs(),
-      'check-ignore',
-      '-z',
-      '-v',
-      '--stdin',
-    ],
+    [...pin, ...pipelineExcludeArgs(), 'check-ignore', '-z', '-v', '--stdin'],
     {
       cwd,
       input: `${paths.join('\0')}\0`,
@@ -550,14 +553,14 @@ function hidesEverything(pattern: string): boolean {
 function trackedIgnoreSources(
   cwd: string,
   sources: Set<string>,
-  anchor: readonly string[] = [],
+  pin: readonly string[] = [],
 ): Set<string> {
   const inside = [...sources].filter(
     (s) =>
       s.length > 0 && !isAbsolute(s) && !s.split('/').some((p) => p === '..'),
   );
   if (inside.length === 0) return new Set();
-  const r = spawnSync('git', [...anchor, 'ls-files', '-z', '--', ...inside], {
+  const r = spawnSync('git', [...pin, 'ls-files', '-z', '--', ...inside], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -567,6 +570,23 @@ function trackedIgnoreSources(
     return new Set();
   }
   return new Set(r.stdout.split('\0').filter((p) => p.length > 0));
+}
+
+/**
+ * The tree's identity recorded at creation — the out-of-band half of the
+ * residue probe's identity gate.
+ */
+export interface ResidueAnchor {
+  /** The tree's own admin entry (`<common>/worktrees/<id>`). */
+  adminDir: string;
+  /**
+   * The admin entry's filesystem identity at recording time, `dev:ino`.
+   * Paths resolve at probe time against a filesystem the contaminator
+   * writes; the inode a directory was created under is not theirs to choose.
+   * Absent when the recording could not stat the entry, and the gate
+   * degrades to its path comparison alone.
+   */
+  devIno?: string;
 }
 
 /**
@@ -627,7 +647,12 @@ function trackedIgnoreSources(
  * inside the creating repository's common dir or stands outside it — so the
  * round-trip alone cannot refuse it. The anchor names the one entry a forge
  * cannot share: the creating repository registered it before any PR content
- * ran.
+ * ran. And agreement by PATH is not agreement by identity — both operands of
+ * that comparison resolve at probe time, against a filesystem the
+ * contaminator writes, so the anchor also records the entry's filesystem
+ * identity (`dev:ino`) and refuses an entry that no longer has it: a
+ * replacement of what the recorded name points at passes every path check
+ * while measuring the replacement's repository.
  *
  * One blind spot the identity checks cannot close: `git status` never looks
  * INSIDE a committed gitlink (mode 160000), and untracked content there does
@@ -645,9 +670,19 @@ function trackedIgnoreSources(
  */
 export function worktreeResidue(
   cwd: string,
+  anchor?: ResidueAnchor,
   cap = 12,
-  expectedAdminDir?: string,
 ): WorktreeResidue {
+  // A refusal about the tree's IDENTITY rather than its state: the probe
+  // never verified which repository answers at this path, so nothing after
+  // this gate may measure it — and a caller that creates trees from this
+  // tree's identity must refuse as well (see `runScratchTree`).
+  const identityRefusal = (unmeasured: string): WorktreeResidue => ({
+    paths: [],
+    total: 0,
+    identityRefused: true,
+    unmeasured,
+  });
   // A genuine review worktree carries its `.git` as a FILE naming its admin
   // entry. A `.git` DIRECTORY at this path is a repository planted over the
   // contamination — `git init` + a commit answers a clean `git status` for a
@@ -658,14 +693,11 @@ export function worktreeResidue(
   // failing open costs a verdict.)
   try {
     if (!lstatSync(join(cwd, '.git')).isFile()) {
-      return {
-        paths: [],
-        total: 0,
-        unmeasured:
-          '.git is not a gitfile (a planted repository?) — a repo stood up ' +
+      return identityRefusal(
+        '.git is not a gitfile (a planted repository?) — a repo stood up ' +
           'at this path answers a clean status for a dirty tree, and the ' +
           'probe cannot tell the two apart',
-      };
+      );
     }
   } catch {
     // No `.git` at all: the walk-up check below fails closed with its own
@@ -681,7 +713,7 @@ export function worktreeResidue(
     { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   let isWorktree = false;
-  let anchor: string[] = [];
+  let pin: string[] = [];
   try {
     const [toplevel, gitDir] = (top.stdout ?? '').trim().split('\n');
     isWorktree =
@@ -707,42 +739,65 @@ export function worktreeResidue(
       // invalid UTF-8 byte is the limit this function's own doc comment
       // acknowledges), and the refusal must say which side failed — the
       // recorded side first, because a broken record cannot re-derive.
-      if (expectedAdminDir !== undefined) {
+      if (anchor !== undefined) {
         let recordedAdminDir: string;
         try {
-          recordedAdminDir = realpathSync(expectedAdminDir);
+          recordedAdminDir = realpathSync(anchor.adminDir);
         } catch {
           // A recorded admin entry that does not resolve is a broken
           // anchor, not a reason to measure unanchored.
-          return {
-            paths: [],
-            total: 0,
-            unmeasured:
-              'the admin entry recorded for this tree does not resolve on ' +
+          return identityRefusal(
+            'the admin entry recorded for this tree does not resolve on ' +
               'disk, so its identity cannot be checked',
-          };
+          );
         }
         let discoveredAdminDir: string;
         try {
           discoveredAdminDir = realpathSync(gitDir);
         } catch {
-          return {
-            paths: [],
-            total: 0,
-            unmeasured:
-              'the .git gitfile names an admin entry that does not ' +
+          return identityRefusal(
+            'the .git gitfile names an admin entry that does not ' +
               'resolve on disk, so the identity check cannot run',
-          };
+          );
         }
         if (discoveredAdminDir !== recordedAdminDir) {
-          return {
-            paths: [],
-            total: 0,
-            unmeasured:
-              'the .git gitfile names an admin entry other than the one ' +
+          return identityRefusal(
+            'the .git gitfile names an admin entry other than the one ' +
               'recorded for this tree — the commands below would measure ' +
               'whichever repository it does name',
-          };
+          );
+        }
+        // Path agreement is not identity agreement: BOTH operands above
+        // resolved at probe time, against a filesystem the contaminator
+        // writes. Replacing what the recorded name points at — retargeting
+        // the entry with a symlink, `cp -a` over it, rewriting its HEAD and
+        // index in place — keeps the path comparison, the round-trip and the
+        // pin all agreeing, while every command below measures the
+        // replacement. The recorded filesystem identity refuses that: an
+        // attacker chooses paths, not the inode a directory was created
+        // under. The honest limit, measured: ext4 re-issues a freed
+        // directory inode at once, so a `cp -a` replacement can land back on
+        // the recorded number, and an in-place rewrite never moves it — this
+        // check raises the bar, it does not close the class; nothing local
+        // to the tree can.
+        if (anchor.devIno !== undefined) {
+          let probed: Stats;
+          try {
+            probed = statSync(discoveredAdminDir);
+          } catch {
+            return identityRefusal(
+              'the admin entry this tree names could not be read for its ' +
+                'filesystem identity, so the identity check cannot run',
+            );
+          }
+          if (`${probed.dev}:${probed.ino}` !== anchor.devIno) {
+            return identityRefusal(
+              'the admin entry this tree names is no longer the directory ' +
+                'recorded for it — its filesystem identity changed, so the ' +
+                'commands below would measure whichever repository ' +
+                'replaced it',
+            );
+          }
         }
       }
       // And the gitfile must name an admin entry that names this tree BACK:
@@ -768,14 +823,11 @@ export function worktreeResidue(
         // path, which is exactly the shape being refused.
       }
       if (!pointsBack) {
-        return {
-          paths: [],
-          total: 0,
-          unmeasured:
-            'the .git gitfile names an admin entry that does not point back ' +
+        return identityRefusal(
+          'the .git gitfile names an admin entry that does not point back ' +
             'at this tree — the commands below would measure whichever ' +
             'repository it does name',
-        };
+        );
       }
       // PIN the identity this gate just verified, for every spawn below.
       // Without it the gate is one-shot: each later command re-discovers the
@@ -790,7 +842,7 @@ export function worktreeResidue(
       // superproject with an initialised submodule and a worktree reached
       // through a symlinked ancestor, all five commands below return
       // byte-identical output pinned and unpinned.
-      anchor = [
+      pin = [
         `--git-dir=${realpathSync(gitDir)}`,
         `--work-tree=${realpathSync(toplevel)}`,
       ];
@@ -800,18 +852,15 @@ export function worktreeResidue(
     isWorktree = false;
   }
   if (!isWorktree) {
-    return {
-      paths: [],
-      total: 0,
-      unmeasured:
-        'the path is not a git worktree (repository discovery walks up into ' +
+    return identityRefusal(
+      'the path is not a git worktree (repository discovery walks up into ' +
         'the enclosing checkout)',
-    };
+    );
   }
   const r = spawnSync(
     'git',
     [
-      ...anchor,
+      ...pin,
       ...pipelineExcludeArgs(),
       // The measurement must not itself become the execution: `core.fsmonitor`
       // runs a command on `status`, and this tree's config is writable by
@@ -882,7 +931,7 @@ export function worktreeResidue(
   // from the name.
   const others = spawnSync(
     'git',
-    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
+    [...pin, '-c', 'core.fsmonitor=', 'ls-files', '--others', '-z'],
     {
       cwd,
       encoding: 'utf8',
@@ -913,7 +962,7 @@ export function worktreeResidue(
     extras.push(rec);
   }
   if (extras.length > 0) {
-    const hiddenBy = ignoreSourcesOf(cwd, extras, anchor);
+    const hiddenBy = ignoreSourcesOf(cwd, extras, pin);
     if (hiddenBy === null) {
       return {
         paths: paths.slice(0, cap),
@@ -926,7 +975,7 @@ export function worktreeResidue(
     const fromTheCommit = trackedIgnoreSources(
       cwd,
       new Set([...hiddenBy.values()].map((rule) => rule.source)),
-      anchor,
+      pin,
     );
     for (const rec of extras) {
       const rule = hiddenBy.get(rec);
@@ -960,7 +1009,7 @@ export function worktreeResidue(
   // gitlink is certified clean.
   const stage = spawnSync(
     'git',
-    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '-s', '-z'],
+    [...pin, '-c', 'core.fsmonitor=', 'ls-files', '-s', '-z'],
     {
       cwd,
       encoding: 'utf8',
@@ -1018,7 +1067,7 @@ export function worktreeResidue(
   // read as "no bits found" and fell through to a clean verdict.
   const bits = spawnSync(
     'git',
-    [...anchor, '-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
+    [...pin, '-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
     {
       cwd,
       encoding: 'utf8',

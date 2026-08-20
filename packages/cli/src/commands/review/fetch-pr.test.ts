@@ -420,6 +420,15 @@ describe('fetch-pr report assembly', () => {
     producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
       producerMocks.actualBuildDiffPlan(...a),
     );
+    // Same reason as the rest: the admin-entry recording test overrides
+    // the stat fallback too, and implementations survive clearAllMocks.
+    producerMocks.statSync.mockImplementation(
+      (path?: unknown): { mtimeMs: number } | undefined =>
+        String(path).endsWith('-fetch.json') ||
+        String(path).endsWith('fetch-report.json')
+          ? { mtimeMs: Date.parse('2026-08-13T00:00:00.000Z') }
+          : undefined,
+    );
     // Same reason as the rest: an implementation set by one test (the
     // ENOSPC case) survives clearAllMocks and would fail every later one.
     producerMocks.writeFileSync.mockImplementation(() => undefined);
@@ -526,24 +535,51 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
-  it('records the worktree admin dir for the residue anchor', async () => {
+  it('records the worktree admin entry — full argv, dev:ino, failure warning', async () => {
     // The residue probe refuses a review tree whose gitfile names any admin
     // entry other than the one recorded HERE, at creation, riding the plan
     // (#9557). The recording spawn carries `--path-format=absolute`: without
     // it git answers a RELATIVE dir from a top-level checkout, and nothing
     // downstream pins the recorded value to an absolute path — a shard
     // resolving it against its own cwd would refuse every healthy tree as
-    // unmeasured. Off the default mock (gitOpt answers null) the field
-    // degrades to null — readers treat that as "no anchor recorded".
-    expect((await reportFor({})).worktreeAdminDir).toBeNull();
+    // unmeasured. And `-C <worktree>`, because the process cwd is the
+    // creating repository, whose own `--git-dir` is the wrong directory
+    // entirely: dropping it records `<repo>/.git`, every healthy tree's
+    // discovered entry mismatches, and every residue verdict degrades to
+    // UNMEASURED silently. Pin the WHOLE argv — both mutants measured green
+    // against a membership-only mock. Off the default mock (gitOpt answers
+    // null) both fields degrade to null and the round is TOLD it runs
+    // unanchored: a weakened review must not pass for a hardened one.
+    const unanchored = await reportFor({});
+    expect(unanchored.worktreeAdminDir).toBeNull();
+    expect(unanchored.worktreeAdminDevIno).toBeNull();
+    expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not record the worktree admin entry'),
+    );
+    expect(producerMocks.gitOpt).toHaveBeenCalledWith(
+      '-C',
+      worktreePath('42'),
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
       args.includes('--git-dir') && args.includes('--path-format=absolute')
         ? '/repo/.git/worktrees/review-pr-42'
         : null,
     );
-    expect((await reportFor({})).worktreeAdminDir).toBe(
-      '/repo/.git/worktrees/review-pr-42',
+    producerMocks.statSync.mockImplementation(
+      (
+        path?: unknown,
+      ): { dev: number; ino: number; mtimeMs: number } | undefined =>
+        String(path) === '/repo/.git/worktrees/review-pr-42'
+          ? { dev: 64, ino: 4242, mtimeMs: 0 }
+          : undefined,
     );
+    const anchored = await reportFor({});
+    expect(anchored.worktreeAdminDir).toBe('/repo/.git/worktrees/review-pr-42');
+    expect(anchored.worktreeAdminDevIno).toBe('64:4242');
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {

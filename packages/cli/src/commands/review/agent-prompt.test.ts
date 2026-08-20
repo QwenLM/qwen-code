@@ -2730,6 +2730,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // scratch-tree call, and the forge this gate refuses would be reachable
     // again through the shard invocation path, silently.
     expect(p).not.toContain('--admin-dir');
+    expect(p).not.toContain('--admin-dev-ino');
     expect(
       buildRoleBrief(
         {
@@ -2752,6 +2753,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         { key: 'verify--round-2--deadbeef1234' },
       ),
     ).toContain(`--admin-dir '/repo/.git/worktrees/John'\\''s PR'`);
+    // The WELD across the line continuations, not just the operands:
+    // dropping either ` \` ends the command at the line before it, and the
+    // remaining operands become standalone lines the shard's shell rejects
+    // — every scratch tree unanchored while every fragment assertion above
+    // stays green (measured: the mutant block exits 127 with
+    // `--admin-dir: command not found`). Assert the joined shape.
+    expect(
+      buildRoleBrief(
+        {
+          ...PR_PLAN,
+          worktreeAdminDir: '/repo/.git/worktrees/review-pr-6766',
+          worktreeAdminDevIno: '64:4242',
+        },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(
+      '--label verify--round-2--deadbeef1234 \\\n' +
+        "  --admin-dir '/repo/.git/worktrees/review-pr-6766' \\\n" +
+        "  --admin-dev-ino '64:4242'",
+    );
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');
