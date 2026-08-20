@@ -1393,6 +1393,22 @@ describe('daemon UI normalizer and transcript reducer', () => {
       store.dispatch({ type: 'user.text.delta', text: 'still alive' }),
     ).not.toThrow();
     expect(store.getSnapshot().blocks.length).toBeGreaterThanOrEqual(1);
+
+    // A positive fractional maxBlocks must also be integral-ized (R15-1):
+    // without the floor, removeCount went fractional and the record snap read a
+    // fractional index one past the end, throwing on later dispatches.
+    const fractionalStore = createDaemonTranscriptStore({ maxBlocks: 2.5 });
+    for (let index = 0; index < 5; index += 1) {
+      expect(() =>
+        fractionalStore.dispatch({
+          type: 'user.text.delta',
+          text: `delta ${index}`,
+        }),
+      ).not.toThrow();
+    }
+    expect(fractionalStore.getSnapshot().blocks.length).toBeGreaterThanOrEqual(
+      1,
+    );
   });
 
   it('keeps the retention estimate current when a tool payload is replaced', () => {
