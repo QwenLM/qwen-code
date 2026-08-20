@@ -6289,6 +6289,7 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: artifactWorkspaceActions,
     streamingState,
     sessionActions,
     store,
@@ -12631,6 +12632,7 @@ export function App({
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
                           onImagePreview={openImagePanel}
+                          onAttachmentPreview={openAttachmentPanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>

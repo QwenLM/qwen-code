@@ -1855,6 +1855,42 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('uploads a file attachment with its original name and MIME type', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+    const data = new Blob(['hello'], { type: 'text/plain' });
+
+    await actions.uploadAttachment({
+      name: 'notes.txt',
+      data,
+      mimeType: 'text/plain',
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledWith(
+      data,
+      'notes.txt',
+      'text/plain',
+      undefined,
+    );
+  });
+
+  it('does not upload an attachment after the active session changes', async () => {
+    const session = createMockSession('session-b');
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.uploadAttachment(
+        {
+          name: 'notes.txt',
+          data: new Blob(['hello']),
+          mimeType: 'text/plain',
+        },
+        { sessionId: 'session-a' },
+      ),
+    ).rejects.toThrow('Attachment session changed');
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
   it('does not restart the event stream when the admitted prompt is stale', async () => {
     const restartEventStream = vi.fn();
     const session = createMockSession('session-a');
