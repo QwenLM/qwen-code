@@ -35527,8 +35527,9 @@ describe('Session', () => {
     it.each([
       core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
       core.CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      core.CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     ])(
-      'does not count a failed Guard compression status %s or block later automatic work',
+      'does not count failed Guard compression status %s or block later automatic work',
       async (compressionStatus) => {
         rebuildSessionWithGuard();
         installPendingTodoTool();

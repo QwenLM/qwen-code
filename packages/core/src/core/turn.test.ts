@@ -56,46 +56,23 @@ vi.mock('../utils/errorReporting', () => ({
 }));
 
 describe('isCompressionFailureStatus', () => {
-  it('treats each compression failure status as failed', () => {
-    expect(
-      isCompressionFailureStatus(
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
-      ),
-    ).toBe(true);
-    expect(
-      isCompressionFailureStatus(
-        CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
-      ),
-    ).toBe(true);
-    expect(
-      isCompressionFailureStatus(
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
-      ),
-    ).toBe(true);
-    expect(
-      isCompressionFailureStatus(
-        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
-      ),
-    ).toBe(true);
-    expect(
-      isCompressionFailureStatus(
-        CompressionStatus.COMPRESSION_FAILED_API_ERROR,
-      ),
-    ).toBe(true);
+  it.each([
+    CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+    CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+  ])('classifies %s as a compression failure', (status) => {
+    expect(isCompressionFailureStatus(status)).toBe(true);
   });
 
-  it('keeps API errors distinct from other compression failure statuses', () => {
-    expect(CompressionStatus.COMPRESSION_FAILED_API_ERROR).not.toBe(
-      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
-    );
-    expect(CompressionStatus.COMPRESSION_FAILED_API_ERROR).not.toBe(
-      CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
-    );
-    expect(isCompressionFailureStatus(CompressionStatus.COMPRESSED)).toBe(
-      false,
-    );
-    expect(isCompressionFailureStatus(CompressionStatus.NOOP)).toBe(false);
-  });
+  it.each([CompressionStatus.COMPRESSED, CompressionStatus.NOOP])(
+    'does not classify %s as a compression failure',
+    (status) => {
+      expect(isCompressionFailureStatus(status)).toBe(false);
+    },
+  );
 });
 
 describe('findRepeatedDuplicateProviderToolCall', () => {
