@@ -282,20 +282,6 @@ export function useBranchCommand(
           // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
-            if (telemetryReplaySnapshot) {
-              try {
-                uiTelemetryService.restoreFromReplaySnapshot(
-                  telemetryReplaySnapshot,
-                );
-              } catch (restoreErr) {
-                config
-                  .getDebugLogger()
-                  .warn(
-                    `Telemetry rollback after failed /branch init failed: ${restoreErr}`,
-                  );
-              }
-              telemetryReplaySnapshot = undefined;
-            }
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
@@ -307,6 +293,25 @@ export function useBranchCommand(
               .warn(
                 `Rollback after failed /branch init failed: ${rollbackErr}`,
               );
+          }
+          // Restore last, not first: the rollback's re-initialize() above
+          // replays the parent's stored telemetry into the aggregate again,
+          // so a restore placed before it would be immediately undone and the
+          // parent would still end up double-counted. Restoring afterwards
+          // discards both the abandoned fork's replay and that duplicate.
+          if (telemetryReplaySnapshot) {
+            try {
+              uiTelemetryService.restoreFromReplaySnapshot(
+                telemetryReplaySnapshot,
+              );
+            } catch (restoreErr) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Telemetry rollback after failed /branch init failed: ${restoreErr}`,
+                );
+            }
+            telemetryReplaySnapshot = undefined;
           }
         }
         if (forkCreated && !uiSwapped) {

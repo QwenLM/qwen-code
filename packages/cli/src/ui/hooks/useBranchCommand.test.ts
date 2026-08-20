@@ -581,6 +581,9 @@ describe('useBranchCommand', () => {
     clearItems.mockImplementationOnce(() => {
       throw new Error('history swap boom');
     });
+    // Fork init succeeds; the rollback re-init succeeds too.
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    config.getGeminiClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -589,6 +592,12 @@ describe('useBranchCommand', () => {
 
     expect(snapshotForReplay).toHaveBeenCalledTimes(1);
     expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(snapshot);
+    // Ordering is load-bearing: the rollback's re-initialize() replays the
+    // parent's history into the aggregate again, so restoring before it would
+    // be undone and leave the parent double-counted.
+    const restoreOrder = restoreFromReplaySnapshot.mock.invocationCallOrder[0];
+    const rollbackInitOrder = initialize.mock.invocationCallOrder.at(-1);
+    expect(restoreOrder).toBeGreaterThan(rollbackInitOrder!);
 
     snapshotForReplay.mockRestore();
     restoreFromReplaySnapshot.mockRestore();
