@@ -953,6 +953,45 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
+    it('gates task assignment while the shutdown mailbox write is pending', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      let markWriteStarted!: () => void;
+      const writeStarted = new Promise<void>((resolve) => {
+        markWriteStarted = resolve;
+      });
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      mockSendStructuredMessage.mockImplementationOnce(async () => {
+        markWriteStarted();
+        await writeGate;
+      });
+
+      const shutdown = h.teamManager.requestShutdown('target');
+      await writeStarted;
+      const task = await createTask(h.teamName, {
+        subject: 'During pending shutdown',
+        description: 'Must remain unassigned',
+      });
+      await (
+        h.teamManager as unknown as {
+          scanIdleAgentsForTasks(): Promise<void>;
+        }
+      ).scanIdleAgentsForTasks();
+
+      const pending = await getTask(h.teamName, task.id);
+      expect(pending?.status).toBe('pending');
+      expect(pending?.owner).toBeUndefined();
+      expect(target.getReceivedMessages()).toHaveLength(0);
+
+      releaseWrite();
+      await shutdown;
+    });
+
     it('shutdown_approved from the requested teammate aborts them', async () => {
       const h = await createHarness();
       const target = await h.spawnTeammate('target', {
