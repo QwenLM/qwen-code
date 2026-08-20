@@ -29,7 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
@@ -44,7 +44,6 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
-  fileLineCount,
   git,
   gitOpt,
   gitProbe as gitExit,
@@ -52,11 +51,14 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
-import {
-  LITERAL_PATHSPECS,
-  PINNED_DIFF_CONFIG,
-  PINNED_DIFF_FLAGS,
-} from './lib/diff-flags.js';
+import type { NarrowSelection } from './lib/narrow-diff.js';
+import { assembleSections, selectNarrowing } from './lib/narrow-diff.js';
+import type {
+  IncrementalScope,
+  WidenedScope,
+} from './lib/incremental-scope.js';
+import { widenScope } from './lib/incremental-scope.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -66,7 +68,6 @@ import {
 import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
-  parseDiff,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
@@ -99,10 +100,6 @@ import {
   clearRoundStamps,
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import {
-  computeIncrementalScope,
-  type IncrementalScope,
-} from './lib/incremental-scope.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -251,7 +248,8 @@ type FetchPrResult = PlanReport & {
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
-   * in this report cover `since..fetchedSha` instead of the merge-base range.
+   * in this report are the merge-base range narrowed to what changed since
+   * the anchor, rather than the whole merge-base range.
    * `upToDate: true` means nothing has landed since the anchor (the anchor is
    * the head, or the commits since it change no bytes) — a fact about the
    * anchor, proven without consulting the base. The diff and plan then cover
@@ -264,22 +262,22 @@ type FetchPrResult = PlanReport & {
    * reason names a CAUSE: a rebase or force-push (`not-an-ancestor`), a sha
    * this history has never seen (`unknown-commit`), an anchor older than the
    * merge base that would scope WIDER than the PR's diff
-   * (`behind-merge-base`), an anchor certified by another identity
-   * (`cross-model-anchor`), a delta file with no section of the PR's own
-   * diff under that name (`lineage-unfollowable` — a rename before the
-   * anchor), nothing to slice FROM and no re-run that would change it
-   * (`containment-unverified` — an unreadable delta, or a successful
-   * merge-base with no common ancestor), a base whose fetch or whose
-   * probes could not answer (`base-untrusted` — the merge-base probe or a
-   * restoration probe; infrastructure, and retryable for that reason), a
-   * capture that threw
-   * (`capture-failed`), or a partitioner that refused to tile
-   * (`partition-failed`).
-   *
-   * `hunks-outside-pr-diff` is gone with the oracle that emitted it: the
-   * published diff is a SLICE of the PR's own, so containment holds by
-   * construction and the "undo per feedback" revert it existed for is
-   * simply reviewed at its full-range hunks.
+   * (`behind-merge-base`), a merge base too stale to rule the clamp on
+   * (`base-untrusted`), a capture that threw OR a base-side fault — the
+   * base fetch or the merge-base resolution — failed (`capture-failed`), a
+   * partitioner that refused to tile (`partition-failed`), or a narrowing
+   * that found nothing it could publish (`nothing-to-narrow`). That last one
+   * exists because the scope is BUILT from the PR's own diff rather than
+   * checked against it, and it covers every shape the build can refuse,
+   * deliberately alike: an "undo per feedback" round whose commits put lines
+   * back the way the base had them, so the PR no longer displays the undone
+   * FILE at all (a file the PR still carries publishes its section whole
+   * instead of refusing); a capture on either side whose bytes do not
+   * survive UTF-8; a delta the
+   * parser cannot read; and the fail-closed refusal — the two captures key
+   * the same change differently (a path or a rename git resolves differently
+   * across the two ranges), so narrowing would drop a change the PR's diff
+   * displays. Every shape keeps the full range: wider, never wrong.
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -298,47 +296,31 @@ export interface IncrementalDecision {
     | 'unknown-commit'
     | 'not-an-ancestor'
     | 'behind-merge-base'
-    | 'containment-unverified'
-    | 'lineage-unfollowable'
+    | 'nothing-to-narrow'
     | 'cross-model-anchor'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
   /**
-   * LEGACY — the scoped range's left side as a FULL sha, written only by
-   * plans an older CLI produced, when the published diff was a capture of
-   * `since..head` and a consumer recomputing its own range (Agent 7's
-   * test-efficacy probe welds `--base` into its brief) needed the anchor.
-   * This CLI never writes it: a sliced round publishes sections of
-   * `merge-base..head`, so the published range's left side IS
-   * `mergeBaseSha`, and the weld falls back to exactly that. Honoured when
-   * an older report still carries it; deliberately absent on new rounds.
+   * The left side of the range the published scope was assembled from, as a
+   * FULL sha, present exactly when the report's diff is the narrowed scope
+   * (`effective` and not `upToDate`). Downstream consumers that recompute
+   * their own ranges read it — Agent 7's test-efficacy probe welds `--base`
+   * into its brief. It is the merge base, never the anchor: the published
+   * hunks are byte-identical hunks of `mergeBase..head`, so that range
+   * covers every one of them and never a byte the PR's diff does not
+   * display, while the anchor range can carry hunks an undo round netted
+   * out of the PR's diff.
    */
   diffBase?: string;
   /**
-   * WHICH files this round reviews and why, present exactly when `diffBase`
-   * is absent: this CLI writes it on the sliced rounds where it no longer
-   * writes `diffBase`, and an older report carrying `diffBase` never carried
-   * this. The scoped diff is a slice of the PR's own, so a file can be in
-   * scope with no change of its own: `interaction` names the still-clean
-   * importers the one-hop widening pulled in, with the changed files each of
-   * them imports, and a brief built for one points its agent at that seam
-   * instead of a from-scratch re-review.
+   * Which files the published scope holds and why, present exactly when the
+   * scope is the narrowed one. `deltaFiles` are what the round touched;
+   * `interaction[]` are still-clean files the one-hop widening pulled back
+   * in, each with the edges that did it, so a chunk brief can point its agent
+   * at the seam rather than order a from-scratch re-review.
    */
   scope?: IncrementalScope;
-  /**
-   * Where the superseded FULL-range diff was kept, as an ABSOLUTE path —
-   * `read_file` rejects a relative one, and an agent runs inside
-   * `worktreePath` where `.qwen/tmp/…` resolves to nothing.
-   *
-   * NOTHING READS IT at this commit. It is kept because the bytes are
-   * already in hand and a later step that needs the whole PR (Agent 0's
-   * issue fidelity, the reverse audit's whole-file lens) would otherwise
-   * re-run the capture. Named as groundwork rather than as a shipped
-   * consumer, deliberately. Absent when it could not be written; the round
-   * is unaffected.
-   */
-  fullDiffPath?: string;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -453,6 +435,20 @@ export function resolveIncrementalAnchor(
   return { incremental: { since, effective: true }, diffBase: resolved };
 }
 
+/** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
+function fileLineCount(ref: string, path: string): number {
+  try {
+    const buf = gitRaw('show', `${ref}:${path}`);
+    if (buf.length === 0) return 0;
+    let n = 0;
+    for (const b of buf) if (b === 0x0a) n++;
+    // A final line without a trailing newline still counts.
+    return buf[buf.length - 1] === 0x0a ? n : n + 1;
+  } catch {
+    return 0; // absent at this ref: created by the PR, or deleted by it
+  }
+}
+
 /**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else (twin of aone.ts's guard — see that
@@ -505,21 +501,36 @@ const gitProbe: GitProbe = {
   // refs/tags and refs/heads FIRST, so a tag or branch named
   // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
   // satisfy the check with no tracking ref present.
+  //
+  // The exit status is KEPT (gitExit, not gitOpt), like the sibling probes,
+  // but it splits nothing here: git exits 128 identically for a transient
+  // fault and for a deterministic refusal (the base branch deleted on the
+  // remote — the refspec fetch fails every time), so the bound on retrying
+  // the deterministic member lives where the class is ruled — the demotion
+  // arm below and SKILL.md's once-cap — never on the status.
   fetch: (remote, ref) =>
-    gitOpt(
+    gitExit(
       'fetch',
       remote,
       '--',
       `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
-    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
+    ).status === 0 && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
-  // `gitExit`, not `gitOpt`: the exit code is what tells "no common ancestor"
-  // (1) apart from "the probe could not answer" (128, or a kill — the 120s
-  // timeout a large long-lived PR under CI load reaches), and the two lead to
-  // opposite recovery flows. `core.commitGraph=false` is main's pin and stays
-  // — a stale commit-graph answers merge-base from a cache the refs have
-  // moved past.
   mergeBase: (a, b) => {
+    // Three-way exit split like the anchor probes: exit 1 is the only
+    // deterministic "no common ancestor"; any other status — an exit-128
+    // fatal, the 120s timeout kill, a spawn failure — is the surface being
+    // unavailable, thrown so the round demotes to the retryable class
+    // instead of folding onto the same null and stamping the deterministic
+    // reason. One member folds in anyway, and no exit-status resolution can
+    // split it: git ALSO exits 1 when it cannot read the object store on
+    // the walk, so a fault there is indistinguishable from an orphan
+    // history. The arm below discloses it.
+    //
+    // `core.commitGraph=false` is #9092's pin, kept: the commit-graph is a
+    // cache, and a stale or truncated one answers this walk from data the
+    // object store no longer agrees with — a wrong merge base, which is the
+    // one input every clamp and the whole narrowing are computed against.
     const { out, status } = gitExit(
       '-c',
       'core.commitGraph=false',
@@ -527,7 +538,9 @@ const gitProbe: GitProbe = {
       a,
       b,
     );
-    return { sha: out, status };
+    if (status === 0) return out;
+    if (status === 1) return null;
+    throw new GitUnavailable();
   },
 };
 
@@ -564,58 +577,6 @@ function cleanStale(prNumber: string): void {
       }),
     );
   }
-}
-
-/**
- * Is `path`'s tree entry identical at both ends of the PR?
- *
- * The whole ENTRY — `<mode> <oid>` — not the blob. `rev-parse <ref>:<path>`
- * yields the oid alone, so a fix round that reverts the content and keeps
- * `chmod +x`, or swaps a file for a symlink with the same text, compared equal
- * and was scoped out as "restored". Its mode-only section IS in the PR's diff,
- * so dropping it put a change nobody reviewed past the next round's anchor.
- *
- * Absent on BOTH sides is deliberately NOT a restoration. Two shapes produce
- * it and this layer cannot tell them apart: a file the PR added and this round
- * deleted (net-zero — safe), and a file renamed before the anchor and deleted
- * now, whose unreviewed deletion hunks sit in the PR diff under its pre-rename
- * name (dropping it loses them). Refusing costs a full review on the first
- * shape; dropping loses scope on the second, so the refusal wins.
- *
- * NULL is a third answer: git could not answer — an exit above 0, or a kill.
- * The surface failing is not a verdict about the entry, and the caller demotes
- * the round under a retryable reason rather than read it as "changed":
- * folded together, one transient failure over a genuinely restored file
- * became a deterministic lineage refusal — the exact conflation the
- * {out, status} split in lib/git.ts was written to forbid.
- */
-function treeEntryUnchanged(
-  baseSha: string,
-  headSha: string,
-  path: string,
-): boolean | null {
-  const at = (ref: string): { entry: string | null } | null => {
-    // `gitExit`, not `gitOpt`: exit 0 IS the answer — possibly empty, which
-    // means "no such entry in that tree". Any other status, a kill included,
-    // is the probe failing to answer.
-    const { out, status } = gitExit(
-      LITERAL_PATHSPECS,
-      'ls-tree',
-      ref,
-      '--',
-      path,
-    );
-    if (status !== 0) return null;
-    const line = out ?? '';
-    if (line === '') return { entry: null };
-    const tab = line.indexOf('\t');
-    const meta = (tab < 0 ? line : line.slice(0, tab)).split(' ');
-    return { entry: meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null };
-  };
-  const b = at(baseSha);
-  const h = at(headSha);
-  if (b === null || h === null) return null;
-  return b.entry !== null && h.entry !== null && b.entry === h.entry;
 }
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
@@ -755,35 +716,6 @@ function tryResume(
   );
   return { resumed: true };
 }
-
-/**
- * Are these bytes valid UTF-8 — i.e. would decoding them lose information?
- *
- * Asked of the decoder, which is the only thing that knows. The distinction
- * that matters is between an invalid sequence SUBSTITUTED with U+FFFD and the
- * code point appearing as ordinary content: the first collides two filenames
- * onto one string, the second is a character like any other, and this
- * repository carries four literal ones in its own source.
- *
- * A byte-length round-trip looks like it answers this and does not. Node
- * emits one U+FFFD per maximal ill-formed subpart, and a 3-byte ill-formed
- * subpart substitutes to a 3-byte U+FFFD — `F0 9F 98`, a truncated
- * 4-byte sequence, decodes to one replacement character of exactly the
- * length it replaced. Every length-preserving substitution passed as clean,
- * which left the collision this guards wide open for precisely the shape a
- * truncated capture produces.
- */
-export function decodeWasLossy(bytes: Buffer): boolean {
-  try {
-    STRICT_UTF8.decode(bytes);
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-/** Constructed once: a decoder is stateless here and the guard runs per round. */
-const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Sampled HERE, at the start of the round: see `reviewModelId`.
@@ -1018,18 +950,29 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
     //    the round trip does not do is normalise CRLF (that would rewrite
     //    every hunk of a CRLF file) or drop the trailing newline.
-    const {
-      sha: mergeBaseSha,
-      baseFetchFailed,
-      probeUnavailable: baseProbeUnavailable,
-    } = resolveMergeBase(
-      remote,
-      meta.baseRefName,
-      // QUALIFIED — the head side is dwim-shadowable exactly like the
-      // fetchedSha read above.
-      `refs/heads/${ref}`,
-      gitProbe,
-    );
+    let mergeBaseSha: string | null;
+    let baseFetchFailed: boolean;
+    /** The merge-base probe threw: the surface, not the history. */
+    let mergeBaseUnavailable = false;
+    try {
+      ({ sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
+        remote,
+        meta.baseRefName,
+        // QUALIFIED — the head side is dwim-shadowable exactly like the
+        // fetchedSha read above.
+        `refs/heads/${ref}`,
+        gitProbe,
+      ));
+    } catch (err) {
+      if (!(err instanceof GitUnavailable)) throw err;
+      // An exit other than the deterministic "no common ancestor" — the
+      // probe's exit split throws it. The round degrades like any base-less
+      // one; the fetch result is lost in the throw, and with no sha and the
+      // retryable reason stamped below, nothing rules on it.
+      mergeBaseSha = null;
+      baseFetchFailed = false;
+      mergeBaseUnavailable = true;
+    }
     if (baseFetchFailed) {
       writeStderrLine(
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
@@ -1259,12 +1202,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
+    /** The PR's own hunks, narrowed to what changed since the anchor. */
+    let narrowed: Buffer | null = null;
+    /** What the narrowing selected, before the widening adds to it. */
+    let selection: NarrowSelection | null = null;
+    /** The selection plus one import hop, and the record of why. */
+    let widened: WidenedScope | null = null;
     if (anchor?.diffBase) {
-      // The delta is read for ONE fact: which files changed since the anchor.
-      // Their hunks come from the full-range diff — see
-      // `computeIncrementalScope` for why the published bytes are a SLICE of
-      // the PR's own diff and never a re-capture.
-      //
       // An anchor that resolved to the merge base names the range already in
       // hand: re-running the identical `git diff` would spend the capture (and
       // its timeout) twice on the same bytes. Reachable without adversary —
@@ -1284,211 +1228,103 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
+      } else if (mergeBaseUnavailable) {
+        // `git merge-base` could not answer: the probe's exit split throws on
+        // every status except the deterministic exit-1 "no common ancestor"
+        // — an exit-128 fatal, the 120s timeout kill, a spawn failure.
+        // Something did fail, and the re-run re-runs exactly that probe, so
+        // this is the retryable class — the same ruling the anchor probes'
+        // GitUnavailable gets.
+        demote('capture-failed');
+      } else if (mergeBaseSha === null && baseFetchFailed) {
+        // No merge base because the FETCH failed and no local base ref
+        // remained to resolve one from. (A merge-base walk that failed on the
+        // surface is the arm above, not this one.) The class has TWO members
+        // the exit
+        // status cannot split — git exits 128 for BOTH: a transient fault (a
+        // fresh CI clone whose base fetch hit a network blip), where the
+        // re-run re-runs exactly the component that failed and can succeed,
+        // and a deterministic refusal (the base branch deleted on the remote
+        // — the refspec fetch fails identically every time), where it never
+        // will. Something did fail, so this keeps the retryable reason;
+        // SKILL.md's recovery paragraph bounds the retry to ONCE so the
+        // deterministic member cannot re-fail every round until the cap.
+        demote('capture-failed');
+      } else if (mergeBaseSha === null) {
+        // No merge base although the fetch SUCCEEDED: `git merge-base` found
+        // no common ancestor — an unrelated-history PR. There is no PR diff to
+        // narrow against, so no scope is built; but nothing THREW, and calling
+        // it `capture-failed` asserts an infrastructure fault that did not
+        // happen and puts the round in the class SKILL.md's recovery flow
+        // retries. A re-run reproduces this exactly, so it names the
+        // deterministic reason instead. Exit 1 is the only "no common
+        // ancestor" signal the probe keeps — every other exit takes the
+        // retryable arm above. One member folds in anyway: git ALSO exits 1
+        // when it cannot read the object store on the walk, so a fault there
+        // stamps this reason at any exit-status resolution, and the
+        // determinism claimed here is unprovable for that member.
+        demote('nothing-to-narrow');
+      } else if (fullBytes === null || fullText === null) {
+        // A base WAS resolved and its capture threw — the 120s git timeout the
+        // large long-lived PR `--since` exists for. That is infrastructure,
+        // and a re-run can succeed, so this one keeps `capture-failed`.
+        demote('capture-failed');
       } else if (
-        mergeBaseSha === null ||
-        fullBytes === null ||
-        fullText === null
+        (selection = selectNarrowing(fullBytes, deltaBytes)) === null
       ) {
-        // No full range to slice, and the reason must name WHICH cause,
-        // because the recovery flow retries one class and not the other.
-        //
-        // `base-untrusted` when the base FETCH failed: the anchor was never
-        // ruled invalid, and the component that failed is one the re-run
-        // repeats, so a flappy fetch must not cost this PR its incremental
-        // scope for ever. `capture-failed` when a base existed and reading
-        // the range threw (the 120s git timeout the large long-lived PR
-        // `--since` exists for) — also infrastructure, also retryable.
-        // `containment-unverified` only for the genuinely base-FREE case:
-        // `git merge-base` found no common ancestor at all (a cross-fork PR
-        // with unrelated history), which a re-run reproduces exactly.
-        //
-        // Collapsing the first into the last is how the split was lost once
-        // already: `containment-unverified` is filed under "deterministic for
-        // the same sha and must NOT be retried", so a CI checkout whose base
-        // fetch blips would pay a full review every round from then on, under
-        // a reason that also misnames the cause — the delta read fine.
-        //
-        // `mergeBaseSha === null` is also the load-bearing FIRST conjunct
-        // rather than a nested check: "fullBytes !== null implies a base" is
-        // true at runtime and invisible to the compiler, so without it the
-        // narrowing does not reach the else branch and the package does not
-        // build.
-        demote(
-          baseFetchFailed || baseProbeUnavailable
-            ? 'base-untrusted'
-            : mergeBaseSha === null
-              ? 'containment-unverified'
-              : 'capture-failed',
-        );
-      } else if (decodeWasLossy(deltaBytes) || decodeWasLossy(fullBytes)) {
-        // A capture that does not decode cleanly names its files with
-        // collision-prone U+FFFD strings: two paths differing only in an
-        // invalid byte decode to the SAME name, and scope membership decided
-        // on the collided strings would republish a sibling's
-        // already-certified hunks (or widen over a file the anchor cleared).
-        // The containment battery this slicing retired refused the exact
-        // shape; the slice path fails closed the same way. The full-range
-        // BYTES stay raw, so the fallback loses nothing.
-        //
-        // Measured on the DECODE, not on the decoded text. Scanning the text
-        // for U+FFFD cannot tell a substitution from the code point itself,
-        // and the code point is ordinary content — this repository holds four
-        // literal ones in source. A delta touching any of them, even as
-        // context, demoted the round to a reason filed under "deterministic
-        // for the same sha and must NOT be retried", so that PR paid a full
-        // review every round from then on, under a cause that had not
-        // happened. Only INVALID bytes produce a substitution, and only
-        // substitution creates the collision this guards.
-        demote('containment-unverified');
-      } else if (parseDiff(delta).files.length === 0) {
-        // Non-empty bytes that name no file: the capture returned something
-        // this parser cannot read (an error stream on stdout, a shape it does
-        // not model). The empty file list is the PARSER's, not the tree's —
-        // the `delta.trim() === ''` arm above is what an actually-empty range
-        // takes — so this must not read as "nothing changed since the
-        // anchor", which would stop the round. An oracle that could not rule
-        // is exactly `containment-unverified`.
-        demote('containment-unverified');
-      } else {
-        const deltaSections = parseDiff(delta).files;
-        // Restoration, probed ONCE per file with the probe's exit status
-        // kept: `treeEntryUnchanged` answers null when git could not answer,
-        // and that third state is ruled on below — folded into "changed" it
-        // converted one transient ls-tree failure into a deterministic
-        // lineage refusal.
-        const restoredAt = new Map<string, boolean | null>();
-        const restored = (path: string): boolean | null => {
-          let v = restoredAt.get(path);
-          if (v === undefined) {
-            v = treeEntryUnchanged(mergeBaseSha, fetchedSha, path);
-            restoredAt.set(path, v);
-          }
-          return v;
-        };
-        // A rename section names only its NEW side, so the source can own
-        // hunks in the PR's diff that nothing in the delta names. Whether it
-        // does is a question about the FULL range, and only the full range
-        // can answer it: rename detection is a similarity threshold, and the
-        // two ranges compare different pairs of blobs, so one can pair a
-        // rename while the other renders a plain deletion beside a plain
-        // addition — or each can pair the SAME deletion with a different
-        // target.
-        //
-        // The rule is therefore the direct one — does the full diff carry a
-        // section under the SOURCE name? If it does, that section is
-        // unreviewed content the slice would drop, so the source rides along
-        // and the lineage check keeps it. If it does not, ask where the full
-        // range put the deletion: when it paired it with a DIFFERENT target,
-        // the source's net hunks sit under that section, and it rides along
-        // instead (a rename target of the full range is absent at the base
-        // by construction, so the restoration probe cannot misread it as
-        // restored and drop it). Otherwise the full range paired the delta's
-        // own rename, the net hunks already sit under the new-side section,
-        // and riding anything along would demand a section that does not
-        // exist and refuse the round.
-        //
-        // Keying on `restored(target)` instead covered only the case where
-        // the target dropped out of the live set. A LIVE target whose ranges
-        // straddle the similarity threshold — round 1 rewrites `a.ts` past
-        // it, round 2 moves it to `b.ts` — left the source's net-deletion
-        // hunks out of the slice with the anchor advancing past them, and
-        // content no round had seen retired for good.
-        const fullFiles = parseDiff(fullText).files;
-        const fullSectionPaths = new Set(fullFiles.map((f) => f.path));
-        const fullRenameTargets = new Map<string, string>();
-        for (const f of fullFiles) {
-          if (f.renamedFrom) fullRenameTargets.set(f.renamedFrom, f.path);
-        }
-        const deltaFiles: string[] = [];
-        for (const f of deltaSections) {
-          deltaFiles.push(f.path);
-          if (!f.renamedFrom || f.renamedFrom === f.path) continue;
-          if (fullSectionPaths.has(f.renamedFrom)) {
-            deltaFiles.push(f.renamedFrom);
-          } else {
-            const carrier = fullRenameTargets.get(f.renamedFrom);
-            if (carrier && carrier !== f.path) deltaFiles.push(carrier);
-          }
-        }
-        const unanswerable = deltaFiles.filter((p) => restored(p) === null);
-        if (unanswerable.length > 0) {
-          // The surface failing, not the anchor: a probe against the base
-          // tree that could not answer is infrastructure, and the re-run
-          // repeats it — retryable like its merge-base sibling.
-          writeStderrLine(
-            `Incremental scope refused: a restoration probe could not ` +
-              `answer for ${unanswerable.length} file(s) ` +
-              `(${unanswerable.slice(0, 3).join(', ')}` +
-              `${unanswerable.length > 3 ? ', …' : ''}) — base-untrusted. ` +
-              `Reviewing the full range.`,
-          );
-          demote('base-untrusted');
-        } else {
-          const ruling = computeIncrementalScope({
-            anchor: anchor.diffBase,
-            fullDiff: fullBytes,
-            deltaFiles,
-            restored: (path) => restored(path) === true,
-            readWorktree: (rel) => {
-              try {
-                return readFileSync(join(wt, rel), 'utf8');
-              } catch {
-                return null;
-              }
-            },
-          });
-          if (ruling.kind === 'refuse') {
-            writeStderrLine(
-              `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
-            );
-            demote(ruling.reason);
-          } else if (ruling.kind === 'nothing-new') {
-            // Every changed file was undone and nothing imports them. That is
-            // the same state as an empty delta, and it takes the same exit.
-            writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
-            anchor.incremental.upToDate = true;
-          } else if (publish(ruling.diff)) {
-            scopedDelta = true;
-            // `diffBase` is deliberately NOT written here. It exists so a
-            // consumer that recomputes its own diff uses the range the round
-            // published (Agent 7's test-efficacy probe welds it into
-            // `--base`), and under slicing that range is the MERGE BASE, not
-            // the anchor: the published bytes are sections of
-            // `merge-base..head`. Writing the anchor would send the probe
-            // over `anchor..HEAD` — hunks the round did not review, and
-            // missing the ones it did — which is the very error the field
-            // was added to prevent, inverted. The reader falls back to
-            // `report.mergeBaseSha`, which is the correct answer for a
-            // sliced round, and it keeps honouring the field on a plan an
-            // older CLI wrote, where a delta-range publish made it true.
-            anchor.incremental.scope = ruling.scope;
-            // The superseded full diff stays on disk beside the scoped one.
-            // ABSOLUTE, like `diffPathAbsolute` and for the same reason:
-            // agents read through `read_file`, which rejects a relative
-            // path, and they run inside `worktreePath` where a
-            // `.qwen/tmp/…` relative path resolves to nothing. Nothing reads
-            // it at this commit — say so rather than name a consumer, which
-            // is how the last round's docs came to certify a transfer that
-            // never happened.
+        // The narrowing found nothing it could publish — all safe, because
+        // keeping the full range costs a wider review and never a wrong one:
+        // the "undo per feedback" round whose commits put lines back the way
+        // the base had them, so the undone FILE no longer appears in
+        // `base..head` at all (an undone file the PR's diff still carries
+        // does not land here — the join fails closed and publishes its
+        // section whole instead); a capture whose bytes do not survive
+        // UTF-8; a delta the parser cannot read; and the fail-closed
+        // refusal — the two captures key the same change differently (a path
+        // or a rename), so narrowing would drop a change the PR's diff
+        // displays.
+        demote('nothing-to-narrow');
+      } else if (
+        // One import hop past what the round touched. The narrowing is sound
+        // in one direction only: a caller cleared against the callee's OLD
+        // shape is unchanged by definition, so no delta capture shows it, and
+        // a scope holding only the touched files retires that seam at the
+        // next re-anchor. The widening never narrows — with no edge to follow
+        // it returns the narrowing's own paths — so the unwidened round is
+        // the floor rather than a second path that could disagree with it.
+        ((widened = widenScope({
+          anchor: anchor.diffBase ?? anchor.incremental.since,
+          selection,
+          readWorktree: (rel) => {
             try {
-              const fullPath = resolve(
-                tmpFile(`pr-${prNumber}`, 'diff-full.txt'),
-              );
-              writeFileSync(fullPath, fullBytes);
-              anchor.incremental.fullDiffPath = fullPath;
-            } catch (err) {
-              // A convenience artefact must never take the round with it.
-              writeStderrLine(
-                `Could not keep the full-range diff beside the scoped one ` +
-                  `(${(err as Error).message}); steps that want the whole ` +
-                  `PR will have to re-capture it.`,
-              );
+              return readFileSync(resolve(wt, rel), 'utf8');
+            } catch {
+              return null;
             }
-          } else {
-            // The slice captured but could not be written: degrade like any
-            // other capture failure rather than scoping to a file nobody has.
-            demote('capture-failed');
-          }
+          },
+        })),
+        (narrowed = assembleSections(selection, widened.paths)) === null)
+      ) {
+        // `assembleSections` selects nothing only when the widened set names
+        // no section the full capture carries, which the guards above already
+        // rule out — but it is the same "nothing to publish" either way, and
+        // the full range is the safe answer to it.
+        demote('nothing-to-narrow');
+      } else {
+        if (publish(narrowed)) {
+          scopedDelta = true;
+          anchor.incremental.scope = widened.scope;
+          // The published hunks are byte-identical hunks of
+          // `mergeBaseSha..head`, so that range is what downstream consumers
+          // recomputing their own diffs must probe (Agent 7's test-efficacy
+          // probe welds --base into its brief): it covers every published hunk
+          // and never a byte the PR's diff does not display, while the anchor
+          // range can carry hunks an undo round netted out of it.
+          anchor.incremental.diffBase = mergeBaseSha;
+        } else {
+          // The scope was built but could not be written: degrade like any
+          // other capture failure rather than scoping to a file nobody has.
+          demote('capture-failed');
         }
       }
     }

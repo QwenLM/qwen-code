@@ -294,29 +294,6 @@ export function gitRaw(...args: string[]): Buffer {
 }
 
 /**
- * Count lines of `<ref>:<path>`, or 0 if it does not exist there.
- *
- * Lives here rather than in `fetch-pr` because `buildPlanReport` derives
- * heaviness from the count, and a second counter written beside another plan
- * builder would classify the same file heavy in one plan and not the other.
- * It took a `repoRoot` for a `-C` variant no caller ever set — a dead switch,
- * kept for a command (`rescope`) that no longer exists — and it is gone; a
- * caller that needs another cwd can pass a ref, which is what the ref is.
- */
-export function fileLineCount(ref: string, path: string): number {
-  try {
-    const buf = gitRaw('show', `${ref}:${path}`);
-    if (buf.length === 0) return 0;
-    let n = 0;
-    for (const b of buf) if (b === 0x0a) n++;
-    // A final line without a trailing newline still counts.
-    return buf[buf.length - 1] === 0x0a ? n : n + 1;
-  } catch {
-    return 0; // absent at this ref: created by the PR, or deleted by it
-  }
-}
-
-/**
  * Like `gitRaw`, but treats "the inputs differ" — exit 1 **with output** — as
  * success and returns the diff the child produced anyway.
  *

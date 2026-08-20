@@ -20,11 +20,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import {
-  repoRelativeOf,
-  REVIEW_TMP_DIR,
-  tmpFile,
-} from './lib/paths.js';
+import { repoRelativeOf, REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
@@ -224,7 +220,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // against the worktree and nothing else, and `git diff -M HEAD` renders a
   // move as delete + add rather than pairing it (measured — a staged move of
   // a 95%-similar file still comes back as two sections). So no local plan
-  // carries `renamedFrom` today. The line is here because the cost is one
+  // carries `renameFrom` today. The line is here because the cost is one
   // set union and the failure it prevents is silent, and because the moment
   // this capture grows a `--cached` range — the obvious next step for staged
   // review — renames appear and the anchor would be wrong without it. There
@@ -233,8 +229,8 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const planPaths = [
     ...new Set(
       fullPlan.files.flatMap((f) =>
-        f.renamedFrom && f.renamedFrom !== f.path
-          ? [f.path, f.renamedFrom]
+        f.renameFrom && f.renameFrom !== f.path
+          ? [f.path, f.renameFrom]
           : [f.path],
       ),
     ),

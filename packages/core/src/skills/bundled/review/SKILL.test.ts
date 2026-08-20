@@ -126,92 +126,64 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
-    // …and the re-run instruction, carrying BOTH flags: a re-run with only
-    // `--since` can never pass the command's same-model gate — a missing
-    // certifier is a mismatch, not a pass (the gate refuses it as
-    // `cross-model-anchor`) — so the recovery this paragraph exists for is
-    // dead on every flow without the model beside the sha. Plus the
-    // flag-replacement rule that keeps a second `--since` from reading as
-    // two anchors.
+    // …and the re-run instruction, including the flag-replacement rule that
+    // keeps a second `--since` from reading as two anchors.
     expect(body).toContain(
-      're-run the `fetch-pr` command from above with `--since <sha> --since-model <model>`',
-    );
-    expect(body).toContain(
-      'REPLACING any `--since` and any `--since-model` the command already carries',
+      'REPLACING any `--since` it already carries, never appending a second one',
     );
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
-    // The orchestrator's recovery loop acts on this prose alone. The
-    // retryable class is the infrastructure reasons — a base fetch, a
-    // merge-base probe, a capture — whose components a re-run repeats;
-    // widening it re-refuses a dead anchor every round forever.
+    // The orchestrator's recovery loop acts on this prose alone, and the
+    // producer deliberately manufactures both planless shapes. Deleting the
+    // retry exception strands the one shape a re-run fixes; widening the
+    // retryable set re-refuses a dead anchor every round forever.
     const body = skillBody();
     expect(body).toContain(
       'Every other reason is deterministic for the same sha and must NOT be retried',
     );
+    expect(body).toContain('Retry that one, once.');
+    // The once-cap's re-keyed shape: a base-less `capture-failed` is the
+    // retryable class, but git's exit status cannot split its transient
+    // member from its deterministic one (a deleted remote base exits 128
+    // identically), so the retry is bounded to one.
     expect(body).toContain(
-      'the component that failed — a base fetch, a merge-base probe, a capture — is re-run by the re-run',
+      'One shape of `capture-failed` retries ONCE, not forever',
     );
-    // The retryable set's MEMBERSHIP, not just the clause's existence:
-    // widening the parenthetical (say, with `partition-failed`) makes an
-    // orchestrator retry a deterministic refusal every round forever — the
-    // exact loop this test's own comment warns about.
+    expect(body).toContain('`baseFetchFailed: true`');
+    // The re-key's premise: a planless partition failure cannot be
+    // base-less, so the cap no longer keys on `partition-failed` at all.
     expect(body).toContain(
-      '(`base-untrusted`, `capture-failed`: the anchor was never ruled invalid',
+      'a planless `partition-failed` always carries a `mergeBaseSha`',
     );
-    // The rules-load exception the deleted `baseFetchFailed: true` pin used
-    // to cover — still live: on a failed base fetch the unresolvable ref
-    // makes load-rules report "no rules found", indistinguishable from a
-    // repo with none, silently enforcing none.
+    // The narrowing reason is deterministic for the same sha like every other
+    // non-infrastructure one: the same two captures select the same hunks. A
+    // future edit moving it into the retryable set would re-narrow to nothing
+    // every round, forever.
+    expect(body).toContain('`nothing-to-narrow` re-narrows identically');
+    expect(body).toContain('found no common ancestor at all');
+    // The narrowing reason's definition in the enumeration and the retryable
+    // set's membership, pinned outright: the recovery loop reads both, and a
+    // rename of the one or a widening of the other ships green without them.
     expect(body).toContain(
-      'except when the fetch report recorded `baseFetchFailed: true`',
+      '`nothing-to-narrow` (the narrowing found nothing it could publish',
     );
-    // The ONE-exception paragraph this test used to pin named a shape the
-    // CLI can no longer produce — `partition-failed` implies a base
-    // resolved, because every publish site needs one — and the transient
-    // shape it carved out now arrives as `base-untrusted`, already
-    // retryable under the infrastructure clause above.
-    expect(body).not.toContain('Retry that one, once.');
-  });
-
-  it('pins the per-reason descriptions the retry split rests on', () => {
-    // The FETCH-vs-containment distinction is load-bearing on retry: a
-    // flappy base fetch must stay retryable (`base-untrusted`) and a
-    // base-free cross-fork history deterministic (`containment-unverified`)
-    // — swapping the two sentences reclassifies one into the other, and the
-    // orchestrator stops retrying what it should retry. And
-    // `lineage-unfollowable` is a reason the CLI emits (the fetch-pr refuse
-    // tree), so it owes a recovery bullet like every other reason.
-    const body = skillBody();
-    expect(body).toContain('`lineage-unfollowable`');
-    expect(body).toContain(
-      'A base FETCH that failed is the other shape and reports `base-untrusted` instead',
-    );
+    expect(body).toContain('(`base-untrusted`, `capture-failed`:');
   });
 
   it('records the range the round actually reviewed in provenance', () => {
-    // A saved report is read by someone who cannot re-derive its scope.
-    // Slicing made every delta-scoped round publish sections of
-    // `merge-base..head`, so the merge base IS the range the round used;
-    // the field that named a delta range's left side left new reports, and
-    // the instruction that pointed the writer at it named a field that is
-    // never there — inviting an improvisation that records the anchor, a
-    // scope the run never had.
+    // A saved report is read by someone who cannot re-derive its scope, so
+    // recording the merge base for a round that reviewed `diffBase..head`
+    // hands that reader a range the run never had.
+    // The whole rule, not its opening clause. The discriminating CONDITION
+    // and the fallback half were each pinned by nothing: deleting the
+    // condition, flipping it to `and upToDate`, or swapping the fallback for
+    // `fetchedSha` all shipped this file green, and each one records a scope
+    // the run never had.
     expect(skillBody()).toContain(
-      '`mergeBaseSha` in every case — a delta-scoped round publishes sections of `merge-base..head`',
+      '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
     );
-    // …and the legacy carve-out: an older report's `diffBase` still names
-    // the range that CLI published, so it stays authoritative there.
-    expect(skillBody()).toContain(
-      'honour the field when an older report still carries it',
-    );
-    // …and the discriminator that tells a writer the field is GONE on new
-    // reports — without it a provenance step improvises an anchor-scoped
-    // range the run never had.
-    expect(skillBody()).toContain(
-      'new reports carry no `incremental.diffBase`',
-    );
+    expect(skillBody()).toContain('`mergeBaseSha` on every other');
   });
 
   it('never asks the orchestrator to derive the file-review target', () => {

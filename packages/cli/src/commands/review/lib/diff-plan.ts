@@ -90,22 +90,18 @@ export function classifyPath(path: string): PathKind {
 export interface DiffFile {
   /** New-side path, or the old path for a deletion. */
   path: string;
+  /**
+   * Old-side path of a rename (`rename from` header) — absent otherwise.
+   * The narrowing join keys a rename by BOTH paths: the two captures can
+   * resolve the same move differently, and the new path alone does not say
+   * whether they keyed the same change.
+   */
+  renameFrom?: string;
   kind: PathKind;
   /** Range within the diff FILE, covering header + all hunks. */
   diffStart: number;
   diffEnd: number;
   hunks: DiffHunk[];
-  /**
-   * The old-side path of a rename section — what it was renamed FROM.
-   *
-   * Set only when rename detection rendered the section (the captures pin
-   * `--find-renames`), where `path` carries the NEW name alone. A delta
-   * whose rename target was restored to the merge-base state owes the
-   * source's net-deletion hunks a reviewer, and they sit in the PR's diff
-   * under this name — a scope decision that reads `path` alone cannot see
-   * them.
-   */
-  renamedFrom?: string;
   /**
    * New-side line ranges the PR actually **wrote** — the `+` lines, coalesced.
    *
@@ -389,7 +385,7 @@ export function parseDiff(diffText: string): {
     // file's path and swallows the line from the add/remove counts.
     if (!curHunk) {
       if (line.startsWith('rename from ')) {
-        cur.renamedFrom = unquote(line.slice('rename from '.length));
+        cur.renameFrom = unquote(line.slice('rename from '.length));
         continue;
       }
       if (line.startsWith('rename to ')) {
