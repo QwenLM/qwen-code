@@ -3125,6 +3125,7 @@ export function WebShellSidebar({
         return;
       }
       const targetPinned = !session.isPinned;
+      let rpcSucceeded = false;
       const markRpcSettled = (): void => {
         setOptimisticPins((previous) => {
           const entry = previous.get(sessionIdentity);
@@ -3174,7 +3175,7 @@ export function WebShellSidebar({
           isPinned: targetPinned,
         })
         .then(() => {
-          markRpcSettled();
+          rpcSucceeded = true;
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => {
@@ -3186,6 +3187,7 @@ export function WebShellSidebar({
           if (workspaceCwd) {
             sessionCatalogController.invalidateWorkspace(workspaceCwd);
           }
+          if (rpcSucceeded) markRpcSettled();
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
