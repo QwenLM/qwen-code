@@ -1062,11 +1062,12 @@ describe('deleteDaemonSessions', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440170';
     writeSessionFile(workspaceDir, sessionId, 'active');
     const closeSession = vi.fn().mockResolvedValue(undefined);
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
 
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId.toUpperCase(), sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession },
+      bridge: { closeSession, deleteSessionAttachments },
       coordinator: new SessionArchiveCoordinator(),
     });
 
@@ -1076,6 +1077,7 @@ describe('deleteDaemonSessions', () => {
       errors: [],
     });
     expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(deleteSessionAttachments).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       false,
     );
