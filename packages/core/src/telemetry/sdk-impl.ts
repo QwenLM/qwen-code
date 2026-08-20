@@ -428,17 +428,14 @@ export async function startTelemetrySdk(
       : logToSpanProcessor
         ? [logToSpanProcessor]
         : [],
-    // Metrics uses the singular `metricReader` field because
-    // `@opentelemetry/sdk-node@0.203.0` only accepts one reader; there is no
-    // `metricReaders: []` opt-out. The SDK's `start()` calls
-    // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
-    // are only suppressed when an explicit reader is provided. This is
-    // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
-    // where an empty array disables env fallback for those signals. Those two
-    // must stay unconditional arrays: omitting them re-enables sdk-node's
-    // env-based fallback, and the logs fallback runs in the NodeSDK
-    // constructor — outside the env-var scrub window around `start()` in
-    // sdk.ts (`startSdkWithExplicitExporters`).
+    // Metrics uses the singular `metricReader` field; `@opentelemetry/sdk-node`
+    // 0.221 also accepts `metricReaders`, but a single reader is all qwen-code
+    // ever configures, and omitting both leaves metrics fully disabled (the
+    // env-based metrics fallback is gone in 0.221). This is intentionally
+    // asymmetric with `spanProcessors`/`logRecordProcessors`, which must stay
+    // unconditional arrays: omitting either re-enables sdk-node's env-based
+    // fallback inside `start()`, where an unset OTEL_*_EXPORTER defaults to
+    // constructing an OTLP exporter from a package this bundle stubs out.
     ...(metricReader && { metricReader }),
     instrumentations: [
       new HttpInstrumentation({
