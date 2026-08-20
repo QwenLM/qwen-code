@@ -149,7 +149,7 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
-  it('persists env, auth selection, selected model, and merged model providers', async () => {
+  it('completes a non-UI install without transaction callbacks', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [
         {
@@ -190,6 +190,7 @@ describe('applyProviderInstallPlan', () => {
       refreshAuth,
     });
 
+    expect(adapter.backup).toHaveBeenCalledOnce();
     expect(adapter.setValue).toHaveBeenCalledWith(
       'env.TEST_API_KEY',
       'sk-test',
@@ -211,7 +212,7 @@ describe('applyProviderInstallPlan', () => {
     // Id-only model selection must clear any stale baseUrl disambiguator
     // (empty-string tombstone overrides a lower-scope value on merge).
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', '');
-    expect(adapter.persist).toHaveBeenCalled();
+    expect(adapter.persist).toHaveBeenCalledOnce();
     expect(reloadModelProviders).toHaveBeenCalledWith({
       [AuthType.USE_OPENAI]: [
         { id: 'new-model', envKey: 'TEST_API_KEY' },
@@ -228,7 +229,7 @@ describe('applyProviderInstallPlan', () => {
       undefined,
     );
     expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
-    expect(adapter.cleanupBackup).toHaveBeenCalled();
+    expect(adapter.cleanupBackup).toHaveBeenCalledOnce();
   });
 
   it('can skip immediate auth refresh', async () => {

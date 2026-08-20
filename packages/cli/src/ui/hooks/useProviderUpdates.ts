@@ -9,6 +9,7 @@ import type {
   ProviderModelConfig,
   Config,
   ProviderConfig,
+  ProviderSettingsAdapter,
 } from '@qwen-code/qwen-code-core';
 import {
   ALL_PROVIDERS,
@@ -28,6 +29,10 @@ import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import type {
+  UiProviderTransaction,
+  UiProviderTransactionContext,
+} from './use-ui-provider-transaction.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -161,6 +166,17 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
+interface ProviderUpdateSuccess {
+  provider: ProviderConfig;
+  previousModel: string;
+  activeModel: string;
+}
+
+type ProviderUpdateResult =
+  | ProviderUpdateSuccess
+  | { error: unknown }
+  | undefined;
+
 function readInstalledOwnedIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
@@ -249,14 +265,37 @@ export function useProviderUpdates(
     item: { type: 'info' | 'error' | 'warning'; text: string },
     timestamp: number,
   ) => void,
+  runUiProviderTransaction?: UiProviderTransaction['run'],
 ) {
   const [updateRequest, setUpdateRequest] = useState<
     ProviderUpdateRequest | undefined
   >();
   const migrated = useRef(false);
 
+  const runProviderUpdateTransaction = useCallback(
+    async (
+      operation: (context: UiProviderTransactionContext) => Promise<void>,
+    ): Promise<void | undefined> => {
+      if (runUiProviderTransaction) {
+        return runUiProviderTransaction(operation);
+      }
+      return operation({
+        signal: new AbortController().signal,
+        canPublish: () => true,
+        ownsRollback: () => true,
+      });
+    },
+    [runUiProviderTransaction],
+  );
+
   const executeUpdate = useCallback(
-    async (pending: PendingUpdate) => {
+    async (
+      pending: PendingUpdate,
+      transaction: UiProviderTransactionContext,
+      settingsAdapter: ProviderSettingsAdapter,
+    ): Promise<ProviderUpdateResult> => {
+      if (!transaction.canPublish()) return undefined;
+
       try {
         const providerCfg = pending.provider;
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
@@ -287,7 +326,12 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const settingsAdapter = createLoadedSettingsAdapter(settings);
+        const previousRuntime = {
+          authType: config.getAuthType(),
+          modelId:
+            config.getActiveRuntimeModelSnapshot()?.id ?? config.getModel(),
+          baseUrl: config.getCurrentModelRegistryBaseUrl(),
+        };
 
         await applyProviderInstallPlan(installPlan, {
           settings: {
@@ -299,68 +343,90 @@ export function useProviderUpdates(
               }
             },
           },
+          signal: transaction.signal,
+          isCurrentTransaction: transaction.ownsRollback,
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
             config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
+          rollbackRuntime: () => {
+            if (previousRuntime.authType === undefined) {
+              config.resetAuth(previousRuntime.modelId);
+              return;
+            }
+            return config.switchModel(
+              previousRuntime.authType,
+              previousRuntime.modelId,
+              { baseUrl: previousRuntime.baseUrl ?? undefined },
+            );
+          },
           ...(updatesActiveProvider && {
-            refreshAuth: (authType) => config.refreshAuth(authType),
+            refreshAuth: (authType) => {
+              if (!transaction.canPublish()) return Promise.resolve();
+              return config.refreshAuth(
+                authType,
+                undefined,
+                transaction.canPublish,
+              );
+            },
           }),
         });
 
-        const activeModel = config.getModel();
-        const displayName = t(providerCfg.label);
+        if (!transaction.canPublish()) return undefined;
 
-        if (activeModel === previousModel) {
-          addItem(
-            {
-              type: 'info',
-              text: t('{{plan}} configuration updated successfully.', {
-                plan: displayName,
-              }),
-            },
-            Date.now(),
-          );
-        } else {
-          addItem(
-            {
-              type: 'info',
-              text: t(
-                '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
-                { plan: displayName, model: activeModel },
-              ),
-            },
-            Date.now(),
-          );
-        }
+        return {
+          provider: providerCfg,
+          previousModel,
+          activeModel: config.getModel(),
+        };
+      } catch (error) {
+        if (!transaction.canPublish()) return undefined;
+        return { error };
+      }
+    },
+    [settings, config],
+  );
 
+  const publishUpdateSuccess = useCallback(
+    ({ provider, previousModel, activeModel }: ProviderUpdateSuccess) => {
+      const displayName = t(provider.label);
+
+      if (activeModel === previousModel) {
         addItem(
           {
             type: 'info',
-            text: t(
-              'Tip: Use /model to switch between available {{plan}} models.',
-              { plan: displayName },
-            ),
-          },
-          Date.now(),
-        );
-
-        return true;
-      } catch (error) {
-        addItem(
-          {
-            type: 'error',
-            text: t('Failed to update provider configuration: {{message}}', {
-              message: getErrorMessage(error),
+            text: t('{{plan}} configuration updated successfully.', {
+              plan: displayName,
             }),
           },
           Date.now(),
         );
-        return false;
+      } else {
+        addItem(
+          {
+            type: 'info',
+            text: t(
+              '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
+              { plan: displayName, model: activeModel },
+            ),
+          },
+          Date.now(),
+        );
       }
+
+      addItem(
+        {
+          type: 'info',
+          text: t(
+            'Tip: Use /model to switch between available {{plan}} models.',
+            { plan: displayName },
+          ),
+        },
+        Date.now(),
+      );
     },
-    [settings, config, addItem],
+    [addItem],
   );
 
   const checkForUpdates = useCallback(() => {
@@ -382,42 +448,145 @@ export function useProviderUpdates(
     setUpdateRequest({
       entries,
       onConfirm: async (choice: UpdateChoice) => {
-        setUpdateRequest(undefined);
-        if (choice === 'update') {
-          for (const p of pendingList) {
-            await executeUpdate(p);
+        await runProviderUpdateTransaction(async (transaction) => {
+          if (!transaction.canPublish()) return;
+          setUpdateRequest(undefined);
+
+          if (choice === 'update') {
+            const batchSettingsAdapter = createLoadedSettingsAdapter(settings);
+            const batchRuntime = {
+              authType: config.getAuthType(),
+              modelId:
+                config.getActiveRuntimeModelSnapshot()?.id ?? config.getModel(),
+              baseUrl: config.getCurrentModelRegistryBaseUrl(),
+              modelProviders: structuredClone(
+                batchSettingsAdapter.getModelProviders(),
+              ),
+            };
+            const installSettings: ProviderSettingsAdapter = {
+              getValue: batchSettingsAdapter.getValue,
+              setValue: batchSettingsAdapter.setValue,
+              getModelProviders: batchSettingsAdapter.getModelProviders,
+              persist: batchSettingsAdapter.persist,
+            };
+            const successes: ProviderUpdateSuccess[] = [];
+            let failure: { error: unknown } | undefined;
+            let cancelled = false;
+            let committed = false;
+
+            try {
+              batchSettingsAdapter.backup?.();
+              for (const pending of pendingList) {
+                if (!transaction.canPublish()) {
+                  cancelled = true;
+                  break;
+                }
+                const result = await executeUpdate(
+                  pending,
+                  transaction,
+                  installSettings,
+                );
+                if (!result) {
+                  cancelled = true;
+                  break;
+                }
+                if ('error' in result) {
+                  failure = result;
+                  break;
+                }
+                successes.push(result);
+              }
+
+              if (!cancelled && !failure && transaction.canPublish()) {
+                committed = true;
+                batchSettingsAdapter.cleanupBackup?.();
+                for (const success of successes) {
+                  if (!transaction.canPublish()) return;
+                  publishUpdateSuccess(success);
+                }
+              }
+            } finally {
+              if (!committed && transaction.ownsRollback()) {
+                batchSettingsAdapter.restore?.();
+                config.reloadModelProvidersConfig(batchRuntime.modelProviders);
+                if (batchRuntime.authType === undefined) {
+                  config.resetAuth(batchRuntime.modelId);
+                } else {
+                  await config.switchModel(
+                    batchRuntime.authType,
+                    batchRuntime.modelId,
+                    { baseUrl: batchRuntime.baseUrl ?? undefined },
+                  );
+                }
+              }
+            }
+
+            if (failure && transaction.canPublish()) {
+              addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Failed to update provider configuration: {{message}}',
+                    {
+                      message: getErrorMessage(failure.error),
+                    },
+                  ),
+                },
+                Date.now(),
+              );
+            }
+            return;
           }
-        } else if (choice === 'skip') {
-          const persistScope = getPersistScopeForModelSelection(settings);
-          for (const p of pendingList) {
-            settings.setValue(
-              persistScope,
-              `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
-              p.currentVersion,
-            );
+
+          if (choice === 'skip') {
+            const persistScope = getPersistScopeForModelSelection(settings);
+            try {
+              if (!transaction.canPublish()) return;
+              settings.setValues(
+                pendingList.map((pending) => ({
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${pending.metadataKey}.ignoredVersion`,
+                  value: pending.currentVersion,
+                })),
+              );
+            } catch (error) {
+              if (!transaction.canPublish()) return;
+              addItem(
+                {
+                  type: 'error',
+                  text: t('Failed to save update dismissal: {{message}}', {
+                    message: getErrorMessage(error),
+                  }),
+                },
+                Date.now(),
+              );
+            }
+            return;
           }
-        } else if (choice === 'later') {
+
           // Persist a cooldown so "later" does not re-prompt on every launch.
           // One batched write keeps the version/timestamp pair atomic, so a
           // partial persist cannot invalidate the cooldown guard on next launch.
           const persistScope = getPersistScopeForModelSelection(settings);
           const postponedAt = Date.now();
           try {
+            if (!transaction.canPublish()) return;
             settings.setValues(
-              pendingList.flatMap((p) => [
+              pendingList.flatMap((pending) => [
                 {
                   scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
-                  value: p.currentVersion,
+                  key: `${PROVIDER_METADATA_NS}.${pending.metadataKey}.postponedVersion`,
+                  value: pending.currentVersion,
                 },
                 {
                   scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+                  key: `${PROVIDER_METADATA_NS}.${pending.metadataKey}.postponedAt`,
                   value: postponedAt,
                 },
               ]),
             );
           } catch (error) {
+            if (!transaction.canPublish()) return;
             addItem(
               {
                 type: 'error',
@@ -428,10 +597,17 @@ export function useProviderUpdates(
               Date.now(),
             );
           }
-        }
+        });
       },
     });
-  }, [settings, config, executeUpdate, addItem]);
+  }, [
+    settings,
+    config,
+    executeUpdate,
+    publishUpdateSuccess,
+    addItem,
+    runProviderUpdateTransaction,
+  ]);
 
   useEffect(() => {
     checkForUpdates();

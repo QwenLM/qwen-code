@@ -1,7 +1,6 @@
 // packages/core/src/copilot/copilot-route.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { routeForModel } from './copilot-route.js';
-import type { CopilotWire } from './copilot-route.js';
 
 describe('routeForModel', () => {
   it('routes claude-opus-4.6 to messages', () => {
@@ -49,8 +48,15 @@ describe('routeForModel', () => {
   it('routes anthropic.claude-future (provider-prefixed) to messages', () => {
     expect(routeForModel('anthropic.claude-future')).toBe('messages');
   });
-  it('live catalog (Tier 1) overrides pattern routing', () => {
-    const live = new Map<string, CopilotWire>([['claude-future', 'responses']]);
-    expect(routeForModel('claude-future', undefined, live)).toBe('responses');
+  it('exposes static routing without live catalog overrides', () => {
+    const warn = vi.fn();
+
+    expect(routeForModel).toHaveLength(2);
+    expect(routeForModel('claude-future', warn)).toBe('messages');
+    expect(routeForModel('gpt-5-future', warn)).toBe('responses');
+    expect(routeForModel('unknown-future', warn)).toBe('chat');
+    expect(warn).toHaveBeenCalledWith(
+      '[copilot] unknown model "unknown-future" — defaulting to chat wire',
+    );
   });
 });

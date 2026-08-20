@@ -20,6 +20,7 @@ import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
 import type { RestoreOption } from '../components/RewindSelector.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { UiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
@@ -43,6 +44,8 @@ export interface UIActions {
   ) => void;
   handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
   auth: AuthController['actions'];
+  runUiProviderTransaction: UiProviderTransaction['run'];
+  cancelUiProviderTransaction: UiProviderTransaction['cancelActive'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
     scope: SettingScope,

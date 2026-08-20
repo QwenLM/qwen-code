@@ -643,7 +643,6 @@ export * from './qwen/qwenOAuth2.js';
 export * from './copilot/copilot-auth.js';
 export * from './copilot/copilot-fetch.js';
 export * from './copilot/copilot-route.js';
-export * from './copilot/copilot-models.js';
 export * from './copilot/createCopilotContentGenerator.js';
 
 // ============================================================================

@@ -57,18 +57,6 @@ describeLive('live CAPI', () => {
     expect(res.status).toBe(200);
   });
 
-  it('GET /models returns catalog with context windows', async () => {
-    const mgr = createCopilotTokenManager();
-    const wrapped = wrapFetchWithCopilotAuth(mgr);
-    const res = await wrapped(`${COPILOT_SENTINEL_BASE_URL}/models`, {
-      headers: { Accept: 'application/json' },
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { data?: unknown[] };
-    const arr = Array.isArray(body) ? body : body.data;
-    expect(arr?.length).toBeGreaterThan(0);
-  });
-
   it('routeForModel maps claude-* to messages wire', () => {
     expect(routeForModel('claude-sonnet-4.6')).toBe('messages');
   });

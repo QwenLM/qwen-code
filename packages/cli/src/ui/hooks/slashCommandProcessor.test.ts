@@ -965,6 +965,35 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('suppresses stale model result feedback, recording, and telemetry', async () => {
+      const input = '/model qwen-max';
+      const command = createTestCommand({
+        name: 'model',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: '',
+          suppressOutputAndTelemetry: true,
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.USER, text: input, sentToModel: false },
+        expect.any(Number),
+      );
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).not.toHaveBeenCalled();
+      expect(logSlashCommand).not.toHaveBeenCalled();
+    });
+
     it('hides the invocation for the /usage alias', async () => {
       const command = createTestCommand({
         name: 'stats',

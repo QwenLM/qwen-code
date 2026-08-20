@@ -405,6 +405,20 @@ export const DialogManager = ({
     }
   }
 
+  if (uiState.auth.isAuthenticating && uiState.auth.externalAuthState) {
+    return (
+      <ExternalAuthProgress
+        title={uiState.auth.externalAuthState.title}
+        message={uiState.auth.externalAuthState.message}
+        detail={uiState.auth.externalAuthState.detail}
+        onCancel={() => {
+          uiActions.auth.cancelAuthentication();
+          uiActions.auth.setAuthState(AuthState.Updating);
+        }}
+      />
+    );
+  }
+
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
@@ -414,23 +428,6 @@ export const DialogManager = ({
   }
 
   if (uiState.auth.isAuthenticating) {
-    if (
-      uiState.auth.pendingAuthType === AuthType.USE_OPENAI &&
-      uiState.auth.externalAuthState
-    ) {
-      return (
-        <ExternalAuthProgress
-          title={uiState.auth.externalAuthState.title}
-          message={uiState.auth.externalAuthState.message}
-          detail={uiState.auth.externalAuthState.detail}
-          onCancel={() => {
-            uiActions.auth.cancelAuthentication();
-            uiActions.auth.setAuthState(AuthState.Updating);
-          }}
-        />
-      );
-    }
-
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
     if (uiState.auth.pendingAuthType === AuthType.QWEN_OAUTH) {

@@ -1,4 +1,5 @@
 // packages/core/src/copilot/copilot-auth.ts
+import { randomUUID } from 'node:crypto';
 import {
   open,
   writeFile,
@@ -9,8 +10,10 @@ import {
 } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { inspect } from 'node:util';
+import lockfile from 'proper-lockfile';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 export interface CopilotAuthSnapshot {
   readonly bearer: string;
@@ -21,7 +24,6 @@ export interface CopilotAuthSnapshot {
 export interface CopilotTokenManager {
   getSnapshot(): Promise<CopilotAuthSnapshot>;
   forceRefresh(): Promise<void>;
-  getAvailableModelIds(): Promise<string[] | null>;
 }
 
 export interface DiscoveredToken {
@@ -163,47 +165,239 @@ const COPILOT_SCOPE = 'read:user';
 const DEFAULT_COPILOT_DOMAIN = 'github.com';
 const COPILOT_HOSTS_KEY = `github.com:${COPILOT_CLIENT_ID}`;
 
-export async function persistGithubToken(
-  token: string,
-  opts?: { hostsFilePath?: string; signal?: AbortSignal },
-): Promise<void> {
-  const filePath =
-    opts?.hostsFilePath ??
-    join(homedir(), '.config', 'github-copilot', 'hosts.json');
-  const signal = opts?.signal;
-  throwIfAborted(signal);
+const debugLogger = createDebugLogger('COPILOT_AUTH');
+
+interface HostsFilePreimage {
+  readonly bytes: Buffer | null;
+  readonly existing: Record<string, unknown>;
+}
+
+const githubTokenPersistenceTails = new Map<string, Promise<void>>();
+
+const GITHUB_TOKEN_PERSISTENCE_LOCK_OPTIONS: lockfile.LockOptions = {
+  realpath: false,
+  retries: {
+    retries: 8,
+    minTimeout: 25,
+    maxTimeout: 500,
+    factor: 2,
+    randomize: true,
+  },
+  stale: 10_000,
+  onCompromised: (error) => {
+    debugLogger.warn('GitHub token persistence lock compromised:', error);
+  },
+};
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ENOENT'
+  );
+}
+
+function makeGithubTokenTempPath(filePath: string): string {
+  return `${filePath}.tmp.${process.pid}.${randomUUID()}`;
+}
+
+function serializeGithubTokenPersistence<T>(
+  filePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous =
+    githubTokenPersistenceTails.get(filePath) ?? Promise.resolve();
+  const result = previous.then(operation, operation);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  githubTokenPersistenceTails.set(filePath, tail);
+  void tail.then(() => {
+    if (githubTokenPersistenceTails.get(filePath) === tail) {
+      githubTokenPersistenceTails.delete(filePath);
+    }
+  });
+  return result;
+}
+
+async function readHostsFilePreimage(
+  filePath: string,
+): Promise<HostsFilePreimage> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filePath);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return { bytes: null, existing: {} };
+    }
+    throw error;
+  }
 
   let existing: Record<string, unknown> = {};
   try {
-    const raw = await readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(bytes.toString('utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       existing = parsed as Record<string, unknown>;
     }
   } catch {
-    // file missing or invalid — start fresh
+    // file invalid — start fresh
   }
-  throwIfAborted(signal);
+  return { bytes, existing };
+}
 
-  const updated = {
-    ...existing,
-    [COPILOT_HOSTS_KEY]: { oauth_token: token },
-  };
-
-  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
-  throwIfAborted(signal);
-  const tmp = `${filePath}.tmp.${process.pid}`;
+async function matchesPostImage(
+  filePath: string,
+  postImage: Buffer,
+): Promise<boolean> {
   try {
-    await writeFile(tmp, JSON.stringify(updated, null, 2), {
-      mode: 0o600,
-      signal,
-    });
-    throwIfAborted(signal);
-    await rename(tmp, filePath);
-  } catch (error) {
-    await unlink(tmp).catch(() => undefined);
-    throw error;
+    return (await readFile(filePath)).equals(postImage);
+  } catch {
+    return false;
   }
+}
+
+async function restoreHostsFilePreimage(
+  filePath: string,
+  preimage: Buffer | null,
+  postImage: Buffer,
+): Promise<boolean> {
+  if (!(await matchesPostImage(filePath, postImage))) {
+    return false;
+  }
+
+  if (preimage === null) {
+    try {
+      await unlink(filePath);
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  const tmp = makeGithubTokenTempPath(filePath);
+  try {
+    await writeFile(tmp, preimage, { mode: 0o600 });
+    if (!(await matchesPostImage(filePath, postImage))) {
+      return false;
+    }
+    await rename(tmp, filePath);
+    return true;
+  } finally {
+    await unlink(tmp).catch(() => undefined);
+  }
+}
+
+function attachLockReleaseError(
+  error: unknown,
+  releaseError: unknown,
+): boolean {
+  if (!(error instanceof Error) || 'cause' in error) {
+    return false;
+  }
+
+  try {
+    Object.defineProperty(error, 'cause', {
+      value: releaseError,
+      configurable: true,
+      writable: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function persistGithubToken(
+  token: string,
+  opts?: { hostsFilePath?: string; signal?: AbortSignal },
+): Promise<void> {
+  const filePath = resolve(
+    opts?.hostsFilePath ??
+      join(homedir(), '.config', 'github-copilot', 'hosts.json'),
+  );
+  const signal = opts?.signal;
+  throwIfAborted(signal);
+
+  return serializeGithubTokenPersistence(filePath, async () => {
+    throwIfAborted(signal);
+    await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+    const release = await lockfile.lock(
+      filePath,
+      GITHUB_TOKEN_PERSISTENCE_LOCK_OPTIONS,
+    );
+    let persistenceError: unknown;
+    let persistenceFailed = false;
+    try {
+      throwIfAborted(signal);
+      const preimage = await readHostsFilePreimage(filePath);
+      throwIfAborted(signal);
+
+      const postImage = Buffer.from(
+        JSON.stringify(
+          {
+            ...preimage.existing,
+            [COPILOT_HOSTS_KEY]: { oauth_token: token },
+          },
+          null,
+          2,
+        ),
+      );
+
+      throwIfAborted(signal);
+      const tmp = makeGithubTokenTempPath(filePath);
+      let renamed = false;
+      try {
+        await writeFile(tmp, postImage, { mode: 0o600, signal });
+        throwIfAborted(signal);
+        await rename(tmp, filePath);
+        renamed = true;
+        throwIfAborted(signal);
+      } catch (error) {
+        await unlink(tmp).catch(() => undefined);
+        if (
+          renamed &&
+          signal?.aborted &&
+          !(await restoreHostsFilePreimage(filePath, preimage.bytes, postImage))
+        ) {
+          throw new Error('Login cancelled; hosts.json recovery conflict');
+        }
+        throw error;
+      }
+    } catch (error) {
+      persistenceError = error;
+      persistenceFailed = true;
+    }
+
+    let releaseError: unknown;
+    let releaseFailed = false;
+    try {
+      await release();
+    } catch (error) {
+      releaseError = error;
+      releaseFailed = true;
+    }
+
+    if (persistenceFailed) {
+      if (
+        releaseFailed &&
+        !attachLockReleaseError(persistenceError, releaseError)
+      ) {
+        throw new AggregateError(
+          [persistenceError, releaseError],
+          'GitHub token persistence and lock release both failed',
+        );
+      }
+      throw persistenceError;
+    }
+    if (releaseFailed) {
+      throw releaseError;
+    }
+  });
 }
 
 export class CopilotExchangeError extends Error {
@@ -300,6 +494,33 @@ interface CacheData {
   ghuSource?: string;
 }
 
+function isCacheData(data: unknown): data is CacheData {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const value = data as Record<string, unknown>;
+  return (
+    typeof value['bearer'] === 'string' &&
+    value['bearer'].length > 0 &&
+    typeof value['endpointsApi'] === 'string' &&
+    value['endpointsApi'].length > 0 &&
+    typeof value['expiresAtMs'] === 'number' &&
+    Number.isFinite(value['expiresAtMs']) &&
+    typeof value['cachedAtMs'] === 'number' &&
+    Number.isFinite(value['cachedAtMs']) &&
+    (value['ghuSource'] === undefined || typeof value['ghuSource'] === 'string')
+  );
+}
+
+function cacheFingerprint(data: CacheData | null): string | null {
+  if (!data) return null;
+  return JSON.stringify([
+    data.bearer,
+    data.endpointsApi,
+    data.expiresAtMs,
+    data.cachedAtMs,
+    data.ghuSource,
+  ]);
+}
+
 async function acquireMintLock(lockFile: string): Promise<() => Promise<void>> {
   await mkdir(dirname(lockFile), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
@@ -335,7 +556,8 @@ async function acquireMintLock(lockFile: string): Promise<() => Promise<void>> {
 async function readDiskCache(cacheFile: string): Promise<CacheData | null> {
   try {
     const raw = await readFile(cacheFile, 'utf-8');
-    return JSON.parse(raw) as CacheData;
+    const data: unknown = JSON.parse(raw);
+    return isCacheData(data) ? data : null;
   } catch {
     return null;
   }
@@ -355,6 +577,14 @@ function isFresh(data: CacheData | null): data is CacheData {
   return !!data && data.expiresAtMs - REFRESH_BUFFER_MS > Date.now();
 }
 
+function snapshotFor(data: CacheData): CopilotAuthSnapshot {
+  return Object.freeze({
+    bearer: new RedactedString(data.bearer) as unknown as string,
+    endpointsApi: data.endpointsApi,
+    expiresAtMs: data.expiresAtMs,
+  });
+}
+
 export function createCopilotTokenManager(opts?: {
   cacheFile?: string | false;
   fetchImpl?: typeof fetch;
@@ -366,88 +596,116 @@ export function createCopilotTokenManager(opts?: {
 
   let inMemory: CacheData | null = null;
   let mintInFlight: Promise<CacheData> | null = null;
+  let forceRefreshInFlight: Promise<void> | null = null;
 
   async function mint(): Promise<CacheData> {
     const discovered = await discoverGithubToken();
-    let data: CacheData;
     if (discovered.token.startsWith('gho_')) {
       const proxyEp = parseProxyEp(discovered.token);
-      data = {
+      return {
         bearer: discovered.token,
         endpointsApi: proxyEp ?? 'https://api.githubcopilot.com',
         expiresAtMs: Date.now() + 3_600_000,
         cachedAtMs: Date.now(),
         ghuSource: discovered.source,
       };
-    } else {
-      const exchanged = await exchangeGhuForCapi(discovered.token, {
-        fetchImpl: f,
-      });
-      data = {
-        bearer: exchanged.bearer,
-        endpointsApi: exchanged.endpointsApi,
-        expiresAtMs: exchanged.expiresAtMs,
-        cachedAtMs: Date.now(),
-        ghuSource: discovered.source,
-      };
     }
-    if (typeof cacheFile === 'string' && lockFile) {
-      const release = await acquireMintLock(lockFile);
-      try {
-        // double-check under lock
-        const diskCheck = await readDiskCache(cacheFile);
-        if (isFresh(diskCheck)) {
-          inMemory = diskCheck;
-          return diskCheck;
-        }
-        await writeDiskCache(cacheFile, data);
-      } finally {
-        await release();
+
+    const exchanged = await exchangeGhuForCapi(discovered.token, {
+      fetchImpl: f,
+    });
+    return {
+      bearer: exchanged.bearer,
+      endpointsApi: exchanged.endpointsApi,
+      expiresAtMs: exchanged.expiresAtMs,
+      cachedAtMs: Date.now(),
+      ghuSource: discovered.source,
+    };
+  }
+
+  async function loadOrMint(): Promise<CacheData> {
+    if (typeof cacheFile !== 'string' || !lockFile) {
+      const data = await mint();
+      inMemory = data;
+      return data;
+    }
+
+    const diskCache = await readDiskCache(cacheFile);
+    if (isFresh(diskCache)) {
+      inMemory = diskCache;
+      return diskCache;
+    }
+
+    const release = await acquireMintLock(lockFile);
+    try {
+      const lockedDiskCache = await readDiskCache(cacheFile);
+      if (isFresh(lockedDiskCache)) {
+        inMemory = lockedDiskCache;
+        return lockedDiskCache;
       }
+      const data = await mint();
+      await writeDiskCache(cacheFile, data);
+      inMemory = data;
+      return data;
+    } finally {
+      await release();
     }
-    inMemory = data;
-    return data;
+  }
+
+  async function refresh(observedFingerprint: string | null): Promise<void> {
+    if (typeof cacheFile !== 'string' || !lockFile) {
+      inMemory = await mint();
+      return;
+    }
+
+    const release = await acquireMintLock(lockFile);
+    try {
+      const diskCache = await readDiskCache(cacheFile);
+      if (
+        isFresh(diskCache) &&
+        cacheFingerprint(diskCache) !== observedFingerprint
+      ) {
+        inMemory = diskCache;
+        return;
+      }
+      const data = await mint();
+      await writeDiskCache(cacheFile, data);
+      inMemory = data;
+    } finally {
+      await release();
+    }
   }
 
   async function getSnapshot(): Promise<CopilotAuthSnapshot> {
-    if (isFresh(inMemory)) {
-      const d = inMemory!;
-      return Object.freeze({
-        bearer: new RedactedString(d.bearer) as unknown as string,
-        endpointsApi: d.endpointsApi,
-        expiresAtMs: d.expiresAtMs,
-      });
-    }
+    if (forceRefreshInFlight) await forceRefreshInFlight;
+    if (isFresh(inMemory)) return snapshotFor(inMemory);
+
     if (!mintInFlight) {
-      mintInFlight = mint().finally(() => {
+      mintInFlight = loadOrMint().finally(() => {
         mintInFlight = null;
       });
     }
-    const data = await mintInFlight;
-    return Object.freeze({
-      bearer: new RedactedString(data.bearer) as unknown as string,
-      endpointsApi: data.endpointsApi,
-      expiresAtMs: data.expiresAtMs,
-    });
+    return snapshotFor(await mintInFlight);
   }
 
   async function forceRefresh(): Promise<void> {
-    inMemory = null;
-    if (typeof cacheFile === 'string') {
-      try {
-        await unlink(cacheFile);
-      } catch {
-        // ok
-      }
+    if (!forceRefreshInFlight) {
+      forceRefreshInFlight = (async () => {
+        const observed =
+          inMemory ??
+          (typeof cacheFile === 'string'
+            ? await readDiskCache(cacheFile)
+            : null);
+        inMemory = null;
+        await refresh(cacheFingerprint(observed));
+      })().finally(() => {
+        forceRefreshInFlight = null;
+      });
     }
-    await getSnapshot();
+    await forceRefreshInFlight;
   }
 
-  async function getAvailableModelIds(): Promise<string[] | null> {
-    return null; // populated by Task 4.1 via modelsList; stub for now
-  }
-
-  return { getSnapshot, forceRefresh, getAvailableModelIds };
+  return { getSnapshot, forceRefresh };
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

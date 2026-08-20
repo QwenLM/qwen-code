@@ -16,7 +16,6 @@ function makeMockMgr(
       expiresAtMs: Date.now() + 3600_000,
     }),
     forceRefresh: vi.fn(async () => {}),
-    getAvailableModelIds: async () => null,
   };
 }
 
@@ -24,25 +23,30 @@ function makeCaptureFetch(): {
   fetch: typeof fetch;
   lastUrl: () => string;
   lastHeaders: () => Record<string, string>;
-  lastBody: () => string;
+  lastRequest: () => Request;
   setResponse: (status: number, body: string) => void;
 } {
   let capturedUrl = '';
   let capturedHeaders: Record<string, string> = {};
-  let capturedBody = '';
+  let capturedRequest: Request | undefined;
   let resStatus = 200;
   let resBody = '{}';
-  const mockFetch = (async (url: URL | string, init?: RequestInit) => {
-    capturedUrl = typeof url === 'string' ? url : url.toString();
-    capturedHeaders = (init?.headers as Record<string, string>) ?? {};
-    capturedBody = init?.body ? String(init.body) : '';
+  const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    capturedRequest = new Request(input, init);
+    capturedUrl = capturedRequest.url;
+    capturedHeaders = Object.fromEntries(capturedRequest.headers);
     return new Response(resBody, { status: resStatus });
   }) as typeof fetch;
   return {
     fetch: mockFetch,
     lastUrl: () => capturedUrl,
     lastHeaders: () => capturedHeaders,
-    lastBody: () => capturedBody,
+    lastRequest: () => {
+      if (!capturedRequest) {
+        throw new Error('Fetch was not called');
+      }
+      return capturedRequest.clone();
+    },
     setResponse: (s, b) => {
       resStatus = s;
       resBody = b;
@@ -79,7 +83,7 @@ describe('wrapFetchWithCopilotAuth', () => {
       method: 'POST',
       body: '{}',
     });
-    expect(cap.lastHeaders()['Authorization']).toBe('Bearer tid=BEARER2');
+    expect(cap.lastHeaders()['authorization']).toBe('Bearer tid=BEARER2');
   });
 
   it('injects copilot-integration-id and editor-version', async () => {
@@ -143,7 +147,82 @@ describe('wrapFetchWithCopilotAuth', () => {
         messages: [{ content: [{ type: 'image_url', image_url: 'data:...' }] }],
       }),
     });
-    expect(cap.lastHeaders()['Copilot-Vision-Request']).toBe('true');
+    expect(cap.lastHeaders()['copilot-vision-request']).toBe('true');
+  });
+
+  it('preserves a Request input method, headers, and JSON body', async () => {
+    const mgr = makeMockMgr(
+      'tid=REQUEST',
+      'https://api.individual.githubcopilot.com',
+    );
+    const cap = makeCaptureFetch();
+    const wrapped = wrapFetchWithCopilotAuth(mgr, { fetchImpl: cap.fetch });
+    const input = new Request(`${COPILOT_SENTINEL_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-request-header': 'from-request',
+      },
+      body: JSON.stringify({ message: 'from-request' }),
+    });
+
+    await wrapped(input);
+
+    const outgoing = cap.lastRequest();
+    expect(outgoing.method).toBe('POST');
+    expect(outgoing.headers.get('x-request-header')).toBe('from-request');
+    expect(await outgoing.text()).toBe('{"message":"from-request"}');
+  });
+
+  it('applies init overrides without discarding an unoverridden Request body', async () => {
+    const mgr = makeMockMgr(
+      'tid=INIT',
+      'https://api.individual.githubcopilot.com',
+    );
+    const cap = makeCaptureFetch();
+    const wrapped = wrapFetchWithCopilotAuth(mgr, { fetchImpl: cap.fetch });
+    const input = new Request(`${COPILOT_SENTINEL_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-request-header': 'from-request',
+      },
+      body: JSON.stringify({ message: 'from-request' }),
+    });
+
+    await wrapped(input, {
+      method: 'PUT',
+      headers: { 'x-init-header': 'from-init' },
+    });
+
+    const outgoing = cap.lastRequest();
+    expect(outgoing.method).toBe('PUT');
+    expect(outgoing.headers.get('x-init-header')).toBe('from-init');
+    expect(outgoing.headers.get('x-request-header')).toBeNull();
+    expect(await outgoing.text()).toBe('{"message":"from-request"}');
+  });
+
+  it('preserves a FormData Request body', async () => {
+    const mgr = makeMockMgr(
+      'tid=FORM',
+      'https://api.individual.githubcopilot.com',
+    );
+    const cap = makeCaptureFetch();
+    const wrapped = wrapFetchWithCopilotAuth(mgr, { fetchImpl: cap.fetch });
+    const form = new FormData();
+    form.set('field', 'value');
+    const input = new Request(`${COPILOT_SENTINEL_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      body: form,
+    });
+
+    await wrapped(input);
+
+    const outgoing = cap.lastRequest();
+    expect(outgoing.headers.get('content-type')).toMatch(
+      /^multipart\/form-data; boundary=/,
+    );
+    expect((await outgoing.formData()).get('field')).toBe('value');
   });
 
   it('401 → forceRefresh + retry once', async () => {

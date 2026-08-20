@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState, useMemo } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { theme } from '../semantic-colors.js';
@@ -17,6 +17,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
 import {
+  AuthType,
   findProviderById,
   findProviderByCredentials,
   findExistingProviderModels,
@@ -129,7 +130,7 @@ const VIEW_TITLES: Record<string, string> = {
 
 export function AuthDialog(): React.JSX.Element {
   const {
-    auth: { authError },
+    auth: { authError, pendingAuthType },
   } = useUIState();
   const {
     auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
@@ -138,8 +139,11 @@ export function AuthDialog(): React.JSX.Element {
   const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const [viewLevel, setViewLevel] = useState<ViewLevel>(() =>
+    pendingAuthType === AuthType.USE_COPILOT ? 'provider-setup' : 'main',
+  );
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
+  const hasStartedRequestedSetup = useRef(false);
 
   const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
@@ -181,17 +185,42 @@ export function AuthDialog(): React.JSX.Element {
     [],
   );
 
-  const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
+  const existingEnv = useMemo(
+    () => (settings.merged.env ?? {}) as Record<string, string>,
+    [settings.merged.env],
+  );
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
-      providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+  const getExistingModelIds = useCallback(
+    (providerConfig: ProviderConfig): string[] => {
+      const saved = findExistingProviderModels(
+        providerConfig,
+        settings.merged.modelProviders as Record<string, unknown> | undefined,
+      );
+      if (!saved) return [];
+      const builtinIds = new Set(getDefaultModelIds(providerConfig));
+      return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    },
+    [settings.merged.modelProviders],
+  );
+
+  useLayoutEffect(() => {
+    if (
+      pendingAuthType !== AuthType.USE_COPILOT ||
+      hasStartedRequestedSetup.current
+    ) {
+      return;
+    }
+    const copilotProvider = findProviderById('copilot');
+    if (!copilotProvider) return;
+
+    hasStartedRequestedSetup.current = true;
+    setupFlow.start(
+      copilotProvider,
+      undefined,
+      existingEnv,
+      getExistingModelIds(copilotProvider),
     );
-    if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
-  };
+  }, [existingEnv, getExistingModelIds, pendingAuthType, setupFlow]);
 
   const handleProviderSelect = (providerId: string) => {
     clearErrors();

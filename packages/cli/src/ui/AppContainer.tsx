@@ -122,6 +122,7 @@ import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
+import { useUiProviderTransaction } from './hooks/use-ui-provider-transaction.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
@@ -666,6 +667,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const {
+    run: runUiProviderTransaction,
+    cancelActive: cancelUiProviderTransaction,
+  } = useUiProviderTransaction();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -762,6 +767,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     config,
     historyManager.addItem,
+    runUiProviderTransaction,
   );
 
   const [isTrustDialogOpen, setTrustDialogOpen] = useState(false);
@@ -1485,6 +1491,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager.addItem,
     refreshStatic,
+    {
+      run: runUiProviderTransaction,
+      cancelActive: cancelUiProviderTransaction,
+    },
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
@@ -1929,6 +1939,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    runUiProviderTransaction,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -4767,6 +4778,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleApprovalModeSelect,
       handleEffortSelect,
       auth: authActions,
+      runUiProviderTransaction,
+      cancelUiProviderTransaction,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -4859,6 +4872,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleApprovalModeSelect,
       handleEffortSelect,
       authActions,
+      runUiProviderTransaction,
+      cancelUiProviderTransaction,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,

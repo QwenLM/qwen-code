@@ -375,7 +375,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as ProviderProtocolConfig,
     description:
-      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.',
+      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth, copilot) are routed automatically and need no entry.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -3079,47 +3079,6 @@ const SETTINGS_SCHEMA = {
             default: undefined as string | undefined,
             description: 'Base URL for OpenAI compatible API.',
             showInDialog: false,
-          },
-          copilot: {
-            type: 'object',
-            label: 'GitHub Copilot',
-            category: 'Security',
-            requiresRestart: true,
-            default: {},
-            description: 'GitHub Copilot authentication settings.',
-            showInDialog: false,
-            properties: {
-              enabled: {
-                type: 'boolean',
-                label: 'Copilot Enabled',
-                category: 'Security',
-                requiresRestart: true,
-                default: false,
-                description:
-                  'Whether GitHub Copilot authentication is enabled.',
-                showInDialog: false,
-              },
-              githubTokenPath: {
-                type: 'string',
-                label: 'GitHub Token Path',
-                category: 'Security',
-                requiresRestart: true,
-                default: undefined as string | undefined,
-                description:
-                  'Filesystem path to a GitHub token (ghu_/gho_) used for Copilot CAPI exchange.',
-                showInDialog: false,
-              },
-              enterpriseUrl: {
-                type: 'string',
-                label: 'Copilot Enterprise URL',
-                category: 'Security',
-                requiresRestart: true,
-                default: undefined as string | undefined,
-                description:
-                  'GitHub Copilot enterprise proxy endpoint URL, overriding the default CAPI base.',
-                showInDialog: false,
-              },
-            },
           },
         },
       },

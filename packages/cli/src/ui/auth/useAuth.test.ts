@@ -24,11 +24,13 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { useUiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 
 const copilotMocks = vi.hoisted(() => ({
   discoverGithubToken: vi.fn(),
   runCopilotDeviceFlow: vi.fn(),
   persistGithubToken: vi.fn(),
+  logAuth: vi.fn(),
 }));
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
@@ -46,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     discoverGithubToken: copilotMocks.discoverGithubToken,
     runCopilotDeviceFlow: copilotMocks.runCopilotDeviceFlow,
     persistGithubToken: copilotMocks.persistGithubToken,
+    logAuth: copilotMocks.logAuth,
   };
 });
 
@@ -79,6 +82,16 @@ function setNestedValue(
     current = current[part] as Record<string, unknown>;
   }
   current[parts[parts.length - 1]!] = value;
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 const createSettings = (initialSettings: Record<string, unknown> = {}) => {
@@ -132,6 +145,23 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
   };
 };
 
+const renderAuthWithTransaction = (
+  settings: ReturnType<typeof createSettings>,
+  config: ReturnType<typeof createConfig>,
+  addItem: (item: Record<string, unknown>, timestamp: number) => void,
+  onAuthChange?: () => void,
+) =>
+  renderHook(() => {
+    const transaction = useUiProviderTransaction();
+    return useAuthCommand(
+      settings as never,
+      config as never,
+      addItem as never,
+      onAuthChange,
+      transaction,
+    );
+  });
+
 describe('useAuthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -143,9 +173,17 @@ describe('useAuthCommand', () => {
     const settings = createSettings();
     const config = createConfig();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, vi.fn()),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, vi.fn());
+
+    expect(result.current.authError).toBeNull();
+  });
+
+  it('accepts GitHub Copilot as QWEN_DEFAULT_AUTH_TYPE', () => {
+    vi.stubEnv('QWEN_DEFAULT_AUTH_TYPE', AuthType.USE_COPILOT);
+    const settings = createSettings();
+    const config = createConfig();
+
+    const { result } = renderAuthWithTransaction(settings, config, vi.fn());
 
     expect(result.current.authError).toBeNull();
   });
@@ -155,9 +193,7 @@ describe('useAuthCommand', () => {
     const config = createConfig();
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     act(() => {
       result.current.openAuthDialog();
@@ -177,9 +213,7 @@ describe('useAuthCommand', () => {
     const config = createConfig(recordSlashCommand);
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     const inputs: ProviderSetupInputs = {
       baseUrl: resolveBaseUrl(deepseekProvider),
@@ -210,7 +244,11 @@ describe('useAuthCommand', () => {
       'model.name',
       'deepseek-v4-flash',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      undefined,
+      expect.any(Function),
+    );
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -235,9 +273,7 @@ describe('useAuthCommand', () => {
     const config = createConfig(recordSlashCommand);
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(deepseekProvider, {
@@ -262,9 +298,7 @@ describe('useAuthCommand', () => {
     const config = createConfig(recordSlashCommand);
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     act(() => {
       result.current.openAuthDialog();
@@ -289,9 +323,7 @@ describe('useAuthCommand', () => {
     const config = createConfig();
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(openRouterProvider, {
@@ -316,7 +348,11 @@ describe('useAuthCommand', () => {
       'model.name',
       'z-ai/glm-4.5-air:free',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('configures Token Plan with the independent Token Plan endpoint', async () => {
@@ -324,9 +360,7 @@ describe('useAuthCommand', () => {
     const config = createConfig();
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(tokenPlanProvider, {
@@ -341,7 +375,11 @@ describe('useAuthCommand', () => {
       'env.BAILIAN_TOKEN_PLAN_API_KEY',
       'sk-token-plan',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('configures Custom API Key via the provider install plan flow', async () => {
@@ -353,9 +391,7 @@ describe('useAuthCommand', () => {
     const config = createConfig();
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(customProvider, {
@@ -384,16 +420,18 @@ describe('useAuthCommand', () => {
       'model.name',
       'custom-model',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('cancelAuthentication resets dialog + flags + clears authError', async () => {
     const settings = createSettings();
     const config = createConfig();
     const addItem = vi.fn();
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     // Put the hook into the middle of an in-flight auth + an error to make
     // sure cancel resets *all* the visible state, not just isAuthenticating.
@@ -421,9 +459,7 @@ describe('useAuthCommand', () => {
     });
     const addItem = vi.fn();
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(deepseekProvider, {
@@ -449,6 +485,282 @@ describe('useAuthCommand', () => {
     expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
   });
 
+  it('queues an ordinary provider until its cancelled predecessor rolls back, then commits the successor', async () => {
+    const initialSettings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'baseline-model', baseUrl: 'https://baseline.example/v1' },
+      modelProviders: {},
+    };
+    const settings = createSettings(initialSettings);
+    const config = createConfig();
+    const addItem = vi.fn();
+    const runtime = {
+      authType: AuthType.USE_OPENAI,
+      model: 'baseline-model',
+      baseUrl: 'https://baseline.example/v1',
+      contentGenerator: 'baseline-generator',
+    };
+    config.getAuthType.mockImplementation(() => runtime.authType);
+    config.getModel.mockImplementation(() => runtime.model);
+    config.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    config
+      .getModelsConfig()
+      .syncAfterAuthRefresh.mockImplementation(
+        (authType: AuthType, model: string, baseUrl?: string) => {
+          runtime.authType = authType;
+          runtime.model = model;
+          runtime.baseUrl = baseUrl ?? '';
+        },
+      );
+    config.switchModel.mockImplementation(async () => {
+      runtime.authType = AuthType.USE_OPENAI;
+      runtime.model = 'baseline-model';
+      runtime.baseUrl = 'https://baseline.example/v1';
+      runtime.contentGenerator = 'baseline-generator';
+    });
+    const refreshAStarted = createDeferred<void>();
+    const refreshA = createDeferred<void>();
+    let refreshCount = 0;
+    config.refreshAuth.mockImplementation(
+      async (
+        _authType: AuthType,
+        _isInitialAuth?: boolean,
+        canPublish?: () => boolean,
+      ) => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          refreshAStarted.resolve(undefined);
+          await refreshA.promise;
+          if (canPublish?.() !== false) {
+            runtime.contentGenerator = 'cancelled-generator';
+          }
+          return;
+        }
+        if (canPublish?.() !== false) {
+          runtime.contentGenerator = 'successor-generator';
+        }
+      },
+    );
+
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
+    const submitA = result.current.handleProviderSubmit(deepseekProvider, {
+      baseUrl: resolveBaseUrl(deepseekProvider),
+      apiKey: 'sk-a',
+      modelIds: ['deepseek-a'],
+    });
+    await refreshAStarted.promise;
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    const stateDuringARollback = structuredClone(settings.merged);
+    const submitB = result.current.handleProviderSubmit(openRouterProvider, {
+      baseUrl: resolveBaseUrl(openRouterProvider),
+      apiKey: 'sk-b',
+      modelIds: ['openrouter-b'],
+    });
+
+    expect(settings.merged).toEqual(stateDuringARollback);
+    expect(refreshCount).toBe(1);
+    refreshA.resolve(undefined);
+    await act(async () => {
+      await Promise.all([submitA, submitB]);
+    });
+
+    expect(settings.merged).toMatchObject({
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'openrouter-b' },
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [
+          expect.objectContaining({ id: 'openrouter-b' }),
+        ],
+      },
+    });
+    expect(runtime).toEqual({
+      authType: AuthType.USE_OPENAI,
+      model: 'openrouter-b',
+      baseUrl: '',
+      contentGenerator: 'successor-generator',
+    });
+    expect(addItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the pre-cancellation persistent and runtime state when the queued successor fails', async () => {
+    const initialSettings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'baseline-model', baseUrl: 'https://baseline.example/v1' },
+      modelProviders: {},
+    };
+    const settings = createSettings(initialSettings);
+    const config = createConfig();
+    const addItem = vi.fn();
+    const runtime = {
+      authType: AuthType.USE_OPENAI,
+      model: 'baseline-model',
+      baseUrl: 'https://baseline.example/v1',
+      contentGenerator: 'baseline-generator',
+    };
+    config.getAuthType.mockImplementation(() => runtime.authType);
+    config.getModel.mockImplementation(() => runtime.model);
+    config.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    config
+      .getModelsConfig()
+      .syncAfterAuthRefresh.mockImplementation(
+        (authType: AuthType, model: string, baseUrl?: string) => {
+          runtime.authType = authType;
+          runtime.model = model;
+          runtime.baseUrl = baseUrl ?? '';
+        },
+      );
+    config.switchModel.mockImplementation(async () => {
+      runtime.authType = AuthType.USE_OPENAI;
+      runtime.model = 'baseline-model';
+      runtime.baseUrl = 'https://baseline.example/v1';
+      runtime.contentGenerator = 'baseline-generator';
+    });
+    const refreshAStarted = createDeferred<void>();
+    const refreshA = createDeferred<void>();
+    let refreshCount = 0;
+    config.refreshAuth.mockImplementation(
+      async (
+        _authType: AuthType,
+        _isInitialAuth?: boolean,
+        canPublish?: () => boolean,
+      ) => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          refreshAStarted.resolve(undefined);
+          await refreshA.promise;
+          if (canPublish?.() !== false) {
+            runtime.contentGenerator = 'cancelled-generator';
+          }
+          return;
+        }
+        if (canPublish?.() !== false) {
+          runtime.contentGenerator = 'failed-successor-generator';
+        }
+        throw new Error('successor refresh failed');
+      },
+    );
+
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
+    const submitA = result.current.handleProviderSubmit(deepseekProvider, {
+      baseUrl: resolveBaseUrl(deepseekProvider),
+      apiKey: 'sk-a',
+      modelIds: ['deepseek-a'],
+    });
+    await refreshAStarted.promise;
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    const stateDuringARollback = structuredClone(settings.merged);
+    const submitB = result.current.handleProviderSubmit(openRouterProvider, {
+      baseUrl: resolveBaseUrl(openRouterProvider),
+      apiKey: 'sk-b',
+      modelIds: ['openrouter-b'],
+    });
+
+    expect(settings.merged).toEqual(stateDuringARollback);
+    expect(refreshCount).toBe(1);
+    refreshA.resolve(undefined);
+    await act(async () => {
+      await Promise.all([submitA, submitB]);
+    });
+
+    expect(settings.merged).toEqual(initialSettings);
+    expect(runtime).toEqual({
+      authType: AuthType.USE_OPENAI,
+      model: 'baseline-model',
+      baseUrl: 'https://baseline.example/v1',
+      contentGenerator: 'baseline-generator',
+    });
+    expect(result.current.authError).toContain('successor refresh failed');
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it('does not publish stale completion or failure effects while a queued successor is active', async () => {
+    const settings = createSettings();
+    const recordSlashCommand = vi.fn();
+    const config = createConfig(recordSlashCommand);
+    const addItem = vi.fn();
+    const refreshAStarted = createDeferred<void>();
+    const refreshA = createDeferred<void>();
+    const refreshBStarted = createDeferred<void>();
+    const refreshB = createDeferred<void>();
+    let refreshCount = 0;
+    config.refreshAuth.mockImplementation(
+      async (
+        _authType: AuthType,
+        _isInitialAuth?: boolean,
+        canPublish?: () => boolean,
+      ) => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          refreshAStarted.resolve(undefined);
+          await refreshA.promise;
+          if (canPublish?.() !== false) {
+            throw new Error('cancelled predecessor refresh failed');
+          }
+          return;
+        }
+        refreshBStarted.resolve(undefined);
+        await refreshB.promise;
+      },
+    );
+
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
+    act(() => {
+      result.current.openAuthDialog();
+    });
+    const submitA = result.current.handleProviderSubmit(deepseekProvider, {
+      baseUrl: resolveBaseUrl(deepseekProvider),
+      apiKey: 'sk-a',
+      modelIds: ['deepseek-a'],
+    });
+    await refreshAStarted.promise;
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    const submitB = result.current.handleProviderSubmit(openRouterProvider, {
+      baseUrl: resolveBaseUrl(openRouterProvider),
+      apiKey: 'sk-b',
+      modelIds: ['openrouter-b'],
+    });
+    refreshA.reject(new Error('cancelled predecessor refresh failed'));
+    await act(async () => {
+      await refreshBStarted.promise;
+    });
+
+    expect(result.current.authError).toBeNull();
+    expect(result.current.isAuthenticating).toBe(true);
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(
+      copilotMocks.logAuth.mock.calls.map(
+        ([, event]) => (event as { status: string }).status,
+      ),
+    ).not.toContain('error');
+
+    refreshB.resolve(undefined);
+    await act(async () => {
+      await Promise.all([submitA, submitB]);
+    });
+
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(
+      copilotMocks.logAuth.mock.calls.map(
+        ([, event]) => (event as { status: string }).status,
+      ),
+    ).toEqual(['success']);
+  });
+
   it('runs Copilot device flow when no GitHub token is found', async () => {
     const copilotProvider = findProviderById('copilot')!;
     const settings = createSettings();
@@ -463,9 +775,7 @@ describe('useAuthCommand', () => {
     });
     copilotMocks.persistGithubToken.mockResolvedValueOnce(undefined);
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     act(() => {
       result.current.openAuthDialog();
@@ -551,9 +861,7 @@ describe('useAuthCommand', () => {
       source: 'mock',
     });
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
     const submit = result.current.handleProviderSubmit(copilotProvider, {
       baseUrl: resolveBaseUrl(copilotProvider),
       apiKey: '',
@@ -651,9 +959,7 @@ describe('useAuthCommand', () => {
     delete process.env['GITHUB_COPILOT_TOKEN'];
 
     try {
-      const { result } = renderHook(() =>
-        useAuthCommand(settings as never, config as never, addItem),
-      );
+      const { result } = renderAuthWithTransaction(settings, config, addItem);
       const submit = result.current.handleProviderSubmit(copilotProvider, {
         baseUrl: resolveBaseUrl(copilotProvider),
         apiKey: '',
@@ -756,9 +1062,7 @@ describe('useAuthCommand', () => {
       source: 'mock',
     });
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
     const submitA = result.current.handleProviderSubmit(copilotProvider, {
       baseUrl: resolveBaseUrl(copilotProvider),
       apiKey: '',
@@ -766,18 +1070,16 @@ describe('useAuthCommand', () => {
     });
     await refreshAStarted;
 
-    let submitB!: Promise<void>;
-    await act(async () => {
-      submitB = result.current.handleProviderSubmit(copilotProvider, {
-        baseUrl: resolveBaseUrl(copilotProvider),
-        apiKey: '',
-        modelIds: ['gpt-5.4'],
-      });
-      await submitB;
+    const submitB = result.current.handleProviderSubmit(copilotProvider, {
+      baseUrl: resolveBaseUrl(copilotProvider),
+      apiKey: '',
+      modelIds: ['gpt-5.4'],
     });
+    expect(refreshCount).toBe(1);
+
     resolveRefreshA();
     await act(async () => {
-      await submitA;
+      await Promise.all([submitA, submitB]);
     });
 
     expect(settings.merged).toMatchObject({
@@ -821,9 +1123,7 @@ describe('useAuthCommand', () => {
       },
     );
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
     let submit!: Promise<void>;
     await act(async () => {
       submit = result.current.handleProviderSubmit(copilotProvider, {
@@ -861,9 +1161,7 @@ describe('useAuthCommand', () => {
 
     copilotMocks.discoverGithubToken.mockReturnValueOnce(discovery);
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
     let submit!: Promise<void>;
     await act(async () => {
       submit = result.current.handleProviderSubmit(copilotProvider, {
@@ -907,9 +1205,7 @@ describe('useAuthCommand', () => {
     });
     copilotMocks.persistGithubToken.mockReturnValueOnce(persistence);
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
     let submit!: Promise<void>;
     await act(async () => {
       submit = result.current.handleProviderSubmit(copilotProvider, {
@@ -958,8 +1254,10 @@ describe('useAuthCommand', () => {
       },
     );
 
-    const { result, unmount } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
+    const { result, unmount } = renderAuthWithTransaction(
+      settings,
+      config,
+      addItem,
     );
     let submit!: Promise<void>;
     await act(async () => {
@@ -984,76 +1282,135 @@ describe('useAuthCommand', () => {
     expect(addItem).not.toHaveBeenCalled();
   });
 
-  it.each(['cancellation', 'unmount'] as const)(
-    'aborts both overlapping Copilot device flows on %s without continuation',
-    async (end) => {
-      const copilotProvider = findProviderById('copilot')!;
-      const settings = createSettings();
-      const config = createConfig();
-      const addItem = vi.fn();
-      const flows: Array<{
-        signal: AbortSignal | undefined;
-        resolve: (result: { token: string }) => void;
-      }> = [];
+  it('cancels the active Copilot flow but starts its queued successor after settlement', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const flows: Array<{
+      signal: AbortSignal | undefined;
+      resolve: (result: { token: string }) => void;
+    }> = [];
+    const firstFlowStarted = createDeferred<void>();
+    const secondFlowStarted = createDeferred<void>();
 
-      copilotMocks.discoverGithubToken.mockRejectedValue(
-        new CopilotTokenNotFoundError('mock: no token'),
-      );
-      copilotMocks.runCopilotDeviceFlow.mockImplementation(
-        (options: { signal?: AbortSignal }) =>
-          new Promise<{ token: string }>((resolve) => {
-            flows.push({ signal: options.signal, resolve });
-          }),
-      );
+    copilotMocks.discoverGithubToken.mockRejectedValue(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockImplementation(
+      (options: { signal?: AbortSignal }) =>
+        new Promise<{ token: string }>((resolve) => {
+          flows.push({ signal: options.signal, resolve });
+          if (flows.length === 1) firstFlowStarted.resolve(undefined);
+          if (flows.length === 2) secondFlowStarted.resolve(undefined);
+        }),
+    );
 
-      const { result, unmount } = renderHook(() =>
-        useAuthCommand(settings as never, config as never, addItem),
-      );
-      const inputs = {
-        baseUrl: resolveBaseUrl(copilotProvider),
-        apiKey: '',
-        modelIds: getDefaultModelIds(copilotProvider),
-      };
-      let firstSubmit!: Promise<void>;
-      let secondSubmit!: Promise<void>;
-      await act(async () => {
-        firstSubmit = result.current.handleProviderSubmit(
-          copilotProvider,
-          inputs,
-        );
-        await Promise.resolve();
-      });
-      expect(flows).toHaveLength(1);
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
+    const inputs = {
+      baseUrl: resolveBaseUrl(copilotProvider),
+      apiKey: '',
+      modelIds: getDefaultModelIds(copilotProvider),
+    };
+    const firstSubmit = result.current.handleProviderSubmit(
+      copilotProvider,
+      inputs,
+    );
+    await firstFlowStarted.promise;
+    expect(flows).toHaveLength(1);
 
-      await act(async () => {
-        secondSubmit = result.current.handleProviderSubmit(
-          copilotProvider,
-          inputs,
-        );
-        await Promise.resolve();
-      });
-      expect(flows).toHaveLength(2);
-      if (end === 'cancellation') {
-        act(() => {
-          result.current.cancelAuthentication();
-        });
-      } else {
-        unmount();
-      }
-      flows.forEach((flow, index) => {
-        flow.resolve({ token: `ghu_late_${index}` });
-      });
-      await act(async () => {
-        await Promise.all([firstSubmit, secondSubmit]);
-      });
+    const secondSubmit = result.current.handleProviderSubmit(
+      copilotProvider,
+      inputs,
+    );
+    await Promise.resolve();
+    expect(flows).toHaveLength(1);
 
-      expect(flows.map((flow) => flow.signal?.aborted)).toEqual([true, true]);
-      expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
-      expect(settings.setValue).not.toHaveBeenCalled();
-      expect(config.refreshAuth).not.toHaveBeenCalled();
-      expect(addItem).not.toHaveBeenCalled();
-    },
-  );
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    expect(flows[0]?.signal?.aborted).toBe(true);
+    flows[0]!.resolve({ token: 'ghu_late_a' });
+    await act(async () => {
+      await firstSubmit;
+      await secondFlowStarted.promise;
+    });
+
+    expect(flows).toHaveLength(2);
+    expect(flows[1]?.signal?.aborted).toBe(false);
+    flows[1]!.resolve({ token: 'ghu_success_b' });
+    await act(async () => {
+      await secondSubmit;
+    });
+
+    expect(copilotMocks.persistGithubToken).toHaveBeenCalledTimes(1);
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_COPILOT,
+    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts active Copilot work and never starts queued work on unmount', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const flows: Array<{
+      signal: AbortSignal | undefined;
+      resolve: (result: { token: string }) => void;
+    }> = [];
+    const firstFlowStarted = createDeferred<void>();
+
+    copilotMocks.discoverGithubToken.mockRejectedValue(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockImplementation(
+      (options: { signal?: AbortSignal }) =>
+        new Promise<{ token: string }>((resolve) => {
+          flows.push({ signal: options.signal, resolve });
+          firstFlowStarted.resolve(undefined);
+        }),
+    );
+
+    const { result, unmount } = renderAuthWithTransaction(
+      settings,
+      config,
+      addItem,
+    );
+    const inputs = {
+      baseUrl: resolveBaseUrl(copilotProvider),
+      apiKey: '',
+      modelIds: getDefaultModelIds(copilotProvider),
+    };
+    const firstSubmit = result.current.handleProviderSubmit(
+      copilotProvider,
+      inputs,
+    );
+    await firstFlowStarted.promise;
+    expect(flows).toHaveLength(1);
+
+    const secondSubmit = result.current.handleProviderSubmit(
+      copilotProvider,
+      inputs,
+    );
+    await Promise.resolve();
+    expect(flows).toHaveLength(1);
+
+    unmount();
+    expect(flows[0]?.signal?.aborted).toBe(true);
+    flows[0]!.resolve({ token: 'ghu_late_a' });
+    await act(async () => {
+      await Promise.all([firstSubmit, secondSubmit]);
+    });
+
+    expect(flows).toHaveLength(1);
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
 
   it('skips device flow when a GitHub token already exists', async () => {
     const copilotProvider = findProviderById('copilot')!;
@@ -1066,9 +1423,7 @@ describe('useAuthCommand', () => {
       source: 'mock',
     });
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(copilotProvider, {
@@ -1102,9 +1457,7 @@ describe('useAuthCommand', () => {
       new Error('Device code expired'),
     );
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
+    const { result } = renderAuthWithTransaction(settings, config, addItem);
 
     await act(async () => {
       await result.current.handleProviderSubmit(copilotProvider, {

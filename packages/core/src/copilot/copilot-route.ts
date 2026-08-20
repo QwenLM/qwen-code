@@ -28,22 +28,15 @@ function baseSlug(slug: string): string {
 export function routeForModel(
   slug: string,
   warn?: (msg: string) => void,
-  liveModels?: Map<string, CopilotWire>,
 ): CopilotWire {
   const base = baseSlug(slug);
 
-  // Tier 1: live catalog — an explicit per-slug override always wins.
-  if (liveModels?.has(base)) {
-    return liveModels.get(base)!;
-  }
-
-  // Tier 2: pattern-based routing. New models in a known family route
-  // correctly without code changes — claude-* is messages-only on CAPI,
-  // gpt-5* uses the OpenAI Responses API.
+  // New models in a known family route correctly without code changes —
+  // claude-* is messages-only on CAPI, gpt-5* uses the OpenAI Responses API.
   if (base.startsWith('claude-')) return 'messages';
   if (base.startsWith('gpt-5')) return 'responses';
 
-  // Tier 3: unknown family — fall back to chat and warn so drift is visible.
+  // Unknown family — fall back to chat and warn so drift is visible.
   warn?.(`[copilot] unknown model "${slug}" — defaulting to chat wire`);
   return 'chat';
 }

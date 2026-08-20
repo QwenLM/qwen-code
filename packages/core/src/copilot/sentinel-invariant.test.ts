@@ -12,7 +12,6 @@ const mgr: CopilotTokenManager = {
     expiresAtMs: Date.now() + 3600_000,
   }),
   forceRefresh: async () => {},
-  getAvailableModelIds: async () => null,
 };
 
 describe('sentinel invariant', () => {

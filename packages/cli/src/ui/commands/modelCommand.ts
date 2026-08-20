@@ -132,7 +132,9 @@ async function switchMainModel(
   currentAuthType: AuthType,
   modelArg: string,
   scopeOverride?: SettingScope,
-): Promise<string> {
+  canPublish: () => boolean = () => true,
+  onSwitchComplete?: () => void,
+): Promise<string | undefined> {
   const parsed = parseAcpModelOption(modelArg);
 
   if (parsed.authType) {
@@ -144,6 +146,8 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
+    onSwitchComplete?.();
+    if (!canPublish()) return undefined;
     persistSetting(
       settings,
       'security.auth.selectedType',
@@ -161,6 +165,8 @@ async function switchMainModel(
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
+  onSwitchComplete?.();
+  if (!canPublish()) return undefined;
   persistSetting(settings, 'model.name', modelArg, scopeOverride);
   persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   return modelArg;
@@ -1126,13 +1132,68 @@ export const modelCommand: SlashCommand = {
           content: t('Settings service not available.'),
         };
       }
-      const effectiveModelName = await switchMainModel(
-        config,
-        settings,
-        authType,
-        modelName,
-        scopeOverride,
-      );
+      const runUiProviderTransaction =
+        context.executionMode === 'interactive'
+          ? services.runUiProviderTransaction
+          : undefined;
+      const effectiveModelName = runUiProviderTransaction
+        ? await runUiProviderTransaction(
+            async ({ canPublish, ownsRollback }) => {
+              if (!canPublish()) return undefined;
+              const previousRuntime = {
+                authType: config.getAuthType(),
+                modelId:
+                  config.getActiveRuntimeModelSnapshot()?.id ??
+                  config.getModel(),
+                baseUrl: config.getCurrentModelRegistryBaseUrl(),
+              };
+              let switchedRuntime = false;
+
+              try {
+                return await switchMainModel(
+                  config,
+                  settings,
+                  authType,
+                  modelName,
+                  scopeOverride,
+                  canPublish,
+                  () => {
+                    switchedRuntime = true;
+                  },
+                );
+              } catch (error) {
+                if (!canPublish()) return undefined;
+                throw error;
+              } finally {
+                if (!canPublish() && switchedRuntime && ownsRollback()) {
+                  if (previousRuntime.authType === undefined) {
+                    config.resetAuth(previousRuntime.modelId);
+                  } else {
+                    await config.switchModel(
+                      previousRuntime.authType,
+                      previousRuntime.modelId,
+                      { baseUrl: previousRuntime.baseUrl ?? undefined },
+                    );
+                  }
+                }
+              }
+            },
+          )
+        : await switchMainModel(
+            config,
+            settings,
+            authType,
+            modelName,
+            scopeOverride,
+          );
+      if (!effectiveModelName) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: '',
+          suppressOutputAndTelemetry: true,
+        };
+      }
       return {
         type: 'message',
         messageType: 'info',

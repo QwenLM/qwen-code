@@ -12,7 +12,6 @@ const mgr: CopilotTokenManager = {
     expiresAtMs: Date.now() + 3600_000,
   }),
   forceRefresh: async () => {},
-  getAvailableModelIds: async () => null,
 };
 
 describe('wire headers per path', () => {
@@ -29,7 +28,7 @@ describe('wire headers per path', () => {
     expect(h['anthropic-beta']).toBeDefined();
   });
 
-  it('/models gets X-GitHub-Api-Version', async () => {
+  it('/models does not get X-GitHub-Api-Version', async () => {
     let h: Record<string, string> = {};
     const f = (async (_u: URL | string, init?: RequestInit) => {
       h = (init?.headers as Record<string, string>) ?? {};
@@ -39,7 +38,7 @@ describe('wire headers per path', () => {
       `${COPILOT_SENTINEL_BASE_URL}/models`,
       { headers: {} },
     );
-    expect(h['X-GitHub-Api-Version']).toBe('2026-06-01');
+    expect(h['X-GitHub-Api-Version']).toBeUndefined();
   });
 
   it('/v1/messages does NOT get X-GitHub-Api-Version', async () => {

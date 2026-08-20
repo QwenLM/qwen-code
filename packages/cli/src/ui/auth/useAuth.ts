@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { UiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
@@ -77,7 +78,7 @@ export type AuthController = {
       providerConfig: ProviderConfig,
       inputs: ProviderSetupInputs,
     ) => Promise<void>;
-    openAuthDialog: () => void;
+    openAuthDialog: (authType?: AuthType) => void;
     cancelAuthentication: () => void;
   };
 };
@@ -86,8 +87,13 @@ export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
-  onAuthChange?: () => void,
+  onAuthChange: (() => void) | undefined,
+  uiProviderTransaction: UiProviderTransaction,
 ) => {
+  const {
+    run: runUiProviderTransaction,
+    cancelActive: cancelUiProviderTransaction,
+  } = uiProviderTransaction;
   const unAuthenticated = config.getAuthType() === undefined;
 
   const [authState, setAuthState] = useState<AuthState>(
@@ -113,7 +119,6 @@ export const useAuthCommand = (
   // The dialog also auto-opens at startup when unauthenticated; only a
   // command-opened dialog has an /auth invocation record to pair with.
   const openedViaCommandRef = useRef(false);
-  const copilotDeviceFlowControllerRef = useRef<AbortController | null>(null);
 
   // -- Shared helpers -------------------------------------------------------
 
@@ -129,28 +134,25 @@ export const useAuthCommand = (
   );
 
   const handleAuthFailure = useCallback(
-    (error: unknown, protocolForTelemetry?: AuthType) => {
+    (
+      error: unknown,
+      protocolForTelemetry: AuthType,
+      canPublish: () => boolean,
+    ) => {
+      if (!canPublish()) return;
+
       setIsAuthenticating(false);
       setExternalAuthState(null);
       const msg = t('Failed to authenticate. Message: {{message}}', {
         message: getErrorMessage(error),
       });
       onAuthError(msg);
-      // Prefer the explicit argument over the closed-over pendingAuthType:
-      // setPendingAuthType(protocol) queues an async React update, but a
-      // synchronous throw in handleProviderSubmit reaches the catch before
-      // the next render, so the closure may still see `undefined` here.
-      // Callers from the new unified flow pass `protocol` explicitly to
-      // sidestep that staleness; legacy callers fall back to the closure.
-      const effectiveProtocol = protocolForTelemetry ?? pendingAuthType;
-      if (effectiveProtocol) {
-        logAuth(
-          config,
-          new AuthEvent(effectiveProtocol, 'manual', 'error', msg),
-        );
-      }
+      logAuth(
+        config,
+        new AuthEvent(protocolForTelemetry, 'manual', 'error', msg),
+      );
     },
-    [onAuthError, pendingAuthType, config],
+    [onAuthError, config],
   );
 
   const completeAuthentication = useCallback(() => {
@@ -166,166 +168,146 @@ export const useAuthCommand = (
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
-      // Resolve the protocol once and store it as pendingAuthType so that if
-      // applyProviderInstallPlan rejects, handleAuthFailure (which gates the
-      // AuthEvent telemetry on pendingAuthType being defined) can record the
-      // failure under the right AuthType bucket instead of silently dropping
-      // it.
       const protocol = inputs.protocol ?? providerConfig.protocol;
-      let copilotDeviceFlowController: AbortController | undefined;
-      const isCurrentCopilotTransaction = () =>
-        !!copilotDeviceFlowController &&
-        copilotDeviceFlowControllerRef.current === copilotDeviceFlowController;
-      const isCopilotDeviceFlowCancelled = () =>
-        !!copilotDeviceFlowController &&
-        (copilotDeviceFlowController.signal.aborted ||
-          !isCurrentCopilotTransaction());
-      try {
-        setPendingAuthType(protocol);
-        setIsAuthenticating(true);
-        setAuthError(null);
 
-        // Copilot device flow: if the user has no pre-existing ghu_/gho_
-        // token (from gh CLI, VS Code Copilot, etc.), run RFC 8628 device
-        // flow so they can authorize via browser. The resulting token is
-        // persisted to ~/.config/github-copilot/hosts.json, which
-        // discoverGithubToken searches at request time.
-        if (protocol === AuthType.USE_COPILOT) {
-          copilotDeviceFlowControllerRef.current?.abort();
-          copilotDeviceFlowController = new AbortController();
-          copilotDeviceFlowControllerRef.current = copilotDeviceFlowController;
+      await runUiProviderTransaction(
+        async ({ signal, canPublish, ownsRollback }) => {
+          const canContinue = () => !signal.aborted && canPublish();
+          if (!canContinue()) return;
+
+          setPendingAuthType(protocol);
+          setIsAuthenticating(true);
+          setAuthError(null);
+
           try {
-            await discoverGithubToken();
-            if (isCopilotDeviceFlowCancelled()) return;
-          } catch (err) {
-            if (!(err instanceof CopilotTokenNotFoundError)) throw err;
-            if (isCopilotDeviceFlowCancelled()) return;
-            const { token } = await runCopilotDeviceFlow({
-              signal: copilotDeviceFlowController.signal,
-              notify: (event) => {
-                if (event.type === 'device_code') {
-                  setExternalAuthState({
-                    title: t('GitHub Copilot Login'),
-                    message: t(
-                      'Go to {{verificationUri}} and enter code: {{userCode}}',
-                      {
-                        verificationUri: event.verificationUri,
-                        userCode: event.userCode,
-                      },
-                    ),
-                    detail: t('Expires in {{expiresInSeconds}}s', {
-                      expiresInSeconds: String(event.expiresInSeconds),
-                    }),
-                  });
-                } else if (event.type === 'progress') {
-                  setExternalAuthState((prev) =>
-                    prev ? { ...prev, detail: event.message } : prev,
-                  );
-                } else if (event.type === 'error') {
-                  setExternalAuthState((prev) =>
-                    prev ? { ...prev, detail: event.message } : prev,
-                  );
-                }
-              },
-            });
-            if (isCopilotDeviceFlowCancelled()) return;
-            await persistGithubToken(token, {
-              signal: copilotDeviceFlowController.signal,
-            });
-            if (isCopilotDeviceFlowCancelled()) return;
-            setExternalAuthState(null);
-          }
-        }
-
-        if (isCopilotDeviceFlowCancelled()) return;
-        const previousCopilotRuntime =
-          protocol === AuthType.USE_COPILOT
-            ? {
-                authType: config.getAuthType(),
-                modelId:
-                  config.getActiveRuntimeModelSnapshot()?.id ??
-                  config.getModel(),
-                baseUrl: config.getCurrentModelRegistryBaseUrl(),
+            // Copilot device flow: if the user has no pre-existing ghu_/gho_
+            // token (from gh CLI, VS Code Copilot, etc.), run RFC 8628 device
+            // flow so they can authorize via browser. The resulting token is
+            // persisted to ~/.config/github-copilot/hosts.json, which
+            // discoverGithubToken searches at request time.
+            if (protocol === AuthType.USE_COPILOT) {
+              try {
+                await discoverGithubToken();
+                if (!canContinue()) return;
+              } catch (error) {
+                if (!(error instanceof CopilotTokenNotFoundError)) throw error;
+                if (!canContinue()) return;
+                const { token } = await runCopilotDeviceFlow({
+                  signal,
+                  notify: (event) => {
+                    if (!canContinue()) return;
+                    if (event.type === 'device_code') {
+                      setExternalAuthState({
+                        title: t('GitHub Copilot Login'),
+                        message: t(
+                          'Go to {{verificationUri}} and enter code: {{userCode}}',
+                          {
+                            verificationUri: event.verificationUri,
+                            userCode: event.userCode,
+                          },
+                        ),
+                        detail: t('Expires in {{expiresInSeconds}}s', {
+                          expiresInSeconds: String(event.expiresInSeconds),
+                        }),
+                      });
+                    } else if (event.type === 'progress') {
+                      setExternalAuthState((previous) =>
+                        previous
+                          ? { ...previous, detail: event.message }
+                          : previous,
+                      );
+                    } else if (event.type === 'error') {
+                      setExternalAuthState((previous) =>
+                        previous
+                          ? { ...previous, detail: event.message }
+                          : previous,
+                      );
+                    }
+                  },
+                });
+                if (!canContinue()) return;
+                await persistGithubToken(token, { signal });
+                if (!canContinue()) return;
+                setExternalAuthState(null);
               }
-            : undefined;
-        const plan = buildInstallPlan(providerConfig, inputs);
-        await applyProviderInstallPlan(plan, {
-          settings: createLoadedSettingsAdapter(settings),
-          signal: copilotDeviceFlowController?.signal,
-          isCurrentTransaction: copilotDeviceFlowController
-            ? isCurrentCopilotTransaction
-            : undefined,
-          reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          refreshAuth: (authType) =>
-            copilotDeviceFlowController
-              ? config.refreshAuth(
-                  authType,
-                  undefined,
-                  isCurrentCopilotTransaction,
-                )
-              : config.refreshAuth(authType),
-          rollbackRuntime: previousCopilotRuntime
-            ? () => {
-                if (previousCopilotRuntime.authType === undefined) {
-                  config.resetAuth(previousCopilotRuntime.modelId);
+            }
+
+            if (!canContinue()) return;
+            const previousRuntime = {
+              authType: config.getAuthType(),
+              modelId:
+                config.getActiveRuntimeModelSnapshot()?.id ?? config.getModel(),
+              baseUrl: config.getCurrentModelRegistryBaseUrl(),
+            };
+            const plan = buildInstallPlan(providerConfig, inputs);
+            await applyProviderInstallPlan(plan, {
+              settings: createLoadedSettingsAdapter(settings),
+              signal,
+              isCurrentTransaction: ownsRollback,
+              reloadModelProviders: (mp) =>
+                config.reloadModelProvidersConfig(mp),
+              syncAuthState: (authType, modelId, baseUrl) =>
+                config
+                  .getModelsConfig()
+                  .syncAfterAuthRefresh(authType, modelId, baseUrl),
+              refreshAuth: (authType) =>
+                config.refreshAuth(authType, undefined, canPublish),
+              rollbackRuntime: () => {
+                if (previousRuntime.authType === undefined) {
+                  config.resetAuth(previousRuntime.modelId);
                   return;
                 }
                 return config.switchModel(
-                  previousCopilotRuntime.authType,
-                  previousCopilotRuntime.modelId,
-                  {
-                    baseUrl: previousCopilotRuntime.baseUrl ?? undefined,
-                  },
+                  previousRuntime.authType,
+                  previousRuntime.modelId,
+                  { baseUrl: previousRuntime.baseUrl ?? undefined },
                 );
-              }
-            : undefined,
-        });
-        if (isCopilotDeviceFlowCancelled()) return;
+              },
+            });
+            if (!canContinue()) return;
 
-        completeAuthentication();
+            completeAuthentication();
 
-        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
-          type: MessageType.INFO,
-          text: t(
-            'Successfully configured {{provider}}. Use /model to switch models.',
-            { provider: providerConfig.label },
-          ),
-        };
-        addItem(feedbackItem, Date.now());
-        if (openedViaCommandRef.current) {
-          openedViaCommandRef.current = false;
-          config.getChatRecordingService?.()?.recordSlashCommand({
-            phase: 'result',
-            rawCommand: '/auth',
-            outputHistoryItems: [feedbackItem],
-          });
-        }
+            const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
+              {
+                type: MessageType.INFO,
+                text: t(
+                  'Successfully configured {{provider}}. Use /model to switch models.',
+                  { provider: providerConfig.label },
+                ),
+              };
+            addItem(feedbackItem, Date.now());
+            if (openedViaCommandRef.current) {
+              openedViaCommandRef.current = false;
+              config.getChatRecordingService?.()?.recordSlashCommand({
+                phase: 'result',
+                rawCommand: '/auth',
+                outputHistoryItems: [feedbackItem],
+              });
+            }
 
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
-      } catch (error) {
-        if (isCopilotDeviceFlowCancelled()) return;
-        // Pass protocol explicitly so error telemetry is recorded even when
-        // a synchronous throw beats the setPendingAuthType state update.
-        handleAuthFailure(error, protocol);
-      } finally {
-        if (
-          copilotDeviceFlowControllerRef.current === copilotDeviceFlowController
-        ) {
-          copilotDeviceFlowControllerRef.current = null;
-        }
-      }
+            logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+          } catch (error) {
+            handleAuthFailure(error, protocol, canPublish);
+          }
+        },
+      );
     },
-    [settings, config, completeAuthentication, addItem, handleAuthFailure],
+    [
+      settings,
+      config,
+      completeAuthentication,
+      addItem,
+      handleAuthFailure,
+      runUiProviderTransaction,
+    ],
   );
 
   // -- Dialog open / close / cancel ----------------------------------------
 
-  const openAuthDialog = useCallback(() => {
+  const openAuthDialog = useCallback((authType?: AuthType) => {
     openedViaCommandRef.current = true;
+    setPendingAuthType(authType);
     setIsAuthDialogOpen(true);
   }, []);
 
@@ -339,7 +321,7 @@ export const useAuthCommand = (
     if (isAuthenticating && pendingAuthType === AuthType.QWEN_OAUTH) {
       cancelQwenAuth();
     }
-    copilotDeviceFlowControllerRef.current?.abort();
+    cancelUiProviderTransaction();
     if (isAuthenticating && pendingAuthType) {
       logAuth(config, new AuthEvent(pendingAuthType, 'manual', 'cancelled'));
     }
@@ -347,15 +329,21 @@ export const useAuthCommand = (
     setExternalAuthState(null);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
+  }, [
+    isAuthenticating,
+    pendingAuthType,
+    cancelQwenAuth,
+    config,
+    cancelUiProviderTransaction,
+  ]);
 
   // -- Validate QWEN_DEFAULT_AUTH_TYPE env var on mount --------------------
 
   useEffect(
     () => () => {
-      copilotDeviceFlowControllerRef.current?.abort();
+      cancelUiProviderTransaction();
     },
-    [],
+    [cancelUiProviderTransaction],
   );
 
   useEffect(() => {
@@ -365,6 +353,7 @@ export const useAuthCommand = (
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
+      AuthType.USE_COPILOT,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ];

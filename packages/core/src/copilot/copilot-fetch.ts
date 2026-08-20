@@ -24,10 +24,6 @@ function isMessagesPath(url: string): boolean {
   return /\/(v1\/)?messages/.test(new URL(url).pathname);
 }
 
-function isModelsPath(url: string): boolean {
-  return /\/models(\/|$|\?)/.test(new URL(url).pathname);
-}
-
 function hasImageInBody(body: string): boolean {
   try {
     const normalized = JSON.stringify(JSON.parse(body));
@@ -41,6 +37,36 @@ function hasImageInBody(body: string): boolean {
   }
 }
 
+function addCopilotHeaders(
+  headers: Headers,
+  bearer: string,
+  url: string,
+  body: string,
+): void {
+  // Delete any caller-provided Authorization first so CAPI receives only
+  // the Copilot bearer.
+  headers.delete('authorization');
+
+  // Ruling 6: bearer is a RedactedString whose toString() returns
+  // '[redacted]'; use valueOf() to get the primitive.
+  headers.set('Authorization', `Bearer ${bearer.valueOf()}`);
+  headers.set(
+    'copilot-integration-id',
+    STATIC_HEADERS['copilot-integration-id'],
+  );
+  headers.set('editor-version', STATIC_HEADERS['editor-version']);
+  headers.set('editor-plugin-version', STATIC_HEADERS['editor-plugin-version']);
+  headers.set('user-agent', STATIC_HEADERS['user-agent']);
+  headers.set('x-initiator', 'user');
+
+  if (isMessagesPath(url)) {
+    headers.set('anthropic-beta', 'prompt-caching-2024-07-31');
+  }
+  if (hasImageInBody(body)) {
+    headers.set('Copilot-Vision-Request', 'true');
+  }
+}
+
 export function wrapFetchWithCopilotAuth(
   tokenMgr: CopilotTokenManager,
   opts?: { fetchImpl?: typeof fetch },
@@ -48,13 +74,14 @@ export function wrapFetchWithCopilotAuth(
   const f = opts?.fetchImpl ?? fetch;
 
   return async (input: URL | string | Request, init?: RequestInit) => {
+    const request = input instanceof Request ? new Request(input, init) : null;
     const url =
       typeof input === 'string'
         ? input
         : input instanceof URL
           ? input.toString()
-          : input.url;
-    const body = init?.body ? String(init.body) : '';
+          : request!.url;
+    const body = typeof init?.body === 'string' ? init.body : '';
 
     let forceRefreshCount = 0;
     let res: Response;
@@ -63,43 +90,22 @@ export function wrapFetchWithCopilotAuth(
       const snap = await tokenMgr.getSnapshot();
       const rewrittenUrl = rewriteHost(url, snap.endpointsApi);
 
-      // Use Headers for robust merge of caller-provided headers, then
-      // materialize to a plain Record so consumers/tests can read by key.
-      // Delete any caller-provided Authorization first — Headers.forEach
-      // normalizes to lowercase 'authorization', but we set 'Authorization'
-      // (capital A) below. Without the delete, the Record carries both keys
-      // and undici appends them into a single comma-separated header (or two
-      // separate headers), causing CAPI to receive the caller's invalid
-      // placeholder token alongside the real Copilot bearer.
-      const merged = new Headers(init?.headers);
-      merged.delete('authorization');
-      const headers: Record<string, string> = {};
-      merged.forEach((v, k) => {
-        headers[k] = v;
-      });
-
-      // Ruling 6: bearer is a RedactedString whose toString() returns
-      // '[redacted]'; use valueOf() to get the primitive.
-      headers['Authorization'] = `Bearer ${snap.bearer.valueOf()}`;
-      headers['copilot-integration-id'] =
-        STATIC_HEADERS['copilot-integration-id'];
-      headers['editor-version'] = STATIC_HEADERS['editor-version'];
-      headers['editor-plugin-version'] =
-        STATIC_HEADERS['editor-plugin-version'];
-      headers['user-agent'] = STATIC_HEADERS['user-agent'];
-      headers['x-initiator'] = 'user';
-
-      if (isMessagesPath(rewrittenUrl)) {
-        headers['anthropic-beta'] = 'prompt-caching-2024-07-31';
-      }
-      if (isModelsPath(rewrittenUrl)) {
-        headers['X-GitHub-Api-Version'] = '2026-06-01';
-      }
-      if (hasImageInBody(body)) {
-        headers['Copilot-Vision-Request'] = 'true';
+      if (request) {
+        const outgoing = new Request(rewrittenUrl, request.clone());
+        addCopilotHeaders(outgoing.headers, snap.bearer, rewrittenUrl, body);
+        return f(outgoing);
       }
 
-      return f(rewrittenUrl, { ...init, headers, body: body || undefined });
+      const headers = new Headers(init?.headers);
+      addCopilotHeaders(headers, snap.bearer, rewrittenUrl, body);
+      const fetchHeaders = Object.fromEntries(headers);
+      const authorization = fetchHeaders['authorization'];
+      if (authorization) {
+        delete fetchHeaders['authorization'];
+        fetchHeaders['Authorization'] = authorization;
+      }
+
+      return f(rewrittenUrl, { ...init, headers: fetchHeaders });
     };
 
     res = await doRequest();
