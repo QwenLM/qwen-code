@@ -10,17 +10,22 @@ import type { Config } from '../../config/config.js';
 import {
   isTerminalWorkflowStatus,
   WorkflowRunRegistry,
+  type WorkflowTask,
 } from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
 const {
   createProductionDispatchMock,
+  journalWrites,
   logWorkflowRunMock,
+  writeLineMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
+  journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  writeLineMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -31,6 +36,12 @@ vi.mock('../../telemetry/loggers.js', () => ({
 vi.mock('../workflow-snapshot.js', () => ({
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/jsonl-utils.js')>();
+  return { ...actual, writeLine: writeLineMock };
+});
 
 vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
   const actual =
@@ -78,8 +89,12 @@ function observeSettlement(registry: WorkflowRunRegistry): {
 describe('WorkflowRunner', () => {
   beforeEach(() => {
     createProductionDispatchMock.mockReset();
+    journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    writeLineMock.mockReset();
+    writeLineMock.mockResolvedValue(undefined);
     writeWorkflowSnapshotMock.mockClear();
+    writeWorkflowSnapshotMock.mockResolvedValue(undefined);
   });
 
   it('passes the registry approval bridge only to production dispatch', async () => {
@@ -103,16 +118,18 @@ describe('WorkflowRunner', () => {
 
     const bridgeApprovalEvents = createProductionDispatchMock.mock
       .calls[0]?.[3] as
-      | ((emitter: AgentEventEmitter) => () => void)
+      | ((emitter: AgentEventEmitter, dispatchId?: string) => () => void)
       | undefined;
     expect(bridgeApprovalEvents).toEqual(expect.any(Function));
     const emitter = new AgentEventEmitter();
     const cleanup = vi.fn();
     productionBridge.mockReturnValue(cleanup);
-    expect(bridgeApprovalEvents?.(emitter)).toBe(cleanup);
+    expect(bridgeApprovalEvents?.(emitter, 'dispatch-1')).toBe(cleanup);
     expect(productionBridge).toHaveBeenCalledWith(
       productionHandle.runId,
       emitter,
+      'dispatch-1',
+      production.registry.get(productionHandle.runId),
     );
 
     const injected = configWithRegistry();
@@ -129,6 +146,90 @@ describe('WorkflowRunner', () => {
     });
     expect(createProductionDispatchMock).toHaveBeenCalledOnce();
     expect(injectedBridge).not.toHaveBeenCalled();
+  });
+
+  it('retains the original args needed to retry a failed run from its journal', async () => {
+    const { config, registry } = configWithRegistry();
+    const args = { target: 'web-shell', checks: ['correctness'] };
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return args.target',
+      args,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.args).toEqual(args);
+  });
+
+  it('records sandbox logs in the replay event ledger', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'log("repository loaded"); return "done";',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.events).toEqual([
+      expect.objectContaining({
+        type: 'log',
+        message: 'repository loaded',
+      }),
+      expect.objectContaining({ type: 'workflow-completed' }),
+    ]);
+  });
+
+  it('keeps sandbox and registry phase projections equal for normalization-colliding titles', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        'phase("\\u001b[1mBuild\\u001b[0m");' +
+        'phase("Build");' +
+        'await agent("x", { phase: "\\u001b[1mBuild\\u001b[0m" });' +
+        'return 1;',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    const settlement = await handle.completion;
+
+    expect(settlement.ok).toBe(true);
+    const outcomePhases = settlement.ok ? settlement.outcome.phases : [];
+    expect(registry.get(handle.runId)?.phases).toEqual(['Build']);
+    expect(outcomePhases).toEqual(registry.get(handle.runId)?.phases);
+  });
+
+  it('records a journal retry as sourced from the same run', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "retried"',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(runId)).toMatchObject({
+      runId,
+      sourceRunId: runId,
+      startMode: 'retry',
+    });
   });
 
   it('keeps one registry-owned handle through exactly-once completion', async () => {
@@ -218,6 +319,39 @@ describe('WorkflowRunner', () => {
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
   });
 
+  it('records caller-aborted dispatches as cancelled', async () => {
+    const { config, registry } = configWithRegistry();
+    const caller = new AbortController();
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: caller.signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    caller.abort();
+    rejectDispatch?.(new Error('Request was aborted'));
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.dispatches).toEqual([
+      expect.objectContaining({ status: 'cancelled' }),
+    ]);
+    expect(registry.get(handle.runId)?.dispatches[0]).not.toHaveProperty(
+      'error',
+    );
+    expect(registry.get(handle.runId)?.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'dispatch-failed' }),
+      ]),
+    );
+  });
+
   it('keeps background runs alive after the caller turn ends', async () => {
     const { config, registry } = configWithRegistry();
     const observed = observeSettlement(registry);
@@ -245,6 +379,92 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('completed');
     expect(observed.terminalStatuses).toEqual(['completed']);
     expect(observed.abortCount()).toBe(1);
+  });
+
+  it('persists terminal runs without live fire-and-forget dispatches', async () => {
+    const { config, registry } = configWithRegistry();
+    let snapshotDispatchStatuses: string[] | undefined;
+    writeWorkflowSnapshotMock.mockImplementation(
+      (_config, snapshotEntry: WorkflowTask) => {
+        snapshotDispatchStatuses = snapshotEntry.dispatches.map(
+          (dispatch) => dispatch.status,
+        );
+        return Promise.resolve();
+      },
+    );
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("fire and forget"); return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () => new Promise<string>(() => undefined),
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    expect(registry.get(handle.runId)).toMatchObject({ status: 'completed' });
+    expect(snapshotDispatchStatuses).toEqual(['cancelled']);
+    expect(registry.get(handle.runId)?.dispatches).toEqual([
+      expect.objectContaining({ status: 'cancelled' }),
+    ]);
+  });
+
+  it('freezes snapshot and telemetry before late dispatches drain', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      storage: {
+        getWorkflowRunJournalPath: () => 'probe-journal.jsonl',
+      },
+    });
+    writeLineMock.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          journalWrites.push(resolve);
+        }),
+    );
+    let snapshotAgentsCompleted: number | undefined;
+    writeWorkflowSnapshotMock.mockImplementation((_config, entry) => {
+      snapshotAgentsCompleted = entry.agentsCompleted;
+      return Promise.resolve();
+    });
+    let finishDispatch: ((result: string) => void) | undefined;
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("fire and forget"); return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+
+    await vi.waitFor(() => {
+      expect(registry.get(handle.runId)?.status).toBe('completed');
+      expect(journalWrites).toHaveLength(1);
+    });
+    finishDispatch?.('late result');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.agentsCompleted).toBe(1),
+    );
+    let settled = false;
+    void handle.completion.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    journalWrites[0]?.();
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    const telemetry = logWorkflowRunMock.mock.calls[0]?.[1] as
+      | { agents_completed: number }
+      | undefined;
+    expect(telemetry?.agents_completed).toBe(0);
+    expect(snapshotAgentsCompleted).toBe(0);
+    for (const resolve of journalWrites) resolve();
   });
 
   it('holds an in-flight agent result until a paused run resumes', async () => {
@@ -585,6 +805,56 @@ describe('WorkflowRunner', () => {
     }
 
     expect(registry.get(runId)?.result).toBe('original');
+  });
+
+  it('ignores late dispatch callbacks from a prior retry entry', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let rejectOriginal: ((error: Error) => void) | undefined;
+    const original = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("original"); throw new Error("original failed")',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectOriginal = reject;
+        }),
+    });
+    await expect(original.completion).resolves.toMatchObject({ ok: false });
+
+    let resolveRetry: ((value: string) => void) | undefined;
+    const retry = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("retry")',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveRetry = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(resolveRetry).toBeDefined());
+
+    rejectOriginal?.(new Error('aborted by old controller'));
+    resolveRetry?.('done');
+    await expect(retry.completion).resolves.toMatchObject({ ok: true });
+
+    expect(registry.get(runId)?.dispatches).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+    ]);
+    expect(registry.get(runId)?.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'dispatch-failed',
+          error: 'aborted by old controller',
+        }),
+      ]),
+    );
   });
 
   it('classifies a background failure after caller abort as failed', async () => {

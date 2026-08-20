@@ -8,7 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { workflowsCommand } from './workflowsCommand.js';
+import { workflowsCommand, snapshotToTask } from './workflowsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
@@ -28,10 +28,14 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     isBackgrounded: true,
     abortController: new AbortController(),
     currentPhase: null,
+    currentPhaseVisitId: null,
     phases: [],
+    phaseVisits: [],
+    dispatches: [],
     agentsDispatched: 0,
     agentsCompleted: 0,
     recentLogs: [],
+    events: [],
     tokensSpent: 0,
     tokenBudgetTotal: null,
     perPhaseTokens: new Map<string | null, number>(),
@@ -668,5 +672,30 @@ describe('workflowsCommand', () => {
         content: 'Unknown live workflow runId: wf_ghost',
       });
     });
+  });
+});
+
+describe('snapshotToTask', () => {
+  it('preserves persisted lineage fields across the restart boundary', () => {
+    const task = snapshotToTask({
+      runId: 'wf_lineage',
+      sourceRunId: 'wf_origin',
+      startMode: 'retry',
+      meta: null,
+      status: 'completed',
+      script: '',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_700_000_000_000,
+      endTime: 1_700_000_005_000,
+    });
+
+    expect(task.sourceRunId).toBe('wf_origin');
+    expect(task.startMode).toBe('retry');
   });
 });

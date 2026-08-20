@@ -158,8 +158,8 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
-  DaemonSessionMediaData,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -190,6 +190,7 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
@@ -1650,6 +1651,23 @@ export class DaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  async setExtensionDefaultActivations(
+    extensionNames: readonly string[],
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      '/extensions/activation',
+      'PUT /extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -3275,14 +3293,15 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
-  async uploadSessionMedia(
+  async uploadSessionAttachment(
     sessionId: string,
     data: Blob,
+    name: string,
     mimeType: string,
     opts?: { signal?: AbortSignal; clientId?: string },
-  ): Promise<DaemonSessionMediaReference> {
+  ): Promise<DaemonSessionAttachmentReference> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments?name=${urlEncode(name)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': mimeType }, opts?.clientId),
@@ -3291,20 +3310,20 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'POST /session/:id/media');
+          throw await this.failOnError(res, 'POST /session/:id/attachments');
         }
-        return (await res.json()) as DaemonSessionMediaReference;
+        return (await res.json()) as DaemonSessionAttachmentReference;
       },
     );
   }
 
-  async readSessionMedia(
+  async readSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
-  ): Promise<DaemonSessionMediaData> {
+  ): Promise<DaemonSessionAttachmentData> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -3312,7 +3331,10 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'GET /session/:id/media/:mediaId');
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/attachments/:attachmentId',
+          );
         }
         const bytes = new Uint8Array(await res.arrayBuffer());
         // This package also targets browsers, where Node's Buffer is absent.
@@ -3332,13 +3354,13 @@ export class DaemonClient {
     );
   }
 
-  async removeSessionMedia(
+  async removeSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts?.clientId),
@@ -3348,7 +3370,7 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(
             res,
-            'DELETE /session/:id/media/:mediaId',
+            'DELETE /session/:id/attachments/:attachmentId',
           );
         }
         return ((await res.json()) as { removed?: unknown }).removed === true;
@@ -3362,7 +3384,7 @@ export class DaemonClient {
    * turn ends. Every accepted request is daemon-owned; a caller-supplied id
    * makes ambiguous retries idempotent. `opts.content` carries media content
    * image blocks alongside the text — pre-flight the
-   * `session_media` capability; older daemons ignore the
+   * `session_attachments` capability; older daemons ignore the
    * field and drop the media.
    */
   async enqueueMidTurnMessage(
@@ -6479,6 +6501,24 @@ export class WorkspaceDaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  setExtensionActivations(
+    extensionNames: readonly string[],
+    state: ExtensionWorkspaceBatchActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      '/extensions/activation',
+      'PUT /workspaces/:workspace/extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 

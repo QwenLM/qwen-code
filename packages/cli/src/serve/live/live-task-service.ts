@@ -21,9 +21,10 @@ import type {
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import type {
-  LiveTaskToolName,
-  LiveTaskToolRequestInfo,
+import {
+  LIVE_TASK_TOOL_NAMES,
+  type LiveTaskToolName,
+  type LiveTaskToolRequestInfo,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import type {
   WorkspaceRegistry,
@@ -34,6 +35,7 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
@@ -647,8 +649,10 @@ export class LiveTaskService {
         cwd: located.summary.workspaceCwd,
         createdAt: epochSeconds(located.summary.createdAt),
         updatedAt: epochSeconds(
-          located.summary.updatedAt ??
+          laterActivityTimestamp(
+            located.summary.updatedAt,
             located.persisted?.conversation.lastUpdated,
+          ),
         ),
       },
       page: {
@@ -832,8 +836,10 @@ export class LiveTaskService {
             eventId: task.runtime.bridge.getSessionLastEventId(target.threadId),
           }
         : {}),
-      updatedAt:
-        task.summary.updatedAt ?? task.persisted?.conversation.lastUpdated,
+      updatedAt: laterActivityTimestamp(
+        task.summary.updatedAt,
+        task.persisted?.conversation.lastUpdated,
+      ),
     });
     const { reset: cursorReset } = decodeCursor(
       target.afterCursor,
@@ -857,9 +863,10 @@ export class LiveTaskService {
       task.summary.clientCount > 0
         ? task.runtime.bridge.getSessionLastEventId(target.threadId)
         : epochSeconds(
-            task.summary.updatedAt ??
-              task.persisted?.conversation.lastUpdated ??
-              task.summary.createdAt,
+            laterActivityTimestamp(
+              task.summary.updatedAt,
+              task.persisted?.conversation.lastUpdated,
+            ) ?? task.summary.createdAt,
           );
     return {
       schemaVersion: 1,
@@ -1056,7 +1063,7 @@ export class LiveTaskService {
       task.runtime.provenance === 'live-conversation'
         ? await readLoadableLiveConversationMetadata(
             task.summary.sessionId,
-            (sessionId) => service.readCreationMetadata(sessionId),
+            service,
           )
         : await service.readCreationMetadata(task.summary.sessionId);
     if (metadata === undefined) {
@@ -1191,11 +1198,5 @@ export class LiveTaskService {
 }
 
 export function isLiveTaskToolName(value: string): value is LiveTaskToolName {
-  return (
-    value === 'list_threads' ||
-    value === 'read_thread' ||
-    value === 'wait_threads' ||
-    value === 'send_message_to_thread' ||
-    value === 'create_thread'
-  );
+  return LIVE_TASK_TOOL_NAMES.some((name) => name === value);
 }

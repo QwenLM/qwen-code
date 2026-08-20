@@ -53,6 +53,7 @@ import {
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
+  claimRetirementDegradeNote,
   expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
@@ -96,6 +97,8 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { inertPath, scratchLabel } from './lib/paths.js';
+import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -489,6 +492,7 @@ export function buildChunkAgentPrompt(
   report: PlanReport,
   id: number,
   rules?: string,
+  residue?: WorktreeResidue,
 ): string {
   const { chunk, total } = chunkFrom(report, id);
 
@@ -560,6 +564,10 @@ export function buildChunkAgentPrompt(
       "hunk's correctness depends on code outside it. Diff context is three lines deep; state " +
       'invariants are not. Page a source file that comes back truncated rather than reasoning ' +
       'from its first screenful.',
+    // A chunk agent reads source files out of the shared worktree, which is
+    // exactly the exposure #9207 is about — so it gets the same rule the role
+    // briefs do, from the same builder.
+    ...worktreeEvidenceBlock(report, residue),
     '',
     '## What to review',
     '',
@@ -764,9 +772,16 @@ export function buildChunkLaunchPrompt(
 export function buildWholeDiffBlock(
   report: PlanReport,
   rules?: string,
+  residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
   const parts = [...diffReadingBlock(report, diffPath)];
+  // An Agent 8 specialist reads source out of the same shared worktree every
+  // other agent is pinned to, so it owes the same rule (#9207). It is the one
+  // launch class built outside `buildLaunch`, which is exactly how it was
+  // missed: the stderr tripwire fired on its build while the block it produced
+  // said nothing — and only the orchestrator sees stderr, never the agent.
+  parts.push(...worktreeEvidenceBlock(report, residue));
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
@@ -941,23 +956,6 @@ function tail(
  * increment is exactly the class of defect this checklist hunts, and it is
  * invisible in the file's text. The `-` lines are the only evidence it existed.
  */
-/**
- * A PR-controlled path, flattened for display inside a brief or prompt. The
- * brief is the file the agent is told is the whole of its instructions — a git
- * path can legally contain newlines, and a newline inside an interpolated path
- * would let PR content open its own Markdown line there. Functional arguments
- * (the `read_file` path) are JSON-quoted instead, which both survives the
- * newline and remains the parseable single-line form the transcripts checks read.
- */
-function inertPath(p: string): string {
-  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
-  // control sequence in a filename must not reach a terminal either); U+2500 is
-  // the roster separator glyph; the backtick would close the Markdown code span
-  // these paths are rendered inside, letting the tail of a filename run as
-  // markup in the file the agent treats as authoritative.
-  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
-}
-
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -1050,6 +1048,114 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
   ];
 }
 
+/**
+ * The review worktree's residue, or nothing at all when there is no worktree to
+ * have any. Resolved against the process cwd, like every other use of
+ * `worktreePath` here: the report stores it repo-relative and review commands
+ * run from the project root.
+ */
+function worktreeResidueOf(report: PlanReport): WorktreeResidue {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
+  return worktreeResidue(resolve(wt));
+}
+
+/**
+ * What every code-reading agent of a worktree-mode review needs to know about
+ * the tree it is standing in: it is shared, and shared with agents that write.
+ *
+ * The isolation half of #9207 removes the source — a verifier's probes now run
+ * in its own scratch tree — and this is the reader half, because "no agent
+ * writes here any more" is exactly the kind of guarantee that is one regression
+ * away from being false, and the reader is the one who pays. Measured live: an
+ * auditor read a probe's mutant plus a leftover probe file, nearly filed a
+ * Critical against them, and recovered only by improvising evidence from
+ * `git show HEAD:` — a fallback no brief mentioned. It is one sentence here so
+ * the next auditor does not have to invent it.
+ *
+ * `residue` is that check made concrete: the paths the tree carried when this
+ * launch was built. Named, not counted — a reader can only act on "distrust
+ * THESE files". Nothing is emitted when the review has no worktree (a local,
+ * file-path or cross-repo review, where the working tree is the user's own and
+ * uncommitted changes may be the very thing under review).
+ */
+function worktreeEvidenceBlock(
+  report: PlanReport,
+  residue: WorktreeResidue | undefined,
+  opts: { rule?: boolean } = {},
+): string[] {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return [];
+  const parts: string[] = [];
+  // The RULE is for agents that review code. The residue paragraph below is for
+  // everyone: Agent 7 does not read the tree, it BUILDS it, and residue that
+  // predates the round reaches its compile and its test run — where a
+  // `[build]`/`[test]` finding is pre-confirmed and skips verification, which
+  // is how a stray probe file becomes a merge-blocking phantom Critical.
+  if (opts.rule !== false) {
+    parts.push(
+      '',
+      '**Your working directory is a SHARED review worktree.** Other agents read it ' +
+        'while you do, and Step 4 verifiers may write in it — their probes run in ' +
+        'their own throwaway trees, but a stray uncommitted change here is still ' +
+        'possible, and it is not part of the pull request. So: **code that is not in ' +
+        'the diff and not in the commit is not a finding.** Before reporting anything ' +
+        'that surprises you — a test file the diff never added, a line the diff never ' +
+        'touched — check it against the commit under review with ' +
+        '`git show HEAD:<path>` and judge THAT. **A path that command cannot produce ' +
+        "(`exists on disk, but not in 'HEAD'`) is not in the commit at all** — it is " +
+        "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
+        "real run took a verifier's live probe for the PR's own code and came within a " +
+        'step of filing a Critical against it.)',
+    );
+  }
+  if (residue?.unmeasured) {
+    parts.push(
+      '',
+      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+        `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
+        'anything that surprises you in this tree as unverified until you have ' +
+        'checked it against `git show HEAD:<path>`.',
+    );
+  }
+  if (residue && residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
+    parts.push(
+      '',
+      `**And right now it is not clean.** These paths differ from the commit under ` +
+        `review: ${residue.paths.map((p) => `\`${inertPath(p)}\``).join(', ')}` +
+        (unlisted > 0
+          ? `, and ${unlisted} more not listed here — this list is capped, and ` +
+            '`git status --porcelain --untracked-files=all` has the full set ' +
+            '(without `--untracked-files=all` it collapses a whole probe directory ' +
+            'to one entry)'
+          : '') +
+        ". **What is not the PR's code is the DIFFERENCE, not always the file.** " +
+        'A path `git show HEAD:<path>` cannot produce was written into the tree ' +
+        "after the commit: none of it is the PR's code, and a failure, a behaviour " +
+        'or a defect confined to it is not a finding — a build or test failure it ' +
+        'causes included. A path that DOES have a HEAD version is a file the ' +
+        'commit contains, possibly one this PR changes: only the uncommitted edit ' +
+        'is foreign, so read `git show HEAD:<path>` and judge THAT — a defect ' +
+        'present in the committed version is a finding like any other, and only a ' +
+        'defect that exists solely in the working copy is not. ' +
+        'The names above are flattened for display (a filename can carry control ' +
+        'or invisible characters); `git status --porcelain --untracked-files=all` ' +
+        'in that worktree has the exact bytes if one does not match. Say in your ' +
+        'return that you saw them, so the orchestrator can have the tree cleared ' +
+        '— by shape: `git checkout HEAD -- <path>` for a tracked ' +
+        'file, `rm -rf <path>` for anything untracked, and `git rm --cached ' +
+        '<path>` first for a path STAGED as new, which `git checkout HEAD --` ' +
+        'cannot match at all. A staged RENAME is listed under both of its ' +
+        'names and they take opposite commands — the new name is the ' +
+        'staged-new case, the original is in HEAD and comes back with ' +
+        '`git checkout HEAD -- <original>`. (A dirty submodule is restored ' +
+        'inside the submodule, not from here.)',
+    );
+  }
+  return parts;
+}
+
 function repositoryBuildBoundary(context: RepositoryContext): string[] {
   return [
     '## Repository-specific verification boundary',
@@ -1079,6 +1185,16 @@ export function buildRoleBrief(
     file?: string;
     planPath?: string;
     chunk?: number;
+    /**
+     * This launch's record key — unique per role, chunk, round and findings
+     * digest: in an --all-chunks round every shard shares one findings file
+     * and therefore one digest, and the chunk id is what separates the keys.
+     * The verifier's scratch tree is named after it, which is what keeps the
+     * shards of one round out of each other's trees (`scratchWorktreePath`).
+     */
+    key?: string;
+    /** Paths the review worktree carries that its commit does not, if any. */
+    residue?: WorktreeResidue;
   } = {},
 ): string {
   const brief = BRIEFS[role];
@@ -1227,6 +1343,95 @@ export function buildRoleBrief(
           'signature, the read sites of a new field — you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
+      );
+    }
+  }
+
+  // The other side of the same coin: in worktree mode there IS a tree, and it is
+  // shared with agents that write into it (#9207). The RULE goes to the roles
+  // that review code; the residue paragraph goes to every role, Agent 7
+  // included — residue that predates the round lands in the build and the test
+  // run it owns, and a `[build]`/`[test]` finding is pre-confirmed downstream,
+  // so a stray probe file would arrive as a merge-blocking Critical nothing
+  // verifies.
+  // Every role that JUDGES code gets the rule — which is every role except
+  // Agent 7, whose job is running commands: `reviewsCode` was the wrong gate
+  // (it exists to scope the path-rule checklists), and it left Agent 0 and the
+  // test matrix reading worktree source with no rule about what they were
+  // reading.
+  parts.push(
+    ...worktreeEvidenceBlock(report, opts.residue, { rule: role !== '7' }),
+  );
+
+  // The verifier is the last writing step without a tree of its own (Agent 7's
+  // efficacy probe has had one since #6832), so it gets one here
+  // — the command welded in with its path and its per-shard label, the way Agent
+  // 7's build-test invocation is, because a probe run in the shared worktree is
+  // read by the next round's auditors as the PR's own code (#9207).
+  if (role === 'verify') {
+    const wt = report.worktreePath;
+    if (typeof wt === 'string' && wt) {
+      // The record key is unique per role, chunk, round and findings digest,
+      // so two shards of one round get two trees — in an --all-chunks round
+      // every shard shares one findings file and therefore one digest, and the
+      // chunk id is what still separates their keys. Falling back to the role
+      // name keeps a direct build working; it is never the roster/CLI path,
+      // which always has a key.
+      // Sanitised HERE, not just where the path is built: this string is
+      // written into a shell command, and the one function that decides the
+      // tree's name is also what keeps a metacharacter out of that command.
+      const label = scratchLabel(opts.key ?? role);
+      parts.push(
+        '',
+        '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
+          'Stand it up the first time a finding needs a run, and again to reset it ' +
+          'between findings: every call puts every tracked file back at the commit ' +
+          "under review and deletes what you wrote, with the review worktree's " +
+          '`node_modules` linked in so a unit harness starts without an install. ' +
+          'Everything that is not in the commit goes with it: your probe files, ' +
+          'your edits, and the IGNORED state too — a build cache, a `dist/` you ' +
+          'rebuilt, a `node_modules` you installed at any depth — with the ' +
+          'dependency farm re-linked from the review worktree afterwards.',
+        '',
+        '```bash',
+        // Quoted, like every other path this file prints into a command: an
+        // ordinary macOS workspace (`~/Documents/John's Projects/…`) word-splits
+        // a bare interpolation, and the failure would be silent — every shard's
+        // scratch tree unavailable, every probe demoted to a reading.
+        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
+        `  --label ${label}`,
+        '```',
+        '',
+        'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
+          'it at the end of the review. `available: false` means the isolation ' +
+          'failed, and then the probe does not run at all: an unisolated probe ' +
+          'contaminates the tree the next round is reading, so the finding falls ' +
+          'back to its reading-based verdict and the low-confidence floor. It also ' +
+          'reports `sharedTreeResidue` — paths the REVIEW worktree carries that its ' +
+          'commit does not. That list must be empty; if it is not, something has ' +
+          'written into the tree the other agents are reading, so restore those ' +
+          'paths (`git checkout HEAD -- <path>` for anything tracked — plain ' +
+          '`git checkout --` restores from the index and leaves STAGED residue in ' +
+          'place — and delete anything untracked) before you go on, and say so in ' +
+          'your report.',
+        '',
+        '**The farm is borrowed, not copied.** Its `node_modules` entries are ' +
+          "symlinks into the review worktree's, so writing THROUGH one — an " +
+          '`npm rebuild`, a `writeFileSync(require.resolve(…))`, a package that ' +
+          'writes into its own directory — lands in the shared tree, where the ' +
+          'residue check cannot see it (`node_modules` is gitignored) and every ' +
+          'other shard would inherit it. Installing INTO your scratch tree is ' +
+          'fine (the next call re-links it); if a probe needs to MODIFY a ' +
+          'dependency, replace the link with a copy first.',
+        '',
+        '**One limit of the scratch tree, so you do not spend a run rediscovering ' +
+          'it:** its `node_modules` is linked from the review worktree, and in a ' +
+          'monorepo that means a workspace package (`@scope/pkg`) resolves to the ' +
+          "review worktree's built copy, not to your scratch tree's source. A probe " +
+          'and a fix INSIDE one package flip normally; a fix you apply in package A ' +
+          'while the probe runs in package B will NOT be seen, however correct it is. ' +
+          'That is the harness, not the finding: say so and treat the flip as ' +
+          'inconclusive rather than reporting the fix as ineffective.',
       );
     }
   }
@@ -1429,13 +1634,14 @@ export function buildRoleBrief(
           'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
           '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +
           '`"clamped": true` — a suite the budget started too late and killed, which ' +
-          'says nothing about the suite. A third shape carries no field at all: a ' +
+          'says nothing about the suite. A third shape ends before any suite: a ' +
           'single-package repo whose budget ran out before its one suite has an ' +
-          'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
-          'the note before calling the dimension finished. That shape cannot be ' +
-          'continued (a continuation has no recorded scope to read, and answers ' +
-          '"ended before its test phase" without running anything): report the ' +
-          'dimension UNFINISHED and do not spend a continuation on it. A resumed ' +
+          'empty `test[]`, no `testScope`, and `"endedBeforeTests": true` — the ' +
+          "report's own stamp — with the note naming the unrun suite. That shape " +
+          'cannot be continued (a continuation has no recorded scope to read; a ' +
+          '`--resume` on it answers "ended before its test phase" and points at a ' +
+          'fresh run): report the dimension UNFINISHED and do not spend a ' +
+          'continuation on it. A resumed ' +
           'call skips install and build and ' +
           'runs only what is left, merging into the SAME report file. Same ' +
           `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
@@ -1783,6 +1989,7 @@ function buildLaunch(
     round?: number;
   },
   rules?: string,
+  residue?: WorktreeResidue,
 ): { key: string; prompt: string } {
   if (spec.role) {
     const key =
@@ -1800,6 +2007,8 @@ function buildLaunch(
         file: spec.file,
         planPath,
         chunk: spec.chunk,
+        key,
+        residue,
       }),
     );
     return {
@@ -1816,7 +2025,7 @@ function buildLaunch(
   const briefFile = writeBrief(
     planPath,
     key,
-    buildChunkAgentPrompt(report, id, rules),
+    buildChunkAgentPrompt(report, id, rules, residue),
   );
   return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
 }
@@ -1935,7 +2144,12 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
-function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+function runRoster(
+  report: PlanReport,
+  planPath: string,
+  rules?: string,
+  residue?: WorktreeResidue,
+): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
   // `check-coverage` holds the run to that same set from the same field.
@@ -1948,6 +2162,7 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         ? { chunk: req.chunk }
         : { role: req.role, file: req.file },
       rules,
+      residue,
     );
     // The roster is what coverage checks; the key is what this command records
     // under. They are derived in two files, and if they ever disagree, every
@@ -2173,6 +2388,61 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
 }
 
 /**
+ * The schedule read shared by the round builder and the per-chunk path
+ * (#9272 — hand-rolled at both sites and edited in lockstep across three
+ * consecutive PRs: the naming, the repair suppression, the deferral): a
+ * throwing read degrades to "everything is due" — never to fewer
+ * auditors — and composes the round's degrade NOTE, which the caller
+ * prints only once the round is admitted (#9259: printed before the
+ * gate, it promised an audit the gate then refused). `noteTail` names
+ * the build's own scope.
+ */
+function reverseAuditScheduleOrNote(
+  planPath: string,
+  chunkIds: number[],
+  round: number,
+  env: NodeJS.ProcessEnv,
+  diffPathAbsolute: unknown,
+  noteTail: string,
+): { schedule: RoundSchedule | null; scheduleNote: string | null } {
+  try {
+    return {
+      schedule: scheduleReverseAuditRound(
+        planPath,
+        chunkIds,
+        round,
+        env,
+        typeof diffPathAbsolute === 'string' ? diffPathAbsolute : undefined,
+      ),
+      scheduleNote: null,
+    };
+  } catch (err) {
+    return {
+      schedule: null,
+      scheduleNote:
+        `NOTE: reverse-audit retirement unavailable this round — ` +
+        `${(err as Error).message ?? String(err)} — ${noteTail}`,
+    };
+  }
+}
+
+/**
+ * Print the round's deferred degrade NOTE exactly once per round per run
+ * — the claim-plus-write glued at both build sites (#9272: a lockstep
+ * duplicate of the claim condition or the writer channel would diverge
+ * the two modes' diagnostics silently).
+ */
+function printRetirementDegradeNoteOnce(
+  planPath: string,
+  round: number | undefined,
+  scheduleNote: string | null,
+): void {
+  if (scheduleNote !== null && claimRetirementDegradeNote(planPath, round)) {
+    writeStderrLineSafe(scheduleNote);
+  }
+}
+
+/**
  * Topology anomaly note (#9242): the plan's own size fields decide the
  * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
  * reverse-audit round-cap tier is priced against that decision — but the
@@ -2214,6 +2484,7 @@ function runAllChunks(
   findingsContent: string,
   rules?: string,
   round?: number,
+  residue?: WorktreeResidue,
 ): void {
   const chunks = requireAuditableChunks(report);
 
@@ -2227,6 +2498,11 @@ function runAllChunks(
   // three yielded in most: the loop earns its keep in the hot territories,
   // and the cold ones were a third of its bill.
   let schedule: RoundSchedule | null = null;
+  // The catch NOTE is deferred until the round is ADMITTED (#9259): a
+  // note printed before the budget/round-cap gate promises `auditing
+  // every chunk.` on a round the gate then refuses — a false continuation
+  // claim on the diagnostic channel this exists to keep truthful.
+  let scheduleNote: string | null = null;
   // Retirement needs two consecutive dry audits, so nothing retires before
   // round 3 (the scheduler's own guard says the same).
   const retirementReadsFrom = 3;
@@ -2235,29 +2511,16 @@ function runAllChunks(
     round !== undefined &&
     round >= retirementReadsFrom
   ) {
-    try {
-      schedule = scheduleReverseAuditRound(
-        planPath,
-        chunks.map((c) => c.id),
-        round,
-        process.env,
-        typeof report.diffPathAbsolute === 'string'
-          ? report.diffPathAbsolute
-          : undefined,
-      );
-    } catch (err) {
-      // Transcripts unavailable, an unreadable plan stat, anything: the
-      // schedule is an optimization, and a broken optimizer must degrade to
-      // today's behaviour — every territory audited — never to fewer
-      // auditors. `null` below means "everything is due". But not SILENTLY
-      // (#9206): a schedule that dies here retires nothing for the rest of
-      // the run, and the round's own output is where the reader can see it.
-      schedule = null;
-      writeStderrLineSafe(
-        `NOTE: reverse-audit retirement unavailable this round — ` +
-          `${(err as Error).message ?? String(err)} — auditing every chunk.`,
-      );
-    }
+    const read = reverseAuditScheduleOrNote(
+      planPath,
+      chunks.map((c) => c.id),
+      round,
+      process.env,
+      report.diffPathAbsolute,
+      'auditing every chunk.',
+    );
+    schedule = read.schedule;
+    scheduleNote = read.scheduleNote;
   }
 
   if (schedule !== null && schedule.converged) {
@@ -2295,6 +2558,11 @@ function runAllChunks(
   ) {
     return;
   }
+  // The admission succeeded, so the round IS being built — now the
+  // deferred catch NOTE tells the truth (#9259), claimed cross-process
+  // so a dead-schedule round's per-chunk builds print it exactly once
+  // (#9272).
+  printRetirementDegradeNoteOnce(planPath, round, scheduleNote);
 
   const dueSet = schedule === null ? null : new Set(schedule.due);
   const dueChunks =
@@ -2324,6 +2592,7 @@ function runAllChunks(
       planPath,
       { role, chunk: c.id, key, round },
       rules,
+      residue,
     );
     const printed = foldFindings(role, findingsContent, prompt, findingsFile);
     recordPrompt(planPath, key, printed);
@@ -2632,6 +2901,42 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  // The state of the shared review worktree AT BUILD TIME (#9207), read once and
+  // handed to every brief this call builds. Every wave of agents — the roster,
+  // each verify shard, each reverse-audit round — passes through this command
+  // just before it is launched, which makes this the one place the pipeline can
+  // notice that the tree those agents are about to read is not the commit they
+  // think it is. Cheap enough to do unconditionally (one `git status` per call,
+  // not per agent) and silent on a clean tree, which is every healthy run.
+  const residue = worktreeResidueOf(report);
+  if (residue.unmeasured) {
+    writeStderrLine(
+      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+        `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
+        'not a clean one.',
+    );
+  }
+  if (residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
+    writeStderrLine(
+      `warning: the review worktree carries changes its commit does not: ${residue.paths
+        .map(inertPath)
+        .join(', ')}` +
+        (unlisted > 0
+          ? ` (and ${unlisted} more — this list is capped; \`git status --porcelain --untracked-files=all\` has the full set)`
+          : '') +
+        '. Every brief built by this call names those paths and says a defect confined to them ' +
+        'is not a finding; the code-reading ones also carry the rule that evidence comes from ' +
+        '`git show HEAD:<path>`. Restore them BEFORE launching this wave — a probe left in the ' +
+        "shared tree reads to an auditor as the PR's own code, and to Agent 7's build and test " +
+        "run as the PR's own failure — and then RE-RUN this same command so the wave is rebuilt: " +
+        'the suppression above is baked into the blocks it printed, so launching them after a ' +
+        'restore tells every agent to drop findings in a file that is by then exactly the ' +
+        "PR's code. (The prompt records are overwritten, so a rebuild is what the delivery " +
+        'check compares against.)',
+    );
+  }
+
   // Write down what was handed out, at a path derived from the plan. The caller is
   // never told this path and is never asked to write to it: it is the CLI's record
   // of its own output, and the only thing that can tell a delivered prompt from a
@@ -2641,7 +2946,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
   if (args.roster) {
-    runRoster(report, args.plan, rules);
+    runRoster(report, args.plan, rules, residue);
     return;
   }
 
@@ -2772,33 +3077,27 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     )
       .map((c) => c?.id)
       .filter((id): id is number => typeof id === 'number');
+    // The catch NOTE is deferred past the admission gate (#9259 — a note
+    // printed before it promises an audit the gate can then refuse) and
+    // claimed cross-process via the record-dir sidecar, never keyed on
+    // the stamp: the stamp lands on the admission build whether or not
+    // that build's schedule read failed, so stamp-keyed suppression
+    // silenced a round whose admission build read cleanly and whose
+    // LATER builds began to throw — the never-retire shape with no word
+    // (#9259). The sidecar is run-epoch fenced, so a retried headless
+    // run re-prints — the safe side.
+    let scheduleNote: string | null = null;
     if (args.round !== undefined) {
-      let schedule: RoundSchedule | null = null;
-      try {
-        schedule = scheduleReverseAuditRound(
-          args.plan,
-          planChunkIds,
-          args.round,
-          process.env,
-          typeof report.diffPathAbsolute === 'string'
-            ? report.diffPathAbsolute
-            : undefined,
-        );
-      } catch (err) {
-        // Same degradation as the round builder: an unreadable history must
-        // fall back to building the auditor, never to refusing it — named,
-        // as the round builder names it (#9206). Named only on the builds
-        // that are NOT repairs: the round's admission build (its first
-        // chunk build, or the round builder itself) already spoke for it,
-        // and a repair stays the clean rebuild its exemption promises.
-        schedule = null;
-        if (!roundAdmitted) {
-          writeStderrLineSafe(
-            `NOTE: reverse-audit retirement unavailable this round — ` +
-              `${(err as Error).message ?? String(err)} — auditing the chunk.`,
-          );
-        }
-      }
+      const read = reverseAuditScheduleOrNote(
+        args.plan,
+        planChunkIds,
+        args.round,
+        process.env,
+        report.diffPathAbsolute,
+        'auditing the chunk.',
+      );
+      const schedule = read.schedule;
+      scheduleNote = read.scheduleNote;
       if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
@@ -2825,6 +3124,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       )
     )
       return;
+    // Admitted (or a stamped repair): the audit IS happening, so the
+    // deferred NOTE tells the truth now (#9259) — once per round per
+    // RUN, across the per-chunk processes, via the sidecar claim
+    // (#9272).
+    printRetirementDegradeNoteOnce(args.plan, args.round, scheduleNote);
     // The note belongs to the round's ADMISSION — a stamped rebuild
     // was ruled on when the round was admitted, so it stays silent.
     if (!roundAdmitted) {
@@ -2843,6 +3147,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       findingsContent,
       rules,
       args.round,
+      residue,
     );
     return;
   }
@@ -2851,7 +3156,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   let key: string;
   let findingsFile: string | null = null;
   if (args.wholeDiff) {
-    prompt = buildWholeDiffBlock(report, rules);
+    prompt = buildWholeDiffBlock(report, rules, residue);
     key = 'whole-diff';
   } else {
     // The record key must be unique per launch. An invariant agent is keyed by its
@@ -2899,6 +3204,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           }
         : { chunk: args.chunk },
       rules,
+      residue,
     ));
   }
 

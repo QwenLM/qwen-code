@@ -30,6 +30,7 @@ import {
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
+  SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
@@ -72,6 +73,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  isTurnResultRecordPayload,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -125,6 +127,7 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -241,6 +244,11 @@ import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
+import {
+  shouldProbeChildHeap,
+  startChildHeapProbe,
+  type ChildHeapProbe,
+} from './child-heap-probe.js';
 import {
   getModelConfiguration,
   type ModelReasoningConfiguration,
@@ -415,6 +423,46 @@ const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
+const TURN_STATUS_SCAN_MAX_PAGES = 10;
+
+async function findSettledTurnResult(
+  reader: SessionTranscriptReader,
+  sessionId: string,
+  promptId: string | undefined,
+  workspaceCwd: string,
+): Promise<TurnResultRecordPayload | undefined> {
+  let cursor: string | undefined;
+  for (let page = 0; page < TURN_STATUS_SCAN_MAX_PAGES; page++) {
+    const result = await reader.readPage(sessionId, {
+      ...(cursor !== undefined
+        ? { cursor }
+        : { direction: 'backward' as const }),
+      limit: TURN_STATUS_SCAN_PAGE_LIMIT,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+    for (let i = result.records.length - 1; i >= 0; i--) {
+      const record = result.records[i]!;
+      if (record.type !== 'system' || record.subtype !== 'turn_result') {
+        continue;
+      }
+      const payload = record.systemPayload;
+      if (!isTurnResultRecordPayload(payload)) continue;
+      if (promptId === undefined || payload.promptId === promptId) {
+        return payload;
+      }
+    }
+    if (!result.hasMore || result.nextCursorState === undefined) {
+      return undefined;
+    }
+    cursor = encodeSessionTranscriptCursor(
+      result.nextCursorState,
+      workspaceCwd,
+    );
+  }
+  return undefined;
+}
 
 type AcpSessionProfileStage =
   | 'settings_load'
@@ -3854,6 +3902,16 @@ class QwenAgent implements Agent {
     }
   })();
   private prevChildCpuAt = Date.now();
+  /**
+   * Lifetime old-generation high-water marks, for the daemon's
+   * `workspaceResource` poll. `undefined` outside a daemon-spawned child — see
+   * {@link shouldProbeChildHeap} for why the gate is where it is.
+   *
+   * Started at construction rather than on the first poll: the peaks that
+   * matter include the ones reached before anyone asks.
+   */
+  private readonly childHeapProbe: ChildHeapProbe | undefined =
+    shouldProbeChildHeap(process.env) ? startChildHeapProbe() : undefined;
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -5122,7 +5180,9 @@ class QwenAgent implements Agent {
           } catch (error) {
             return this.cleanupAfterRequestFailure(error, async () => {
               if (
-                this.sessions.get(config.getSessionId())?.getConfig() !== config
+                this.sessions
+                  .get(normalizeSessionIdForLookup(config.getSessionId()))
+                  ?.getConfig() !== config
               ) {
                 await this.cleanupUnstoredConfig(config);
               }
@@ -5283,10 +5343,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5519,7 +5590,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
@@ -5599,10 +5672,21 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5674,7 +5758,9 @@ class QwenAgent implements Agent {
           error,
           async () => {
             if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
+              this.sessions
+                .get(normalizeSessionIdForLookup(config.getSessionId()))
+                ?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
@@ -5827,19 +5913,32 @@ class QwenAgent implements Agent {
           session.getConfig(),
         );
         if (modelReasoning) {
+          const effortValues = modelReasoning.toggleOnly
+            ? undefined
+            : modelReasoning.efforts;
           const selected =
             value === ACP_REASONING_EFFORT_NONE
               ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.efforts.find((effort) => effort === value);
+              : modelReasoning.toggleOnly
+                ? value === ACP_REASONING_EFFORT_DEFAULT
+                  ? ACP_REASONING_EFFORT_DEFAULT
+                  : undefined
+                : effortValues?.find((effort) => effort === value);
           if (!selected) {
+            const choices = [
+              ACP_REASONING_EFFORT_NONE,
+              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+            ];
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_NONE}, ${modelReasoning.efforts.join(', ')}`,
+              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
             );
           }
           const generation = session.getConfig().getContentGeneratorConfig();
           if (selected === ACP_REASONING_EFFORT_NONE) {
             generation.reasoning = false;
+          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+            generation.reasoning = undefined;
           } else {
             const current = generation.reasoning;
             generation.reasoning = {
@@ -8582,9 +8681,18 @@ class QwenAgent implements Agent {
         } catch {
           /* restricted container — report 0 rss */
         }
+        // Spread rather than always-present fields: a child without the probe
+        // (no daemon marker) omits them entirely, so the daemon can tell "not
+        // measured" from a measured zero. Reporting 0 here would read as "this
+        // child needs no heap", which is the one wrong answer. The probe
+        // itself returns undefined until its first successful read, so a child
+        // whose every V8 call throws (restricted container) omits heap the
+        // same way instead of publishing a zeroed, coverage-complete report.
+        const childHeap = this.childHeapProbe?.snapshot();
         return {
           rssBytes,
           cpuPercent,
+          ...(childHeap ? { heap: childHeap } : {}),
         };
       }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
@@ -11044,6 +11152,101 @@ class QwenAgent implements Agent {
             : null,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawPromptId = params['promptId'];
+        if (
+          rawPromptId !== undefined &&
+          (typeof rawPromptId !== 'string' || rawPromptId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const settings = loadSettingsCached(cwd);
+        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          try {
+            await session.getConfig().getChatRecordingService()?.flush();
+          } catch {
+            // Read the last durable snapshot after a best-effort flush.
+          }
+          let reader: SessionTranscriptReader | undefined;
+          try {
+            reader = new SessionTranscriptReader(cwd);
+            const turnResult = await findSettledTurnResult(
+              reader,
+              sessionId,
+              typeof rawPromptId === 'string' ? rawPromptId : undefined,
+              cwd,
+            );
+            return {
+              v: 1,
+              sessionId,
+              turnResult: turnResult ?? null,
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              // Transcript file not written yet (no settled turn
+              // persisted). Scoped to the read so an unrelated ENOENT
+              // (settings/runtime resolution) still surfaces.
+              return { v: 1, sessionId, turnResult: null };
+            }
+            if (
+              error instanceof SessionTranscriptSnapshotUnavailableError &&
+              reader
+            ) {
+              try {
+                const transcript = await fs.stat(
+                  reader.getSessionFilePath(sessionId),
+                );
+                if (transcript.size === 0) {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              } catch (statError) {
+                if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              }
+            }
+            if (error instanceof InvalidSessionTranscriptCursorError) {
+              throw new RequestError(-32602, error.message, {
+                errorKind: 'invalid_transcript_cursor',
+              });
+            }
+            if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: 'transcript_snapshot_unavailable',
+                sessionId,
+              });
+            }
+            if (error instanceof SessionTranscriptTooLargeError) {
+              throw new RequestError(-32011, error.message, {
+                errorKind: 'transcript_too_large',
+                sessionId,
+                snapshotSize: error.snapshotSize,
+                maxBytes: error.maxBytes,
+              });
+            }
+            if (error instanceof SessionTranscriptPageTooLargeError) {
+              throw new RequestError(-32012, error.message, {
+                errorKind: 'transcript_page_too_large',
+                sessionId,
+                pageBytes: error.pageBytes,
+                maxBytes: error.maxBytes,
+              });
+            }
+            throw error;
+          }
+        });
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -12928,24 +13131,36 @@ class QwenAgent implements Agent {
           currentValue:
             config.getContentGeneratorConfig().reasoning === false
               ? ACP_REASONING_EFFORT_NONE
-              : (modelReasoning.efforts.find(
-                  (effort) => effort === currentModelEffort,
-                ) ?? modelReasoning.defaultEffort),
+              : modelReasoning.toggleOnly
+                ? ACP_REASONING_EFFORT_DEFAULT
+                : (modelReasoning.efforts.find(
+                    (effort) => effort === currentModelEffort,
+                  ) ?? modelReasoning.defaultEffort),
           options: [
             {
               value: ACP_REASONING_EFFORT_NONE,
               name: 'Thinking off',
               description: 'Disable thinking for this session',
             },
-            ...modelReasoning.efforts.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description: 'Apply this effort to the next request',
-            })),
+            ...(modelReasoning.toggleOnly
+              ? [
+                  {
+                    value: ACP_REASONING_EFFORT_DEFAULT,
+                    name: 'Thinking on',
+                    description: 'Use the model or provider thinking default',
+                  },
+                ]
+              : modelReasoning.efforts.map((effort) => ({
+                  value: effort,
+                  name: ACP_REASONING_EFFORT_NAMES[effort],
+                  description: 'Apply this effort to the next request',
+                }))),
           ],
           _meta: {
             'qwenCode/reasoning': {
-              defaultEffort: modelReasoning.defaultEffort,
+              ...(modelReasoning.toggleOnly
+                ? { toggleOnly: true }
+                : { defaultEffort: modelReasoning.defaultEffort }),
             },
           },
         }
@@ -12987,7 +13202,9 @@ class QwenAgent implements Agent {
     const reasoning = getModelConfiguration(config.getModel())?.reasoning;
     const currentEffort = config.getReasoningEffort?.();
     return reasoning?.thinking &&
-      (!currentEffort || reasoning.efforts.includes(currentEffort))
+      (reasoning.toggleOnly ||
+        !currentEffort ||
+        reasoning.efforts.includes(currentEffort))
       ? reasoning
       : undefined;
   }
