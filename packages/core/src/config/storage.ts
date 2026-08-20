@@ -410,8 +410,12 @@ export class Storage {
    * of the working directories recorded in its artifacts (chat logs,
    * runtime sidecars, archived transcripts) still exists outside OS
    * temp roots. Entries owned by a still-running session (runtime
-   * sidecar with a live pid) are never touched, as are entries with
-   * recent file activity — sidecar-less sessions (headless, ACP, SDK,
+   * sidecar with a live pid) are protected: the entry gate trusts a
+   * sidecar's pid only while the sidecar is younger than the staleness
+   * window (an old pid may have been recycled), but the deletion gate
+   * re-checks pid liveness without that window — an idle session writes
+   * nothing, and a recycled pid can only fail keep-only — so a
+   * live-but-idle session is never removed. Entries with recent file activity — sidecar-less sessions (headless, ACP, SDK,
    * `qwen serve`) stay protected that way — and `currentProjectId`.
    * Every other record-bearing entry is marked first and only removed
    * once the marker has aged past the grace window, so a transiently
@@ -541,6 +545,17 @@ export class Storage {
     },
     cwds?: string[],
   ): Promise<void> {
+    // Final liveness gate, ahead of salvage: the entry gate distrusts a
+    // sidecar older than the staleness window (pid-recycle risk), but
+    // an idle session writes nothing — sidecar and appends age together
+    // — so a live-but-idle session can reach this point. Re-check
+    // without that window: a recycled pid only fails keep-only, like
+    // every other gate. Salvaging first would double-count a session
+    // still accruing usage.
+    if (Storage.hasLiveSession(entryPath, false)) {
+      Storage.removeOrphanMarker(entryPath);
+      return;
+    }
     if (onBeforeRemove) {
       try {
         await onBeforeRemove(entryPath);
@@ -850,9 +865,15 @@ export class Storage {
 
   /**
    * True when the entry holds a runtime sidecar whose pid is still alive
-   * — i.e. a session is running from this entry right now.
+   * — i.e. a session is running from this entry right now. With
+   * `distrustStaleSidecars` off, a sidecar's pid is trusted regardless
+   * of its age: the deletion-gate re-check, where a false "live" can
+   * only leak the entry, never delete a live session's records.
    */
-  private static hasLiveSession(entryPath: string): boolean {
+  private static hasLiveSession(
+    entryPath: string,
+    distrustStaleSidecars = true,
+  ): boolean {
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(path.join(entryPath, 'chats'), {
@@ -869,8 +890,9 @@ export class Storage {
         // pid, a matching pid is more likely an unrelated reused one
         // than the original session — stop trusting it.
         if (
+          distrustStaleSidecars &&
           Date.now() - fs.statSync(sidecarPath).mtimeMs >
-          Storage.ORPHAN_STALE_AGE_MS
+            Storage.ORPHAN_STALE_AGE_MS
         ) {
           continue;
         }

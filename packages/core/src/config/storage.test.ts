@@ -946,6 +946,33 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   });
 
+  it('keeps a live-but-idle temp session at the deletion gate (R11-1)', async () => {
+    // Idle >24 h: the sidecar aged past the trust window and there were
+    // no appends, so the entry gate lets the marker flow run. The
+    // deletion gate must still re-check pid liveness without that
+    // window — the process is provably alive.
+    const survived = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-idle-live-'),
+    );
+    const entry = path.join(projectsDir, '-idle-live');
+    const chats = path.join(entry, 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.jsonl'),
+      JSON.stringify({ cwd: survived, type: 'user' }) + '\n',
+    );
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.runtime.json'),
+      JSON.stringify({ pid: process.pid, work_dir: survived }),
+    );
+    ageEntry('-idle-live');
+    await sweepPastMarkerGrace('-idle-live');
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+      false,
+    );
+  });
+
   it('recovers cwds from `}{`-glued records (crash mid-append)', async () => {
     const chats = path.join(projectsDir, '-glued', 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
