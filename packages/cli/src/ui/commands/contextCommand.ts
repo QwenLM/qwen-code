@@ -27,9 +27,11 @@ import {
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import * as path from 'node:path';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
@@ -71,7 +73,10 @@ function estimateTokens(text: string): number {
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
-function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
+function parseMemoryFiles(
+  memoryContent: string,
+  workingDir: string,
+): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
@@ -84,7 +89,14 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
     const filePath = match[1]!;
     const content = match[2]!;
     results.push({
-      path: filePath,
+      // Marker paths are relative to the session working directory (where
+      // memory discovery ran, which may differ from process.cwd() in
+      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+      // global memory files don't render as `../../..` chains.
+      path: formatContextFileDisplayPath(
+        path.resolve(workingDir, filePath),
+        workingDir,
+      ),
       tokens: estimateTokens(content),
     });
   }
@@ -171,7 +183,7 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent);
+  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
   const autoMemoryPrompt = config.getAutoMemoryPrompt();
   if (autoMemoryPrompt) {
     memoryFiles.push({
