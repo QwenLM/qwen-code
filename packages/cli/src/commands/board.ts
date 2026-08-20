@@ -22,6 +22,7 @@ import {
   raiseDecision,
   resolveDecision,
 } from '@qwen-code/qwen-code-core/board';
+import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
 import { requireActorName, requireBoardName } from './board/context.js';
 import { oneLine, renderBoard, type BoardSnapshot } from './board/render.js';
 
@@ -32,8 +33,11 @@ interface CommonArgs {
 }
 
 function emit(argv: CommonArgs, value: unknown, human: string): void {
+  // Sanitize without flattening: the `show` panel and `ask --wait` answers
+  // are genuinely multi-line, and `sanitizeTerminalText` keeps LF/TAB while
+  // neutralizing dangerous control sequences.
   process.stdout.write(
-    `${argv.json ? JSON.stringify(value) : oneLine(human)}\n`,
+    `${argv.json ? JSON.stringify(value) : sanitizeTerminalText(human)}\n`,
   );
 }
 

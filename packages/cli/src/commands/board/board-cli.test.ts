@@ -36,6 +36,11 @@ const core = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/qwen-code-core/board', () => core);
 
+import type {
+  AskRecord,
+  BoardTaskRecord,
+  DecisionRecord,
+} from '@qwen-code/qwen-code-core/board';
 import { boardCommand } from '../board.js';
 import { renderBoard } from './render.js';
 
@@ -143,6 +148,42 @@ describe('board CLI', () => {
     expect(stderr.mock.calls.flat().join('')).not.toContain('\x07');
   });
 
+  it('keeps the show panel multi-line while still sanitizing it', async () => {
+    core.listBoardTasks.mockResolvedValue([
+      {
+        id: TASK_ID,
+        subject: 'first\nsecond',
+        status: 'in_progress',
+        owner: 'worker',
+      },
+      {
+        id: 't-00000000-0000-4000-8000-000000000003',
+        subject: 'third\x1b]52;c;pw\x07',
+        status: 'pending',
+        owner: null,
+      },
+    ]);
+    await parse('board show --board demo');
+    const out = stdout.mock.calls.flat().join('');
+    expect(out.trim().split('\n')).toHaveLength(3);
+    expect(out).toContain('first second');
+    expect(out).not.toContain('\x1b');
+    expect(out).not.toContain('\x07');
+  });
+
+  it('prints a multi-line ask answer without flattening it', async () => {
+    core.createAsk.mockResolvedValue({ id: ASK_ID, to: 'web' });
+    core.getAsk.mockResolvedValue({
+      id: ASK_ID,
+      state: 'answered',
+      answer: 'line one\nline two',
+    });
+    await parse(
+      'board ask web question --board demo --as api --wait --timeout 1 --ttl 1',
+    );
+    expect(stdout).toHaveBeenCalledWith('line one\nline two\n');
+  });
+
   it('rejects a negative prune cutoff before deleting', async () => {
     await parse('board prune --board demo --as human --older-than -1');
     expect(core.pruneAsks).not.toHaveBeenCalled();
@@ -173,5 +214,19 @@ describe('board rendering', () => {
     expect(output).toContain(TASK_ID);
     expect(output).toContain('first second');
     expect(output.split('\n')).toHaveLength(2);
+  });
+
+  it('renders fieldless foreign records without crashing', () => {
+    const output = renderBoard({
+      board: 'demo',
+      tasks: [{} as unknown as BoardTaskRecord],
+      asks: [{} as unknown as AskRecord],
+      decisions: [
+        { state: 'open', kind: 'approve' } as unknown as DecisionRecord,
+      ],
+    });
+    expect(output).not.toContain('NaN');
+    expect(output).not.toContain('undefined');
+    expect(output.split('\n')).toHaveLength(4);
   });
 });

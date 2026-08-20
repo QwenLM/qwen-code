@@ -106,14 +106,16 @@ describe('board asks and decisions', () => {
       path.join(asksDir, 'a-00000000-0000-4000-8000-000000000000.json'),
       JSON.stringify({ schemaVersion: 99 }),
     );
+    // Valid UUIDv4 filenames so these records reach content validation
+    // (all-zero names are rejected by the filename filter before parsing).
     await fs.writeFile(
-      path.join(asksDir, 'a-00000000-0000-0000-0000-000000000000.json'),
+      path.join(asksDir, 'a-00000000-0000-4000-8000-000000000001.json'),
       '{}',
     );
     const decisionsDir = getCollectionDir('demo', 'decisions');
     await fs.mkdir(decisionsDir, { recursive: true });
     await fs.writeFile(
-      path.join(decisionsDir, 'd-00000000-0000-0000-0000-000000000000.json'),
+      path.join(decisionsDir, 'd-00000000-0000-4000-8000-000000000000.json'),
       '{}',
     );
     await expect(listAsks('demo')).resolves.toMatchObject([
