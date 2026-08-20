@@ -68,7 +68,7 @@ export function assertSafeResumeRunId(runId: string): void {
 /**
  * Resolve a named workflow to its source, searching project `.qwen/workflows`
  * first, then the user's `~/.qwen/workflows`. This is the SINGLE guarded name
- * resolution shared by the CLI tool (tools/workflow/workflow.ts) and the
+ * resolution shared by the CLI tool (tools/workflow-run/workflowRun.ts) and the
  * gateway route (rc-gateway routes/workflows.ts) so there is exactly one
  * traversal defense, not two divergent copies.
  *

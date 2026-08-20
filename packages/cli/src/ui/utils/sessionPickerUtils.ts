@@ -5,6 +5,11 @@
  */
 
 import type { SessionListItem } from '@qwen-code/qwen-code-core';
+import { getCachedStringWidth } from './textUtils.js';
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
 
 /**
  * State for managing loaded sessions in the session picker.
@@ -24,14 +29,37 @@ export const SESSION_PAGE_SIZE = 20;
  * Truncates text to fit within a given width, adding ellipsis if needed.
  */
 export function truncateText(text: string, maxWidth: number): string {
+  const widthLimit = Math.max(0, Math.floor(maxWidth));
+  if (widthLimit === 0) {
+    return '';
+  }
+
   const firstLine = text.split(/\r?\n/, 1)[0];
-  if (firstLine.length <= maxWidth) {
+  if (getCachedStringWidth(firstLine) <= widthLimit) {
     return firstLine;
   }
-  if (maxWidth <= 3) {
-    return firstLine.slice(0, maxWidth);
+
+  if (widthLimit <= 3) {
+    return truncateToDisplayWidth(firstLine, widthLimit);
   }
-  return firstLine.slice(0, maxWidth - 3) + '...';
+
+  return `${truncateToDisplayWidth(firstLine, widthLimit - 3)}...`;
+}
+
+function truncateToDisplayWidth(text: string, maxWidth: number): string {
+  let width = 0;
+  let result = '';
+
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+
+  return result;
 }
 
 /**

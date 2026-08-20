@@ -10,7 +10,16 @@ export class ModelScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleP
    * Checks if the configuration is for ModelScope.
    */
   static isModelScopeProvider(config: ContentGeneratorConfig): boolean {
-    return !!config.baseUrl?.includes('modelscope');
+    const baseUrl = config.baseUrl ?? '';
+    if (!baseUrl) return false;
+    try {
+      const hostname = new URL(baseUrl).hostname.toLowerCase();
+      return (
+        hostname === 'modelscope.cn' || hostname.endsWith('.modelscope.cn')
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**

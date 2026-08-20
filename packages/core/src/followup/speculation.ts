@@ -18,7 +18,16 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import { StreamEventType } from '../core/geminiChat.js';
+import {
+  convertToFunctionErrorResponse,
+  convertToFunctionResponse,
+} from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../tools/tool-names.js';
+import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
+import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
@@ -27,14 +36,54 @@ import {
   runForkedAgent,
   runWithForkedChatModel,
 } from '../utils/forkedAgent.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../utils/tool-response-finalizer.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../utils/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
+const debugLogger = createDebugLogger('SPECULATION');
+
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
+
+function observeSpeculationProducer(params: {
+  config: Config;
+  callId: string;
+  toolName: string;
+  persistedOutputFiles?: string[];
+  artifacts?: ReadonlyArray<{ kind?: unknown }>;
+  knownNone?: boolean;
+  values: () => ReturnType<typeof toolResultPartDiagnosticValues>;
+}): void {
+  try {
+    observeToolResultBoundary({
+      stage: 'producer',
+      sessionId: params.config.getSessionId?.(),
+      toolCallId: params.callId,
+      toolName: params.toolName,
+      artifacts: [
+        toolResultBoundaryArtifact(
+          params.knownNone ? [] : params.persistedOutputFiles,
+          params.artifacts,
+        ),
+      ],
+      values: params.values,
+    });
+  } catch {
+    // Diagnostics must not affect speculative execution.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -241,6 +290,7 @@ async function runSpeculativeLoop(
           if (part.functionCall && part.functionCall.name) {
             modelParts.push({
               functionCall: {
+                ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
                 name: part.functionCall.name,
                 args: part.functionCall.args,
               },
@@ -267,18 +317,39 @@ async function runSpeculativeLoop(
       }
 
       // Process each function call through the tool gate
-      const functionResponses: Part[] = [];
+      let functionResponses: Part[] = [];
+      const responseEntries: ToolResponseBudgetEntry[] = [];
       let hitBoundary = false;
 
       for (const part of functionCalls) {
         const fc = part.functionCall;
         const name = fc.name ?? '';
+        const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const persistenceCallId =
+          id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
+        let producerObserved = false;
+        const observeProducer = (
+          params: Omit<
+            Parameters<typeof observeSpeculationProducer>[0],
+            'config' | 'callId' | 'toolName'
+          >,
+        ) => {
+          if (producerObserved) return;
+          producerObserved = true;
+          observeSpeculationProducer({
+            ...params,
+            config,
+            callId: persistenceCallId,
+            toolName: name,
+          });
+        };
         const gate = await evaluateToolCall(
           name,
           args,
           state.overlayFs!,
           approvalMode,
+          config.getTargetDir?.(),
         );
 
         if (gate.action === 'boundary') {
@@ -302,31 +373,120 @@ async function runSpeculativeLoop(
           const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
-            functionResponses.push({
+            const responsePart: Part = {
               functionResponse: {
+                ...(id ? { id } : {}),
                 name,
                 response: { error: `Tool '${name}' not found` },
               },
+            };
+            observeProducer({
+              knownNone: true,
+              values: () => toolResultPartDiagnosticValues(responsePart),
+            });
+            functionResponses.push(responsePart);
+            responseEntries.push({
+              callId: persistenceCallId,
+              toolName: name,
+              responseParts: [responsePart],
             });
             continue;
           }
 
           const invocation = tool.build(args);
+          const toolInvocationGuard = config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId: persistenceCallId,
+                toolName: canonicalToolName(name),
+                args: invocation.params as Record<string, unknown>,
+                signal: state.abortController!.signal,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
+                ...(invocationContext ? { invocationContext } : {}),
+              },
+            );
+            if (state.abortController!.signal.aborted) {
+              hitBoundary = true;
+              break;
+            }
+            if (!guardDecision.allowed) {
+              debugLogger.debug(
+                `Speculative guard denial: ${guardDecision.reason}`,
+              );
+              hitBoundary = true;
+              break;
+            }
+          }
           const result = await invocation.execute(
             state.abortController!.signal,
           );
           state.toolUseCount++;
+          let resultArtifacts: ToolArtifact[] | undefined;
+          let resultPersistedOutputFiles: string[] | undefined;
+          try {
+            resultArtifacts = result.artifacts;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+          try {
+            resultPersistedOutputFiles = result.persistedOutputFiles;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
 
-          const responseContent =
-            typeof result.llmContent === 'string'
-              ? { output: result.llmContent }
-              : { output: JSON.stringify(result.llmContent) };
-          functionResponses.push({
-            functionResponse: { name, response: responseContent },
+          observeProducer({
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
+            values: () => [
+              ...toolResultPartDiagnosticValues(result.llmContent),
+              ...(typeof result.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: result.returnDisplay,
+                    },
+                  ]
+                : []),
+            ],
+          });
+
+          const convertedResponseParts = result.error
+            ? convertToFunctionErrorResponse(
+                name,
+                id ?? '',
+                result.llmContent,
+                result.error.message,
+              )
+            : convertToFunctionResponse(name, id ?? '', result.llmContent);
+          const bridgedResponseParts = stripToolResultImages(
+            convertedResponseParts,
+          );
+          const responseParts = id
+            ? bridgedResponseParts
+            : bridgedResponseParts.map((responsePart) => {
+                if (!responsePart.functionResponse) {
+                  return responsePart;
+                }
+                const { id: _id, ...functionResponse } =
+                  responsePart.functionResponse;
+                return { ...responsePart, functionResponse };
+              });
+          functionResponses.push(...responseParts);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
           });
         } catch (error: unknown) {
-          functionResponses.push({
+          const responsePart: Part = {
             functionResponse: {
+              ...(id ? { id } : {}),
               name,
               response: {
                 error:
@@ -335,8 +495,23 @@ async function runSpeculativeLoop(
                     : 'Tool execution failed',
               },
             },
+          };
+          observeProducer({
+            knownNone: true,
+            values: () => toolResultPartDiagnosticValues(responsePart),
+          });
+          functionResponses.push(responsePart);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts: [responsePart],
           });
         }
+      }
+
+      if (responseEntries.length > 0) {
+        const finalized = await finalizeToolResponses(config, responseEntries);
+        functionResponses = finalized.flatMap((entry) => entry.responseParts);
       }
 
       if (hitBoundary) {
@@ -546,6 +721,7 @@ ${SUGGESTION_PROMPT}`;
     const cacheSafeParams = getCacheSafeParams();
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
+    const resolvedModel = model ?? cacheSafeParams.model;
     const result = await runForkedAgent({
       config,
       userMessage: augmentedPrompt,
@@ -553,6 +729,7 @@ ${SUGGESTION_PROMPT}`;
       jsonSchema: PIPELINED_SCHEMA,
       ...(model !== undefined ? { model } : {}),
       abortSignal,
+      preserveTools: resolvedModel === cacheSafeParams.model,
     });
 
     if (abortSignal.aborted) return null;

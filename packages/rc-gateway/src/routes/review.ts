@@ -248,7 +248,7 @@ export function createTriggerReviewRoute(
     }
     if (!hasReviewSkill) {
       try {
-        await deps.daemon.endSession(sessionId);
+        await deps.daemon.closeSession(sessionId);
       } catch {
         // Best-effort — the daemon may already have dropped the session.
       }
@@ -309,7 +309,7 @@ export function createTriggerReviewRoute(
         // Rollback: no zombie session, no half-triggered review.
         deps.bridge.close(sessionId);
         try {
-          await deps.daemon.endSession(sessionId);
+          await deps.daemon.closeSession(sessionId);
         } catch {
           // Best-effort.
         }
@@ -366,7 +366,7 @@ export function createTriggerReviewRoute(
       // zombie session or open bridge survives, and never hang the client.
       deps.bridge.close(sessionId);
       try {
-        await deps.daemon.endSession(sessionId);
+        await deps.daemon.closeSession(sessionId);
       } catch {
         // Best-effort — the daemon may already have dropped the session.
       }
@@ -470,7 +470,7 @@ export function createCancelReviewRoute(
       return;
     }
     try {
-      await deps.daemon.endSession(rec.sessionId);
+      await deps.daemon.closeSession(rec.sessionId);
     } catch {
       res
         .status(502)

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core';
+import {
+  buildBareRememberPrompt,
+  buildManagedRememberPrompt,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
   CommandContext,
@@ -20,6 +23,7 @@ export const rememberCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
+  argumentHint: '<text to remember>',
   action: (context: CommandContext, args): SlashCommandActionReturn | void => {
     const fact = args.trim();
     if (!fact) {
@@ -39,21 +43,21 @@ export const rememberCommand: SlashCommand = {
       };
     }
 
-    if (config.getManagedAutoMemoryEnabled()) {
-      const memoryDir = getAutoMemoryRoot(config.getProjectRoot());
-      const dirHint = ` Save it to \`${memoryDir}\`.`;
+    const useManagedMemory = config?.isManagedMemoryAvailable() ?? false;
+
+    if (useManagedMemory) {
       return {
         type: 'submit_prompt',
-        content: `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${fact}`,
+        content: buildManagedRememberPrompt(fact, config.getProjectRoot()),
       };
     }
 
-    // Managed auto-memory is disabled: ask the agent to save to QWEN.md
-    // using its native file tools. We do not call save_memory because that
-    // tool was removed.
+    // --bare mode: ask the agent to save to QWEN.md using its native
+    // file tools.
     return {
       type: 'submit_prompt',
-      content: `Please save the following fact to memory (e.g. append to QWEN.md in the project root):\n\n${fact}`,
+      content: buildBareRememberPrompt(fact),
+      refreshContextFilesOnWrite: true,
     };
   },
 };

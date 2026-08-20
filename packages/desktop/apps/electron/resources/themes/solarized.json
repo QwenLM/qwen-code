@@ -1,0 +1,26 @@
+{
+  "name": "Solarized",
+  "description": "Precision colors, scientifically designed",
+  "author": "Ethan Schoonover",
+  "license": "MIT",
+  "source": "https://github.com/altercation/solarized",
+  "supportedModes": ["light", "dark"],
+  "shikiTheme": {
+    "light": "solarized-light",
+    "dark": "solarized-dark"
+  },
+  "background": "#fdf6e3",
+  "foreground": "#657b83",
+  "accent": "#268bd2",
+  "info": "#b58900",
+  "success": "#859900",
+  "destructive": "#dc322f",
+  "dark": {
+    "background": "#002b36",
+    "foreground": "#839496",
+    "accent": "#268bd2",
+    "info": "#b58900",
+    "success": "#859900",
+    "destructive": "#dc322f"
+  }
+}

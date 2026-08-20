@@ -28,6 +28,7 @@ export const buildRemovalNotice = (): string =>
     `                     ${t('China: https://coding.dashscope.aliyuncs.com/v1')}`,
     `                     ${t('International: https://coding-intl.dashscope.aliyuncs.com/v1')}`,
     `  ${cyan(t('OpenRouter'))}    →  ${t('set OPENROUTER_API_KEY and OPENAI_BASE_URL=https://openrouter.ai/api/v1')}`,
+    `  ${cyan(t('Requesty'))}      →  ${t('set REQUESTY_API_KEY and OPENAI_BASE_URL=https://router.requesty.ai/v1')}`,
     `  ${cyan(t('Qwen OAuth'))}    →  ${t('run qwen interactively and use /auth; OAuth cannot be configured with env vars alone')}`,
     `  ${cyan(t('Scripted'))}      →  ${t('edit ~/.qwen/settings.json, or run qwen interactively once')}`,
     '',
@@ -43,6 +44,7 @@ const legacySubcommands = [
   'status',
   'coding-plan',
   'openrouter',
+  'requesty',
   'api-key',
   'qwen-oauth',
 ];

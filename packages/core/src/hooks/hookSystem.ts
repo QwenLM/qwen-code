@@ -12,7 +12,11 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput, HookPhase } from './types.js';
+import type {
+  ContextUsageData,
+  DefaultHookOutput,
+  HookPhase,
+} from './types.js';
 import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
@@ -34,6 +38,8 @@ import type {
   StopFailureErrorType,
   TodoItem,
   TodoStatus,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -82,6 +88,11 @@ export class HookSystem {
   async initialize(): Promise<void> {
     await this.hookRegistry.initialize();
     debugLogger.debug('Hook system initialized successfully');
+  }
+
+  async reload(): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks();
+    debugLogger.debug('Hook system reloaded successfully');
   }
 
   /**
@@ -142,13 +153,37 @@ export class HookSystem {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
+      submittedPrompt,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
+      : undefined;
+  }
+
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireInstructionsLoadedEvent(
+      filePath,
+      memoryType,
+      loadReason,
+      options,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('InstructionsLoaded', result.finalOutput)
       : undefined;
   }
 
@@ -176,11 +211,30 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      contextUsage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MessageDisplay event - called repeatedly as the assistant's reply streams
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMessageDisplayEvent(
+      messageId,
+      displayedText,
+      isFinal,
       signal,
     );
   }
@@ -217,6 +271,19 @@ export class HookSystem {
       : undefined;
   }
 
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionDeleteEvent(
+      deletedSessionId,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionDelete', result.finalOutput)
+      : undefined;
+  }
+
   /**
    * Fire a PreToolUse event - called before tool execution
    */
@@ -226,6 +293,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePreToolUseEvent(
       toolName,
@@ -233,6 +301,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PreToolUse', result.finalOutput)
@@ -249,6 +318,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -257,6 +327,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -274,6 +345,7 @@ export class HookSystem {
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -283,6 +355,7 @@ export class HookSystem {
       isInterrupt,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -458,6 +531,7 @@ export class HookSystem {
     toolUseId: string,
     reason: PermissionDeniedReason,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePermissionDeniedEvent(
       toolName,
@@ -465,6 +539,7 @@ export class HookSystem {
       toolUseId,
       reason,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PermissionDenied', result.finalOutput)

@@ -150,6 +150,25 @@ response:
 | `/copy code typescript` | Copies the last `typescript` code block. |
 | `/copy code mermaid 1`  | Copies the first `mermaid` code block.   |
 
+## Selecting an Earlier AI Message
+
+By default `/copy` targets the most recent AI message. Prefix the command with
+a positive integer to copy from the Nth-last AI message instead — handy when
+the latest reply is something low-signal (e.g., a TODO update) and the
+substantive output is one or two turns back.
+
+| Command               | Behavior                                               |
+| --------------------- | ------------------------------------------------------ |
+| `/copy 2`             | Copies the second-to-last AI message in full.          |
+| `/copy 3`             | Copies the third-to-last AI message in full.           |
+| `/copy 2 code python` | Copies the last `python` code block from the 2nd-last. |
+| `/copy 3 latex`       | Copies the last LaTeX block from the 3rd-last message. |
+
+`/copy 1` is equivalent to `/copy`. If `N` exceeds the number of AI messages
+in the session, `/copy` reports the actual count instead of copying anything.
+Without a leading integer, sub-selectors such as `/copy code python 2` keep
+their existing meaning (the 2nd `python` block in the last message).
+
 ## Current Limits
 
 - Mermaid image rendering depends on Mermaid CLI plus terminal image support.
@@ -160,4 +179,5 @@ response:
   Mermaid layout engine.
 - Raw mode is global for rendered Markdown blocks; it is not a per-block toggle.
 - LaTeX rendering covers common symbols and expressions, not full TeX layout.
-- Source copy commands operate on the last AI response.
+- Source copy commands target the last AI response by default, or the Nth-last
+  when invoked as `/copy N ...`.

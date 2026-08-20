@@ -10,8 +10,14 @@ import { escapeSystemReminderTags, escapeXml } from './xml.js';
 describe('xml utils', () => {
   describe('escapeXml', () => {
     it('escapes XML metacharacters for element and attribute contexts', () => {
-      expect(escapeXml(`a&b <tag attr="x">'y'</tag>`)).toBe(
-        'a&amp;b &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
+      // TWO of each metacharacter: with a single `&`, a
+      // `.replace(/&/g, …)` → `.replace('&', …)` mutation shipped green
+      // across the whole package (measured: 19,546 tests passed), and a
+      // path holding two — a TMPDIR under `o&brien` with a basename like
+      // `out&err.log` — would then put a raw `&` into a model-facing XML
+      // envelope. The other four were already pinned globally; `&` was not.
+      expect(escapeXml(`a&b&c <tag attr="x">'y'</tag>`)).toBe(
+        'a&amp;b&amp;c &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
       );
     });
   });
@@ -68,6 +74,19 @@ describe('xml utils', () => {
         '<system-reminderish>keep</system-reminderish>\n<system-reminder-extra />';
 
       expect(escapeSystemReminderTags(input)).toBe(input);
+    });
+
+    it('still detects a closing tag preceded by a stray "<"', () => {
+      expect(escapeSystemReminderTags('foo < </system-reminder>')).toBe(
+        'foo < <\\/system-reminder>',
+      );
+    });
+
+    it('handles adversarial whitespace/"<" runs without catastrophic backtracking', () => {
+      const input = `<${'\t'.repeat(50000)}${'<'.repeat(50000)}`;
+      const start = Date.now();
+      expect(escapeSystemReminderTags(input)).toBe(input);
+      expect(Date.now() - start).toBeLessThan(1000);
     });
 
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {

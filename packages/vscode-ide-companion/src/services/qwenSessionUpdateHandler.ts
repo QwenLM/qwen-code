@@ -10,6 +10,7 @@
  * Handles session updates from ACP and dispatches them to appropriate callbacks
  */
 
+import { logger } from '../utils/logger.js';
 import type {
   SessionNotification,
   AvailableCommand,
@@ -49,10 +50,6 @@ export class QwenSessionUpdateHandler {
   handleSessionUpdate(data: SessionNotification): void {
     const update = data.update;
     const sessionUpdate = (update as { sessionUpdate?: string }).sessionUpdate;
-    console.log(
-      '[SessionUpdateHandler] Processing update type:',
-      sessionUpdate,
-    );
 
     switch (sessionUpdate) {
       case 'user_message_chunk': {
@@ -69,12 +66,40 @@ export class QwenSessionUpdateHandler {
         const text = this.getTextContent(
           (update as { content?: unknown }).content,
         );
-        if (text && this.callbacks.onStreamChunk) {
+        const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+        // When MessageRewriteMiddleware is active it emits a rewritten summary
+        // (_meta.rewritten === true) in addition to the original chunk, and
+        // both carry qwenDiscreteMessage. Persist only the original here so the
+        // notification is not stored twice; the rewritten copy falls through to
+        // onStreamChunk like any other streamed text.
+        const isDiscreteMessage =
+          (meta?.qwenDiscreteMessage === true ||
+            meta?.source === 'background_notification') &&
+          meta?.rewritten !== true;
+        if (text && isDiscreteMessage && this.callbacks.onMessage) {
+          const source =
+            typeof meta?.source === 'string' ? meta.source : undefined;
+          // Forward the originating ACP session id so the webview can persist
+          // background-notification follow-ups against the conversation that
+          // owns the session, not whichever conversation happens to be active
+          // in the panel right now. Without this, switching conversations
+          // between triggering a background task and receiving its reply leaks
+          // the reply (and its full chat-history context) into the wrong
+          // conversation's persisted message store.
+          const sessionId =
+            typeof data.sessionId === 'string' ? data.sessionId : undefined;
+          this.callbacks.onMessage({
+            role: 'assistant',
+            content: text,
+            timestamp:
+              typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
+            ...(source ? { source } : {}),
+            ...(sessionId ? { sessionId } : {}),
+          });
+        } else if (text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(text);
         }
-        this.emitUsageMeta(
-          (update as { _meta?: SessionUpdateMeta | null })._meta,
-        );
+        this.emitUsageMeta(meta);
         break;
       }
 
@@ -87,7 +112,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onThoughtChunk(text);
           } else if (this.callbacks.onStreamChunk) {
             // Fallback to regular stream processing
-            console.log(
+            logger.log(
               '[SessionUpdateHandler] 🧠 Falling back to onStreamChunk',
             );
             this.callbacks.onStreamChunk(text);
@@ -184,7 +209,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onModeChanged(modeId);
           }
         } catch (err) {
-          console.warn(
+          logger.warn(
             '[SessionUpdateHandler] Failed to handle mode update',
             err,
           );
@@ -207,7 +232,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
           }
         } catch (err) {
-          console.warn(
+          logger.warn(
             '[SessionUpdateHandler] Failed to handle available commands update',
             err,
           );
@@ -216,7 +241,10 @@ export class QwenSessionUpdateHandler {
       }
 
       default:
-        console.log('[QwenAgentManager] Unhandled session update type');
+        logger.log(
+          '[SessionUpdateHandler] Unhandled session update type:',
+          sessionUpdate,
+        );
         break;
     }
   }

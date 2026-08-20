@@ -238,7 +238,6 @@ describe('runDoctorChecks', () => {
           getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
         },
         settings: { merged: {} },
-        git: undefined,
       },
     } as unknown as CommandContext);
 
@@ -265,7 +264,6 @@ describe('runDoctorChecks', () => {
           getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
         },
         settings: { merged: {} },
-        git: undefined,
       },
     } as unknown as CommandContext);
 

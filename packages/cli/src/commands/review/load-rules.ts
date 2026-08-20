@@ -36,7 +36,7 @@ function showFile(baseRef: string, path: string): string | null {
   return gitOpt('show', `${baseRef}:${path}`);
 }
 
-function extractCodeReviewSection(content: string): string | null {
+export function extractCodeReviewSection(content: string): string | null {
   // Find `## Code Review` heading and return everything up to the next
   // top-level `## ` heading, or end of file. Done with line-based scanning
   // rather than a regex with `\Z` (which JS doesn't support).

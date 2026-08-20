@@ -13,7 +13,7 @@ import { WorkspaceContext } from '@qwen-code/qwen-code-core';
 import { canonicalizeWorkspace, resolveWithinWorkspace } from './paths.js';
 // `isFsError` is a runtime guard called below — must stay a value
 // import. `FsError` is type-only here (typed `catch` variable); same
-// for `FsErrorKind`. The eslint-disable mirrors the workspaceFileSystem.ts
+// for `FsErrorKind`. The eslint-disable mirrors the workspace-file-system.ts
 // fix and exists because the auto-fix at commit 7b0db4c3a promoted the
 // whole line to `import type`, erasing `isFsError` at runtime and
 // failing 11 tests in this file alone.

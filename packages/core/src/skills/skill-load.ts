@@ -1,8 +1,10 @@
 import {
   type SkillConfig,
   type SkillValidationResult,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
@@ -132,16 +134,7 @@ export function parseSkillContent(
   const description = String(descriptionRaw);
 
   // Extract optional fields
-  const allowedToolsRaw = frontmatter['allowedTools'] as unknown[] | undefined;
-  let allowedTools: string[] | undefined;
-
-  if (allowedToolsRaw !== undefined) {
-    if (Array.isArray(allowedToolsRaw)) {
-      allowedTools = allowedToolsRaw.map(String);
-    } else {
-      throw new Error('"allowedTools" must be an array');
-    }
-  }
+  const allowedTools = parseAllowedToolsField(frontmatter);
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
@@ -165,6 +158,7 @@ export function parseSkillContent(
     disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
       ? true
       : undefined;
+  const userInvocable = parseUserInvocableField(frontmatter);
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
@@ -197,6 +191,7 @@ export function parseSkillContent(
     level: 'extension',
     whenToUse,
     disableModelInvocation,
+    userInvocable,
     paths,
     priority,
   };

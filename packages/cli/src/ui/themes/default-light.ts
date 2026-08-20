@@ -5,9 +5,10 @@
  */
 
 import { lightTheme, Theme } from './theme.js';
+import { DEFAULT_LIGHT_THEME_NAME } from '../../config/default-theme-names.js';
 
 export const DefaultLight: Theme = new Theme(
-  'Default Light',
+  DEFAULT_LIGHT_THEME_NAME,
   'light',
   {
     hljs: {

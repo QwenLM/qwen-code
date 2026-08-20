@@ -44,13 +44,9 @@ export const dreamCommand: SlashCommand = {
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());
 
-      // In ACP mode, onComplete is never invoked — record eagerly.
       if (context.executionMode === 'acp') {
-        try {
-          await recordDream();
-        } catch {
-          // Best-effort: dream dedup recording must not block prompt submission.
-        }
+        recordDream().catch(() => {});
+        return { type: 'submit_prompt', content: prompt };
       }
 
       return {

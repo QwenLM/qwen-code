@@ -6,7 +6,9 @@
 
 import {
   AuthType,
+  type Config,
   InputFormat,
+  isDebugLogFileEnabled,
   isDebugLoggingDegraded,
   isBareMode,
   logUserPrompt,
@@ -14,24 +16,33 @@ import {
   Storage,
   SessionService,
   setStartupEventSink,
-  type Config,
   createDebugLogger,
-  writeRuntimeStatus,
+  persistSessionUsage,
+  PRIVATE_ACP_CAPABILITY_ENV,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
-import { render } from 'ink';
+import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
+import fs from 'node:fs';
 import os from 'node:os';
-import path, { basename } from 'node:path';
+import path from 'node:path';
 import v8 from 'node:v8';
-import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
+import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
-import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
+import type { DnsResolutionOrder } from './config/settings.js';
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
@@ -40,42 +51,25 @@ import {
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
-import {
-  initializeApp,
-  type InitializationResult,
-} from './core/initializer.js';
-import { handleList as handleListExtensions } from './commands/extensions/list.js';
-import { runNonInteractive } from './nonInteractiveCli.js';
+import { SettingsWatcher } from './config/settingsWatcher.js';
+import { registerMcpHotReload } from './config/hot-reload.js';
+import { LspConfigWatcher } from './config/lsp-config-watcher.js';
+import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
+import { ExtensionRefreshState } from './config/extension-refresh-state.js';
+import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
-import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
-import { AppContainer } from './ui/AppContainer.js';
-import { DaemonAppContainer } from './ui/DaemonAppContainer.js';
-import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
-import { KeypressProvider } from './ui/contexts/KeypressContext.js';
-import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
-import { SettingsContext } from './ui/contexts/SettingsContext.js';
-import { VimModeProvider } from './ui/contexts/VimModeContext.js';
-import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
-import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
-import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
-import {
-  detectAndEnableKittyProtocol,
-  disableKittyProtocol,
-} from './ui/utils/kittyProtocolDetector.js';
-import { checkForUpdates } from './ui/utils/updateCheck.js';
+import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
 import { AppEvent, appEvents } from './utils/events.js';
-import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
   profileCheckpoint,
@@ -85,33 +79,49 @@ import {
   isStartupProfilerEnabled,
 } from './utils/startupProfiler.js';
 import {
+  isAcpStartupProfilerEnabled,
+  markAcpStartup,
+  recordAcpConfigStartupEvent,
+} from './utils/acp-startup-profiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
 import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
-import { getCliVersion } from './utils/version.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
-import { writeStderrLine } from './utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { computeWindowTitle } from './utils/windowTitle.js';
-import {
-  startEarlyInputCapture,
-  stopAndGetCapturedInput,
-} from './utils/earlyInputCapture.js';
-import { preconnectApi } from './utils/apiPreconnect.js';
-import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
-import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
-import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
-import { DualOutputContext } from './dualOutput/DualOutputContext.js';
-import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
-import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
-import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
-import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  UPDATE_COMPLETE_EXIT_CODE,
+} from './utils/processUtils.js';
+import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+interface RuntimeLspReinitializeResult {
+  reconcile: {
+    added: string[];
+    removed: string[];
+    restarted: string[];
+    unchanged: string[];
+    failed: string[];
+  };
+  skipped: Array<{ name: string }>;
+}
+
+interface RuntimeLspClient {
+  reinitialize?: () => Promise<RuntimeLspReinitializeResult>;
+}
+
+interface RuntimeLspConfig {
+  reinitializeLsp?: () => Promise<RuntimeLspReinitializeResult | undefined>;
+}
 
 function clearCorruptionEnvVars(): void {
   delete process.env[ENV_CORRUPTED_PATH];
@@ -167,7 +177,62 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
-import { runAcpAgent } from './acp-integration/acpAgent.js';
+import {
+  handleUncaughtException,
+  isExpectedPtyRaceError,
+} from './utils/uncaught-exception-handler.js';
+
+let uncaughtExceptionHandler: ((error: unknown) => void) | undefined;
+
+export function setupUncaughtExceptionHandler(config: Config) {
+  // runCliEntryPoint() registered the basic handleUncaughtException at startup,
+  // before the session ID existed. Replace it now: two listeners conflict — the
+  // first calls process.exit(1) so the second never runs — and the basic one
+  // lacks the debug-log write and the alternate-screen handling below. Also drop
+  // any handler a previous call installed so exactly one listener is ever active.
+  process.removeListener('uncaughtException', handleUncaughtException);
+  if (uncaughtExceptionHandler) {
+    process.removeListener('uncaughtException', uncaughtExceptionHandler);
+  }
+  uncaughtExceptionHandler = (rawError) => {
+    if (isExpectedPtyRaceError(rawError)) {
+      return;
+    }
+    const error =
+      rawError instanceof Error ? rawError : new Error(String(rawError));
+    const timestamp = new Date().toISOString();
+    const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
+    // debugLogger.error() uses async fs.appendFile — the write would be
+    // abandoned by the process.exit() below. Write synchronously instead.
+    let logged = false;
+    try {
+      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.appendFileSync(logPath, line, 'utf8');
+      logged = true;
+    } catch {
+      // Best-effort: if the debug dir doesn't exist yet or the disk is
+      // full, the stderr output below is the fallback record.
+    }
+    // In VP / alternate-screen mode, stderr is written to the alternate
+    // buffer which is discarded on teardown. Leave the alternate screen
+    // *before* writing the error so the user actually sees it. Guard on
+    // isTTY: with stdout redirected to a file the escapes would corrupt it.
+    if (process.stdout.isTTY) {
+      try {
+        process.stdout.write('\x1b[?1049l'); // leave alternate screen
+        process.stdout.write('\x1b[?25h'); // show cursor
+      } catch {
+        // stdout may be broken; the debug log above is the primary record.
+      }
+    }
+    writeStderrLineSafe(
+      `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
+    );
+    process.exit(1);
+  };
+  process.on('uncaughtException', uncaughtExceptionHandler);
+}
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -183,6 +248,7 @@ Stack trace:
 ${reason.stack}`
         : ''
     }`;
+    debugLogger.error(errorMessage);
     appEvents.emit(AppEvent.LogError, errorMessage);
     if (!unhandledRejectionOccurred) {
       unhandledRejectionOccurred = true;
@@ -192,13 +258,36 @@ ${reason.stack}`
 }
 
 function getSignalExitCode(signal: NodeJS.Signals): number {
-  return signal === 'SIGINT' ? 130 : 143;
+  if (signal === 'SIGINT') return 130;
+  if (signal === 'SIGHUP') return 129;
+  return 143;
 }
+
+// A real SIGINT only reaches the process-level handler while raw mode is
+// off (in raw mode Ctrl+C arrives as input and goes through the UI's
+// double-press guard). Terminals that toggle raw mode around subprocesses
+// (e.g. the PyCharm terminal) deliver real SIGINTs, so mirror the UI's
+// press-twice-to-exit window here instead of exiting on the first signal.
+const SIGINT_EXIT_CONFIRM_WINDOW_MS = 1000;
+
+// `when-exit` (pulled in via `atomically`) re-raises the signal from its own
+// once-handler after running its callbacks, so one physical Ctrl+C surfaces
+// as two SIGINT events microseconds apart. Repeats inside this gap are the
+// same press, not a confirmation; a human double-press is far slower.
+const SIGINT_RERAISE_IGNORE_MS = 50;
 
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let cleanupStarted = false;
+  let lastSigintAt = 0;
 
-  const handleSignal = (signal: NodeJS.Signals) => {
+  // The exit cleanup chain removes the named handlers below. Without a
+  // stand-in listener, a stray Ctrl+C during cleanup would fall back to
+  // Node's default SIGINT handling and kill the process before the
+  // terminal is restored (see #6776). Registered when cleanup begins;
+  // the process exits at the end of cleanup regardless.
+  const swallowSignalDuringCleanup = () => {};
+
+  const beginExit = (signal: NodeJS.Signals) => {
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(wasRaw);
     }
@@ -207,6 +296,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
       return;
     }
     cleanupStarted = true;
+    process.on('SIGINT', swallowSignalDuringCleanup);
 
     void runExitCleanup()
       .catch((error) => {
@@ -218,214 +308,42 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 
   const handleSigterm = () => {
-    handleSignal('SIGTERM');
+    beginExit('SIGTERM');
+  };
+  const handleSighup = () => {
+    beginExit('SIGHUP');
   };
   const handleSigint = () => {
-    handleSignal('SIGINT');
+    if (cleanupStarted) {
+      return;
+    }
+    const now = Date.now();
+    const sincePrevious = now - lastSigintAt;
+    if (sincePrevious <= SIGINT_RERAISE_IGNORE_MS) {
+      return;
+    }
+    if (sincePrevious <= SIGINT_EXIT_CONFIRM_WINDOW_MS) {
+      beginExit('SIGINT');
+      return;
+    }
+    lastSigintAt = now;
+    writeStderrLine('Press Ctrl+C again to exit.');
   };
 
-  process.once('SIGTERM', handleSigterm);
-  process.once('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigterm);
+  process.on('SIGINT', handleSigint);
+  process.on('SIGHUP', handleSighup);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
+    process.removeListener('SIGHUP', handleSighup);
   };
-}
-
-export async function startInteractiveUI(
-  config: Config,
-  settings: LoadedSettings,
-  startupWarnings: string[],
-  workspaceRoot: string = process.cwd(),
-  initializationResult: InitializationResult,
-  attachDaemonUrl?: string,
-  attachDaemonToken?: string,
-) {
-  const version = await getCliVersion();
-  setWindowTitle(basename(workspaceRoot), settings);
-
-  // Write a small runtime.json sidecar next to the chat log so external
-  // tools (terminal multiplexers, IDE integrations, status daemons) can
-  // map the running PID back to its session id and work directory.
-  // Best-effort: a read-only filesystem must not prevent the UI from
-  // starting up. Marking the runtime status as enabled is what arms the
-  // session-swap refresh in `Config.refreshSessionId()` — without this
-  // call, the sidecar would never update on `/clear` or `/resume`.
-  try {
-    const sessionId = config.getSessionId();
-    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
-    await writeRuntimeStatus(runtimeStatusPath, {
-      sessionId,
-      workDir: config.getTargetDir(),
-      qwenVersion: version,
-    });
-    config.markRuntimeStatusEnabled();
-  } catch {
-    // ignored: best-effort, never block UI startup.
-  }
-
-  const restoreTerminalRedrawOptimizer =
-    process.stdout.isTTY && !config.getScreenReader()
-      ? installTerminalRedrawOptimizer(process.stdout)
-      : () => {};
-  const restoreSynchronizedOutput =
-    process.stdout.isTTY && !config.getScreenReader()
-      ? installSynchronizedOutput(process.stdout)
-      : () => {};
-
-  // Create dual output bridge if --json-fd or --json-file is specified.
-  // Errors are caught so a bad fd/path degrades gracefully instead of
-  // preventing the TUI from launching.
-  let dualOutputBridge: DualOutputBridge | null = null;
-  const jsonFd = config.getJsonFd?.();
-  const jsonFile = config.getJsonFile?.();
-  try {
-    if (jsonFd != null) {
-      dualOutputBridge = new DualOutputBridge(
-        config,
-        { fd: jsonFd },
-        { version },
-      );
-    } else if (jsonFile != null) {
-      dualOutputBridge = new DualOutputBridge(
-        config,
-        { filePath: jsonFile },
-        { version },
-      );
-    }
-  } catch (err) {
-    debugLogger.error('Failed to initialize dual output bridge:', err);
-    writeStderrLine(
-      `Warning: dual output disabled — ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  // Create remote input watcher if --input-file is specified.
-  // This enables bidirectional sync: an external process writes JSONL
-  // commands to this file, and the TUI processes them as user messages.
-  let remoteInputWatcher: RemoteInputWatcher | null = null;
-  const inputFile = config.getInputFile?.();
-  if (inputFile) {
-    try {
-      remoteInputWatcher = new RemoteInputWatcher(inputFile);
-    } catch (err) {
-      debugLogger.error('Failed to initialize remote input watcher:', err);
-      writeStderrLine(
-        `Warning: remote input disabled — ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  // Drain the early-captured input exactly once, before any React rendering.
-  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
-  // always reads from the same stable prop rather than the (now empty) module buffer.
-  const initialCapturedInput = stopAndGetCapturedInput();
-
-  // Create wrapper component to use hooks inside render
-  const AppWrapper = () => {
-    const kittyProtocolStatus = useKittyKeyboardProtocol();
-    const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
-    return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      {attachDaemonUrl ? (
-                        <DaemonAppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                          daemonUrl={attachDaemonUrl}
-                          daemonToken={attachDaemonToken ?? ''}
-                        />
-                      ) : (
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                        />
-                      )}
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
-    );
-  };
-
-  const instance = render(
-    process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
-    ) : (
-      <AppWrapper />
-    ),
-    {
-      exitOnCtrlC: false,
-      isScreenReaderEnabled: config.getScreenReader(),
-    },
-  );
-  // Records the moment Ink's `render()` call has returned, which is
-  // synchronous and happens before React reconciliation actually pushes
-  // bytes to the terminal. We intentionally keep the legacy name
-  // `first_paint` for backward compatibility with previously-collected
-  // profile files; the value is best read as "render call returned"
-  // rather than literal pixel paint. AppContainer's mount effect runs
-  // after this — it carries the `config_initialize_*` and
-  // `input_enabled` checkpoints that complete the first-screen picture.
-  profileCheckpoint('first_paint');
-
-  // Check for updates only if enableAutoUpdate is not explicitly disabled.
-  // Using !== false ensures updates are enabled by default when undefined.
-  if (settings.merged.general?.enableAutoUpdate !== false) {
-    checkForUpdates()
-      .then((info) => {
-        handleAutoUpdate(info, settings, config.getProjectRoot());
-      })
-      .catch((err) => {
-        // Silently ignore update check errors.
-        debugLogger.warn(`Update check failed: ${err}`);
-      });
-  }
-
-  registerCleanup(async () => {
-    remoteInputWatcher?.shutdown();
-    await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
-    instance.unmount();
-    restoreSynchronizedOutput();
-    restoreTerminalRedrawOptimizer();
-  });
 }
 
 export async function main() {
   profileCheckpoint('main_entry');
+  const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // GeminiClient.setTools) into the cli's startup profiler. Gated on
   // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
@@ -433,11 +351,30 @@ export async function main() {
   // sees a null sink and short-circuits at the first comparison, instead
   // of going through this arrow wrapper and the profiler's own enabled
   // check.
-  if (isStartupProfilerEnabled()) {
-    setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  const startupProfilerEnabled = isStartupProfilerEnabled();
+  if (startupProfilerEnabled || acpStartupProfilerEnabled) {
+    setStartupEventSink((name, attrs) => {
+      if (startupProfilerEnabled) recordStartupEvent(name, attrs);
+      if (acpStartupProfilerEnabled) recordAcpConfigStartupEvent(name);
+    });
   }
   setupUnhandledRejectionHandler();
   initializeWarningHandler();
+
+  const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  const privateExternalToolGuard =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
+    EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -447,17 +384,54 @@ export async function main() {
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
 
+  markAcpStartup('argsParseStart');
   let argv = await parseArguments();
+  // The full yargs `serve` handler captures and deletes this credential while
+  // parsing the subcommand. Other CLI/ACP paths do not use it, so scrub any
+  // ambient value immediately after argument parsing and before Config,
+  // hooks, MCP servers, or tools can initialize.
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  const privateAcpChildEnv =
+    isAcpMode && privateAcpParentCapability !== undefined
+      ? {
+          [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(privateExternalToolGuard
+            ? {
+                [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
+              }
+            : {}),
+        }
+      : undefined;
+
+  if (
+    (argv.acp || argv.experimentalAcp) &&
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+  ) {
+    delete process.env['ELECTRON_RUN_AS_NODE'];
+    if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
+      delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    }
+  }
 
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
   // Load user settings — bare mode uses minimal config, normal mode loads full.
+  markAcpStartup('settingsLoadStart');
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+  markAcpStartup('settingsLoadEnd');
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -487,6 +461,12 @@ export async function main() {
   }
 
   if (argv.listExtensions) {
+    await initializeI18n(
+      resolveLanguageSetting(settings.merged.general?.language as string),
+    );
+    const { handleList: handleListExtensions } = await import(
+      './commands/extensions/list.js'
+    );
     await handleListExtensions();
     process.exit(0);
   }
@@ -505,6 +485,9 @@ export async function main() {
     validateDnsResolutionOrder(settings.merged.advanced?.dnsResolutionOrder),
   );
 
+  const { themeManager, AUTO_THEME_NAME } = await import(
+    './ui/themes/theme-manager.js'
+  );
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
@@ -530,8 +513,45 @@ export async function main() {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
+    const updateProjectRoot = process.cwd();
+    const onUpdateRelaunch = async (relaunchOnFailure: boolean) => {
+      await initializeI18n(
+        resolveLanguageSetting(settings.merged.general?.language as string),
+      );
+      const { updateBeforeRelaunch } = await import(
+        './utils/update-relaunch.js'
+      );
+      const shouldRelaunch = await updateBeforeRelaunch(
+        settings,
+        updateProjectRoot,
+        relaunchOnFailure,
+      );
+      return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
+    };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
-    // We intentially omit the list of extensions here because extensions
+    const customSandboxImage =
+      argv.sandboxImage ??
+      process.env['QWEN_SANDBOX_IMAGE'] ??
+      settings.merged.tools?.sandboxImage;
+    if (
+      sandboxConfig &&
+      sandboxConfig.command !== 'sandbox-exec' &&
+      customSandboxImage
+    ) {
+      // Images built before this handoff protocol must be rebuilt; they cannot
+      // be made to skip their in-process updater from the host.
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
+    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
+      process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
+        Boolean(
+          hostInstallationInfo.updateCommand ||
+            (hostInstallationInfo.isStandalone &&
+              hostInstallationInfo.standaloneDir),
+        ),
+      );
+    }
+    // We intentionally omit the list of extensions here because extensions
     // should not impact auth or setting up the sandbox.
     // TODO(jacobr): refactor loadCliConfig so there is a minimal version
     // that only initializes enough config to enable refreshAuth or find
@@ -638,8 +658,18 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
-      await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+      await relaunchOnExitCode(
+        () =>
+          start_sandbox(
+            sandboxConfig,
+            memoryArgs,
+            partialConfig,
+            sandboxArgs,
+            privateAcpChildEnv,
+          ),
+        {
+          onUpdateRelaunch,
+        },
       );
       process.exit(0);
     } else {
@@ -647,8 +677,27 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        childEnv: privateAcpChildEnv,
+        onUpdateRelaunch,
       });
     }
+  }
+
+  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV] === '1') {
+    // A daemon-spawned ACP child hosts sessions for arbitrary workspaces.
+    // Loader vars from the daemon's launch environment were only needed to
+    // boot this process (e.g. the dev harness tsx loader); left in
+    // process.env they propagate into every session subprocess — shell
+    // tool, MCP servers, hooks — and hijack module resolution across
+    // workspace boundaries. The gate is the daemon stamp: direct ACP
+    // integrations (editor companions) spawn the same --acp command line
+    // but host the user's own session, where an exported
+    // NODE_OPTIONS=--max-old-space-size is expected to reach tool
+    // subprocesses. Placement is after the relaunch/sandbox handoff: those
+    // respawn this process with process.env and still need the loader to
+    // boot, and the respawned child re-runs this scrub itself. Only the
+    // final process (no relaunch) reaches here.
+    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve
@@ -745,6 +794,9 @@ export async function main() {
 
     if (argv.resume === '') {
       // No argument — show picker
+      const { showResumeSessionPicker } = await import(
+        './ui/components/StandaloneSessionPicker.js'
+      );
       resolvedSessionId = await showResumeSessionPicker();
     } else if (!cliConfig.isValidSessionId(argv.resume)) {
       // Non-UUID argument — treat as custom title search
@@ -756,6 +808,9 @@ export async function main() {
         // Multiple matches — show picker to let user choose
         writeStderrLine(
           `Multiple sessions found with title "${argv.resume}". Please select one:`,
+        );
+        const { showResumeSessionPicker } = await import(
+          './ui/components/StandaloneSessionPicker.js'
         );
         resolvedSessionId = await showResumeSessionPicker(
           process.cwd(),
@@ -790,9 +845,18 @@ export async function main() {
   }
 
   {
+    // Start settings file watcher (skip in bare mode)
+    const settingsWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new SettingsWatcher(settings);
+    settingsWatcher?.startWatching();
+
+    markAcpStartup('configConstructionStart');
     const config = await loadCliConfig(
       settings.merged,
-      argv,
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv,
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
@@ -801,8 +865,58 @@ export async function main() {
         projectHooks: settings.getProjectHooks(),
       },
       buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
     );
+    markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    const nonInteractiveHousekeeping =
+      !config.isInteractive() || config.getExperimentalZedIntegration()
+        ? await import('./utils/housekeeping/scheduler.js')
+        : undefined;
+    if (nonInteractiveHousekeeping) {
+      registerCleanup(() =>
+        nonInteractiveHousekeeping.stopNonInteractiveOpenAILogHousekeeping(),
+      );
+    }
+
+    // Subscribe the running Config to settings changes so MCP servers
+    // reconnect / disconnect / restart without a session restart (#3696,
+    // sub-task 3). Skipped in bare mode (no watcher).
+    if (settingsWatcher) {
+      const disposeMcpHotReload = registerMcpHotReload(
+        settingsWatcher,
+        settings,
+        config,
+        config.getTopTierMcpServers(),
+      );
+      registerCleanup(disposeMcpHotReload);
+    }
+
+    registerLspHotReload(config, registerCleanup);
+
+    const extensionRefreshState = new ExtensionRefreshState();
+    const extensionFileWatcher =
+      isBareMode(argv.bare) || config.isSafeMode()
+        ? undefined
+        : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+    extensionFileWatcher?.startWatching();
+    if (extensionFileWatcher) {
+      const restartExtensionWatcher = () =>
+        extensionFileWatcher.restartWatching();
+      extensionRefreshState.on(
+        AppEvent.ExtensionsReloaded,
+        restartExtensionWatcher,
+      );
+      registerCleanup(() => {
+        extensionRefreshState.off(
+          AppEvent.ExtensionsReloaded,
+          restartExtensionWatcher,
+        );
+        extensionFileWatcher.stopWatching();
+      });
+    }
 
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
@@ -849,24 +963,39 @@ export async function main() {
       }
     }
 
+    // Persist session usage for cross-session reports (must run before
+    // config.shutdown() which clears telemetry state).
+    // sessionStartTime is read from uiTelemetryService so it stays correct
+    // after /clear resets the session (reset() updates the internal timestamp).
+    registerCleanup(() => {
+      try {
+        const metrics = uiTelemetryService.getMetrics();
+        const hasActivity = Object.values(metrics.models).some(
+          (m) => m.api.totalRequests > 0,
+        );
+        if (!hasActivity) return;
+        persistSessionUsage({
+          sessionId: config.getSessionId(),
+          startTime: uiTelemetryService.getSessionStartTime(),
+          endTime: new Date(),
+          project: config.getProjectRoot(),
+          metrics,
+        });
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+    });
+
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
-    // Startup optimization: preconnect API to warm TCP+TLS connection
-    // Fires early; cost is one HEAD request even for local-only commands
-    try {
-      const modelsConfig = config.getModelsConfig();
-      const authType = modelsConfig.getCurrentAuthType();
-      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
-      const proxy = config.getProxy();
-      preconnectApi(authType, { resolvedBaseUrl, proxy });
-    } catch (error) {
-      // If we can't get authType, skip preconnect - it's optional optimization
-      debugLogger.debug(
-        `Preconnect skipped due to error getting authType: ${error}`,
-      );
-    }
+    // Install the uncaughtException handler once the session ID is known.
+    // Before this point VP mode is not active, so Node's default stderr
+    // output is visible and sufficient.
+    setupUncaughtExceptionHandler(config);
+
+    startEarlyStartupPrefetches(config);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -875,6 +1004,12 @@ export async function main() {
       registerCleanup(installInteractiveSignalHandlers(wasRaw));
     }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
+      const { startEarlyInputCapture, stopAndGetCapturedInput } = await import(
+        './utils/earlyInputCapture.js'
+      );
+      const { detectAndEnableKittyProtocol } = await import(
+        './ui/utils/kittyProtocolDetector.js'
+      );
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
@@ -906,7 +1041,12 @@ export async function main() {
       }
     }
 
-    setMaxSizedBoxDebugging(isDebugMode);
+    if (config.isInteractive()) {
+      const { setMaxSizedBoxDebugging } = await import(
+        './ui/components/shared/MaxSizedBox.js'
+      );
+      setMaxSizedBoxDebugging(isDebugMode);
+    }
 
     // Check input format early to determine initialization flow
     // In TTY mode, ignore stream-json input format to prevent process from hanging
@@ -918,38 +1058,54 @@ export async function main() {
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    const initializationResult = await initializeApp(config, settings);
+    const { initializeApp } = await import('./core/initializer.js');
+    let input = config.getQuestion();
+    const hasRemoteInput = Boolean(config.getInputFile?.());
+    const deferIdeConnection =
+      config.isInteractive() &&
+      !config.getExperimentalZedIntegration() &&
+      !input &&
+      !hasRemoteInput;
+    markAcpStartup('appInitializationStart');
+    const initializationResult = await initializeApp(config, settings, {
+      deferIdeConnection,
+    });
+    markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
-      await runAcpAgent(config, settings, argv);
-      // Clean up child processes and force exit, matching other non-interactive modes
-      await runExitCleanup();
+      markAcpStartup('acpImportStart');
+      const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
+      markAcpStartup('acpImportEnd');
+      try {
+        await runAcpAgent(config, settings, argv, {
+          privateParentCapability: isAcpMode
+            ? privateAcpParentCapability
+            : undefined,
+          externalToolGuardRequired:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          externalToolGuardProviderAttached:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuardProvider ===
+              EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+        });
+      } finally {
+        // Clean up child processes even when ACP setup or shutdown fails.
+        await runExitCleanup();
+      }
       process.exit(0);
     }
 
-    // Background housekeeping: file-history cleanup and (future) other
-    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
-    // don't create the file-history dirs this cleans, so they skip.
-    // Dynamic import keeps --help / one-shot --prompt paths from loading
-    // this code at all. Timers inside are .unref()'d so they never block
-    // process exit.
-    if (config.isInteractive()) {
-      // .catch() is intentional: a dynamic-import or module-init failure
-      // (theoretically near-impossible — the module has no top-level side
-      // effects — but defense in depth matches the runPass try/catch in
-      // scheduler.ts) becomes a swallowed log instead of an unhandled
-      // promise rejection that crashes the REPL.
-      void import('./utils/housekeeping/scheduler.js')
-        .then((m) => m.startBackgroundHousekeeping(config, settings))
-        .catch((err) => {
-          debugLogger.warn('failed to start background housekeeping:', err);
-        });
-    }
-
-    let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
+        ...(config.isSafeMode()
+          ? [
+              '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
+            ]
+          : []),
         ...(await getStartupWarnings()),
         ...(await getUserStartupWarnings({
           workspaceRoot: process.cwd(),
@@ -966,6 +1122,7 @@ export async function main() {
           : []),
       ]),
     ];
+    const emittedStartupWarnings = new Set(startupWarnings);
 
     // Surface critical startup warnings (corrupted settings, recovery, etc.)
     // to stderr so they are visible regardless of UI mode. In interactive
@@ -1012,14 +1169,19 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
         settings,
         startupWarnings,
         process.cwd(),
         initializationResult!,
-        argv.attachDaemon,
-        argv.daemonToken,
+        {
+          postRenderConnectIde: deferIdeConnection,
+          extensionRefreshState,
+          attachDaemonUrl: argv.attachDaemon,
+          attachDaemonToken: argv.daemonToken,
+        },
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.
@@ -1038,9 +1200,13 @@ export async function main() {
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
       writeStderrLine('Debug mode enabled');
-      writeStderrLine(
-        `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
-      );
+      if (isDebugLogFileEnabled()) {
+        writeStderrLine(
+          `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
+        );
+      } else {
+        writeStderrLine('Debug log file disabled by QWEN_DEBUG_LOG_FILE');
+      }
       if (isDebugLoggingDegraded()) {
         writeStderrLine(
           'Warning: Debug logging is degraded (write failures occurred)',
@@ -1066,6 +1232,11 @@ export async function main() {
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      for (const warning of config.getWarnings()) {
+        if (emittedStartupWarnings.has(warning)) continue;
+        emittedStartupWarnings.add(warning);
+        writeStderrLine(warning);
+      }
       profileCheckpoint('config_initialize_end');
 
       // Non-interactive paths feed a prompt to the model immediately after
@@ -1123,6 +1294,9 @@ export async function main() {
       }
     }
 
+    const { validateNonInteractiveAuth } = await import(
+      './validateNonInterActiveAuth.js'
+    );
     const nonInteractiveConfig = await validateNonInteractiveAuth(
       settings.merged.security?.auth?.useExternal,
       config,
@@ -1133,13 +1307,23 @@ export async function main() {
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
+      const { runNonInteractiveStreamJson } = await import(
+        './nonInteractive/session.js'
+      );
 
-      await runNonInteractiveStreamJson(
+      nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
         nonInteractiveConfig,
-        trimmedInput.length > 0 ? trimmedInput : '',
         settings,
       );
-      await runExitCleanup();
+      try {
+        await runNonInteractiveStreamJson(
+          nonInteractiveConfig,
+          trimmedInput.length > 0 ? trimmedInput : '',
+          settings,
+        );
+      } finally {
+        await runExitCleanup();
+      }
       // `runNonInteractiveStreamJson` doesn't return an explicit exit
       // code yet, so a cleanup task that mutates `process.exitCode`
       // could clobber a non-zero failure signal. This is currently safe
@@ -1170,18 +1354,25 @@ export async function main() {
 
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
-    const exitCode = await runNonInteractive(
+    const { runNonInteractive } = await import('./nonInteractiveCli.js');
+    nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
       nonInteractiveConfig,
       settings,
-      input,
-      prompt_id,
     );
-    // Call cleanup before process.exit, which causes cleanup to not run.
-    // Capture the exit code BEFORE cleanup so any cleanup task that
-    // mutates process.exitCode can't silently turn a structured-output
-    // failure (or other explicit non-zero return from runNonInteractive)
-    // into a zero exit.
-    await runExitCleanup();
+    let exitCode: number;
+    try {
+      exitCode = await runNonInteractive(
+        nonInteractiveConfig,
+        settings,
+        input,
+        prompt_id,
+      );
+    } finally {
+      // Call cleanup before process.exit, which causes cleanup to not run.
+      await runExitCleanup();
+    }
+    // Capture the exit code BEFORE cleanup so any cleanup task that mutates
+    // process.exitCode can't silently turn an explicit failure into success.
     process.exit(exitCode);
   }
 }
@@ -1190,13 +1381,112 @@ export function createNonInteractivePromptId(sessionId: string): string {
   return `${sessionId}########0`;
 }
 
-function setWindowTitle(title: string, settings: LoadedSettings) {
-  if (!settings.merged.ui?.hideWindowTitle) {
-    const windowTitle = computeWindowTitle(title);
-    process.stdout.write(`\x1b]2;${windowTitle}\x07`);
-
-    process.on('exit', () => {
-      process.stdout.write(`\x1b]2;\x07`);
-    });
+/**
+ * Watches `.lsp.json` for changes and reconciles running LSP servers
+ * (add / remove / restart) without requiring a session restart.
+ *
+ * Silently no-ops when LSP is disabled or the active client does not
+ * support runtime reinitialization.
+ *
+ * Emits {@link AppEvent.LspStatusChanged} after every successful reload
+ * so the UI can reflect the new server state.
+ */
+export function registerLspHotReload(
+  config: Config,
+  registerCleanup: (fn: () => void | Promise<void>) => void,
+): void {
+  const lspClient = config.getLspClient?.() as
+    | (ReturnType<Config['getLspClient']> & RuntimeLspClient)
+    | undefined;
+  const runtimeConfig = config as Config & RuntimeLspConfig;
+  const reinitializeLsp = runtimeConfig.reinitializeLsp;
+  if (
+    config.isLspEnabled?.() !== true ||
+    !lspClient?.reinitialize ||
+    !reinitializeLsp
+  ) {
+    return;
   }
+  const lspConfigWatcher = new LspConfigWatcher(config.getProjectRoot());
+  debugLogger.info(
+    `Registering LSP config hot reload watcher for ${config.getProjectRoot()}`,
+  );
+  lspConfigWatcher.startWatching(async (event) => {
+    if (event.changeType === 'invalid') {
+      debugLogger.warn(`Invalid LSP config file ${event.path}: ${event.error}`);
+      appEvents.emit(AppEvent.LogError, event.error);
+      return;
+    }
+    debugLogger.info(
+      `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
+    );
+    let errorReported = false;
+    try {
+      const result = await reinitializeLsp();
+      if (result) {
+        const failedServers = getRuntimeReloadFailedNames(result.reconcile);
+        debugLogger.info(
+          `Reloaded LSP server settings: added=${formatRuntimeReloadNames(
+            result.reconcile.added,
+          )}, removed=${formatRuntimeReloadNames(
+            result.reconcile.removed,
+          )}, restarted=${formatRuntimeReloadNames(
+            result.reconcile.restarted,
+          )}, unchanged=${formatRuntimeReloadNames(
+            result.reconcile.unchanged,
+          )}, failed=${formatRuntimeReloadNames(
+            failedServers,
+          )}, skipped=${formatRuntimeReloadNames(
+            result.skipped.map((server) => server.name),
+          )}`,
+        );
+        if (failedServers.length > 0) {
+          appEvents.emit(AppEvent.LspStatusChanged);
+          const changedServers = [
+            ...result.reconcile.added,
+            ...result.reconcile.removed,
+            ...result.reconcile.restarted,
+          ];
+          const message = `LSP reload partially completed: changed=${formatRuntimeReloadNames(
+            changedServers,
+          )}, failed=${formatRuntimeReloadNames(
+            failedServers,
+          )}. Run with --debug for details.`;
+          appEvents.emit(AppEvent.LogError, message);
+          errorReported = true;
+          throw new Error(message);
+        }
+      } else {
+        debugLogger.info(
+          'Skipped LSP server settings reload because LSP is disabled or no client is available',
+        );
+      }
+      appEvents.emit(AppEvent.LspStatusChanged);
+    } catch (error) {
+      debugLogger.warn('Failed to reload LSP server settings:', error);
+      if (!errorReported) {
+        const message =
+          error instanceof Error
+            ? `Failed to reload LSP server settings: ${error.message}. Some LSP servers may have been partially updated. Run with --debug for details.`
+            : 'Failed to reload LSP server settings; some LSP servers may have been partially updated. Run with --debug for details.';
+        appEvents.emit(AppEvent.LogError, message);
+      }
+      throw error;
+    }
+  });
+  registerCleanup(() => lspConfigWatcher.stopWatching());
+}
+
+function formatRuntimeReloadNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
+}
+
+/**
+ * Reads the optional failed bucket defensively because the CLI may typecheck
+ * against stale core dist declarations during local development.
+ */
+function getRuntimeReloadFailedNames(reconcile: {
+  failed?: readonly string[];
+}): readonly string[] {
+  return reconcile.failed ?? [];
 }

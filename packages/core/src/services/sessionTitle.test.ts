@@ -7,6 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '../utils/environmentContext.js';
 import { sanitizeTitle, tryGenerateSessionTitle } from './sessionTitle.js';
 
 interface MockOptions {
@@ -49,6 +54,9 @@ const DIALOG_HISTORY: Content[] = [
     parts: [{ text: "Let's look at the button handler and the viewport CSS." }],
   },
 ];
+
+const reminder = (body: string) =>
+  `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('tryGenerateSessionTitle', () => {
   it('returns {ok:false, reason:"no_fast_model"} when fast model is absent', async () => {
@@ -149,6 +157,129 @@ describe('tryGenerateSessionTitle', () => {
     expect(callOpts.maxAttempts).toBe(1);
   });
 
+  it('uses the user-facing projection instead of hidden prompt context', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as {
+      contents: Content[];
+    };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden channel instructions');
+  });
+
+  it('projects every recorded user turn when retrying title generation', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden first instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'hidden second instructions' }] },
+        { role: 'model', parts: [{ text: 'Second reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greetings' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      '再见',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).toContain('再见');
+    expect(prompt).not.toContain('hidden first instructions');
+    expect(prompt).not.toContain('hidden second instructions');
+  });
+
+  it('treats an all-empty display projection as intentionally empty', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Should never be used' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['', ''],
+    );
+
+    // `''` entries mean "projection recorded, user-authored text empty" —
+    // stay in projection mode (`empty_history`) instead of falling back to
+    // the raw history, which carries the hidden model context.
+    expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
+    expect(generateJson).not.toHaveBeenCalled();
+  });
+
+  it('does not align a display projection onto an intervening system turn', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        { role: 'model', parts: [{ text: 'Cron reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      'visible channel message',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('visible channel message');
+    expect(prompt).not.toContain('hidden channel instructions');
+    expect(prompt).not.toContain('internal cron prompt');
+  });
+
+  it('omits unprojected older user turns from resumed channel history', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'oldest hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Oldest reply' }] },
+        { role: 'user', parts: [{ text: 'older hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Older reply' }] },
+        { role: 'user', parts: [{ text: 'current hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Current reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    // Resumed sessions replay `undefined` for every user turn recorded before
+    // display-projection tracking existed; only the newest turn projects.
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      undefined,
+      undefined,
+      '当前消息',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('当前消息');
+    expect(prompt).not.toContain('undefined');
+    expect(prompt).not.toContain('older hidden instructions');
+    expect(prompt).not.toContain('current hidden instructions');
+  });
+
   it('sanitizes residual markdown and trailing punctuation from the model result', async () => {
     const { config } = makeConfig({
       fastModel: 'qwen-turbo',
@@ -223,6 +354,147 @@ describe('tryGenerateSessionTitle', () => {
     expect(serialized).not.toContain('TEN_THOUSAND_TOKENS_OF_FILE_DUMP');
     expect(serialized).toContain('scan the auth module');
     expect(serialized).toContain('middleware stores tokens unsafely');
+  });
+
+  it('skips startup context when building the title prompt', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: reminder('STARTUP_SKILL_LIST') }] },
+      { role: 'user', parts: [{ text: 'fix auto title for short prompts' }] },
+      { role: 'model', parts: [{ text: 'I will inspect title generation.' }] },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Fix auto title prompts' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).not.toContain('STARTUP_SKILL_LIST');
+    expect(captured).toContain('fix auto title for short prompts');
+  });
+
+  it('strips system-reminder parts while keeping the real user prompt', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'start with titles' }] },
+      { role: 'model', parts: [{ text: 'Ready.' }] },
+      {
+        role: 'user',
+        parts: [
+          { text: reminder('MID_SESSION_TOOL_METADATA') },
+          { text: 'please add a regression test' },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'I will add the test.' }] },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Add title regression test' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).not.toContain('MID_SESSION_TOOL_METADATA');
+    expect(captured).toContain('please add a regression test');
+  });
+
+  it('excludes UserPromptSubmit hook context from the title prompt', async () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'Diagnose the parser CI failure.' },
+          {
+            text: wrapUserPromptSubmitContext(
+              'UNRELATED_MEMORY_TOPIC '.repeat(80),
+            ),
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'I will inspect the parser workflow.' }],
+      },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Diagnose parser CI failure' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).toContain('Diagnose the parser CI failure.');
+    expect(captured).not.toContain('UNRELATED_MEMORY_TOPIC');
+  });
+
+  it('drops pure system-reminder messages from the title prompt', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'fix session titles' }] },
+      { role: 'model', parts: [{ text: 'I found the title service.' }] },
+      { role: 'user', parts: [{ text: reminder('ADDED_MCP_TOOLS') }] },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Fix session titles' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).not.toContain('ADDED_MCP_TOOLS');
+    expect(captured).toContain('fix session titles');
+  });
+
+  it('strips IDE-merged system reminders from title prompt text', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect the selected file' }] },
+      { role: 'model', parts: [{ text: 'I will inspect it.' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `what does this function do?\n${reminder('IDE_SKILL_CONTEXT')}`,
+          },
+        ],
+      },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Inspect selected function' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).not.toContain('IDE_SKILL_CONTEXT');
+    expect(captured).toContain('what does this function do?');
   });
 
   it('tail-slices conversations longer than 1000 characters', async () => {

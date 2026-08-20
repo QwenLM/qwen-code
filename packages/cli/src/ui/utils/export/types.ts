@@ -6,6 +6,31 @@
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 
+export interface ExportToolLocation {
+  path: string;
+  line?: number | null;
+}
+
+export interface ExportToolInvocation {
+  getDescription(): string;
+  toolLocations(): ExportToolLocation[];
+}
+
+export interface ExportToolDefinition {
+  displayName?: string;
+  kind?: unknown;
+  build?: (args: Record<string, unknown>) => ExportToolInvocation;
+}
+
+export interface ExportToolRegistry {
+  getTool?: (toolName: string) => ExportToolDefinition | null | undefined;
+}
+
+export interface ExportConfig {
+  getChannel?: () => string | undefined;
+  getToolRegistry?: () => ExportToolRegistry | undefined;
+}
+
 /**
  * Universal export message format - SSOT for all export formats.
  * This is format-agnostic and contains all information needed for any export type.

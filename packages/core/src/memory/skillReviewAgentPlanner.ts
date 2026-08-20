@@ -18,14 +18,27 @@ import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   assertRealProjectSkillPath,
+  getArchivedSkillsRoot,
   getProjectSkillsRoot,
   isProjectSkillPath,
   SKILL_FILE_NAME,
 } from '../skills/skill-paths.js';
+import { SKILL_NAME_PATTERN } from '../skills/types.js';
 
 export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
 export const DEFAULT_AUTO_SKILL_MAX_TURNS = 8;
 export const DEFAULT_AUTO_SKILL_TIMEOUT_MS = 120_000;
+
+/**
+ * Mandatory directory-name prefix for skills created by the review agent.
+ * The project `.gitignore` re-ignores directories matching
+ * `.qwen/skills/auto-skill-<glob>` so these transient, session-specific
+ * skills stay out of version control while hand-authored project skills
+ * remain tracked. This is a prompt-level convention only — skill discovery
+ * (`SkillManager`) is prefix-agnostic, and the `source: auto-skill`
+ * frontmatter marker remains the file-level signal for edit protection.
+ */
+export const AUTO_SKILL_DIR_PREFIX = 'auto-skill-' as const;
 
 export interface SkillReviewExecutionResult {
   touchedSkillFiles: string[];
@@ -66,6 +79,21 @@ async function hasAutoSkillSource(filePath: string): Promise<boolean | null> {
   );
   if (!match) return false;
   return /^source:\s*auto-skill\s*$/m.test(match[1]);
+}
+
+async function isArchivedSkillDirectoryReserved(
+  filePath: string,
+  projectRoot: string,
+): Promise<boolean> {
+  const directoryName = path.basename(path.dirname(filePath));
+  try {
+    await fs.lstat(
+      path.join(getArchivedSkillsRoot(projectRoot), directoryName),
+    );
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
 }
 
 function isScopedTool(toolName: string): boolean {
@@ -126,7 +154,10 @@ async function evaluateScopedDecision(
       // For existing files, verify source: auto-skill is present.
       const sourceFlag = await hasAutoSkillSource(ctx.filePath);
       if (sourceFlag === null) {
-        // File does not exist yet — allow creation (path already validated above).
+        if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
+          return 'deny';
+        }
+        // File does not exist yet and the directory name is not archived.
         return 'allow';
       }
       return sourceFlag ? 'allow' : 'deny';
@@ -155,6 +186,9 @@ async function evaluateScopedDecision(
       try {
         await assertRealProjectSkillPath(ctx.filePath, projectRoot);
       } catch {
+        return 'deny';
+      }
+      if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
         return 'deny';
       }
       // ENOENT → file does not exist → allow creation.
@@ -228,7 +262,9 @@ export function createSkillScopedAgentConfig(
   return scopedConfig;
 }
 
-const SKILL_REVIEW_SYSTEM_PROMPT = [
+// Exported for tests so the `auto-skill-` prefix instruction stays asserted
+// at the system-prompt layer too, not just in `buildTaskPrompt`.
+export const SKILL_REVIEW_SYSTEM_PROMPT = [
   'You are reviewing this conversation to extract reusable skills.',
   '',
   'Review the conversation above and consider saving or updating a skill if appropriate.',
@@ -239,6 +275,7 @@ const SKILL_REVIEW_SYSTEM_PROMPT = [
   "- You may ONLY modify skill files that contain 'source: auto-skill' in their YAML frontmatter. Always read a skill file before editing it.",
   '- Do NOT touch skills that lack this marker — they were created by the user.',
   "- When creating a new skill, you MUST include 'source: auto-skill' in the frontmatter so future review agents can safely update it.",
+  `- When creating a new skill, its directory MUST use the \`${AUTO_SKILL_DIR_PREFIX}\` prefix (e.g. \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\`) so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` without the prefix.`,
   '- Do NOT delete any skill. Only create or update.',
   '',
   "If nothing is worth saving, just say 'Nothing to save.' and stop.",
@@ -268,13 +305,11 @@ function buildAgentHistory(history: Content[]): Content[] {
 }
 
 /**
- * Enumerate directories under the project skills root that contain a
- * SKILL.md. Returned names are the directory basenames (the same identifier
- * the agent uses when picking `.qwen/skills/<name>/SKILL.md`).
+ * Enumerate active project skill directory names.
  *
- * Best-effort: any read error (ENOENT, EACCES, ...) returns `[]` so a
- * temporarily-unreadable skills dir downgrades to "no enumeration" rather
- * than aborting the task. Exported for tests.
+ * Best-effort: an unreadable root contributes no names, so a temporary read
+ * failure downgrades enumeration rather than aborting the task. Exported for
+ * tests.
  */
 export async function listExistingSkillDirNames(
   projectRoot: string,
@@ -301,8 +336,32 @@ export async function listExistingSkillDirNames(
       // shouldn't reserve a name.
     }
   }
-  names.sort();
-  return names;
+  return names.sort();
+}
+
+async function listArchivedSkillDirNames(
+  projectRoot: string,
+): Promise<string[]> {
+  const names: string[] = [];
+  try {
+    const entries = await fs.readdir(getArchivedSkillsRoot(projectRoot), {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      // Apply the same charset guard the curator uses everywhere else so a
+      // crafted archived directory name carrying ANSI/control bytes cannot
+      // reach the task prompt verbatim.
+      if (
+        (entry.isDirectory() || entry.isSymbolicLink()) &&
+        SKILL_NAME_PATTERN.test(entry.name)
+      ) {
+        names.push(entry.name);
+      }
+    }
+  } catch {
+    // An unavailable archive contributes no reserved names.
+  }
+  return names.sort();
 }
 
 /**
@@ -316,11 +375,23 @@ export async function listExistingSkillDirNames(
  */
 export async function buildTaskPrompt(projectRoot: string): Promise<string> {
   const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listExistingSkillDirNames(projectRoot);
+  const [active, archived] = await Promise.all([
+    listExistingSkillDirNames(projectRoot),
+    listArchivedSkillDirNames(projectRoot),
+  ]);
   const existingLine =
-    existing.length === 0
+    active.length === 0 && archived.length === 0
       ? '(no skills exist yet — any name is available)'
-      : `Existing skill names (do NOT reuse for write_file; use \`edit\` if you want to update one of these): ${existing.join(', ')}`;
+      : [
+          active.length > 0
+            ? `Active skill directory names (use \`edit\` to update): ${active.join(', ')}`
+            : undefined,
+          archived.length > 0
+            ? `Archived skill directory names (do NOT reuse for write_file): ${archived.join(', ')}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n');
   return [
     `Project skills directory: \`${skillsRoot}\``,
     '',
@@ -328,7 +399,7 @@ export async function buildTaskPrompt(projectRoot: string): Promise<string> {
     '',
     'Use `ls` and `read_file` to inspect existing skills before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
-    "Each skill lives at .qwen/skills/<name>/SKILL.md. Skills you create MUST include 'source: auto-skill' in the frontmatter:",
+    `New skills you create MUST live at \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\` — the \`${AUTO_SKILL_DIR_PREFIX}\` directory prefix is mandatory so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` (no prefix). The frontmatter MUST include 'source: auto-skill':`,
     '',
     '---',
     'name: <skill-name>',
@@ -345,7 +416,9 @@ export async function runSkillReviewByAgent(params: {
   config: Config;
   projectRoot: string;
   history: Content[];
+  /** Per-call turn override; the shared memory setting is used otherwise. */
   maxTurns?: number;
+  /** Per-call timeout override; the shared memory setting is used otherwise. */
   timeoutMs?: number;
 }): Promise<SkillReviewExecutionResult> {
   const scopedConfig = createSkillScopedAgentConfig(
@@ -357,9 +430,15 @@ export async function runSkillReviewByAgent(params: {
     config: scopedConfig,
     taskPrompt: await buildTaskPrompt(params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
-    maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
+    maxTurns:
+      params.maxTurns ??
+      params.config.getMemoryAgentMaxTurns() ??
+      DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
-      (params.timeoutMs ?? DEFAULT_AUTO_SKILL_TIMEOUT_MS) / 60_000,
+      params.timeoutMs !== undefined
+        ? params.timeoutMs / 60_000
+        : (params.config.getMemoryAgentTimeoutMinutes() ??
+          DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
     tools: [
       ToolNames.READ_FILE,
       ToolNames.LS,

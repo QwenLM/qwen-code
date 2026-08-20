@@ -6,19 +6,23 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
+import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
+import { useTerminalSize } from './useTerminalSize.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
+  DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
+  type StatusLinePresetItemId,
 } from '../statusLinePresets.js';
 
 /**
@@ -101,6 +105,39 @@ interface StatusLineCommandConfig {
   hideContextIndicator?: boolean;
 }
 
+// Preset items that already render context usage. When one of them is active
+// the footer indicator would show the same information twice (issue #8695).
+const CONTEXT_PRESET_ITEM_IDS = new Set<StatusLinePresetItemId>([
+  'context-used',
+  'context-remaining',
+]);
+
+/**
+ * Resolves the tri-state `hideContextIndicator` setting:
+ * - explicit `true`/`false` always wins, so users can force either behavior;
+ * - when unset, a preset status line that already shows context usage hides
+ *   the footer indicator to avoid duplicating it;
+ * - callers can keep the automatic indicator when their layout may clip it;
+ * - when unset for a `command` status line, the indicator stays visible — the
+ *   command output is opaque, so we never guess what it contains.
+ */
+export function resolveHideContextIndicator(
+  config: StatusLineConfig | undefined,
+  isContextOverLimit = false,
+  keepAutomaticIndicator = false,
+): boolean {
+  if (typeof config?.hideContextIndicator === 'boolean') {
+    return config.hideContextIndicator;
+  }
+  if (isContextOverLimit || keepAutomaticIndicator) {
+    return false;
+  }
+  if (config?.type === 'preset') {
+    return config.items.some((item) => CONTEXT_PRESET_ITEM_IDS.has(item));
+  }
+  return false;
+}
+
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
 
 const debugLog = createDebugLogger('STATUS_LINE');
@@ -118,8 +155,16 @@ function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
 ): StatusLineConfig | undefined {
   const raw = settings.merged.ui?.statusLine;
+  // `null` explicitly disables the status line; `undefined` (unset) falls
+  // through to the built-in default preset below so new users get useful
+  // context out-of-the-box (issue #5789).
+  if (raw === null) {
+    return undefined;
+  }
+  if (raw === undefined) {
+    return DEFAULT_STATUS_LINE_PRESET_CONFIG;
+  }
   if (
-    raw &&
     typeof raw === 'object' &&
     'type' in raw &&
     raw.type === 'command' &&
@@ -189,7 +234,10 @@ function buildMetricsPayload(
  * on a timer so external data (git branch, quota, clock) stays fresh even
  * when no Agent state has changed.
  */
-export function useStatusLine(): {
+export function useStatusLine(
+  keepAutomaticContextIndicator = false,
+  availableWidth?: number,
+): {
   lines: string[];
   useThemeColors: boolean;
   respectUserColors: boolean;
@@ -198,7 +246,8 @@ export function useStatusLine(): {
   const settings = useSettings();
   const uiState = useUIState();
   const config = useConfig();
-  const { vimEnabled, vimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -262,6 +311,12 @@ export function useStatusLine(): {
   const totalLinesRemoved =
     uiState.sessionStats.metrics.files.totalLinesRemoved;
   const effectiveVim = vimEnabled ? vimMode : undefined;
+  // Reasoning effort lives on the content-generator config, not uiState, so it
+  // isn't a natural render trigger. Track it as a string key so the status line
+  // recomputes immediately when `/effort` changes it mid-session.
+  const reasoningConfig = config.getContentGeneratorConfig()?.reasoning;
+  const reasoningEffortKey =
+    reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
     promptTokenCount: number;
     currentModel: string;
@@ -272,6 +327,7 @@ export function useStatusLine(): {
     totalLinesAdded: number;
     totalLinesRemoved: number;
     streamingState: string;
+    reasoningEffortKey: string;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
@@ -282,6 +338,7 @@ export function useStatusLine(): {
     totalLinesAdded,
     totalLinesRemoved,
     streamingState,
+    reasoningEffortKey,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -372,6 +429,24 @@ export function useStatusLine(): {
 
   const doUpdate = useCallback(() => {
     const preset = statusLinePresetRef.current;
+    const cmd = statusLineCommandRef.current;
+    if (!preset && !cmd) {
+      clearPullRequestLookup();
+      setOutput([]);
+      return;
+    }
+
+    const ui = uiStateRef.current;
+    const cfg = configRef.current;
+    const stats = ui.sessionStats;
+    const m = stats.metrics;
+    const contentGeneratorConfig = cfg.getContentGeneratorConfig();
+    const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
+    const modelDisplayName = ui.currentModel
+      ? cfg.getModelsConfig().getModelDisplayName(ui.currentModel)
+      : cfg.getModelDisplayName();
+    const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
+
     if (preset) {
       if (activeChildRef.current) {
         activeChildRef.current.kill();
@@ -379,21 +454,13 @@ export function useStatusLine(): {
         generationRef.current++;
       }
 
-      const ui = uiStateRef.current;
-      const cfg = configRef.current;
-      const stats = ui.sessionStats;
-      const m = stats.metrics;
       const currentDir = cfg.getTargetDir();
       ensurePullRequestNumber(preset, currentDir, ui.branchName);
 
-      const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
-
-      const contentGeneratorConfig = cfg.getContentGeneratorConfig();
-      const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: cfg.getModelDisplayName(),
+        modelDisplayName,
         reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
@@ -412,19 +479,6 @@ export function useStatusLine(): {
 
     clearPullRequestLookup();
 
-    const cmd = statusLineCommandRef.current;
-    if (!cmd) {
-      setOutput([]);
-      return;
-    }
-
-    const ui = uiStateRef.current;
-    const cfg = configRef.current;
-    const stats = ui.sessionStats;
-    const m = stats.metrics;
-
-    const contextWindowSize =
-      cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
     const usedPercentage =
       contextWindowSize > 0
         ? Math.min(
@@ -438,13 +492,11 @@ export function useStatusLine(): {
           )
         : 0;
 
-    const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
-
     const input: StatusLineCommandInput = {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: cfg.getModelDisplayName(),
+        display_name: modelDisplayName,
       },
       context_window: {
         context_window_size: contextWindowSize,
@@ -494,7 +546,7 @@ export function useStatusLine(): {
     let child: ChildProcess;
     try {
       child = exec(
-        cmd,
+        cmd!,
         { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
         (error, stdout) => {
           if (gen !== generationRef.current) return; // stale
@@ -583,7 +635,8 @@ export function useStatusLine(): {
       totalToolCalls !== prev.totalToolCalls ||
       totalLinesAdded !== prev.totalLinesAdded ||
       totalLinesRemoved !== prev.totalLinesRemoved ||
-      streamingState !== prev.streamingState
+      streamingState !== prev.streamingState ||
+      reasoningEffortKey !== prev.reasoningEffortKey
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
@@ -594,6 +647,7 @@ export function useStatusLine(): {
       prev.totalLinesAdded = totalLinesAdded;
       prev.totalLinesRemoved = totalLinesRemoved;
       prev.streamingState = streamingState;
+      prev.reasoningEffortKey = reasoningEffortKey;
       scheduleUpdate();
     }
   }, [
@@ -611,6 +665,7 @@ export function useStatusLine(): {
     totalLinesAdded,
     totalLinesRemoved,
     streamingState,
+    reasoningEffortKey,
     scheduleUpdate,
     updatePullRequestNumber,
   ]);
@@ -717,6 +772,18 @@ export function useStatusLine(): {
     respectUserColors:
       statusLineConfig?.type === 'command' &&
       statusLineConfig.respectUserColors === true,
-    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
+    hideContextIndicator: resolveHideContextIndicator(
+      statusLineConfig,
+      uiState.sessionStats.lastPromptTokenCount >
+        (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
+      keepAutomaticContextIndicator ||
+        output.some(
+          (line) =>
+            wrapAnsi(line, Math.max(1, availableWidth ?? terminalWidth - 4), {
+              trim: false,
+              hard: true,
+            }).split('\n').length > MAX_STATUS_LINES,
+        ),
+    ),
   };
 }

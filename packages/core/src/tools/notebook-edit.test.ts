@@ -73,6 +73,7 @@ describe('NotebookEditTool', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     CommitAttributionService.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -114,6 +115,10 @@ describe('NotebookEditTool', () => {
       metadata: { language_info: { name: 'python' } },
     });
     seedNotebookRead(filePath);
+    const writeSpy = vi.spyOn(
+      StandardFileSystemService.prototype,
+      'writeTextFile',
+    );
 
     const result = await buildInvocation({
       notebook_path: filePath,
@@ -127,6 +132,10 @@ describe('NotebookEditTool', () => {
     expect(updated.cells[0].execution_count).toBeNull();
     expect(updated.cells[0].outputs).toEqual([]);
     expect(result.llmContent).toContain('replace cell load-data');
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ toolWriteOrigin: 'notebook_edit' }),
+    );
+    writeSpy.mockRestore();
 
     const cacheState = fileReadCache.check(fs.statSync(filePath));
     expect(cacheState.state).toBe('fresh');
@@ -134,6 +143,107 @@ describe('NotebookEditTool', () => {
       expect(cacheState.entry.lastReadWasFull).toBe(true);
       expect(cacheState.entry.lastReadCacheable).toBe(false);
     }
+  });
+
+  it('blocks writing a secret into a team-memory notebook', async () => {
+    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
+    fs.mkdirSync(teamDir, { recursive: true });
+    const filePath = path.join(teamDir, 'analysis.ipynb');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'load-data',
+              source: ['x = 1\n'],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
+
+    // Rejected at validate/build time (parity with edit/write-file), before any
+    // invocation is created — so the serialized notebook never reaches disk.
+    expect(() =>
+      buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'load-data',
+        new_source: `token = "ghp_${'a'.repeat(36)}"`,
+      }),
+    ).toThrow(/shared with all repository collaborators/i);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
+  });
+
+  it('blocks a secret in a sibling cell at execute time (full-notebook backstop)', async () => {
+    // A team-memory notebook that already carries a secret in one cell. Editing
+    // a DIFFERENT, clean cell passes the validate-time single-cell scan (its
+    // new_source has no secret), so only execute()'s scan of the whole
+    // serialized notebook — the backstop edit/write-file can't run on an
+    // .ipynb — catches it. Exercises the execute-time path, not the build-time one.
+    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
+    fs.mkdirSync(teamDir, { recursive: true });
+    const filePath = path.join(teamDir, 'analysis.ipynb');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'creds',
+              source: [`token = "ghp_${'a'.repeat(36)}"`],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+            {
+              cell_type: 'code',
+              id: 'clean',
+              source: ['x = 1\n'],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
+
+    // new_source is clean, so build() succeeds; the rejection comes from
+    // execute()'s full-notebook scan, returned as an error result (not a throw).
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'clean',
+      new_source: 'x = 2\n',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    expect(result.llmContent).toMatch(
+      /shared with all repository collaborators/i,
+    );
+    // Blocked before any disk write — the notebook is untouched.
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
   });
 
   it('replaces a code cell in a UTF-8 BOM notebook and preserves the BOM', async () => {
@@ -470,6 +580,47 @@ describe('NotebookEditTool', () => {
     expect(result.llmContent).toContain('has not been fully read');
   });
 
+  it('rejects a notebook edit terminally when the filesystem reports ino 0', async () => {
+    // `ino: 0` (FAT/exFAT, some SMB mounts) makes the prior read
+    // unprovable, and re-reading cannot fix it — so the model gets a
+    // terminal error instead of the "read it first" instruction.
+    const filePath = writeNotebook('zero-inode.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    fileReadCache.recordRead(filePath, fs.statSync(filePath), {
+      full: true,
+      cacheable: false,
+    });
+    const nativeStat = fs.promises.stat;
+    const stat = vi
+      .spyOn(fs.promises, 'stat')
+      .mockImplementation(async (target: fs.PathLike) => {
+        const stats = await nativeStat(target);
+        if (target === filePath) {
+          Object.defineProperty(stats, 'ino', { value: 0 });
+        }
+        return stats;
+      });
+
+    try {
+      const result = await buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(abortSignal);
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
+      expect(result.llmContent).toContain('does not provide a verifiable');
+      expect(result.llmContent).toContain('Use a different mechanism');
+      expect(result.llmContent).not.toContain('has not been fully read');
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
   it('rejects edits after a truncated notebook read', async () => {
     const filePath = writeNotebook('truncated-read.ipynb', {
       cells: [
@@ -705,6 +856,22 @@ describe('NotebookEditTool', () => {
         new_source: 'x = 1',
       }),
     ).toThrow(/ignored by \.qwenignore/);
+  });
+
+  it('rejects notebooks ignored by .agentignore during validation', () => {
+    fs.writeFileSync(path.join(tempDir, '.agentignore'), '*.ipynb\n', 'utf-8');
+    const filePath = writeNotebook('agent-ignored.ipynb', {
+      cells: [],
+      metadata: {},
+    });
+
+    expect(() =>
+      tool.build({
+        notebook_path: filePath,
+        edit_mode: 'insert',
+        new_source: 'x = 1',
+      }),
+    ).toThrow(/ignored by \.agentignore/);
   });
 
   it('returns a notebook diff for confirmation', async () => {

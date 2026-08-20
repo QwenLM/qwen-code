@@ -9,9 +9,16 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
+import {
+  applyOfficialOpenAIPromptCaching,
+  isOfficialOpenAIEndpoint,
+} from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -19,6 +26,141 @@ import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
+import { createChildAbortController } from '../../utils/abortController.js';
+import { reconcileMaxTokens } from '../tokenLimits.js';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '../modalityDefaults.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
+  MAX_STREAM_GUARD_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
+} from './constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
+import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
+import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import {
+  reportOpenAiChunk,
+  reportOpenAiRequest,
+  reportOpenAiResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
+import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const OPENAI_STRICT_SCHEMA_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'description',
+  'enum',
+]);
+const OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS = new Set([
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+]);
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeSchemaType(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  return [
+    'object',
+    'array',
+    'string',
+    'number',
+    'integer',
+    'boolean',
+    'null',
+  ].includes(normalized)
+    ? normalized
+    : undefined;
+}
+
+function normalizeOpenAIStrictSchema(
+  schema: unknown,
+): Record<string, unknown> | undefined {
+  const source = asObject(schema);
+  if (!source) return undefined;
+
+  const type = normalizeSchemaType(source['type']);
+  if (!type) return undefined;
+
+  const normalized: Record<string, unknown> = { type };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      key === 'type' ||
+      OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS.has(key) ||
+      !OPENAI_STRICT_SCHEMA_KEYS.has(key)
+    ) {
+      continue;
+    }
+    normalized[key] = value;
+  }
+
+  if (type === 'object') {
+    const properties = asObject(source['properties']);
+    if (!properties) return undefined;
+
+    const normalizedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      const property = normalizeOpenAIStrictSchema(value);
+      if (!property) return undefined;
+      normalizedProperties[key] = property;
+    }
+
+    const propertyKeys = Object.keys(normalizedProperties);
+    const required = source['required'];
+    if (
+      !Array.isArray(required) ||
+      !propertyKeys.every((key) => required.includes(key)) ||
+      required.length !== propertyKeys.length
+    ) {
+      return undefined;
+    }
+
+    normalized['properties'] = normalizedProperties;
+    normalized['required'] = required;
+    normalized['additionalProperties'] = false;
+  }
+
+  if (type === 'array') {
+    const items = normalizeOpenAIStrictSchema(source['items']);
+    if (!items) return undefined;
+    normalized['items'] = items;
+  }
+
+  return normalized;
+}
+
+function isRequiredThinkingError(error: unknown): boolean {
+  if (getErrorStatus(error) !== 400) return false;
+  const providerMessage = getRateLimitErrorDetails(error).providerMessage;
+  const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
+  return (
+    message.includes('enable_thinking') &&
+    /(?:restricted to|must be) true\b/i.test(message)
+  );
+}
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -33,63 +175,548 @@ export class StreamContentError extends Error {
   }
 }
 
+/**
+ * Thrown when a streaming response goes silent past the inactivity timeout.
+ * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
+ * transport error, identical to a real socket read timeout.
+ */
+export class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
+    );
+    this.name = 'StreamInactivityTimeoutError';
+  }
+}
+
+/**
+ * Thrown when a streaming response exceeds its upstream-wait budget without
+ * completing. The cap charges accumulated time blocked in `await it.next()`
+ * (upstream latency), never the consumer's processing, so a buffered,
+ * already-complete stream never trips it — the shape it catches is a
+ * never-completing stream the inactivity watchdog cannot see: a drip-fed
+ * gateway or a model crawling through an oversized response resets that
+ * watchdog forever (issue #8597). Same retryable `ETIMEDOUT` code, so a
+ * text-only generation resumes via the transport-continuation recovery; a
+ * turn that already streamed a functionCall surfaces as a visible,
+ * classified error instead.
+ */
+export class StreamLifetimeExceededError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly maxLifetimeMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(
+      `Stream exceeded its ${maxLifetimeMs}ms upstream-wait cap after ` +
+        `${chunksReceived} chunks without completing (wall clock: ` +
+        `${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_MAX_LIFETIME_MS_ENV} to increase this cap ` +
+        `(or 0 to disable it).`,
+    );
+    this.name = 'StreamLifetimeExceededError';
+  }
+}
+
+/**
+ * Maximum bytes of response body to include in NonSSEResponseError diagnostics.
+ */
+const NON_SSE_BODY_PREFIX_LIMIT = 512;
+
+/**
+ * Content-type prefixes that are compatible with SSE streaming. Anything
+ * outside this set (e.g. `text/html`) indicates the upstream did not return
+ * an SSE stream — typically a gateway/proxy interception page.
+ */
+function isSSECompatibleContentType(contentType: string | null): boolean {
+  if (!contentType) return true; // absence → assume SSE (SDK default)
+  const mediaType = (contentType.split(';')[0] ?? '').trim().toLowerCase();
+  return (
+    mediaType === 'text/event-stream' ||
+    mediaType === 'application/x-ndjson' ||
+    mediaType === 'application/stream+json'
+  );
+}
+
+/**
+ * Thrown when the HTTP 200 response to a streaming request has a content-type
+ * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
+ * bounded diagnostic metadata so the user/maintainer can distinguish "model
+ * returned empty stream" from "upstream returned a non-SSE page".
+ */
+export class NonSSEResponseError extends Error {
+  readonly status: number;
+  readonly request_id: string | null;
+
+  constructor(
+    readonly contentType: string | null,
+    readonly httpStatus: number,
+    readonly bodyPrefix: string,
+    readonly requestId: string | null,
+  ) {
+    const preview = bodyPrefix.length > 0 ? ` Body prefix: ${bodyPrefix}` : '';
+    super(
+      `Streaming request received a non-SSE response ` +
+        `(HTTP ${httpStatus}, Content-Type: ${contentType || 'unknown'}).` +
+        `${preview}`,
+    );
+    this.name = 'NonSSEResponseError';
+    this.status = httpStatus;
+    this.request_id = requestId;
+  }
+}
+
+/**
+ * Provider-specific output-budget keys that stand in for `max_tokens` on the
+ * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
+ * samplingParams already carries one of these, the window clamp must not also
+ * inject `max_tokens`: sending the pair double-specifies the output budget and
+ * some endpoints reject it.
+ */
+const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
+
+function hasProviderOutputBudgetKey(samplingParams: {
+  [key: string]: unknown;
+}): boolean {
+  return PROVIDER_OUTPUT_BUDGET_KEYS.some(
+    (key) => samplingParams[key] !== undefined,
+  );
+}
+
+/**
+ * Clamp any provider-specific output-budget key (e.g. `max_completion_tokens`)
+ * to the window's remaining room, mutating and returning the passed object.
+ * An output budget is subject to `prompt + output ≤ window` regardless of the
+ * key it travels under, so we shrink the key's value to `requestMaxTokens` when
+ * it exceeds it — but we clamp the value in place rather than injecting a
+ * separate `max_tokens`, which would double-specify the budget and be rejected
+ * by endpoints like the o-series. When there is room (or no clamp value is
+ * available), the user's value passes through unchanged.
+ */
+function clampProviderOutputBudgetKeys(
+  samplingParams: { [key: string]: unknown },
+  requestMaxTokens: number | undefined,
+): { [key: string]: unknown } {
+  if (typeof requestMaxTokens !== 'number') return samplingParams;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = samplingParams[key];
+    if (typeof value === 'number' && value > requestMaxTokens) {
+      samplingParams[key] = requestMaxTokens;
+    }
+  }
+  return samplingParams;
+}
+
+/**
+ * Resolve a stream-guard timeout (ms). Precedence, for both guards: explicit
+ * `ContentGeneratorConfig` field (programmatic, wins — including `0` to
+ * disable) > the env deployment knob > the built-in default. A malformed env
+ * value is ignored (with a `console.warn`) rather than failing the request.
+ */
+function resolveStreamGuardMs(
+  fromConfig: number | undefined,
+  configLabel: string,
+  envName: string,
+  defaultMs: number,
+): number {
+  // 1. Explicit config field (programmatic) wins:
+  //    - `<= 0` disables the watchdog (downstream `> 0` guards skip it).
+  //    - Values above the JS timer ceiling are rejected: setTimeout silently
+  //      compresses them to 1ms, which would fire near-immediately.
+  //    - NaN/Infinity/non-integer are invalid.
+  if (typeof fromConfig === 'number') {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_GUARD_TIMEOUT_MS
+    ) {
+      return fromConfig;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range ${configLabel}=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
+        `falling back to ${envName}/default.`,
+    );
+  }
+  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
+  //    notation/floats/signs so a typo can't silently become a surprising
+  //    timeout. `0` disables; values above the timer ceiling are rejected.
+  const raw = process.env[envName];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
+        return parsed;
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${envName}="${raw}" ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
+        `using default ${defaultMs}ms.`,
+    );
+  }
+  return defaultMs;
+}
+
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamIdleTimeoutMs,
+    'streamIdleTimeoutMs',
+    QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  );
+}
+
+function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamMaxLifetimeMs,
+    'streamMaxLifetimeMs',
+    QWEN_STREAM_MAX_LIFETIME_MS_ENV,
+    DEFAULT_STREAM_MAX_LIFETIME_MS,
+  );
+}
+
+/**
+ * Wraps a streaming chunk source with two guards. The inactivity watchdog: if
+ * no chunk arrives for `idleMs`, `abortRequest()` is invoked (to abort the
+ * underlying request and free the socket) and the iterator throws — a user
+ * `AbortError` when the parent signal was cancelled, otherwise a retryable
+ * ETIMEDOUT. The idle timer resets on every chunk (including
+ * thinking/reasoning deltas), so an actively streaming model is never
+ * interrupted by it. The lifetime cap does NOT reset: once the stream has
+ * accumulated `maxLifetimeMs` of upstream-wait time (the time spent blocked
+ * on the source, never the consumer's time after a yield) without
+ * completing, the iterator throws the same way — the bound a drip-fed
+ * stream cannot reset (issue #8597). `<= 0` disables each guard
+ * independently.
+ */
+async function* withStreamGuards(
+  source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  idleMs: number,
+  maxLifetimeMs: number,
+  abortRequest: () => void,
+  parentSignal: AbortSignal | undefined,
+): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+  // Both guards off: pass the source through untouched. The caller's
+  // `idleMs > 0 || maxLifetimeMs > 0` already prevents this, but the invariant
+  // must live here too — with both `<= 0`, `wait` computes to `Infinity` and
+  // Node clamps `setTimeout(Infinity)` to ~1ms, so every stream would die
+  // instantly with a bogus lifetime error.
+  if (idleMs <= 0 && maxLifetimeMs <= 0) {
+    yield* source;
+    return;
+  }
+  const it = source[Symbol.asyncIterator]();
+  // Monotonic, never `Date.now()`: an NTP step must not kill a healthy
+  // generation on the next iteration (a forward jump) nor silently disable
+  // the cap until the clock catches up (a backward jump) — the hang this
+  // guard exists to bound. The setTimeout this races is a monotonic clock
+  // too, so the two agree.
+  const streamStartedAt = performance.now();
+  // The lifetime cap is on ACCUMULATED UPSTREAM-WAIT — the wall-clock time
+  // this loop spends blocked in `await it.next()`. It is deliberately NOT
+  // end-to-end delivery time: an upstream that finished and buffered its
+  // chunks owes nothing, however slowly the consumer drains (a paused IDE
+  // client, a big TUI render), and a stream whose terminal `done` resolves
+  // at the boundary completes rather than becoming a retry. The cap only
+  // bites while the consumer is actually waiting on the model — which is
+  // exactly where #8597's drip-fed, never-completing stream spends its time.
+  let upstreamMs = 0;
+  let chunksReceived = 0;
+  try {
+    while (true) {
+      const remainingMs =
+        maxLifetimeMs > 0
+          ? maxLifetimeMs - upstreamMs
+          : Number.POSITIVE_INFINITY;
+      // The upstream-wait budget is already spent; a further wait can only
+      // lose, so fail it here (the lifetime timer below normally wins first).
+      if (remainingMs <= 0) {
+        // Same precedence as the timer below: a user cancellation wins over
+        // the cap's retryable ETIMEDOUT.
+        if (parentSignal?.aborted) {
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        abortRequest();
+        throw new StreamLifetimeExceededError(
+          maxLifetimeMs,
+          chunksReceived,
+          performance.now() - streamStartedAt,
+        );
+      }
+      const nextPromise = it.next();
+      const awaitedAt = performance.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        // The caller wraps only when at least one guard is positive, so at
+        // least one of these is finite.
+        const idleIn = idleMs > 0 ? idleMs : Number.POSITIVE_INFINITY;
+        const wait = Math.min(idleIn, remainingMs);
+        timer = setTimeout(
+          () => {
+            if (parentSignal?.aborted) {
+              // Plain Error (not DOMException) so error redaction's prototype
+              // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+              const abortErr = new Error('Aborted');
+              abortErr.name = 'AbortError';
+              reject(abortErr);
+            } else if (remainingMs <= idleIn) {
+              abortRequest();
+              reject(
+                new StreamLifetimeExceededError(
+                  maxLifetimeMs,
+                  chunksReceived,
+                  performance.now() - streamStartedAt,
+                ),
+              );
+            } else {
+              abortRequest();
+              reject(
+                new StreamInactivityTimeoutError(
+                  idleMs,
+                  chunksReceived,
+                  performance.now() - streamStartedAt,
+                ),
+              );
+            }
+          },
+          Math.max(wait, 0),
+        );
+        timer.unref?.();
+      });
+      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+      try {
+        result = await Promise.race([nextPromise, timeout]);
+      } catch (err) {
+        // Once abortRequest() aborts the request, the orphaned next() rejects
+        // with an AbortError; swallow it so it is not an unhandled rejection.
+        void Promise.resolve(nextPromise).catch(() => {});
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) return;
+      // Charge only the time this chunk took to arrive — the upstream
+      // latency — never the time the consumer spent after the previous yield.
+      upstreamMs += performance.now() - awaitedAt;
+      chunksReceived += 1;
+      yield result.value;
+    }
+  } finally {
+    abortRequest();
+    try {
+      await it.return?.();
+    } catch {
+      // The abort above is the cleanup that matters; ignore return failures.
+    }
+  }
+}
+
 export type { PipelineConfig } from './types.js';
 
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  private readonly requiredThinkingModels = new Set<string>();
+  // Resolved once (config field > env > default) so the env read + any
+  // invalid-value warning happen per pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
+  private readonly streamMaxLifetimeMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
+    );
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
+      this.contentGeneratorConfig,
+    );
   }
 
   async execute(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
-        const openaiResponse = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as OpenAI.Chat.ChatCompletion;
+      async (openaiRequest, context, telemetryAttempt) => {
+        // Wrap in a per-request child so the OpenAI SDK's leaked abort
+        // listener (client.mjs fetchWithTimeout — no {once:true}, no
+        // removeEventListener) stays on a short-lived signal instead of
+        // accumulating on the caller's long-lived round signal.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
+        try {
+          const openaiResponse = (await this.client.chat.completions.create(
+            openaiRequest,
+            {
+              signal: perRequestAc?.signal,
+            },
+          )) as OpenAI.Chat.ChatCompletion;
+          reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
-        const geminiResponse =
-          OpenAIContentConverter.convertOpenAIResponseToGemini(
-            openaiResponse,
-            context,
-          );
+          const geminiResponse =
+            OpenAIContentConverter.convertOpenAIResponseToGemini(
+              openaiResponse,
+              context,
+            );
 
-        return geminiResponse;
+          return geminiResponse;
+        } finally {
+          perRequestAc?.abort();
+        }
       },
     );
   }
 
   async executeStream(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       true,
-      async (openaiRequest, context) => {
-        // Stage 1: Create OpenAI stream
-        const stream = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+      async (openaiRequest, context, telemetryAttempt) => {
+        // Always use a per-request controller so the inactivity watchdog can
+        // abort the SDK request even when the caller did not provide a signal.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = createChildAbortController(parentSignal);
+        let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        try {
+          // Stage 1: Create OpenAI stream. Wrapped in try so a network /
+          // DNS / proxy error during the SDK call still cleans up the
+          // per-request child (same pattern as the non-streaming path).
+          //
+          // Use withResponse() to access HTTP response headers — this allows
+          // early detection of non-SSE responses (e.g. gateway block pages
+          // returning text/html with HTTP 200).
+          const createPromise = this.client.chat.completions.create(
+            openaiRequest,
+            { signal: perRequestAc.signal },
+          );
 
-        // Stage 2: Process stream with conversion and logging
-        return this.processStreamWithLogging(stream, context, request);
+          // withResponse() is available on APIPromise (the OpenAI SDK's
+          // extended Promise). If unavailable (e.g. a mock), fall back.
+          if (
+            typeof (createPromise as { withResponse?: unknown })
+              .withResponse === 'function'
+          ) {
+            const {
+              data,
+              response: httpResponse,
+              request_id,
+            } = await (
+              createPromise as unknown as {
+                withResponse(): Promise<{
+                  data: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+                  response: Response;
+                  request_id: string | null;
+                }>;
+              }
+            ).withResponse();
+            stream = data;
+
+            // Validate content-type: a non-SSE content-type on a streaming
+            // request means the upstream (gateway/proxy) returned something
+            // other than an event stream — surface it immediately.
+            const contentType =
+              httpResponse.headers.get('content-type') ?? null;
+            if (!isSSECompatibleContentType(contentType)) {
+              // Read a bounded prefix of the body for diagnostics. The body
+              // may already be consumed by the SDK's stream parser; in that
+              // case we fall through with an empty prefix.
+              let bodyPrefix = '';
+              try {
+                if (httpResponse.body) {
+                  const reader = httpResponse.body.getReader();
+                  const { value } = await reader.read();
+                  reader.releaseLock();
+                  if (value) {
+                    bodyPrefix = new TextDecoder()
+                      .decode(value)
+                      .slice(0, NON_SSE_BODY_PREFIX_LIMIT);
+                  }
+                }
+              } catch {
+                // Body already consumed by the SDK — expected; proceed
+                // without the prefix.
+              }
+              throw new NonSSEResponseError(
+                contentType,
+                httpResponse.status,
+                bodyPrefix,
+                request_id,
+              );
+            }
+          } else {
+            stream =
+              (await createPromise) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          }
+        } catch (e) {
+          perRequestAc.abort();
+          throw e;
+        }
+
+        // Two guards wrap the stream (the SDK `timeout` only bounds connect +
+        // first response). The inactivity watchdog aborts + surfaces a
+        // retryable ETIMEDOUT after `idleMs` of no chunks; the lifetime cap
+        // covers what the watchdog cannot — a drip-fed stream resets the idle
+        // timer forever while never completing (issue #8597), so it aborts
+        // once `maxLifetimeMs` of accumulated upstream-wait has passed.
+        // `<= 0` disables each guard.
+        const idleMs = this.streamIdleTimeoutMs;
+        const maxLifetimeMs = this.streamMaxLifetimeMs;
+        const guarded =
+          idleMs > 0 || maxLifetimeMs > 0
+            ? withStreamGuards(
+                stream,
+                idleMs,
+                maxLifetimeMs,
+                () => perRequestAc.abort(),
+                parentSignal,
+              )
+            : stream;
+
+        // Stage 2: Process stream with conversion and logging.
+        // Wrap in an async generator that aborts the per-request controller
+        // once the stream is fully consumed or abandoned, releasing the SDK
+        // request and any parent listener.
+        const innerStream = this.processStreamWithLogging(
+          guarded,
+          context,
+          request,
+          userPromptId,
+          telemetryAttempt,
+        );
+        async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+          try {
+            yield* innerStream;
+          } finally {
+            perRequestAc.abort();
+          }
+        }
+        return drainThenCleanup();
       },
     );
   }
@@ -100,16 +727,15 @@ export class ContentGenerationPipeline {
    * 1. Convert OpenAI chunks to Gemini format while preserving original chunks
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
-   * 4. Collect both formats for logging
-   * 5. Handle success/error logging
+   * 4. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
-    const collectedGeminiResponses: GenerateContentResponse[] = [];
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -119,10 +745,37 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingFinishProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
+    ) => {
+      if (!sanitization) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
+      });
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        reportOpenAiChunk(telemetryAttempt, chunk);
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,
@@ -139,13 +792,34 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
-          response.candidates?.[0]?.content?.parts?.length === 0 &&
+          (response.candidates?.[0]?.content?.parts?.length ?? 0) === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -167,13 +841,20 @@ export class ContentGenerationPipeline {
               pending.usageMetadata = response.usageMetadata;
             }
           }
-          collectedGeminiResponses.push(response);
           continue;
+        }
+
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
         }
 
         const shouldYield = this.handleChunkMerging(
           response,
-          collectedGeminiResponses,
+          pendingFinishResponse,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -182,26 +863,109 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
       }
 
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      // Bypass handleError so callers retain the dedicated timeout type and
+      // its idle/chunk/lifetime metadata for retry telemetry and diagnostics.
+      // Both stream guards share the ETIMEDOUT code and the same retry path
+      // (issue #8597).
+      // Hoisted above the thinking-tag check: a drip-fed gateway cutting the
+      // model mid-`<think>` would otherwise surface the guard's ETIMEDOUT as a
+      // PROTOCOL_TAG_LEAK and burn the tag-leak retry budget instead of the
+      // transport replay/continuation one the guard error is meant to ride.
+      if (
+        error instanceof StreamInactivityTimeoutError ||
+        error instanceof StreamLifetimeExceededError
+      ) {
+        const isLifetime = error instanceof StreamLifetimeExceededError;
+        debugLogger.warn(
+          isLifetime
+            ? 'OpenAI stream lifetime cap exceeded'
+            : 'OpenAI stream inactivity timeout',
+          {
+            chunksReceived: error.chunksReceived,
+            // Wall clock, labelled apart from the cap so the two numbers in
+            // the log reconcile the same way the error message does.
+            wallClockMs: error.streamLifetimeMs,
+            ...(isLifetime
+              ? {
+                  maxLifetimeMs: (error as StreamLifetimeExceededError)
+                    .maxLifetimeMs,
+                }
+              : { idleMs: (error as StreamInactivityTimeoutError).idleMs }),
+          },
+        );
+        throw redactProxyError(error);
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Use shared error handling logic
@@ -217,79 +981,69 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param collectedGeminiResponses Array to collect responses for logging
+   * @param pendingFinishResponse Finish response currently held for merging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    collectedGeminiResponses: GenerateContentResponse[],
+    pendingFinishResponse: GenerateContentResponse | null,
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
 
-    // Check if we have a pending finish response from previous chunks
-    const hasPendingFinish =
-      collectedGeminiResponses.length > 0 &&
-      collectedGeminiResponses[collectedGeminiResponses.length - 1]
-        .candidates?.[0]?.finishReason;
-
     if (isFinishChunk) {
-      if (hasPendingFinish) {
+      if (pendingFinishResponse) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
+          pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
-        setPendingFinish(lastResponse);
+        if (response.modelVersion) {
+          pendingFinishResponse.modelVersion = response.modelVersion;
+        }
+        setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
         setPendingFinish(response);
       }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
-    } else if (hasPendingFinish) {
+    } else if (pendingFinishResponse) {
       // We have a pending finish chunk, merge this chunk's data into it
-      const lastResponse =
-        collectedGeminiResponses[collectedGeminiResponses.length - 1];
       const mergedResponse = new GenerateContentResponse();
 
       // Keep the finish reason from the previous chunk
-      mergedResponse.candidates = lastResponse.candidates;
+      mergedResponse.candidates = pendingFinishResponse.candidates;
 
       // Merge usage metadata if this chunk has it
       if (response.usageMetadata) {
         mergedResponse.usageMetadata = response.usageMetadata;
       } else {
-        mergedResponse.usageMetadata = lastResponse.usageMetadata;
+        mergedResponse.usageMetadata = pendingFinishResponse.usageMetadata;
       }
 
       // Copy other essential properties from the current response
-      mergedResponse.responseId = response.responseId;
-      mergedResponse.createTime = response.createTime;
-      mergedResponse.modelVersion = response.modelVersion;
-      mergedResponse.promptFeedback = response.promptFeedback;
-
-      // Update the collected responses with the merged response
-      collectedGeminiResponses[collectedGeminiResponses.length - 1] =
-        mergedResponse;
+      mergedResponse.responseId =
+        response.responseId || pendingFinishResponse.responseId;
+      mergedResponse.createTime =
+        response.createTime || pendingFinishResponse.createTime;
+      mergedResponse.modelVersion =
+        response.modelVersion || pendingFinishResponse.modelVersion;
+      mergedResponse.promptFeedback =
+        response.promptFeedback || pendingFinishResponse.promptFeedback;
 
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
     }
 
-    // Normal chunk - collect and yield
-    collectedGeminiResponses.push(response);
+    // Normal chunk
     return true;
   }
 
   private async buildRequest(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     context: RequestContext,
     isStreaming: boolean,
@@ -304,14 +1058,19 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
+      ...this.buildResponseFormat(request),
     };
 
-    // Add streaming options if present
     if (isStreaming) {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
       ).stream = true;
       baseRequest.stream_options = { include_usage: true };
+    } else {
+      // Explicit false required: some gateways default to SSE when the field is absent.
+      (
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
+      ).stream = false;
     }
 
     // Add tools if present and non-empty.
@@ -322,13 +1081,38 @@ export class ContentGenerationPipeline {
           request.config.tools,
           this.contentGeneratorConfig.schemaCompliance ?? 'auto',
         );
+
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+      // tool_choice so structured side queries (e.g. the AUTO-mode
+      // classifier's respond_in_schema) can force the model to emit a tool
+      // call instead of free-texting. Without this, thinking-heavy models
+      // may consume the tiny output budget on reasoning and skip the tool.
+      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      if (fcMode === 'ANY') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'required';
+      } else if (fcMode === 'NONE') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'none';
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
-    const providerRequest = this.config.provider.buildRequest(
+    let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
     );
+    if (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
+    ) {
+      providerRequest = applyOfficialOpenAIPromptCaching(
+        providerRequest,
+        this.config.cliConfig.getSessionId?.(),
+        request.promptCacheSharing === true,
+        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
+      );
+    }
 
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),
@@ -337,6 +1121,18 @@ export class ContentGenerationPipeline {
     // not just remove the effort knob — otherwise providers whose default
     // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
     // latency/cost.
+    //
+    // Exception: `thinkingMandatory` marks models that reject
+    // `enable_thinking: false` with a 400 (e.g. qwen3.8-max-preview on
+    // DashScope Token Plan gateways — set by the preset, or by users via
+    // model generation config). For these, never emit the disable on the
+    // wire: a "disabled" shape is a guaranteed request failure, so the flag
+    // also overrides the config-level `reasoning: false` opt-out.
+    const model = (context.model ?? '').toLowerCase();
+    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+      this.contentGeneratorConfig,
+    );
+    const thinkingMandatory = this.requiresThinking(model);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -356,20 +1152,47 @@ export class ContentGenerationPipeline {
       // request-level model override would otherwise desync the gate from
       // what actually ships: a qwen config with a non-qwen request model
       // would leak the field, and a non-qwen config with a qwen request
-      // model would miss the disable signal (the #4501 regression).
-      //
-      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
-      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
-      // start with `qwen` but is the most common hybrid-thinking model
-      // for first-time users, so it must be covered.
-      const model = (context.model ?? '').toLowerCase();
-      if (
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-          this.contentGeneratorConfig,
-        ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
-        typed['enable_thinking'] = false;
+      // model would miss the disable signal (the regression).
+      if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
+        if (isDashScope) {
+          if (isTieredEffortWireModel(model)) {
+            // The tier-native family reads reasoning_effort, not the
+            // boolean: emit the canonical disable in the knob it reads
+            // (the strip below preserves 'none'). Drop a user-supplied
+            // thinking_budget too — DashScope rejects it alongside
+            // reasoning_effort.
+            delete typed['enable_thinking'];
+            delete typed['thinking_budget'];
+            typed['reasoning_effort'] = 'none';
+          } else {
+            typed['enable_thinking'] = false;
+          }
+        } else {
+          // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
+          // the model's chat template server-side and read the thinking switch
+          // from `chat_template_kwargs`, not a top-level `enable_thinking`
+          // (which they silently ignore). Send it there so hybrid qwen models
+          // actually stop emitting <think> when reasoning is disabled — e.g.
+          // the auto-mode permission classifier's short structured-output
+          // calls, which otherwise spend their small token budget on thinking
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
+          const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          typed['chat_template_kwargs'] = {
+            ...existing,
+            enable_thinking: false,
+          };
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
@@ -380,7 +1203,7 @@ export class ContentGenerationPipeline {
       if ('reasoning' in typed) {
         delete typed['reasoning'];
       }
-      if ('reasoning_effort' in typed) {
+      if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
@@ -394,7 +1217,101 @@ export class ContentGenerationPipeline {
       }
     }
 
+    if (thinkingMandatory) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if (typed['enable_thinking'] === false) {
+        delete typed['enable_thinking'];
+      }
+      // `reasoning_effort: 'none'` is the tiered family's canonical disable
+      // shape (the provider canonicalizes the extra_body escape hatch into
+      // it); a thinking-mandatory model rejects it like the boolean shapes.
+      if (typed['reasoning_effort'] === 'none') {
+        delete typed['reasoning_effort'];
+      }
+      const chatTemplateKwargs = typed['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (chatTemplateKwargs?.['enable_thinking'] === false) {
+        const remaining = { ...chatTemplateKwargs };
+        delete remaining['enable_thinking'];
+        if (Object.keys(remaining).length > 0) {
+          typed['chat_template_kwargs'] = remaining;
+        } else {
+          delete typed['chat_template_kwargs'];
+        }
+      }
+    }
+
+    const typed = providerRequest as unknown as Record<string, unknown>;
+    const reasoningEffort = typed['reasoning_effort'];
+    const thinkingBudget = typed['thinking_budget'];
+    // DashScope rejects forced tool selection while thinking is enabled
+    // ("The tool_choice parameter does not support being set to required or
+    // object in thinking mode"). Both field clauses are family-gated like
+    // the disable path above: `enable_thinking` and `reasoning_effort` are
+    // qwen thinking switches, but on non-qwen models sharing the endpoint
+    // they are opaque parameters that do not put the request in thinking
+    // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
+    // dropping `required` there only degrades their forced-tool side
+    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // "thinking is on" knowledge, model-agnostic by design.
+    if (
+      isDashScope &&
+      typed['tool_choice'] === 'required' &&
+      (thinkingMandatory ||
+        (isQwenFamilyWireModel(model) &&
+          (typed['enable_thinking'] === true ||
+            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
+            (typeof reasoningEffort === 'string' &&
+              reasoningEffort !== 'none'))))
+    ) {
+      debugLogger.debug(
+        'DashScope: dropping tool_choice=required while thinking is enabled',
+        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
+      );
+      delete typed['tool_choice'];
+    }
+
     return providerRequest;
+  }
+
+  private buildResponseFormat(
+    request: PromptCacheSharingParameters,
+  ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    // `response_format` (both `json_object` and the strict `json_schema`
+    // variant) is official-OpenAI-specific wire shape. Third-party
+    // OpenAI-compatible endpoints reject it (DeepSeek accepts only
+    // text/json_object; older vLLM builds and validating gateways refuse
+    // unknown fields), and this pipeline never sent the field before this
+    // feature. Gate on the official endpoint, same precedent as the
+    // prompt-caching feature above.
+    if (!isOfficialOpenAIEndpoint(this.contentGeneratorConfig)) return {};
+    if (request.config?.responseMimeType !== 'application/json') return {};
+    const schema =
+      request.config.responseJsonSchema ?? request.config.responseSchema;
+    if (!schema) return { response_format: { type: 'json_object' } };
+    const strictSchema = normalizeOpenAIStrictSchema(schema);
+    if (!strictSchema) return { response_format: { type: 'json_object' } };
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: strictSchema,
+          strict: true,
+        },
+      },
+    };
+  }
+
+  private requiresThinking(model: string): boolean {
+    const normalizedModel = model.toLowerCase();
+    return (
+      this.requiredThinkingModels.has(normalizedModel) ||
+      (this.contentGeneratorConfig.thinkingMandatory === true &&
+        normalizedModel ===
+          (this.contentGeneratorConfig.model ?? '').toLowerCase())
+    );
   }
 
   private buildGenerateContentConfig(
@@ -436,9 +1353,36 @@ export class ContentGenerationPipeline {
     // When samplingParams is set, its keys pass through to the wire verbatim.
     // This lets users target provider-specific parameter names
     // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
-    // When absent, the historical default behavior applies.
+    // No output budget escapes the window clamp, whatever key it travels under:
+    //   - max_tokens is a ceiling, not an exemption — when both a config
+    //     max_tokens and the (clamped) request maxOutputTokens are present the
+    //     smaller wins; when samplingParams omits max_tokens the clamped request
+    //     value is injected.
+    //   - A provider-specific output-budget key (max_completion_tokens,
+    //     max_new_tokens) is clamped in place to the window instead — we do NOT
+    //     also inject max_tokens, since sending the pair double-specifies the
+    //     budget and some endpoints (o-series) reject it. Its value only shrinks
+    //     when the window is tight; when there is room it passes through as-is.
+    // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
+    // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
-      return { ...configSamplingParams };
+      const requestMaxTokens = request.config?.maxOutputTokens;
+      const maxTokens =
+        reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
+        configSamplingParams.max_tokens ??
+        (hasProviderOutputBudgetKey(configSamplingParams)
+          ? undefined
+          : requestMaxTokens);
+      // Single exit: whatever the branch decided about max_tokens, any
+      // provider-specific output-budget key in the result is clamped to the
+      // window too — a config carrying both max_tokens and e.g.
+      // max_completion_tokens must not leak the provider key unclamped.
+      return clampProviderOutputBudgetKeys(
+        maxTokens !== undefined
+          ? { ...configSamplingParams, max_tokens: maxTokens }
+          : { ...configSamplingParams },
+        requestMaxTokens,
+      );
     }
 
     const params: Record<string, unknown> = {
@@ -474,11 +1418,11 @@ export class ContentGenerationPipeline {
     // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
     // For example, across common providers and models:
     //
-    //   - deepseek-reasoner   — thinking is enabled by default and cannot be disabled
-    //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
-    //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
-    //   - qwen3 series        — model-dependent; emitted as `enable_thinking: false`
+    //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
+    //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
+    //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
+    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
     //                           on DashScope endpoints when reasoning is disabled
     //
     // Given this inconsistency, we avoid mapping values and only pass through the
@@ -502,18 +1446,19 @@ export class ContentGenerationPipeline {
    * Common error handling wrapper for execute methods
    */
   private async executeWithErrorHandling<T>(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     isStreaming: boolean,
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
+      telemetryAttempt: GenAiAttemptHandle | undefined,
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
-
-    try {
-      const openaiRequest = await this.buildRequest(
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const executeAttempt = async () => {
+      openaiRequest = await this.buildRequest(
         request,
         userPromptId,
         context,
@@ -525,10 +1470,40 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      const result = await executor(openaiRequest, context);
-      return result;
+      return executor(openaiRequest, context, telemetryAttempt);
+    };
+
+    try {
+      return await executeAttempt();
     } catch (error) {
+      const model = context.model.toLowerCase();
+      const wireRequest = openaiRequest as Record<string, unknown> | undefined;
+      const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        (wireRequest?.['enable_thinking'] === false ||
+          chatTemplateKwargs?.['enable_thinking'] === false ||
+          // The tier-native family's disable shape (reasoning_effort:
+          // 'none') replaces enable_thinking: false on the wire; recognise
+          // it so runtime learning still fires there.
+          wireRequest?.['reasoning_effort'] === 'none') &&
+        request.config?.abortSignal?.aborted !== true &&
+        isRequiredThinkingError(error)
+      ) {
+        this.requiredThinkingModels.add(model);
+        debugLogger.warn('Retrying with required thinking enabled', {
+          model,
+          originalError: getErrorMessage(error),
+        });
+        try {
+          return await executeAttempt();
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
@@ -573,7 +1548,18 @@ export class ContentGenerationPipeline {
       splitToolMedia:
         providerOverrides.splitToolMedia ??
         this.contentGeneratorConfig.splitToolMedia ??
-        false,
+        // Default true: the OpenAI Chat Completions spec only permits text on
+        // `role: "tool"` messages, so tool-returned media (e.g. an image read
+        // by read_file) embedded there is silently dropped or rejected by
+        // strict providers (doubao / new-api / LM Studio) and the model never
+        // sees it (QwenLM/qwen-code#4876). Splitting it into a follow-up user
+        // message is spec-compliant and safe for permissive providers too.
+        // Opt out via generationConfig.splitToolMedia = false.
+        true,
+      toolResultContentFormat:
+        providerOverrides.toolResultContentFormat ??
+        this.contentGeneratorConfig.toolResultContentFormat ??
+        'parts',
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

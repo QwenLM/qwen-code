@@ -93,9 +93,22 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return fire-and-forget exit codes for SessionDelete event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.SessionDelete);
+      expect(exitCodes).toHaveLength(2);
+      for (const row of exitCodes) {
+        expect(row.description).toContain('fire-and-forget');
+      }
+    });
+
     it('should return exit codes for PreCompact event', () => {
       const exitCodes = getHookExitCodes(HookEventName.PreCompact);
       expect(exitCodes).toHaveLength(3);
+    });
+
+    it('should return exit codes for InstructionsLoaded event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.InstructionsLoaded);
+      expect(exitCodes).toHaveLength(2);
     });
 
     it('should return exit codes for PostCompact event', () => {
@@ -148,9 +161,26 @@ describe('hooks constants', () => {
       expect(desc).toBe('When a new session is started');
     });
 
+    it('should return description for SessionDelete', () => {
+      expect(getHookShortDescription(HookEventName.SessionDelete)).toBe(
+        'After an explicitly selected session is deleted',
+      );
+    });
+
+    it('should return description for InstructionsLoaded', () => {
+      const desc = getHookShortDescription(HookEventName.InstructionsLoaded);
+      expect(desc).toBe('When instruction files are loaded');
+    });
+
     it('should return description for PostCompact', () => {
       const desc = getHookShortDescription(HookEventName.PostCompact);
       expect(desc).toBe('After conversation compaction');
+    });
+
+    it('should describe the deleted session id for SessionDelete', () => {
+      expect(getHookDescription(HookEventName.SessionDelete)).toContain(
+        'deleted_session_id',
+      );
     });
 
     it('should return description for StopFailure', () => {
@@ -193,6 +223,21 @@ describe('hooks constants', () => {
     it('should return empty string for Stop event', () => {
       const desc = getHookDescription(HookEventName.Stop);
       expect(desc).toBe('');
+    });
+
+    it('should return description for InstructionsLoaded', () => {
+      const desc = getHookDescription(HookEventName.InstructionsLoaded);
+      expect(desc).toContain('file_path');
+      expect(desc).toContain('memory_type');
+      expect(desc).toContain('load_reason');
+    });
+
+    it('should distinguish model-bound and submitted prompts', () => {
+      const desc = getHookDescription(HookEventName.UserPromptSubmit);
+      expect(desc).toContain('"prompt"');
+      expect(desc).toContain('model-bound');
+      expect(desc).toContain('"submitted_prompt"');
+      expect(desc).toContain('interactive TUI');
     });
 
     it('should return description for PostCompact', () => {
@@ -247,6 +292,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptExpansion);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionEnd);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionDelete);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStop);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
@@ -255,6 +301,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionDenied);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCreated);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.InstructionsLoaded);
     });
 
     it('should include every hook event', () => {
@@ -287,6 +334,7 @@ describe('hooks constants', () => {
       expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);
+      expect(supportsMatchers(HookEventName.SessionDelete)).toBe(false);
     });
 
     it('returns false for unknown events', () => {
@@ -366,6 +414,16 @@ describe('hooks constants', () => {
       );
       expect(info.description).toContain('previous_status');
       expect(info.exitCodes).toHaveLength(3);
+      expect(info.matcherGroups).toEqual([]);
+    });
+
+    it('should create empty info for InstructionsLoaded', () => {
+      const info = createEmptyHookEventInfo(HookEventName.InstructionsLoaded);
+
+      expect(info.event).toBe(HookEventName.InstructionsLoaded);
+      expect(info.shortDescription).toBe('When instruction files are loaded');
+      expect(info.description).toContain('file_path');
+      expect(info.exitCodes).toHaveLength(2);
       expect(info.matcherGroups).toEqual([]);
     });
   });

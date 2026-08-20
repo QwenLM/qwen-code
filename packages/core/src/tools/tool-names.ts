@@ -21,6 +21,7 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
+  ZOOM_IMAGE: 'zoom_image',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -29,35 +30,47 @@ export const ToolNames = {
   AGENT: 'agent',
   SKILL: 'skill',
   EXIT_PLAN_MODE: 'exit_plan_mode',
+  ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
+  WEB_SEARCH: 'web_search',
+  IMAGE_GEN: 'image_gen',
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
   CRON_CREATE: 'cron_create',
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
+  LOOP_WAKEUP: 'loop_wakeup',
+  CREATE_SUB_SESSION: 'create_sub_session',
+  LIST_AGENTS: 'list_agents',
   TASK_STOP: 'task_stop',
+  TASK_CREATE: 'task_create',
+  TASK_UPDATE: 'task_update',
+  TASK_LIST: 'task_list',
+  TEAM_CREATE: 'team_create',
+  TEAM_DELETE: 'team_delete',
+  TEAM_PLAN_APPROVAL: 'team_plan_approval',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
+  READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
-  // Computer Use tools — built-in but backed by an upstream MCP server.
-  // All deferred; revealed only when the user-initiated request triggers
-  // a computer-use action. See packages/core/src/tools/computer-use/.
-  COMPUTER_USE_LIST_APPS: 'computer_use__list_apps',
-  COMPUTER_USE_GET_APP_STATE: 'computer_use__get_app_state',
-  COMPUTER_USE_CLICK: 'computer_use__click',
-  COMPUTER_USE_PERFORM_SECONDARY_ACTION:
-    'computer_use__perform_secondary_action',
-  COMPUTER_USE_SCROLL: 'computer_use__scroll',
-  COMPUTER_USE_DRAG: 'computer_use__drag',
-  COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
-  COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
-  COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
-  WORKFLOW: 'Workflow',
+  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
+  // Their full 35-tool surface is generated into computer-use/schemas.ts and
+  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
+  // subset here only goes stale on every cua-driver version bump — review
+  // round 1 removed the old ocu-era 9-name list, which still carried
+  // `get_app_state` / `perform_secondary_action` that no longer exist.
+  WORKFLOW: 'workflow',
+  WORKFLOW_RUN: 'workflow_run',
+  ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
+  GET_GOAL: 'get_goal',
+  UPDATE_GOAL: 'update_goal',
+  DISPLAY_IMAGE: 'display_image',
 } as const;
 
 /**
@@ -69,40 +82,51 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
+  ZOOM_IMAGE: 'ZoomImage',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
-  TODO_WRITE: 'TodoWrite',
+  TODO_WRITE: 'TodoList',
   MEMORY: 'SaveMemory',
   AGENT: 'Agent',
   SKILL: 'Skill',
   EXIT_PLAN_MODE: 'ExitPlanMode',
+  ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
+  WEB_SEARCH: 'WebSearch',
+  IMAGE_GEN: 'ImageGen',
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
   CRON_CREATE: 'CronCreate',
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
+  LOOP_WAKEUP: 'LoopWakeup',
+  CREATE_SUB_SESSION: 'CreateSubSession',
+  LIST_AGENTS: 'ListAgents',
   TASK_STOP: 'TaskStop',
+  TASK_CREATE: 'TaskCreate',
+  TASK_UPDATE: 'TaskUpdate',
+  TASK_LIST: 'TaskList',
+  TEAM_CREATE: 'TeamCreate',
+  TEAM_DELETE: 'TeamDelete',
+  TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
+  READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
-  COMPUTER_USE_LIST_APPS: 'computer_use__list_apps',
-  COMPUTER_USE_GET_APP_STATE: 'computer_use__get_app_state',
-  COMPUTER_USE_CLICK: 'computer_use__click',
-  COMPUTER_USE_PERFORM_SECONDARY_ACTION:
-    'computer_use__perform_secondary_action',
-  COMPUTER_USE_SCROLL: 'computer_use__scroll',
-  COMPUTER_USE_DRAG: 'computer_use__drag',
-  COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
-  COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
-  COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
+  WORKFLOW_RUN: 'WorkflowRun',
+  ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
+  GET_GOAL: 'Goal',
+  UPDATE_GOAL: 'UpdateGoal',
+  DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 
 // Migration from old tool names to new tool names
@@ -114,6 +138,18 @@ export const ToolNamesMigration = {
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
 } as const;
 
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep_search`) to its canonical form. The single
+ * alias-resolution site: every caller that classifies or keys tool calls by
+ * name — the scheduler, loop detection, plan redaction, memory refresh, the
+ * headless partitioner in nonInteractiveCli, the daemon/ACP session — must
+ * use this so an aliased call is treated identically everywhere.
+ */
+export function canonicalToolName(toolName: string): string {
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
 // Migration from old tool display names to new tool display names
 // These legacy display names were used before the tool naming standardization
 export const ToolDisplayNamesMigration = {
@@ -121,4 +157,5 @@ export const ToolDisplayNamesMigration = {
   FindFiles: ToolDisplayNames.GLOB, // Old display name for Glob
   ReadFolder: ToolDisplayNames.LS, // Old display name for ListFiles
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
+  TodoWrite: ToolDisplayNames.TODO_WRITE, // Old display name for TodoList (renamed from TodoWrite)
 } as const;

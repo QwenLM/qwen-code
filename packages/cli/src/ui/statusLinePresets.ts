@@ -5,17 +5,18 @@
  */
 
 import nodePath from 'node:path';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
+  'project-name',
+  'git-branch',
   'model-with-reasoning',
   'model',
-  'git-branch',
   'context-remaining',
   'total-input-tokens',
   'total-output-tokens',
   'current-dir',
-  'project-name',
   'pull-request-number',
   'branch-changes',
   'context-used',
@@ -46,7 +47,7 @@ export interface StatusLinePresetConfig {
 export type StatusLinePresetReasoning =
   | false
   | {
-      effort?: 'low' | 'medium' | 'high' | 'max';
+      effort?: ReasoningEffort;
     }
   | undefined;
 
@@ -84,6 +85,18 @@ export function aggregateModelTokens(metrics: {
 
 export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
   {
+    id: 'project-name',
+    label: 'project-name',
+    description: 'Project name when available',
+    defaultSelected: true,
+  },
+  {
+    id: 'git-branch',
+    label: 'git-branch',
+    description: 'Current Git branch when available',
+    defaultSelected: true,
+  },
+  {
     id: 'model-with-reasoning',
     label: 'model-with-reasoning',
     description: 'Current model name with reasoning level when available',
@@ -95,16 +108,9 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     description: 'Current model name without reasoning level',
   },
   {
-    id: 'git-branch',
-    label: 'git-branch',
-    description: 'Current Git branch when available',
-    defaultSelected: true,
-  },
-  {
     id: 'context-remaining',
     label: 'context-remaining',
     description: 'Percentage of context window remaining',
-    defaultSelected: true,
   },
   {
     id: 'total-input-tokens',
@@ -120,12 +126,6 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     id: 'current-dir',
     label: 'current-dir',
     description: 'Current working directory',
-    defaultSelected: true,
-  },
-  {
-    id: 'project-name',
-    label: 'project-name',
-    description: 'Project name when available',
   },
   {
     id: 'pull-request-number',
@@ -262,17 +262,22 @@ export function getRunStateLabel(state: StreamingState): string {
   }
 }
 
+function stripProviderPrefix(name: string): string {
+  return name.replace(/^\[[^\]]*\]\s*/, '');
+}
+
 export function formatModelWithReasoning(
   modelDisplayName: string,
   reasoning: StatusLinePresetReasoning,
 ): string {
+  const cleanName = stripProviderPrefix(modelDisplayName);
   if (reasoning === false) {
-    return `${modelDisplayName} reasoning off`;
+    return `${cleanName} reasoning off`;
   }
   if (reasoning?.effort) {
-    return `${modelDisplayName} ${reasoning.effort}`;
+    return `${cleanName} ${reasoning.effort}`;
   }
-  return modelDisplayName;
+  return cleanName;
 }
 
 export function inferPullRequestNumber(
@@ -337,92 +342,88 @@ export function buildStatusLinePresetData(params: {
   };
 }
 
+function formatPresetItem(
+  item: StatusLinePresetItemId,
+  data: StatusLinePresetData,
+): string | undefined {
+  switch (item) {
+    case 'model-with-reasoning':
+      return formatModelWithReasoning(data.modelDisplayName, data.reasoning);
+    case 'model':
+      return stripProviderPrefix(data.modelDisplayName);
+    case 'context-remaining':
+      if (data.contextWindowSize > 0) {
+        return `Context ${formatPercent(data.remainingPercentage)} left`;
+      }
+      return undefined;
+    case 'current-dir':
+      return data.currentDir;
+    case 'context-used':
+      if (data.contextWindowSize > 0 && data.usedPercentage > 0) {
+        return `${formatTokenCount(data.contextWindowSize)} Context ${formatPercent(data.usedPercentage)} used`;
+      }
+      return undefined;
+    case 'git-branch':
+      if (data.branch) {
+        return `git:(${data.branch})`;
+      }
+      return undefined;
+    case 'project-name':
+      if (data.projectName) {
+        return `\u279c ${data.projectName}`;
+      }
+      return undefined;
+    case 'pull-request-number': {
+      const prNumber =
+        data.pullRequestNumber ?? inferPullRequestNumber(data.branch);
+      if (prNumber) {
+        return `#${prNumber}`;
+      }
+      return undefined;
+    }
+    case 'branch-changes':
+      if (data.totalLinesAdded > 0 || data.totalLinesRemoved > 0) {
+        return `+${data.totalLinesAdded} -${data.totalLinesRemoved}`;
+      }
+      return undefined;
+    case 'run-state':
+      return getRunStateLabel(data.streamingState);
+    case 'qwen-version':
+      return `v${data.version}`;
+    case 'context-window-size':
+      if (data.contextWindowSize > 0) {
+        return `${formatTokenCount(data.contextWindowSize)} window`;
+      }
+      return undefined;
+    case 'used-tokens':
+      if (data.currentUsage > 0) {
+        return `${formatTokenCount(data.currentUsage)} used`;
+      }
+      return undefined;
+    case 'total-input-tokens':
+      return `${formatTokenCount(data.totalInputTokens)} total in`;
+    case 'total-output-tokens':
+      return `${formatTokenCount(data.totalOutputTokens)} total out`;
+    case 'session-id':
+      return data.sessionId || undefined;
+    default: {
+      item satisfies never;
+      return undefined;
+    }
+  }
+}
+
 export function buildStatusLinePresetParts(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
   const parts: string[] = [];
-
   for (const item of orderStatusLinePresetItems(config.items)) {
-    switch (item) {
-      case 'model-with-reasoning':
-        parts.push(
-          formatModelWithReasoning(data.modelDisplayName, data.reasoning),
-        );
-        break;
-      case 'model':
-        parts.push(data.modelDisplayName);
-        break;
-      case 'context-remaining':
-        if (data.contextWindowSize > 0) {
-          parts.push(`Context ${formatPercent(data.remainingPercentage)} left`);
-        }
-        break;
-      case 'current-dir':
-        parts.push(data.currentDir);
-        break;
-      case 'context-used':
-        if (data.contextWindowSize > 0 && data.usedPercentage > 0) {
-          parts.push(`Context ${formatPercent(data.usedPercentage)} used`);
-        }
-        break;
-      case 'git-branch':
-        if (data.branch) {
-          parts.push(data.branch);
-        }
-        break;
-      case 'project-name':
-        if (data.projectName) {
-          parts.push(data.projectName);
-        }
-        break;
-      case 'pull-request-number': {
-        const prNumber =
-          data.pullRequestNumber ?? inferPullRequestNumber(data.branch);
-        if (prNumber) {
-          parts.push(`#${prNumber}`);
-        }
-        break;
-      }
-      case 'branch-changes':
-        if (data.totalLinesAdded > 0 || data.totalLinesRemoved > 0) {
-          parts.push(`+${data.totalLinesAdded} -${data.totalLinesRemoved}`);
-        }
-        break;
-      case 'run-state':
-        parts.push(getRunStateLabel(data.streamingState));
-        break;
-      case 'qwen-version':
-        parts.push(`v${data.version}`);
-        break;
-      case 'context-window-size':
-        if (data.contextWindowSize > 0) {
-          parts.push(`${formatTokenCount(data.contextWindowSize)} window`);
-        }
-        break;
-      case 'used-tokens':
-        if (data.currentUsage > 0) {
-          parts.push(`${formatTokenCount(data.currentUsage)} used`);
-        }
-        break;
-      case 'total-input-tokens':
-        parts.push(`${formatTokenCount(data.totalInputTokens)} in`);
-        break;
-      case 'total-output-tokens':
-        parts.push(`${formatTokenCount(data.totalOutputTokens)} out`);
-        break;
-      case 'session-id':
-        if (data.sessionId) {
-          parts.push(data.sessionId);
-        }
-        break;
-      default: {
-        item satisfies never;
-        break;
-      }
+    const text = formatPresetItem(item, data);
+    if (text) {
+      parts.push(text);
     }
   }
-
   return parts;
 }
 
@@ -430,6 +431,6 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const line = buildStatusLinePresetParts(config, data).join(' | ');
+  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
   return line ? [line] : [];
 }

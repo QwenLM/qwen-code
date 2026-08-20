@@ -49,3 +49,6 @@ export { removeSkill } from './skill-remove.js';
 
 // NL-based skill suggestion
 export { suggestSkills, scoreSkillRelevance } from './skill-suggest.js';
+
+// Project auto-skill lifecycle maintenance
+export * from './skill-curator.js';

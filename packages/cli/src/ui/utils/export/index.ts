@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type { ExportMessage, ExportSessionData } from './types.js';
+export type {
+  ExportConfig,
+  ExportMessage,
+  ExportSessionData,
+} from './types.js';
 export { collectSessionData } from './collect.js';
 export { normalizeSessionData } from './normalize.js';
 export { toMarkdown } from './formatters/markdown.js';

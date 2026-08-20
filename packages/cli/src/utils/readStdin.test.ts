@@ -109,4 +109,30 @@ describe('readStdin', () => {
 
     await expect(promise).resolves.toBe('chunk1chunk2');
   });
+
+  it('should enforce the stdin limit by UTF-8 byte size', async () => {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    const maxStdinSize = 8 * 1024 * 1024;
+    const input = '😀'.repeat(maxStdinSize / 4 + 1);
+    mockStdin.read.mockReturnValueOnce(input).mockReturnValueOnce(null);
+
+    try {
+      const promise = readStdin();
+
+      onReadableHandler();
+
+      const result = await promise;
+      expect(Buffer.byteLength(result, 'utf8')).toBe(maxStdinSize);
+      expect(result).toBe('😀'.repeat(maxStdinSize / 4));
+      expect(mockStdin.destroy).toHaveBeenCalledOnce();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        `Warning: stdin input truncated to ${maxStdinSize} bytes.\n`,
+      );
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+    }
+  });
 });

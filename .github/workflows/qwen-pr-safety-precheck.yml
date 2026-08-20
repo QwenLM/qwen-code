@@ -1,0 +1,145 @@
+name: 'Qwen PR Safety Precheck'
+
+on:
+  workflow_call:
+    secrets:
+      CI_BOT_PAT:
+        required: false
+    outputs:
+      decision:
+        description: 'allow_triage or manual_required'
+        value: '${{ jobs.precheck.outputs.decision }}'
+
+jobs:
+  precheck:
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    concurrency:
+      group: 'qwen-pr-precheck-${{ github.event.pull_request.number }}'
+      cancel-in-progress: false
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
+    outputs:
+      decision: '${{ steps.assess.outputs.decision }}'
+    steps:
+      - name: 'Checkout trusted precheck script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/scripts/pr-safety-precheck.mjs'
+
+      - name: 'Check PR author permission'
+        id: 'author_permission'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+        run: |-
+          set -euo pipefail
+          permission="$(
+            gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
+              --jq '.permission' 2>/dev/null || true
+          )"
+          echo "Author '${PR_AUTHOR}' permission='${permission:-<empty>}'"
+          case "$permission" in
+            admin|maintain|write) trusted_author=true ;;
+            *) trusted_author=false ;;
+          esac
+          echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
+
+      - name: 'Collect PR precheck input'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          TRUSTED_AUTHOR: '${{ steps.author_permission.outputs.trusted_author }}'
+        run: |-
+          set -euo pipefail
+          if [ "$TRUSTED_AUTHOR" = "true" ]; then
+            printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
+              > "$RUNNER_TEMP/pr-precheck.json"
+            : > "$RUNNER_TEMP/pr-precheck.diff"
+            exit 0
+          fi
+
+          if ! gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json title,body,headRefOid \
+            > "$RUNNER_TEMP/pr-precheck.json"; then
+            printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
+              > "$RUNNER_TEMP/pr-precheck.json"
+          fi
+
+          max_diff_bytes=$((2 * 1024 * 1024))
+          set +o pipefail
+          gh pr diff "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --patch \
+            | head -c "$max_diff_bytes" > "$RUNNER_TEMP/pr-precheck.diff"
+          diff_status=${PIPESTATUS[0]}
+          set -o pipefail
+          if [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; then
+            echo "PR diff unavailable; precheck will fail closed." >&2
+            : > "$RUNNER_TEMP/pr-precheck.diff"
+          fi
+
+      - name: 'Assess PR safety'
+        id: 'assess'
+        run: |-
+          node .github/scripts/pr-safety-precheck.mjs \
+            --pr "$RUNNER_TEMP/pr-precheck.json" \
+            --diff "$RUNNER_TEMP/pr-precheck.diff" \
+            --trusted-author "${{ steps.author_permission.outputs.trusted_author }}" \
+            --comment "$RUNNER_TEMP/pr-precheck-comment.md"
+
+      - name: 'Upsert manual approval comment'
+        if: "steps.assess.outputs.decision == 'manual_required'"
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          existing_id="$(
+            # -F would otherwise make gh api default to POST.
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot" or (.user.type == "Bot"))] | last | .id // empty'
+          )"
+          if [ -n "$existing_id" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" \
+              -f body="$(cat "$RUNNER_TEMP/pr-precheck-comment.md")" \
+              > /dev/null
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="$(cat "$RUNNER_TEMP/pr-precheck-comment.md")" \
+              > /dev/null
+          fi
+
+      - name: 'Clear manual approval comment'
+        if: "steps.assess.outputs.decision == 'allow_triage'"
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          existing_id="$(
+            # -F would otherwise make gh api default to POST.
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot" or (.user.type == "Bot"))] | last | .id // empty'
+          )"
+          if [ -n "$existing_id" ]; then
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" \
+              > /dev/null
+          fi

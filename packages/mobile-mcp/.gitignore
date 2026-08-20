@@ -1,0 +1,7 @@
+**/.DS_Store
+node_modules
+lib
+.vscode
+coverage
+test-results
+playwright-report

@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
@@ -46,6 +47,7 @@ import type {
   UserFeedbackEvent,
   UserRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
   ArenaSessionStartedEvent,
@@ -487,6 +489,7 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+        ...(event.model ? { model: event.model } : {}),
       },
     });
 
@@ -535,9 +538,13 @@ export class QwenLogger {
       `tool_call#${event.function_name}`,
       {
         properties: {
+          call_id: event.call_id,
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          status: event.status,
+          execution_status: event.execution_status,
+          tool_type: event.tool_type,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
@@ -650,6 +657,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 
@@ -882,6 +890,28 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logRipgrepRuntimeRecoveryEvent(event: RipgrepRuntimeRecoveryEvent): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'ripgrep_runtime_recovery',
+      {
+        properties: {
+          platform: process.platform,
+          arch: process.arch,
+          selection_mode: event.selection_mode,
+          retry_triggered: event.retry_triggered,
+          ...(event.retry_succeeded !== undefined
+            ? { retry_succeeded: event.retry_succeeded }
+            : {}),
+          failure_kind: event.failure_kind,
+        },
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logLoopDetectionDisabledEvent(): void {
     const rumEvent = this.createActionEvent(
       'misc',
@@ -952,6 +982,21 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
       },
     });
 
@@ -1070,7 +1115,7 @@ export class QwenLogger {
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');

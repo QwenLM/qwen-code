@@ -36,6 +36,8 @@ const debugLogger = createDebugLogger('SELECTION_LIST');
 export interface UseSelectionListResult {
   activeIndex: number;
   setActiveIndex: (index: number) => void;
+  /** Move the active index to `index` and select it (click-to-choose). */
+  selectIndex: (index: number) => void;
 }
 
 interface SelectionListState<T> {
@@ -415,8 +417,21 @@ export function useSelectionList<T>({
     });
   };
 
+  // Click-to-choose: move the active index to `index` and select it, the
+  // mouse counterpart of arrowing to a row and pressing Enter. Both dispatches
+  // are processed against the evolving reducer state in order, so SELECT_CURRENT
+  // sees the just-set activeIndex. Disabled rows are ignored (the selection
+  // side effect guards on `disabled` too, but bailing here avoids a redundant
+  // highlight dispatch).
+  const selectIndex = (index: number) => {
+    if (items[index]?.disabled) return;
+    dispatch({ type: 'SET_ACTIVE_INDEX', payload: { index, items } });
+    dispatch({ type: 'SELECT_CURRENT', payload: { items } });
+  };
+
   return {
     activeIndex: state.activeIndex,
     setActiveIndex,
+    selectIndex,
   };
 }

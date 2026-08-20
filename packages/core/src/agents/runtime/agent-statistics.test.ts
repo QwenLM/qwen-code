@@ -16,6 +16,30 @@ describe('AgentStatistics', () => {
   });
 
   describe('basic statistics tracking', () => {
+    it('should reset all statistics for a new turn', () => {
+      stats.start(baseTime);
+      stats.setRounds(3);
+      stats.recordToolCall('file_read', false, 100, 'failed');
+      stats.recordTokens(100, 50, 10, 5, 160);
+
+      stats.reset();
+
+      expect(stats.getSummary(baseTime + 5000)).toEqual({
+        rounds: 0,
+        totalDurationMs: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+      });
+    });
+
     it('should track execution time', () => {
       stats.start(baseTime);
       const summary = stats.getSummary(baseTime + 5000);
@@ -122,10 +146,10 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('Test task', baseTime + 5000);
 
-      expect(result).toContain('📋 Task Completed: Test task');
-      expect(result).toContain('🔧 Tool Usage: 1 calls, 100.0% success');
-      expect(result).toContain('⏱️ Duration: 5.0s | 🔁 Rounds: 2');
-      expect(result).toContain('🔢 Tokens: 1,520 (in 1000, out 500)');
+      expect(result).toContain('▸ Task Completed: Test task');
+      expect(result).toContain('● Tool Usage: 1 calls, 100.0% success');
+      expect(result).toContain('● Duration: 5.0s | ● Rounds: 2');
+      expect(result).toContain('● Tokens: 1,520 (in 1000, out 500)');
     });
 
     it('should handle zero tool calls', () => {
@@ -133,7 +157,7 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('Empty task', baseTime + 1000);
 
-      expect(result).toContain('🔧 Tool Usage: 0 calls');
+      expect(result).toContain('● Tool Usage: 0 calls');
       expect(result).not.toContain('% success');
     });
 
@@ -143,7 +167,7 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('No tokens task', baseTime + 1000);
 
-      expect(result).toContain('🔢 Tokens: 0');
+      expect(result).toContain('● Tokens: 0');
     });
   });
 
@@ -161,14 +185,14 @@ describe('AgentStatistics', () => {
       const result = stats.formatDetailed('Complex task', baseTime + 30000);
 
       expect(result).toContain(
-        '✅ Quality: Poor execution (66.7% tool success)',
+        '✓ Quality: Poor execution (66.7% tool success)',
       );
     });
 
     it('should include speed assessment', () => {
       const result = stats.formatDetailed('Fast task', baseTime + 5000);
 
-      expect(result).toContain('🚀 Speed: Fast completion - under 10 seconds');
+      expect(result).toContain('● Speed: Fast completion - under 10 seconds');
     });
 
     it('should show top tools', () => {
@@ -183,7 +207,7 @@ describe('AgentStatistics', () => {
     it('should include performance insights', () => {
       const result = stats.formatDetailed('Slow task', baseTime + 120000);
 
-      expect(result).toContain('💡 Performance Insights:');
+      expect(result).toContain('★ Performance Insights:');
       expect(result).toContain(
         'Long execution time - consider breaking down complex tasks',
       );

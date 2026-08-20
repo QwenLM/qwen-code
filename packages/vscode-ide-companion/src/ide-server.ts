@@ -204,8 +204,6 @@ export class IDEServer {
         next();
       });
 
-      const mcpServer = createMcpServer(this.diffManager);
-
       this.openFilesManager = new OpenFilesManager(context);
       const onDidChangeSubscription = this.openFilesManager.onDidChange(() => {
         this.broadcastIdeContextUpdate();
@@ -247,6 +245,8 @@ export class IDEServer {
             }
           }, 30000); // 30 sec
 
+          const mcpServer = createMcpServer(this.diffManager);
+
           transport.onclose = () => {
             clearInterval(keepAlive);
             if (transport.sessionId) {
@@ -255,7 +255,7 @@ export class IDEServer {
               delete this.transports[transport.sessionId];
             }
           };
-          mcpServer.connect(transport);
+          await mcpServer.connect(transport);
         } else {
           this.log(
             'Bad Request: No valid session ID provided for non-initialize request.',
@@ -437,7 +437,7 @@ const createMcpServer = (diffManager: DiffManager) => {
     'openDiff',
     {
       description:
-        '(IDE Tool) Open a diff view to create or modify a file. Returns a notification once the diff has been accepted or rejcted.',
+        '(IDE Tool) Open a diff view to create or modify a file. Returns a notification once the diff has been accepted or rejected.',
       inputSchema: OpenDiffRequestSchema.shape,
     },
     async ({ filePath, newContent }: z.infer<typeof OpenDiffRequestSchema>) => {

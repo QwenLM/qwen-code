@@ -108,6 +108,29 @@ describe('writeWorkspaceContextFile', () => {
     );
   });
 
+  it('rechecks the generation immediately before writing', async () => {
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    const assertCanCommit = vi
+      .fn()
+      .mockImplementationOnce(() => {})
+      .mockImplementationOnce(() => {
+        throw new Error('generation closed');
+      });
+
+    await expect(
+      writeWorkspaceContextFile({
+        scope: 'workspace',
+        mode: 'replace',
+        content: 'replacement\n',
+        projectRoot: workspace,
+        assertCanCommit,
+      }),
+    ).rejects.toThrow('generation closed');
+
+    expect(assertCanCommit).toHaveBeenCalledTimes(2);
+    await expect(fs.access(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('writes to the global ~/.qwen directory when scope=global', async () => {
     const result = await writeWorkspaceContextFile({
       scope: 'global',

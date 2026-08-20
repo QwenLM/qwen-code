@@ -10,15 +10,19 @@ import type { ForkRecord } from './forkTranscript.js';
 export type ResolveTurnError = 'invalid_turn' | 'rewind_not_applicable';
 
 /**
- * A resolved turn boundary: `targetTurnIndex` is forwarded verbatim to the
- * daemon's ACP `rewindSession` (`{ sessionId, targetTurnIndex }`);
- * `truncatedEventId` is a record-ARRAY index into the same `records` this
- * function was called with — the same "slice boundary" convention
- * `routes/fork.ts`'s `fromEventId` already uses (`records.slice(0,
- * truncatedEventId)` keeps exactly the records before the target turn).
+ * A resolved turn boundary: `targetTurnIndex` is the 0-indexed count of
+ * user turns to keep (the same number the route maps onto a daemon rewind
+ * snapshot); `addressableTurnCount` is the total number of addressable user
+ * turns — `targetTurnIndex === addressableTurnCount` means `toTurn` addressed
+ * the tip (no truncation); `truncatedEventId` is a record-ARRAY index into
+ * the same `records` this function was called with — the same "slice
+ * boundary" convention `routes/fork.ts`'s `fromEventId` already uses
+ * (`records.slice(0, truncatedEventId)` keeps exactly the records before
+ * the target turn).
  */
 export interface ResolvedTurn {
   targetTurnIndex: number;
+  addressableTurnCount: number;
   truncatedEventId: number;
 }
 
@@ -77,5 +81,10 @@ export function resolveTurn(
       ? records.length
       : userTurnIndices[toTurn]!;
 
-  return { ok: true, targetTurnIndex: toTurn, truncatedEventId };
+  return {
+    ok: true,
+    targetTurnIndex: toTurn,
+    addressableTurnCount: userTurnIndices.length,
+    truncatedEventId,
+  };
 }

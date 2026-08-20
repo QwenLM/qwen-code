@@ -89,4 +89,19 @@ describe('buildPermissionCheckContext', () => {
       filePath: '/project/analysis.ipynb',
     });
   });
+
+  it('uses server_name as the literal specifier for read_mcp_resource', () => {
+    // Lets a persisted `ReadMcpResource(<server>)` rule match per-server
+    // instead of a blanket grant over every configured MCP server.
+    expect(
+      buildPermissionCheckContext(
+        'read_mcp_resource',
+        { server_name: 'asys-mcp', uri: 'asight://x.md' },
+        '/project',
+      ),
+    ).toMatchObject({
+      toolName: 'read_mcp_resource',
+      specifier: 'asys-mcp',
+    });
+  });
 });

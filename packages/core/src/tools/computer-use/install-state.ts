@@ -9,7 +9,11 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 export interface InstallState {
-  /** The package spec the user approved (e.g. "@qwen-code/open-computer-use@0.2.3"). */
+  /**
+   * The cua-driver approval key the user accepted (e.g. "cua-driver-rs@0.5.2",
+   * from `approvalKey()`). Field name is retained for back-compat with existing
+   * on-disk `installed.json`; it no longer holds an npm package spec.
+   */
   approvedPackageSpec: string;
   /** ISO 8601 UTC timestamp of approval. */
   approvedAtIso: string;

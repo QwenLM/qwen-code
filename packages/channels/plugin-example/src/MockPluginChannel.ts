@@ -3,7 +3,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import type {
@@ -24,7 +24,7 @@ export class MockPluginChannel extends ChannelBase {
   constructor(
     name: string,
     config: MockPluginConfig & Record<string, unknown>,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);

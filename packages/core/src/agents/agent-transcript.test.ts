@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -13,6 +13,8 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  buildAgentTranscriptAttach,
+  normalizeResumedAgentDepth,
   readAgentMeta,
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
@@ -20,7 +22,24 @@ import {
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Config } from '../config/config.js';
+import type { Content } from '@google/genai';
+
+// Pin the git-branch annotation without spawning git: buildAgentTranscriptAttach
+// is the only consumer of getCachedGitBranch in this file's import graph.
+// vi.hoisted so the attach tests can also pin WHICH directory the builder
+// hands to the lookup (project root, not the storage dir).
+const { getCachedGitBranchMock } = vi.hoisted(() => ({
+  getCachedGitBranchMock: vi.fn(() => 'test-branch'),
+}));
+
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
+  return {
+    ...actual,
+    getCachedGitBranch: getCachedGitBranchMock,
+  };
+});
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -66,6 +85,61 @@ describe('agent-transcript', () => {
     it('preserves alphanumerics, underscores, and hyphens in agentId', () => {
       expect(getAgentJsonlPath('/proj', 'sess', 'agent_1-abc')).toBe(
         path.join('/proj', 'subagents', 'sess', 'agent-agent_1-abc.jsonl'),
+      );
+    });
+  });
+
+  describe('buildAgentTranscriptAttach', () => {
+    beforeEach(() => {
+      getCachedGitBranchMock.mockClear();
+    });
+
+    function makeConfig(cliVersion: string): Config {
+      return {
+        getSessionId: () => 'sess-9',
+        getProjectRoot: () => '/proj/root',
+        getCliVersion: () => cliVersion,
+        storage: { getProjectDir: () => '/proj/dir' },
+      } as unknown as Config;
+    }
+
+    it('assembles the path and launch metadata every attach site shares', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+      );
+
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'sess-9', 'agent-1'),
+      );
+      expect(options).toEqual({
+        agentId: 'agent-1',
+        sessionId: 'sess-9',
+        cwd: '/proj/root',
+        version: '1.2.3',
+        gitBranch: 'test-branch',
+      });
+      // The branch lookup is anchored at the project root — the storage dir
+      // is never inside a git repo, so a swap would silently drop gitBranch
+      // from every transcript.
+      expect(getCachedGitBranchMock).toHaveBeenCalledWith('/proj/root');
+    });
+
+    it('falls back to an unknown version when the CLI reports none', () => {
+      const { options } = buildAgentTranscriptAttach(makeConfig(''), 'agent-1');
+      expect(options.version).toBe('unknown');
+    });
+
+    it('routes the path through an overridden sessionId for resume', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+        { sessionId: 'launch-session' },
+      );
+
+      expect(options.sessionId).toBe('launch-session');
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'launch-session', 'agent-1'),
       );
     });
   });
@@ -137,12 +211,14 @@ describe('agent-transcript', () => {
         status: 'running',
         subagentName: 'explore',
         resolvedApprovalMode: 'auto-edit',
+        executionAllowedTools: [],
       });
 
       expect(readAgentMeta(metaPath)).toMatchObject({
         agentId: 'a',
         status: 'running',
         subagentName: 'explore',
+        executionAllowedTools: [],
       });
     });
   });
@@ -171,8 +247,6 @@ describe('agent-transcript', () => {
       extra: {
         initialUserPrompt?: string;
         bootstrapHistory?: Content[];
-        bootstrapSystemInstruction?: string | Content;
-        bootstrapTools?: Array<string | FunctionDeclaration>;
         launchTaskPrompt?: string;
       } = {},
     ) {
@@ -260,11 +334,6 @@ describe('agent-transcript', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { cleanup } = makeWriter(jsonlPath, {
         bootstrapHistory: [],
-        bootstrapSystemInstruction: {
-          role: 'system',
-          parts: [{ text: 'fork system' }],
-        },
-        bootstrapTools: [{ name: 'Bash' }],
         launchTaskPrompt: 'Begin.',
       });
 
@@ -278,12 +347,52 @@ describe('agent-transcript', () => {
       expect(records[0]?.systemPayload).toMatchObject({
         kind: 'fork',
         history: [],
-        systemInstruction: {
-          role: 'system',
-          parts: [{ text: 'fork system' }],
-        },
-        tools: [{ name: 'Bash' }],
       });
+      expect(records[0]?.systemPayload).not.toHaveProperty(
+        'executionAllowedTools',
+      );
+    });
+
+    it('seeds an agent_retry system marker at the retry seam', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const first = makeWriter(jsonlPath, { initialUserPrompt: 'task' });
+      first.emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt one',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      first.cleanup();
+
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        appendToExisting: true,
+        retryAttempt: 2,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt two',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['user', undefined],
+        ['assistant', undefined],
+        ['system', 'agent_retry'],
+        ['assistant', undefined],
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ attempt: 2 });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+      expect(records[3]?.parentUuid).toBe(records[2]?.uuid);
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
@@ -295,6 +404,12 @@ describe('agent-transcript', () => {
         round: 1,
         text: 'Hello',
         thoughtText: '',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
         timestamp: Date.now(),
       });
       cleanup();
@@ -303,9 +418,142 @@ describe('agent-transcript', () => {
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('assistant');
       expect(records[0].message?.parts?.[0]).toMatchObject({ text: 'Hello' });
+      expect(records[0].usageMetadata).toMatchObject({
+        promptTokenCount: 100,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 40,
+      });
     });
 
-    it('drops empty ROUND_TEXT to keep the canonical view free of noise', () => {
+    it('persists thought content and live stream chunks separately', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'thinking now',
+        thought: true,
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'x'.repeat(64 * 1024),
+        thought: false,
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'answer',
+        thoughtText: 'thinking now',
+        timestamp: 2,
+      });
+      expect(readJsonl(jsonlPath)[0].message?.parts).toEqual([
+        { text: 'thinking now', thought: true },
+        { text: 'answer' },
+      ]);
+      expect(
+        JSON.parse(
+          fs.readFileSync(`${jsonlPath}.stream`, 'utf8').trim().split('\n')[0]!,
+        ),
+      ).toMatchObject({
+        runId: readJsonl(jsonlPath)[0].agentRunId,
+        round: 1,
+        text: 'thinking now',
+        thought: true,
+        timestamp: 1,
+      });
+      expect(readJsonl(jsonlPath)[0].agentRound).toBe(1);
+      cleanup();
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+    });
+
+    it('flushes live stream chunks when the pending buffer reaches 64 KiB', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'x'.repeat(32 * 1024),
+        thought: false,
+        timestamp: 1,
+      });
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'y'.repeat(32 * 1024),
+        thought: false,
+        timestamp: 2,
+      });
+
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(true);
+      const records = fs
+        .readFileSync(`${jsonlPath}.stream`, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(records).toHaveLength(2);
+      expect(records[1]).toMatchObject({
+        round: 1,
+        thought: false,
+        timestamp: 2,
+      });
+      cleanup();
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+    });
+
+    it('replaces a stale stream sidecar when a writer starts', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+      fs.writeFileSync(`${jsonlPath}.stream`, 'stale\n');
+
+      const { cleanup } = makeWriter(jsonlPath);
+
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      cleanup();
+    });
+
+    it('writes usage-only ROUND_TEXT with a model message for exporters', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        runId: 'run-1',
+        round: 1,
+        text: '',
+        thoughtText: '',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        type: 'assistant',
+        message: { role: 'model', parts: [] },
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
+        agentRunId: 'run-1',
+        agentRound: 1,
+      });
+    });
+
+    it('drops ROUND_TEXT with no text, thought, or usage', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -348,7 +596,7 @@ describe('agent-transcript', () => {
       });
     });
 
-    it('writes TOOL_RESULT events as tool_result records with toolCallResult metadata', () => {
+    it('does not persist provisional TOOL_RESULT response parts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -358,7 +606,44 @@ describe('agent-transcript', () => {
         callId: 'c1',
         name: 'read_file',
         success: true,
-        durationMs: 7,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'read_file',
+              response: { output: 'unfinalized' },
+            },
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      expect(fs.existsSync(jsonlPath)).toBe(false);
+    });
+
+    it('writes finalized tool responses with toolCallResult metadata', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'agent-x',
+        round: 1,
+        responses: [
+          {
+            callId: 'c1',
+            durationMs: 7,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
         timestamp: Date.now(),
       });
       cleanup();
@@ -372,7 +657,7 @@ describe('agent-transcript', () => {
       });
     });
 
-    it('preserves real responseParts from TOOL_RESULT when present', () => {
+    it('preserves finalized responseParts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -385,13 +670,10 @@ describe('agent-transcript', () => {
           },
         },
       ];
-      emitter.emit(AgentEventType.TOOL_RESULT, {
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
         subagentId: 'agent-x',
         round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        success: true,
-        responseParts,
+        responses: [{ callId: 'c1', responseParts }],
         timestamp: Date.now(),
       });
       cleanup();
@@ -420,12 +702,23 @@ describe('agent-transcript', () => {
         description: '',
         timestamp: 2,
       });
-      emitter.emit(AgentEventType.TOOL_RESULT, {
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
         subagentId: 'agent-x',
         round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        success: true,
+        responses: [
+          {
+            callId: 'c1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
         timestamp: 3,
       });
       cleanup();
@@ -580,6 +873,31 @@ describe('agent-transcript', () => {
       expect(records).toHaveLength(2);
       expect(records[1].parentUuid).toBe(records[0].uuid);
       expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[1].uuid);
+    });
+  });
+
+  describe('normalizeResumedAgentDepth', () => {
+    it('passes through valid persisted depths and absent values', () => {
+      expect(normalizeResumedAgentDepth(undefined)).toBeUndefined();
+      expect(normalizeResumedAgentDepth(0)).toBe(0);
+      expect(normalizeResumedAgentDepth(3)).toBe(3);
+      expect(normalizeResumedAgentDepth(100)).toBe(100);
+    });
+
+    it('fails closed (no spawn capacity) on tampered or corrupt values', () => {
+      // A negative depth would make canSpawnNestedAgent() pass for every
+      // cap; clamping down to 0 would likewise fail open by granting full
+      // spawn capacity. Anything invalid pins to the ceiling instead.
+      expect(normalizeResumedAgentDepth(-50)).toBe(100);
+      // JSON `-1e309` parses to -Infinity.
+      expect(normalizeResumedAgentDepth(-Infinity)).toBe(100);
+      expect(normalizeResumedAgentDepth(Infinity)).toBe(100);
+      expect(normalizeResumedAgentDepth(NaN)).toBe(100);
+      expect(normalizeResumedAgentDepth(2.5)).toBe(100);
+      expect(normalizeResumedAgentDepth(101)).toBe(100);
+      expect(normalizeResumedAgentDepth(null as unknown as number)).toBe(
+        undefined,
+      );
     });
   });
 });

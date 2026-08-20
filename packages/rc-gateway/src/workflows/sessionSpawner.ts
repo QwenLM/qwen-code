@@ -70,7 +70,7 @@ export class SessionSpawner implements AgentSpawner {
 
     // Cancel → end the session.
     const onAbort = () =>
-      void this.deps.daemon.endSession(sessionId).catch(() => {});
+      void this.deps.daemon.closeSession(sessionId).catch(() => {});
     req.signal?.addEventListener('abort', onAbort, { once: true });
 
     try {

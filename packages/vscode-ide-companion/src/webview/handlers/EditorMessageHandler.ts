@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
@@ -29,7 +30,7 @@ export class EditorMessageHandler extends BaseMessageHandler {
         break;
 
       default:
-        console.warn(
+        logger.warn(
           '[EditorMessageHandler] Unknown message type:',
           message.type,
         );
@@ -68,7 +69,7 @@ export class EditorMessageHandler extends BaseMessageHandler {
         });
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[EditorMessageHandler] Failed to get active editor:',
         error,
       );
@@ -102,7 +103,7 @@ export class EditorMessageHandler extends BaseMessageHandler {
         }
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[EditorMessageHandler] Failed to focus active editor:',
         error,
       );

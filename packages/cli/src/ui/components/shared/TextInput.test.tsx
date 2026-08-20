@@ -19,6 +19,7 @@ vi.mock('../../hooks/usePreferredEditor.js');
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: { accent: 'cyan' },
+    background: { primary: '#1E1E1E' },
     status: { error: 'red' },
   },
 }));

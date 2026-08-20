@@ -14,6 +14,7 @@ export { HookRunner } from './hookRunner.js';
 export { HookAggregator } from './hookAggregator.js';
 export { HookPlanner, hookEventSupportsMatcher } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
+export { createInstructionsLoadedCallback } from './instructionsLoadedCallback.js';
 
 // Export new hook runners
 export { HttpHookRunner } from './httpHookRunner.js';

@@ -15,6 +15,7 @@ export default {
   'integration-jetbrains': 'JetBrains IDEs',
   'integration-github-action': 'GitHub Actions',
   'qwen-serve': 'Daemon mode (qwen serve)',
+  'qwen-serve-deploy-local': 'Daemon mode — local launch templates',
   'remote-control': 'Remote Control (qwen-rc)',
   'Code with Qwen Code': {
     type: 'separator',

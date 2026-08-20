@@ -8,8 +8,13 @@ import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getAliasSetForTool } from '../utils/tool-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+export function getToolMatcherTargets(toolName: string): string[] {
+  return [...getAliasSetForTool(toolName)];
+}
 
 type HookMatcherTargetKind =
   | 'toolName'
@@ -18,7 +23,8 @@ type HookMatcherTargetKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'filePath';
 
 interface HookMatcherTarget {
   kind: HookMatcherTargetKind;
@@ -58,6 +64,9 @@ export function getHookMatcherTarget(
         target: context?.notificationType ?? '',
       };
 
+    case HookEventName.InstructionsLoaded:
+      return { kind: 'filePath', target: context?.filePath ?? '' };
+
     case HookEventName.UserPromptExpansion:
       // Unlike UserPromptSubmit, command expansions are matchable by the slash
       // command name that produced the submitted prompt.
@@ -65,7 +74,9 @@ export function getHookMatcherTarget(
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
+    case HookEventName.MessageDisplay:
     case HookEventName.PostToolBatch:
+    case HookEventName.SessionDelete:
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
       return undefined;
@@ -177,6 +188,9 @@ export class HookPlanner {
       case 'notificationType':
         return this.matchesNotificationType(matcher, matcherTarget.target);
 
+      case 'filePath':
+        return this.matchesFilePath(matcher, matcherTarget.target);
+
       case 'sessionTrigger':
         return this.matchesSessionTrigger(matcher, matcherTarget.target);
 
@@ -195,6 +209,21 @@ export class HookPlanner {
     notificationType: string,
   ): boolean {
     return matcher === notificationType;
+  }
+
+  /**
+   * Match loaded instruction file path against matcher pattern.
+   */
+  private matchesFilePath(matcher: string, filePath: string): boolean {
+    try {
+      const regex = new RegExp(matcher);
+      return regex.test(filePath);
+    } catch (error) {
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for file path "${filePath}", falling back to exact match: ${error}`,
+      );
+      return matcher === filePath;
+    }
   }
 
   /**
@@ -218,16 +247,33 @@ export class HookPlanner {
    * Match tool name against matcher pattern
    */
   private matchesToolName(matcher: string, toolName: string): boolean {
+    const targets = getToolMatcherTargets(toolName);
+
+    if (
+      matcher.includes('|') &&
+      !matcher.startsWith('^') &&
+      !matcher.startsWith('(')
+    ) {
+      const alternatives = matcher.split('|').map((entry) => entry.trim());
+      if (alternatives.some((entry) => targets.includes(entry))) {
+        return true;
+      }
+    }
+
+    if (targets.includes(matcher)) {
+      return true;
+    }
+
     try {
-      // Attempt to treat the matcher as a regular expression.
+      // Regex matchers apply to the runtime id only. Alias expansion is exact
+      // so display names do not create new substring matches.
       const regex = new RegExp(matcher);
       return regex.test(toolName);
     } catch (error) {
-      // If it's not a valid regex, treat it as a literal string for an exact match.
       debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
+        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", no alias match and invalid regex: ${error}`,
       );
-      return matcher === toolName;
+      return false;
     }
   }
 
@@ -304,4 +350,6 @@ export interface HookEventContext {
   agentType?: string;
   /** Error type for StopFailure matcher filtering (fieldToMatch: 'error') */
   error?: string;
+  /** Loaded instruction/context file path for InstructionsLoaded matcher filtering */
+  filePath?: string;
 }

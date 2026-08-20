@@ -16,6 +16,16 @@ import { renderPermissionRequest } from './render.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
 
+/**
+ * Live reachability state backing the bridge's `GET /healthz` report
+ * (health.ts). The bridge owns the two booleans; health.ts only formats them
+ * into a report.
+ */
+export interface TelegramHealthState {
+  daemonReachable: boolean;
+  telegramReachable: boolean;
+}
+
 export interface TelegramBridgeConfig {
   botApi: TelegramBotApi;
   client: BridgeClient;

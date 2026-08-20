@@ -23,8 +23,11 @@ import {
 import {
   readWorktreeSession,
   clearWorktreeSession,
+  isSessionRuntimeActive,
+  type WorktreeSession,
 } from '../services/worktreeSessionService.js';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -117,10 +120,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     if (this.params.action !== 'remove') {
       return super.getConfirmationDetails(_abortSignal);
     }
-    const projectRoot = this.config.getTargetDir();
-    const wtService = new GitWorktreeService(projectRoot);
-    const worktreePath = wtService.getUserWorktreePath(this.params.name);
-    const branch = worktreeBranchForSlug(this.params.name);
+    const target = await this.resolveConfirmationTarget();
+    const worktreePath = target.worktreePath;
+    const branch = target.branch;
     const command =
       `git worktree remove ${worktreePath}` + ` && git branch -d ${branch}`;
     const details: ToolExecuteConfirmationDetails = {
@@ -148,11 +150,14 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const cwd = this.config.getTargetDir();
     const probe = new GitWorktreeService(cwd);
     const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
-    const service =
+    let service =
       projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
-    const worktreePath = service.getUserWorktreePath(this.params.name);
-    const branch = worktreeBranchForSlug(this.params.name);
+    let worktreePath = service.getUserWorktreePath(this.params.name);
+    let branch = worktreeBranchForSlug(this.params.name);
+    let currentWorktreeSession: WorktreeSession | null = null;
+    let currentSessionInWorktree = false;
+    let ownerProjectRoot = projectRoot;
 
     // Confirm the worktree directory actually exists before doing anything.
     // Distinguish ENOENT ("not found", legitimate) from any other I/O
@@ -161,18 +166,34 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // making it impossible to diagnose a real filesystem problem.
     let exists = false;
     try {
-      const stat = await fs.stat(worktreePath);
-      exists = stat.isDirectory();
+      exists = await isDirectory(worktreePath);
     } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') {
-        exists = false;
+      debugLogger.warn(`exit_worktree: cannot stat ${worktreePath}: ${error}`);
+      return errorResult(
+        `Cannot access worktree at ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+    if (!exists) {
+      const resolved = await this.resolveCurrentSessionWorktree();
+      if (resolved) {
+        service = resolved.service;
+        worktreePath = resolved.worktreePath;
+        branch = resolved.branch;
+        currentWorktreeSession = resolved.session;
+        exists = true;
       } else {
-        debugLogger.warn(
-          `exit_worktree: cannot stat ${worktreePath}: ${error}`,
+        const current = await resolveManagedWorktreeFromCwd(
+          cwd,
+          this.params.name,
         );
-        return errorResult(
-          `Cannot access worktree at ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
-        );
+        if (current) {
+          service = new GitWorktreeService(current.repoRoot);
+          worktreePath = current.worktreePath;
+          branch = worktreeBranchForSlug(this.params.name);
+          currentSessionInWorktree = true;
+          ownerProjectRoot = current.repoRoot;
+          exists = true;
+        }
       }
     }
     if (!exists) {
@@ -218,11 +239,38 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const owner = await readWorktreeSessionMarker(worktreePath);
     const currentSessionId = this.config.getSessionId();
     if (owner !== null && owner !== currentSessionId) {
-      return errorResult(
-        `Refusing to remove worktree "${this.params.name}" — it was ` +
-          `created by a different session (owner=${owner}). Resume the ` +
-          `owning session to drop it, or remove it manually with ` +
-          `\`git worktree remove ${worktreePath}\`.`,
+      currentWorktreeSession ??= await this.readCurrentWorktreeSession();
+      const currentSessionOwnsPath =
+        currentWorktreeSession?.slug === this.params.name &&
+        samePath(currentWorktreeSession.worktreePath, worktreePath);
+      const ownerActive = await isSessionRuntimeActive(
+        owner,
+        currentWorktreeSession
+          ? [
+              currentWorktreeSession.originalCwd,
+              currentWorktreeSession.worktreePath,
+            ]
+          : [ownerProjectRoot, worktreePath],
+      ).catch((error) => {
+        debugLogger.warn(
+          `exit_worktree: failed to check owner runtime ${owner}: ${error}`,
+        );
+        return true;
+      });
+      if (
+        ownerActive ||
+        (!currentSessionOwnsPath && !currentSessionInWorktree)
+      ) {
+        return errorResult(
+          `Refusing to remove worktree "${this.params.name}" — it was ` +
+            `created by a different session (owner=${owner}). Resume the ` +
+            `owning session to drop it, or remove it manually with ` +
+            `\`git worktree remove ${worktreePath}\`.`,
+        );
+      }
+      debugLogger.warn(
+        `exit_worktree: allowing session ${currentSessionId} to remove ` +
+          `${worktreePath}; stale marker owner=${owner}`,
       );
     }
     if (owner === null) {
@@ -352,6 +400,99 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       );
     }
   }
+
+  private async readCurrentWorktreeSession(): Promise<WorktreeSession | null> {
+    try {
+      const sessionPath = this.config
+        .getSessionService()
+        .getWorktreeSessionPath(this.config.getSessionId());
+      return await readWorktreeSession(sessionPath);
+    } catch (error) {
+      debugLogger.warn(
+        `exit_worktree: failed to read current WorktreeSession sidecar: ${error}`,
+      );
+      return null;
+    }
+  }
+
+  private async resolveCurrentSessionWorktree(): Promise<{
+    service: GitWorktreeService;
+    worktreePath: string;
+    branch: string;
+    session: WorktreeSession;
+  } | null> {
+    const session = await this.readCurrentWorktreeSession();
+    if (!session || session.slug !== this.params.name) {
+      return null;
+    }
+    const service = new GitWorktreeService(session.originalCwd);
+    const expectedPath = service.getUserWorktreePath(this.params.name);
+    if (!samePath(session.worktreePath, expectedPath)) {
+      return null;
+    }
+    try {
+      if (!(await isDirectory(session.worktreePath))) {
+        return null;
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `exit_worktree: cannot stat sidecar worktree ${session.worktreePath}: ${error}`,
+      );
+      return null;
+    }
+    return {
+      service,
+      worktreePath: session.worktreePath,
+      branch: session.worktreeBranch,
+      session,
+    };
+  }
+
+  private async resolveConfirmationTarget(): Promise<{
+    worktreePath: string;
+    branch: string;
+  }> {
+    const cwd = this.config.getTargetDir();
+    const probe = new GitWorktreeService(cwd);
+    const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+    const service =
+      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+    const worktreePath = service.getUserWorktreePath(this.params.name);
+    try {
+      if (await isDirectory(worktreePath)) {
+        return {
+          worktreePath,
+          branch: worktreeBranchForSlug(this.params.name),
+        };
+      }
+    } catch {
+      return {
+        worktreePath,
+        branch: worktreeBranchForSlug(this.params.name),
+      };
+    }
+
+    const resolved = await this.resolveCurrentSessionWorktree();
+    if (resolved) {
+      return {
+        worktreePath: resolved.worktreePath,
+        branch: resolved.branch,
+      };
+    }
+
+    const current = await resolveManagedWorktreeFromCwd(cwd, this.params.name);
+    if (current) {
+      return {
+        worktreePath: current.worktreePath,
+        branch: worktreeBranchForSlug(this.params.name),
+      };
+    }
+
+    return {
+      worktreePath,
+      branch: worktreeBranchForSlug(this.params.name),
+    };
+  }
 }
 
 function errorResult(message: string): ToolResult {
@@ -360,6 +501,48 @@ function errorResult(message: string): ToolResult {
     returnDisplay: `Error: ${message}`,
     error: { message },
   };
+}
+
+async function isDirectory(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.isDirectory();
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  return path.resolve(a) === path.resolve(b);
+}
+
+async function resolveManagedWorktreeFromCwd(
+  cwd: string,
+  slug: string,
+): Promise<{ repoRoot: string; worktreePath: string } | null> {
+  let cursor = path.resolve(cwd);
+  while (true) {
+    if (
+      path.basename(cursor) === slug &&
+      path.basename(path.dirname(cursor)) === 'worktrees' &&
+      path.basename(path.dirname(path.dirname(cursor))) === '.qwen'
+    ) {
+      const repoRoot = path.dirname(path.dirname(path.dirname(cursor)));
+      if (await isDirectory(cursor)) {
+        return { repoRoot, worktreePath: cursor };
+      }
+      return null;
+    }
+
+    const parent = path.dirname(cursor);
+    if (parent === cursor) {
+      return null;
+    }
+    cursor = parent;
+  }
 }
 
 export class ExitWorktreeTool extends BaseDeclarativeTool<

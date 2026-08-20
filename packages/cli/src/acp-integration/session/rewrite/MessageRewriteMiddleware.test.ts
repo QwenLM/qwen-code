@@ -73,6 +73,45 @@ describe('MessageRewriteMiddleware', () => {
   });
 
   describe('interceptUpdate — target filtering', () => {
+    it.each(['message', 'all'] as const)(
+      'does not carry slash-command metadata into the next %s rewrite',
+      async (target) => {
+        const { middleware, mockSendUpdate } = createMiddleware(target);
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Context compressed.' },
+          _meta: { source: 'slash_command' },
+        } as unknown as SessionUpdate);
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Normal model response.' },
+        } as unknown as SessionUpdate);
+
+        await middleware.flushTurn();
+        await middleware.waitForPendingRewrites();
+
+        expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'rewritten text' },
+          _meta: { rewritten: true, turnIndex: 1 },
+        });
+
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+          rewrite: ReturnType<typeof vi.fn>;
+        };
+        expect(rewriter.rewrite).toHaveBeenCalledWith(
+          {
+            thoughts: [],
+            messages: ['Normal model response.'],
+            hasToolCalls: false,
+          },
+          expect.any(AbortSignal),
+        );
+      },
+    );
+
     it('should accumulate messages when target is "message"', async () => {
       const { middleware, mockSendUpdate } = createMiddleware('message');
 
@@ -202,6 +241,52 @@ describe('MessageRewriteMiddleware', () => {
       expect(meta['rewritten']).toBe(true);
       expect(meta['turnIndex']).toBe(1);
     });
+
+    it('preserves background discrete metadata on rewritten messages', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'background response' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'monitor-1',
+            status: 'completed',
+            kind: 'monitor',
+            toolUseId: 'tool-1',
+          },
+          customTraceId: 'trace-1',
+        },
+      } as unknown as SessionUpdate);
+
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      const rewriteCall = mockSendUpdate.mock.calls.find(
+        (call: unknown[]) =>
+          (
+            (call[0] as Record<string, unknown>)['_meta'] as
+              | Record<string, unknown>
+              | undefined
+          )?.['rewritten'] === true,
+      );
+      expect(rewriteCall).toBeDefined();
+      expect((rewriteCall![0] as Record<string, unknown>)['_meta']).toEqual({
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: 'monitor-1',
+          status: 'completed',
+          kind: 'monitor',
+          toolUseId: 'tool-1',
+        },
+        customTraceId: 'trace-1',
+        rewritten: true,
+        turnIndex: 1,
+      });
+    });
   });
 
   describe('timeoutMs config', () => {
@@ -298,6 +383,95 @@ describe('MessageRewriteMiddleware', () => {
         await middleware.waitForPendingRewrites();
       } finally {
         vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('waitForPendingRewrites — draining late arrivals', () => {
+    it('waits for a rewrite enqueued while it is already draining', async () => {
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const mockable = LlmRewriter as unknown as {
+        mockImplementation: (fn: unknown) => void;
+      };
+
+      // Hand out a controllable promise per rewrite so we can complete the
+      // first turn's rewrite while a second turn is enqueued mid-drain.
+      const deferreds: Array<{
+        resolve: (v: string) => void;
+        promise: Promise<string>;
+      }> = [];
+      const nextDeferred = () => {
+        let resolve!: (v: string) => void;
+        const promise = new Promise<string>((r) => (resolve = r));
+        const d = { resolve, promise };
+        deferreds.push(d);
+        return d;
+      };
+
+      try {
+        mockable.mockImplementation(() => ({
+          rewrite: vi.fn(() => nextDeferred().promise),
+        }));
+
+        const mockSendUpdate = vi.fn().mockResolvedValue(undefined);
+        const middleware = new MessageRewriteMiddleware(
+          {} as Config,
+          { enabled: true, target: 'all', prompt: 'test prompt' },
+          mockSendUpdate,
+        );
+        const flushMicrotasks = () =>
+          new Promise((resolve) => setImmediate(resolve));
+
+        // Turn 1 → enqueues the first pending rewrite (awaiting deferreds[0]).
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'turn one content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        // Start draining; it captures the first rewrite and awaits it.
+        let drained = false;
+        const waitPromise = middleware.waitForPendingRewrites().then(() => {
+          drained = true;
+        });
+
+        // Turn 2 lands *during* the drain → enqueues a second pending rewrite.
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'turn two content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        // Complete only the first rewrite.
+        deferreds[0].resolve('rewritten one');
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        // The second rewrite is still pending, so the drain must not be done.
+        // Pre-fix, waitForPendingRewrites snapshotted only the first rewrite
+        // and returned here, dropping the second.
+        expect(drained).toBe(false);
+
+        // Complete the second rewrite; the drain now resolves and both
+        // rewritten messages have been emitted.
+        deferreds[1].resolve('rewritten two');
+        await waitPromise;
+        expect(drained).toBe(true);
+
+        const rewriteCalls = mockSendUpdate.mock.calls.filter(
+          (call: unknown[]) =>
+            (
+              (call[0] as Record<string, unknown>)['_meta'] as
+                | Record<string, unknown>
+                | undefined
+            )?.['rewritten'] === true,
+        );
+        expect(rewriteCalls).toHaveLength(2);
+      } finally {
+        // Restore the default mock so later runs are unaffected.
+        mockable.mockImplementation(() => ({
+          rewrite: vi.fn().mockResolvedValue('rewritten text'),
+        }));
       }
     });
   });

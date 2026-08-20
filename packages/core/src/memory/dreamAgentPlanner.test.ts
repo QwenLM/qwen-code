@@ -9,10 +9,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { Storage } from '../config/storage.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
+import {
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+  clearAutoMemoryRootCache,
+} from './paths.js';
 import {
   buildConsolidationTaskPrompt,
   getTranscriptDir,
@@ -25,6 +33,7 @@ vi.mock('../utils/forkedAgent.js', () => ({
 }));
 
 describe('dreamAgentPlanner', () => {
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   let tempDir: string;
   let projectRoot: string;
   let config: Config;
@@ -35,16 +44,27 @@ describe('dreamAgentPlanner', () => {
     );
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
     await ensureAutoMemoryScaffold(projectRoot);
     config = {
       getSessionId: vi.fn().mockReturnValue('session-1'),
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
+      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
+    vi.mocked(runForkedAgent).mockReset();
   });
 
   afterEach(async () => {
     Storage.setRuntimeBaseDir(null);
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -93,6 +113,20 @@ describe('dreamAgentPlanner', () => {
     );
   });
 
+  it('excludes pinned memories from consolidation', () => {
+    const prompt = buildConsolidationTaskPrompt(
+      path.join(tempDir, 'memory'),
+      path.join(tempDir, 'transcripts'),
+    );
+
+    expect(prompt).toContain('`pinned/`');
+    expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain(
+      'Do not intentionally remove existing index entries for valid `pinned/` files',
+    );
+    expect(prompt).toContain('normal index limits still apply');
+  });
+
   it('returns the forked agent result', async () => {
     const mockResult: ForkedAgentResult = {
       status: 'completed',
@@ -122,6 +156,102 @@ describe('dreamAgentPlanner', () => {
         ],
       }),
     );
+  });
+
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('can read transcripts while keeping writes project-memory-only', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    const pm = params.config.getPermissionManager?.() as PermissionManager;
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.GREP,
+        filePath: getTranscriptDir(projectRoot),
+      }),
+    ).resolves.toBe('default');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getAutoMemoryRoot(projectRoot), 'project.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'architecture.md',
+        ),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+    // Pinned protection applies to write/edit; shell deletion is blocked by
+    // the pre-existing read-only shell policy.
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.SHELL,
+        command: `rm ${path.join(
+          getAutoMemoryRoot(projectRoot),
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'architecture.md',
+        )}`,
+      }),
+    ).resolves.toBe('deny');
   });
 
   it('throws when the agent fails', async () => {

@@ -18,9 +18,14 @@ import { FsError, type FsErrorKind } from './errors.js';
 // `./serve/fs/paths.js` without churn.
 import {
   canonicalizeWorkspace,
+  canonicalizeWorkspaces,
   MAX_WORKSPACE_PATH_LENGTH,
 } from '@qwen-code/acp-bridge/workspacePaths';
-export { canonicalizeWorkspace, MAX_WORKSPACE_PATH_LENGTH };
+export {
+  canonicalizeWorkspace,
+  canonicalizeWorkspaces,
+  MAX_WORKSPACE_PATH_LENGTH,
+};
 
 /**
  * Branded absolute path that has passed the workspace boundary check.
@@ -181,11 +186,9 @@ const MAX_ANCESTOR_HOPS = 40;
  * Map lookup; first call still pays the syscall (idempotent on
  * already-canonical input).
  *
- * Cache size is bounded only by the number of *distinct*
- * `boundWorkspace` values a daemon ever sees — `1 daemon = 1
- * workspace` per #4175, so the steady-state size is exactly 1.
- * Tests that exercise multiple workspaces add an entry per
- * scratch dir; entries never have to be evicted because realpath
+ * Cache size is bounded only by the number of *distinct* workspace
+ * roots a daemon ever sees. Multi-root IDE sessions add one entry
+ * per folder; entries never have to be evicted because realpath
  * is functional (a path's canonical form doesn't change unless
  * the path is moved on disk, in which case the bound workspace
  * is wrong elsewhere too).
@@ -197,6 +200,44 @@ function canonicalizeBoundWorkspaceCached(boundWorkspace: string): string {
   const canonical = canonicalizeWorkspace(boundWorkspace);
   CANONICAL_BOUND_CACHE.set(boundWorkspace, canonical);
   return canonical;
+}
+
+function canonicalizeBoundWorkspacesCached(
+  boundWorkspaces: string | readonly string[],
+): string[] {
+  const inputs =
+    typeof boundWorkspaces === 'string' ? [boundWorkspaces] : boundWorkspaces;
+  if (inputs.length === 0) {
+    throw new FsError(
+      'parse_error',
+      'boundWorkspaces must include at least one workspace root',
+    );
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const workspace of inputs) {
+    const canonical = canonicalizeBoundWorkspaceCached(workspace);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(canonical);
+  }
+  return out;
+}
+
+function findContainingWorkspace(
+  absolute: string,
+  boundWorkspaces: readonly string[],
+): string | undefined {
+  let match: string | undefined;
+  for (const workspace of boundWorkspaces) {
+    if (
+      isWithinRoot(absolute, workspace) &&
+      (match === undefined || workspace.length > match.length)
+    ) {
+      match = workspace;
+    }
+  }
+  return match;
 }
 
 /**
@@ -274,15 +315,15 @@ async function findExistingAncestor(
 
 /**
  * Resolve a daemon-input path to an absolute, symlink-canonicalized
- * `ResolvedPath` that is provably inside `boundWorkspace`. Throws
+ * `ResolvedPath` that is provably inside one workspace root. Throws
  * `FsError` on any boundary violation.
  *
  * Algorithm (#4175 PR 18 plan, claude-code-style chain check):
  *
  * 1. Reject suspicious literal patterns before any I/O.
- * 2. Resolve against `boundWorkspace` to absolutize relative inputs.
+ * 2. Resolve against the primary workspace to absolutize relative inputs.
  * 3. Cheap pre-filter: textual containment check rejects obvious
- *    `..` traversal without paying for `realpath`.
+ *    escapes from every registered root without paying for `realpath`.
  * 4. `fs.promises.realpath` on the absolute path. Node's realpath
  *    follows the entire symlink chain natively (SYMLOOP_MAX-bounded);
  *    if any hop escapes the workspace, the final canonical lands
@@ -291,17 +332,16 @@ async function findExistingAncestor(
  *    realpath the ancestor, re-attach the unresolved tail. The tail
  *    can't introduce new symlinks (it doesn't exist), so the joined
  *    result is the actual write target the OS will use.
- * 6. Final containment check against canonicalized `boundWorkspace`.
- *    If the canonical landed outside but the resolved-without-realpath
- *    version was inside, classify as `symlink_escape`; otherwise as
- *    `path_outside_workspace`.
+ * 6. Final containment check against every registered workspace root.
+ *    If realpath leaves all roots after the literal request was admitted,
+ *    classify as `symlink_escape`; otherwise as `path_outside_workspace`.
  *
  * The brand on the return type is the contract that PR 19/20 routes
  * may not construct one without going through this function.
  */
 export async function resolveWithinWorkspace(
   input: string,
-  boundWorkspace: string,
+  boundWorkspaces: string | readonly string[],
   intent: Intent,
 ): Promise<ResolvedPath> {
   if (typeof input !== 'string' || input.length === 0) {
@@ -317,12 +357,71 @@ export async function resolveWithinWorkspace(
     );
   }
 
-  const boundCanonical = canonicalizeBoundWorkspaceCached(boundWorkspace);
-  const absolute = path.resolve(boundCanonical, input);
+  const boundCanonicals = canonicalizeBoundWorkspacesCached(boundWorkspaces);
+  const primary = boundCanonicals[0];
+  if (primary === undefined) {
+    throw new FsError(
+      'parse_error',
+      'boundWorkspaces must include at least one workspace root',
+    );
+  }
+  const absolute = path.resolve(primary, input);
+  let boundCanonical = findContainingWorkspace(absolute, boundCanonicals);
+  let preResolvedCanonical: string | undefined;
+
+  if (boundCanonical === undefined && path.isAbsolute(input)) {
+    try {
+      preResolvedCanonical = await fsp.realpath(absolute);
+      boundCanonical = findContainingWorkspace(
+        preResolvedCanonical,
+        boundCanonicals,
+      );
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        try {
+          const { ancestor, tail } = await findExistingAncestor(absolute);
+          const ancestorReal = await fsp.realpath(ancestor);
+          const canonicalCandidate = tail
+            ? path.join(ancestorReal, tail)
+            : ancestorReal;
+          boundCanonical = findContainingWorkspace(
+            canonicalCandidate,
+            boundCanonicals,
+          );
+          if (boundCanonical !== undefined) {
+            const finalPathIsSymlink = await fsp
+              .lstat(absolute)
+              .then((stat) => stat.isSymbolicLink())
+              .catch((lstatErr: NodeJS.ErrnoException) => {
+                if (lstatErr.code === 'ENOENT' || lstatErr.code === 'ENOTDIR') {
+                  return false;
+                }
+                throw lstatErr;
+              });
+            if (!finalPathIsSymlink && ENOENT_TOLERATING_INTENTS.has(intent)) {
+              preResolvedCanonical = canonicalCandidate;
+            }
+          }
+        } catch (innerErr) {
+          const innerCode = (innerErr as NodeJS.ErrnoException)?.code;
+          if (innerCode !== 'ENOENT' && innerCode !== 'ENOTDIR') {
+            throw innerErr;
+          }
+          // Leave `boundCanonical` undefined. This fallback is only
+          // for non-canonical absolute inputs that still land inside
+          // a registered root; missing-path failures should keep the
+          // normal path_outside_workspace classification below.
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
 
   // Cheap pre-filter on the resolved-but-not-realpathed form. Catches
   // textual `..` escape without an FS call.
-  if (!isWithinRoot(absolute, boundCanonical)) {
+  if (boundCanonical === undefined) {
     throw new FsError(
       'path_outside_workspace',
       `path escapes workspace: ${input}`,
@@ -331,7 +430,7 @@ export async function resolveWithinWorkspace(
 
   let canonical: string;
   try {
-    canonical = await fsp.realpath(absolute);
+    canonical = preResolvedCanonical ?? (await fsp.realpath(absolute));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code === 'ENOENT' && ENOENT_TOLERATING_INTENTS.has(intent)) {
@@ -437,7 +536,9 @@ export async function resolveWithinWorkspace(
           const canonicalTarget = targetTail
             ? path.join(targetAncestorReal, targetTail)
             : targetAncestorReal;
-          if (!isWithinRoot(canonicalTarget, boundCanonical)) {
+          if (
+            !boundCanonicals.some((root) => isWithinRoot(canonicalTarget, root))
+          ) {
             throw new FsError(
               'symlink_escape',
               `dangling symlink target escapes workspace: ${input}`,
@@ -500,7 +601,7 @@ export async function resolveWithinWorkspace(
     }
   }
 
-  if (!isWithinRoot(canonical, boundCanonical)) {
+  if (!boundCanonicals.some((root) => isWithinRoot(canonical, root))) {
     const kind: FsErrorKind =
       canonical !== absolute ? 'symlink_escape' : 'path_outside_workspace';
     throw new FsError(

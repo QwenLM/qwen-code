@@ -8,10 +8,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
-import { trace } from '@opentelemetry/api';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
-import { getSessionContext } from '../telemetry/session-context.js';
+import {
+  getTraceContext,
+  type TraceContext,
+} from '../telemetry/trace-context.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -20,6 +22,7 @@ export interface DebugLogSession {
 }
 
 export interface DebugLogger {
+  isEnabled: () => boolean;
   debug: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
@@ -30,22 +33,19 @@ let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
-const sessionContext = new AsyncLocalStorage<DebugLogSession>();
+const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
-interface TraceContext {
-  traceId: string;
-  spanId: string;
-}
-
-function isDebugLogFileEnabled(): boolean {
+export function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
-  if (!value) return true;
+  if (!value) return false;
   const normalized = value.trim().toLowerCase();
-  return !['0', 'false', 'off', 'no'].includes(normalized);
+  return !['', '0', 'false', 'off', 'no'].includes(normalized);
 }
 
 function getActiveSession(): DebugLogSession | null {
-  return sessionContext.getStore() ?? globalSession;
+  const contextSession = sessionContext.getStore();
+  if (contextSession === false) return null;
+  return contextSession ?? globalSession;
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -74,41 +74,6 @@ function formatArgs(args: unknown[]): string {
     })
     .map((arg) => (typeof arg === 'string' ? arg : util.inspect(arg)))
     .join(' ');
-}
-
-const ZERO_TRACE_ID = '00000000000000000000000000000000';
-
-function getActiveSpanTraceContext(): TraceContext | null {
-  try {
-    const activeSpan = trace.getActiveSpan();
-    if (activeSpan) {
-      const ctx = activeSpan.spanContext();
-      if (ctx.traceId !== ZERO_TRACE_ID) {
-        return { traceId: ctx.traceId, spanId: ctx.spanId };
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function getSessionRootTraceContext(): TraceContext | null {
-  try {
-    const sessionContext = getSessionContext();
-    const sessionSpan = sessionContext ? trace.getSpan(sessionContext) : null;
-    const ctx = sessionSpan?.spanContext();
-    if (ctx && ctx.traceId !== ZERO_TRACE_ID) {
-      return { traceId: ctx.traceId, spanId: ctx.spanId };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function getTraceContext(): TraceContext | null {
-  return getActiveSpanTraceContext() ?? getSessionRootTraceContext();
 }
 
 /**
@@ -155,7 +120,7 @@ function writeLog(
     // and the module already tracks `hasWriteFailure` for the
     // degraded-mode UI. Kernel page-cache flush is sufficient here.
     // (JSONL session writes via writeLine/writeLineSync DO use
-    // flush:true — those are the actual #3681 closure target.)
+    // flush:true — those are the actual closure target.)
     .then(() => fs.appendFile(logFilePath, line, 'utf8'))
     .catch(() => {
       hasWriteFailure = true;
@@ -181,9 +146,14 @@ export function resetDebugLoggingState(): void {
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function updateLatestDebugLogAlias(sessionId: string): void {
   if (!isDebugLogFileEnabled()) {
+    return;
+  }
+  if (!SESSION_ID_PATTERN.test(sessionId)) {
     return;
   }
 
@@ -225,15 +195,20 @@ export function runWithDebugLogSession<T>(
   return sessionContext.run(session, fn);
 }
 
+export function runWithoutDebugLogSession<T>(fn: () => T): T {
+  return sessionContext.run(false, fn);
+}
+
 /**
  * Creates a debug logger that writes to the current debug log session.
  *
  * Session resolution order:
- * 1) async-local session (runWithDebugLogSession)
+ * 1) async-local suppression or session
  * 2) process-wide session (setDebugLogSession)
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {
+    isEnabled: () => getActiveSession() !== null,
     debug: (...args: unknown[]) => {
       const session = getActiveSession();
       if (!session) return;

@@ -1,0 +1,26 @@
+{
+  "name": "Nord",
+  "description": "Arctic, north-bluish, calm",
+  "author": "Arctic Ice Studio",
+  "license": "MIT",
+  "source": "https://github.com/nordtheme/nord",
+  "supportedModes": ["light", "dark"],
+  "shikiTheme": {
+    "light": "github-light",
+    "dark": "nord"
+  },
+  "background": "#eceff4",
+  "foreground": "#2e3440",
+  "accent": "#5e81ac",
+  "info": "#ebcb8b",
+  "success": "#a3be8c",
+  "destructive": "#bf616a",
+  "dark": {
+    "background": "#2e3440",
+    "foreground": "#eceff4",
+    "accent": "#88c0d0",
+    "info": "#ebcb8b",
+    "success": "#a3be8c",
+    "destructive": "#bf616a"
+  }
+}

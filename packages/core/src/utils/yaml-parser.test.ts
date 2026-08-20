@@ -36,19 +36,139 @@ describe('yaml-parser', () => {
         },
       });
     });
+
+    it('should parse YAML folded block scalar (>)', () => {
+      const input =
+        'name: test-skill\ndescription: >\n  This is a folded\n  multiline description.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe(
+        'This is a folded multiline description.\n',
+      );
+    });
+
+    it('should parse YAML literal block scalar (|)', () => {
+      const input =
+        'name: test-skill\ndescription: |\n  Line one.\n  Line two.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe('Line one.\nLine two.\n');
+    });
+
+    it('should parse YAML block scalar with strip chomping (>-)', () => {
+      const input =
+        'name: test-skill\ndescription: >-\n  Folded without trailing newline.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe('Folded without trailing newline.');
+    });
+
+    it('should not coerce date-like strings into Date objects', () => {
+      const input = 'name: test\ncreated: 2024-01-01';
+      const result = parse(input);
+      expect(typeof result['created']).toBe('string');
+      expect(result['created']).toBe('2024-01-01');
+    });
+
+    it('should strip bare keys with no value', () => {
+      const input = 'name: test\nhooks:';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      expect(result['hooks']).toBeUndefined();
+    });
+
+    it('should strip explicit null and tilde values', () => {
+      const input = 'a: null\nb: ~';
+      const result = parse(input);
+      expect(result['a']).toBeUndefined();
+      expect(result['b']).toBeUndefined();
+    });
+
+    it('should treat yes/no as strings in YAML 1.2 core schema', () => {
+      const input = 'answer: yes\nother: no';
+      const result = parse(input);
+      expect(result['answer']).toBe('yes');
+      expect(result['other']).toBe('no');
+    });
+
+    it('should fall back to simple parser on invalid YAML', () => {
+      // Unclosed flow sequence triggers a yaml.parse error
+      const input = 'name: test\nallowedTools: [unclosed';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+    });
+
+    it('should strip null values in fallback path same as main path', () => {
+      // Unclosed flow forces fallback to parseSimple; explicit null
+      // must be stripped so callers can use `!== undefined` consistently.
+      const input = 'name: test\noptional: null\nbroken: [unclosed';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      expect(result['optional']).toBeUndefined();
+      expect('optional' in result).toBe(false);
+    });
+
+    it('should not allow prototype pollution via simple parser fallback', () => {
+      // Crafted to fail yaml.parse (unclosed flow) and trigger parseSimple,
+      // where __proto__ as a nested-object key could pollute the prototype.
+      const input =
+        '__proto__:\n  polluted: true\nname: test\nbroken: [unclosed';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      const clean: Record<string, unknown> = {};
+      expect(clean['polluted']).toBeUndefined();
+      expect(Object.getPrototypeOf(result)).toBeNull();
+    });
+
+    it('should handle empty input gracefully', () => {
+      const result = parse('');
+      expect(result).toEqual({});
+    });
+
+    it('should handle comment-only input gracefully', () => {
+      const result = parse('# just a comment');
+      expect(result).toEqual({});
+    });
+
+    it('should not allow prototype pollution via __proto__ key', () => {
+      const input = 'name: legit\n__proto__:\n  polluted: true';
+      const result = parse(input);
+      expect(result['name']).toBe('legit');
+      // result uses null prototype — __proto__ is a plain own property
+      expect(Object.getPrototypeOf(result)).toBeNull();
+      expect(Object.hasOwn(result, '__proto__')).toBe(true);
+    });
+
+    it('should not resolve !!timestamp explicit tags', () => {
+      const input = 'name: test\ncreated: !!timestamp 2024-01-01';
+      const result = parse(input);
+      expect(typeof result['created']).toBe('string');
+    });
+
+    it('should sanitize nested objects recursively', () => {
+      const input =
+        'name: test\nmetadata:\n  created: !!timestamp 2024-01-01\n  note: hello';
+      const result = parse(input);
+      const metadata = result['metadata'] as Record<string, unknown>;
+      expect(typeof metadata['created']).toBe('string');
+      expect(metadata['note']).toBe('hello');
+      expect(Object.getPrototypeOf(metadata)).toBeNull();
+    });
   });
 
   describe('stringify', () => {
+    // Stringify now delegates to eemeli/yaml's serializer, which appends a
+    // trailing newline and is free to choose among equivalent serializations
+    // depending on content. Assertions therefore check round-trip rather
+    // than byte-exact output.
     it('should stringify simple objects', () => {
       const obj = { name: 'test', description: 'A test config' };
-      const result = stringify(obj);
-      expect(result).toBe('name: test\ndescription: A test config');
+      expect(parse(stringify(obj))).toEqual(obj);
     });
 
     it('should stringify arrays', () => {
       const obj = { tools: ['file', 'shell'] };
-      const result = stringify(obj);
-      expect(result).toBe('tools:\n  - file\n  - shell');
+      expect(parse(stringify(obj))).toEqual(obj);
     });
 
     it('should stringify nested objects', () => {
@@ -58,98 +178,62 @@ describe('yaml-parser', () => {
           maxTokens: 1000,
         },
       };
-      const result = stringify(obj);
-      expect(result).toBe(
-        'modelConfig:\n  temperature: 0.7\n  maxTokens: 1000',
-      );
+      expect(parse(stringify(obj))).toEqual(obj);
     });
 
-    describe('string escaping security', () => {
-      it('should properly escape strings with quotes', () => {
-        const obj = { key: 'value with "quotes"' };
-        const result = stringify(obj);
-        expect(result).toBe('key: "value with \\"quotes\\""');
+    describe('round-trip integrity', () => {
+      // Property-based: parse(stringify(x)) === x. We no longer pin the
+      // exact YAML bytes — eemeli/yaml's stringify legitimately chooses
+      // among equivalent plain / quoted / block-scalar representations
+      // depending on content. The contract that matters at the API
+      // boundary is round-trip.
+      it.each([
+        ['simple string', 'simplevalue'],
+        ['with quotes', 'value with "quotes"'],
+        ['with backslash', 'value with \\ backslash'],
+        ['with backslash-quote', 'value with \\" sequence'],
+        ['windows-style path', 'C:\\Program Files\\"App"\\file.txt'],
+        ['containing colon', 'value:with:colons'],
+        ['containing hash', 'value#with#hash'],
+        ['leading/trailing spaces', ' value with spaces '],
+        ['multiline newlines', 'line one\nline two\nline three'],
+        ['unicode', '中文 — naïve café'],
+      ])('round-trips: %s', (_label, str) => {
+        const obj = { key: str };
+        expect(parse(stringify(obj))).toEqual(obj);
       });
+    });
 
-      it('should properly escape strings with backslashes', () => {
-        const obj = { key: 'value with \\ backslash' };
-        const result = stringify(obj);
-        expect(result).toBe('key: "value with \\\\ backslash"');
-      });
-
-      it('should properly escape strings with backslash-quote sequences', () => {
-        // This is the critical security test case
-        const obj = { key: 'value with \\" sequence' };
-        const result = stringify(obj);
-        // Should escape backslashes first, then quotes
-        expect(result).toBe('key: "value with \\\\\\" sequence"');
-      });
-
-      it('should handle complex escaping scenarios', () => {
-        const testCases = [
-          {
-            input: { path: 'C:\\Program Files\\"App"\\file.txt' },
-            expected: 'path: "C:\\\\Program Files\\\\\\"App\\"\\\\file.txt"',
+    describe('nested round-trip for mcpServers / hooks', () => {
+      // The previous hand-rolled stringifier emitted `[object Object]` for
+      // any value below the first level of nesting. With yaml.stringify
+      // the CC-shape `mcpServers` (record-of-records) and `hooks`
+      // (record-of-array-of-records) now round-trip cleanly.
+      it('round-trips a CC-shape mcpServers block', () => {
+        const obj = {
+          mcpServers: {
+            filesystem: {
+              type: 'stdio',
+              command: 'node',
+              args: ['/path/to/server.js'],
+            },
           },
-          {
-            input: { message: 'He said: \\"Hello\\"' },
-            expected: 'message: "He said: \\\\\\"Hello\\\\\\""',
+        };
+        expect(parse(stringify(obj))).toEqual(obj);
+      });
+
+      it('round-trips a CC-shape hooks block', () => {
+        const obj = {
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: 'Bash',
+                hooks: [{ type: 'command', command: 'echo before' }],
+              },
+            ],
           },
-          {
-            input: { complex: 'Multiple \\\\ backslashes \\" and " quotes' },
-            expected:
-              'complex: "Multiple \\\\\\\\ backslashes \\\\\\" and \\" quotes"',
-          },
-        ];
-
-        testCases.forEach(({ input, expected }) => {
-          const result = stringify(input);
-          expect(result).toBe(expected);
-        });
-      });
-
-      it('should maintain round-trip integrity for escaped strings', () => {
-        const testStrings = [
-          'simple string',
-          'string with "quotes"',
-          'string with \\ backslash',
-          'string with \\" sequence',
-          'path\\to\\"file".txt',
-          'He said: \\"Hello\\"',
-          'Multiple \\\\ backslashes \\" and " quotes',
-        ];
-
-        testStrings.forEach((testString) => {
-          // Force quoting by adding a colon
-          const originalObj = { key: testString + ':' };
-          const yamlString = stringify(originalObj);
-          const parsedObj = parse(yamlString);
-          expect(parsedObj).toEqual(originalObj);
-        });
-      });
-
-      it('should not quote strings that do not need quoting', () => {
-        const obj = { key: 'simplevalue' };
-        const result = stringify(obj);
-        expect(result).toBe('key: simplevalue');
-      });
-
-      it('should quote strings with colons', () => {
-        const obj = { key: 'value:with:colons' };
-        const result = stringify(obj);
-        expect(result).toBe('key: "value:with:colons"');
-      });
-
-      it('should quote strings with hash symbols', () => {
-        const obj = { key: 'value#with#hash' };
-        const result = stringify(obj);
-        expect(result).toBe('key: "value#with#hash"');
-      });
-
-      it('should quote strings with leading/trailing whitespace', () => {
-        const obj = { key: ' value with spaces ' };
-        const result = stringify(obj);
-        expect(result).toBe('key: " value with spaces "');
+        };
+        expect(parse(stringify(obj))).toEqual(obj);
       });
     });
 
@@ -187,6 +271,25 @@ describe('yaml-parser', () => {
         expect(typeof result['name']).toBe('string');
         expect(typeof result['age']).toBe('number');
         expect(typeof result['description']).toBe('string');
+      });
+    });
+
+    describe('nested YAML', () => {
+      it('parses array-of-records', () => {
+        const yaml =
+          'mcpServers:\n  - filesystem:\n      type: stdio\n      command: node';
+        const result = parse(yaml);
+        expect(result['mcpServers']).toEqual([
+          { filesystem: { type: 'stdio', command: 'node' } },
+        ]);
+      });
+
+      it('parses record-of-records with arrays', () => {
+        const yaml = 'hooks:\n  PreToolUse:\n    - matcher: Read';
+        const result = parse(yaml);
+        expect(result['hooks']).toEqual({
+          PreToolUse: [{ matcher: 'Read' }],
+        });
       });
     });
   });

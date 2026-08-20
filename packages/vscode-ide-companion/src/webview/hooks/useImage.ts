@@ -239,13 +239,16 @@ function isWithinSizeLimit(file: File): boolean {
   return file.size <= MAX_IMAGE_SIZE;
 }
 
-function formatFileSize(bytes: number): string {
+export function formatFileSize(bytes: number): string {
   if (bytes === 0) {
     return '0 B';
   }
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1),
+  );
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
@@ -332,7 +335,7 @@ export function useImagePaste({
 
           if (!isWithinSizeLimit(file)) {
             errors.push(
-              `Image "${file.name || 'pasted image'}" is too large (${formatFileSize(file.size)}). Maximum size is 10MB.`,
+              `Image "${file.name || 'pasted image'}" is too large (${formatFileSize(file.size)}). Maximum size is ${formatFileSize(MAX_IMAGE_SIZE)}.`,
             );
             continue;
           }

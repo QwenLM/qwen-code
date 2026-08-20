@@ -21,20 +21,35 @@ export default defineConfig({
     exclude: [
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
+      '**/qwen-daemon-loadtest*',
+      '**/qwen-daemon-first-output-benchmark*',
       '**/node_modules/**',
     ],
     retry: 2,
     fileParallelism: true,
+    pool: 'forks',
     poolOptions: {
-      threads: {
-        minThreads: 2,
-        maxThreads: 4,
+      forks: {
+        minForks: 2,
+        maxForks: 4,
       },
     },
   },
   resolve: {
     alias: {
       // Use built SDK bundle for e2e tests
+      '@qwen-code/sdk/daemon/transports': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transports.js',
+      ),
+      '@qwen-code/sdk/daemon/transcript': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transcript.js',
+      ),
+      '@qwen-code/sdk/daemon': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/index.js',
+      ),
       '@qwen-code/sdk': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/index.mjs',

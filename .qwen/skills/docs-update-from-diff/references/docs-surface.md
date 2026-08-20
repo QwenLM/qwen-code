@@ -7,7 +7,7 @@ Use this file to choose the correct destination page under `docs/`.
 - `docs/users/overview.md`, `quickstart.md`, `common-workflow.md` Good for
   entry points, first-run guidance, and broad user workflows.
 - `docs/users/features/*.md` Good for user-visible features such as skills,
-  MCP, sandbox, sub-agents, commands, checkpointing, and approval modes.
+  MCP, sandbox, sub-agents, commands, and approval modes.
 - `docs/users/configuration/*.md` Good for settings, auth, model providers,
   themes, trusted folders, `.qwen` files, and similar configuration topics.
 - `docs/users/integration-*.md` and `docs/users/ide-integration/*.md` Good for
@@ -30,6 +30,25 @@ Use this file to choose the correct destination page under `docs/`.
 - `docs/developers/tools/_meta.ts`
 - If you create a page and do not add it to the right `_meta.ts`, the docs will
   be incomplete even if the markdown exists.
+
+## Doc-path consumers outside `docs/`
+
+Several files outside the `docs/` tree maintain hardcoded references to doc
+paths. When pages are added, moved, renamed, or removed, these consumers must
+be updated alongside the docs themselves:
+
+- `packages/core/src/skills/bundled/qc-helper/SKILL.md` — The `qc-helper`
+  bundled skill ships with the CLI. Its topic-to-path index tables (under
+  "Documentation Index" and "Common Config Categories") are used at runtime
+  to locate the right doc for `/qc-helper` invocations. Stale entries cause
+  the skill to miss documentation or point at nonexistent files.
+- `.qwen/skills/*/SKILL.md` and `.qwen/skills/*/references/*.md` — Project-
+  level skills may hardcode `docs/users/` or `docs/developers/` paths.
+  Notable examples: `docs-update-from-diff`, `docs-audit-and-refresh`,
+  `qwen-code-claw`.
+- Source code comments in `packages/cli/src/` and `packages/core/src/`
+  occasionally reference doc paths as contracts between code behavior and
+  documentation. These are low-risk but should stay accurate.
 
 ## Placement heuristics
 

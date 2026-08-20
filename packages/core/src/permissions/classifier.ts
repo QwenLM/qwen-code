@@ -9,9 +9,10 @@
  *   Stage 1 (fast):  shouldBlock-only output, max_tokens=32, thinking off.
  *                    Allow path returns immediately (~300ms).
  *   Stage 2 (review): full output { thinking, shouldBlock, reason },
- *                     max_tokens=4096, thinking off. Reviews stage-1 blocks
- *                     to reduce false positives. (`thinking` is a plain output
- *                     field, not an allocated reasoning budget.)
+ *                     max_tokens=4096. API thinking is off by default but can
+ *                     be enabled via settings. Reviews stage-1 blocks to
+ *                     reduce false positives. (`thinking` is a plain output
+ *                     field unless API thinking is explicitly enabled.)
  *
  * Fail-closed: any non-abort failure (API error, timeout, schema failure,
  * context overflow) returns shouldBlock=true with unavailable=true.
@@ -34,14 +35,20 @@ import { buildClassifierContents } from './classifier-transcript.js';
 // the underlying API / timeout / context-overflow error.
 const debugLogger = createDebugLogger('CLASSIFIER');
 
-// A timeout is fail-closed (action BLOCKED as "unavailable"), so too tight a
-// budget turns transient slowness into spurious blocks. The fast model's p99
-// is ~1.5s but the tail is long under load, so budgets are kept generous —
-// better to wait than fail closed on a healthy call.
+// A timeout yields an unavailable result and manual fallback downstream, so
+// too tight a budget turns transient slowness into repeated prompts. The fast
+// model's p99 is ~1.5s but the tail is long under load, so budgets are kept
+// generous.
 /** Stage-1 timeout: generous headroom over the fast model's p99 (~1.5s). */
 export const STAGE1_TIMEOUT_MS = 10_000;
 /** Stage-2 timeout: review stage runs a larger prompt; cap infra failure. */
 export const STAGE2_TIMEOUT_MS = 30_000;
+
+interface ClassifierSettings {
+  stage1TimeoutMs: number;
+  stage2TimeoutMs: number;
+  stage2ThinkingEnabled: boolean;
+}
 
 /** Token usage attributed to a single classifier call. */
 export interface ClassifierUsage {
@@ -126,7 +133,7 @@ const STAGE2_SCHEMA: Record<string, unknown> = {
  *
  * Returns a `ClassifierResult` describing the verdict. Throws `AbortError`
  * only when the user-supplied `input.signal` is aborted; all other failures
- * are converted into `unavailable=true` block results (fail-closed).
+ * are converted into `unavailable=true` results for downstream fallback.
  */
 export async function classifyAction(
   input: ClassifierInput,
@@ -136,7 +143,7 @@ export async function classifyAction(
   // buildClassifierContents and buildClassifierSystemPrompt are wrapped so
   // any pathological input (a tool returning a circular projected-args
   // structure that crashes JSON.stringify, a registry lookup error, etc.)
-  // is converted to a fail-closed unavailable verdict instead of crashing
+  // is converted to an unavailable result instead of crashing
   // the tool-execution loop with an uncaught exception.
   let contents;
   let baseSystemPrompt: string;
@@ -148,7 +155,7 @@ export async function classifyAction(
     );
     baseSystemPrompt = buildClassifierSystemPrompt(input.config);
   } catch (err) {
-    return failClosed(
+    return failUnavailable(
       'Classifier prompt construction failed',
       err,
       'fast',
@@ -157,11 +164,12 @@ export async function classifyAction(
     );
   }
   const stage1SystemPrompt = baseSystemPrompt + STAGE1_SUFFIX;
+  const classifierSettings = resolveClassifierSettings(input.config);
 
   // Stage 1 ──────────────────────────────────────────────────────────────
   const stage1Signal = AbortSignal.any([
     input.signal,
-    AbortSignal.timeout(STAGE1_TIMEOUT_MS),
+    AbortSignal.timeout(classifierSettings.stage1TimeoutMs),
   ]);
 
   let stage1: Stage1Response;
@@ -172,16 +180,21 @@ export async function classifyAction(
       systemInstruction: stage1SystemPrompt,
       abortSignal: stage1Signal,
       purpose: 'permission_classifier_stage1',
+      skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
         temperature: 0,
-        maxOutputTokens: 32,
+        // 32 tokens is insufficient for adaptive-thinking models (Claude
+        // 4.6+) which emit server-driven thinking that consumes output
+        // budget before any tool_use. 256 gives enough headroom for
+        // thinking + the respond_in_schema tool call without being wasteful.
+        maxOutputTokens: 256,
         thinkingConfig: { includeThoughts: false },
       },
     })) as Stage1Response;
   } catch (err) {
     if (input.signal.aborted) throw err;
-    return failClosed(
+    return failUnavailable(
       'Classifier stage 1 unavailable',
       err,
       'fast',
@@ -209,7 +222,7 @@ export async function classifyAction(
   // Stage 2 ──────────────────────────────────────────────────────────────
   const stage2Signal = AbortSignal.any([
     input.signal,
-    AbortSignal.timeout(STAGE2_TIMEOUT_MS),
+    AbortSignal.timeout(classifierSettings.stage2TimeoutMs),
   ]);
 
   let stage2: Stage2Response;
@@ -220,15 +233,18 @@ export async function classifyAction(
       systemInstruction: baseSystemPrompt + STAGE2_SUFFIX,
       abortSignal: stage2Signal,
       purpose: 'permission_classifier_stage2',
+      skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
         temperature: 0,
         maxOutputTokens: 4096,
-        // Thinking off: this gate is latency-sensitive (the user is waiting),
-        // and a reasoning budget would slow the review path and worsen the
-        // fail-closed timeout above. The `thinking` output field still carries
-        // the model's reasoning.
-        thinkingConfig: { includeThoughts: false },
+        // API thinking stays off by default: this gate is latency-sensitive
+        // and a reasoning budget can worsen unavailable-result timeouts. The
+        // `thinking` output field still carries the model's plain-text
+        // reasoning unless API thinking is explicitly enabled.
+        thinkingConfig: {
+          includeThoughts: classifierSettings.stage2ThinkingEnabled,
+        },
       },
     })) as Stage2Response;
   } catch (err) {
@@ -267,6 +283,37 @@ export async function classifyAction(
     durationMs: Date.now() - overallStart,
     stage: 'thinking',
   };
+}
+
+function resolveClassifierSettings(config: Config): ClassifierSettings {
+  const classifier = config.getAutoModeSettings().classifier;
+  return {
+    stage1TimeoutMs: resolveTimeoutMs(
+      classifier?.timeouts?.stage1Ms,
+      STAGE1_TIMEOUT_MS,
+    ),
+    stage2TimeoutMs: resolveTimeoutMs(
+      classifier?.timeouts?.stage2Ms,
+      STAGE2_TIMEOUT_MS,
+    ),
+    stage2ThinkingEnabled: classifier?.thinking?.stage2Enabled === true,
+  };
+}
+
+function resolveTimeoutMs(value: number | undefined, fallback: number): number {
+  if (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 1000
+  ) {
+    debugLogger.warn(
+      `Classifier timeout ${value}ms below 1000ms floor, using default ${fallback}ms`,
+    );
+  }
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1000
+    ? value
+    : fallback;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -309,7 +356,7 @@ export function sanitizeClassifierReason(raw: string): string {
   );
 }
 
-function failClosed(
+function failUnavailable(
   baseMessage: string,
   err: unknown,
   stage: 'fast' | 'thinking',
@@ -318,13 +365,13 @@ function failClosed(
 ): ClassifierResult {
   const reason = isContextLengthExceededError(err)
     ? 'Conversation transcript exceeds classifier context window'
-    : `${baseMessage} - blocked for safety`;
+    : baseMessage;
   // Log the underlying error so operators can distinguish timeout / API /
   // schema-validation / context-overflow failure modes when AUTO mode
-  // starts silently blocking every call. The public `ClassifierResult`
+  // starts routing every call to manual approval. The public `ClassifierResult`
   // only carries the sanitized `reason` and `unavailable` flag.
   debugLogger.warn(
-    `failClosed stage=${stage} durationMs=${Date.now() - startedAt} ` +
+    `failUnavailable stage=${stage} durationMs=${Date.now() - startedAt} ` +
       `reason="${reason}" cause="${errMessage(err)}"`,
   );
   return {

@@ -275,4 +275,111 @@ describe('useMessageSubmit', () => {
       },
     });
   });
+
+  it('resolves raw image picker paths with spaces on submit', () => {
+    const imagePath = 'C:\\Users\\Me\\Pictures\\screen shot.png';
+    const props = createDefaultProps({
+      inputText: `describe @${imagePath} please`,
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) =>
+      name === imagePath ? imagePath : undefined,
+    );
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: `describe @${imagePath} please`,
+        context: [
+          {
+            type: 'file',
+            name: imagePath,
+            value: imagePath,
+            isImage: true,
+          },
+        ],
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
+
+  it('resolves multiple file references in one message', () => {
+    const imagePath = '/workspace/screen shot.png';
+    const notePath = '/workspace/notes.md';
+    const props = createDefaultProps({
+      inputText: `compare @${imagePath} with @${notePath}`,
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) => {
+      if (name === imagePath) {
+        return imagePath;
+      }
+      if (name === notePath) {
+        return notePath;
+      }
+      return undefined;
+    });
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: `compare @${imagePath} with @${notePath}`,
+        context: [
+          {
+            type: 'file',
+            name: imagePath,
+            value: imagePath,
+            isImage: true,
+          },
+          {
+            type: 'file',
+            name: notePath,
+            value: notePath,
+            isImage: false,
+          },
+        ],
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
+
+  it('does not resolve file references from strict token prefixes', () => {
+    const props = createDefaultProps({
+      inputText: 'open @data.csv.bak',
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) =>
+      name === 'data.csv' ? '/workspace/data.csv' : undefined,
+    );
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: 'open @data.csv.bak',
+        context: undefined,
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
 });

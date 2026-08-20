@@ -19,6 +19,8 @@ export const useLogger = (storage: Storage, sessionId: string) => {
       return;
     }
 
+    let cancelled = false;
+
     const newLogger = new Logger(sessionId, storage);
     /**
      * Start async initialization, no need to await. Using await slows down the
@@ -28,9 +30,15 @@ export const useLogger = (storage: Storage, sessionId: string) => {
     newLogger
       .initialize()
       .then(() => {
-        setLogger(newLogger);
+        if (!cancelled) {
+          setLogger(newLogger);
+        }
       })
       .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
   }, [storage, sessionId]);
 
   return logger;

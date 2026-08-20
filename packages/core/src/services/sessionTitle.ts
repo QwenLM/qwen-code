@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getStartupContextLength,
+  stripSystemReminderBlocks,
+} from '../utils/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -23,7 +28,6 @@ Rules:
 - Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
-- Match the dominant language of the conversation (English or Chinese). For Chinese, treat as roughly 12-20 characters total; still no trailing punctuation.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
@@ -105,6 +109,7 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
+  userDisplayTexts: ReadonlyArray<string | undefined> = [],
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -116,7 +121,14 @@ export async function tryGenerateSessionTitle(
     const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
-    const dialog = filterToDialog(fullHistory);
+    const hasDisplayProjection = userDisplayTexts.some(
+      (displayText) => displayText !== undefined,
+    );
+    const dialog = hasDisplayProjection
+      ? userDisplayTexts.flatMap((displayText): Content[] =>
+          displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
+        )
+      : filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };
@@ -206,15 +218,23 @@ export function sanitizeTitle(s: string): string {
  */
 function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
-  for (const msg of history) {
+  for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
-    const textParts = (msg.parts ?? []).filter(
-      (part) =>
-        typeof part?.text === 'string' &&
-        part.text.trim() !== '' &&
-        !part.thought &&
-        !part.thoughtSignature,
-    );
+    const textParts: Part[] = [];
+    const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
+    for (const part of parts) {
+      if (
+        typeof part?.text !== 'string' ||
+        part.text.trim() === '' ||
+        part.thought ||
+        part.thoughtSignature
+      ) {
+        continue;
+      }
+      const text = stripSystemReminderBlocks(part.text);
+      if (text.trim() === '') continue;
+      textParts.push({ ...part, text });
+    }
     if (textParts.length === 0) continue;
     out.push({ role: msg.role, parts: textParts });
   }

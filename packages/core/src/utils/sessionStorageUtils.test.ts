@@ -46,6 +46,11 @@ describe('sessionStorageUtils', () => {
       expect(extractJsonStringField(text, 'customTitle')).toBe('my-feature');
     });
 
+    it('should extract field with same-line whitespace around colon', () => {
+      const text = '{"customTitle" \t: \t"my-feature"}';
+      expect(extractJsonStringField(text, 'customTitle')).toBe('my-feature');
+    });
+
     it('should return first match', () => {
       const text = '{"customTitle":"first"}\n{"customTitle":"second"}';
       expect(extractJsonStringField(text, 'customTitle')).toBe('first');
@@ -96,6 +101,18 @@ describe('sessionStorageUtils', () => {
       );
     });
 
+    it('should return the latest match when the last field has whitespace around colon', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"old"}\n{"subtype":"custom_title","customTitle" : "new"}';
+      expect(
+        extractLastJsonStringField(
+          text,
+          'customTitle',
+          '"subtype":"custom_title"',
+        ),
+      ).toBe('new');
+    });
+
     it('should return globally last match when mixed patterns interleave', () => {
       // Bug fix: previously returned "middle" because the second pattern
       // ("key": "value") scan overwrote the result from the first pattern.
@@ -112,6 +129,22 @@ describe('sessionStorageUtils', () => {
       expect(
         extractLastJsonStringField(text, 'customTitle', 'custom_title'),
       ).toBe('real-title');
+    });
+
+    it('should not close a truncated value on the next JSONL record', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"partial\n{"subtype":"custom_title","customTitle":"complete"}';
+      expect(
+        extractLastJsonStringField(text, 'customTitle', 'custom_title'),
+      ).toBe('complete');
+    });
+
+    it('should not skip a newline after a dangling escape', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"partial\\\n{"type":"assistant","content":"hi"}';
+      expect(
+        extractLastJsonStringField(text, 'customTitle', 'custom_title'),
+      ).toBeUndefined();
     });
 
     it('should ignore matches on lines without lineContains marker', () => {
@@ -435,6 +468,18 @@ describe('sessionStorageUtils', () => {
       expect(hit).toEqual({ customTitle: 'A', titleSource: 'auto' });
     });
 
+    it('extracts fields with same-line whitespace around colons', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle" : "A","titleSource"\t:\t"auto"}\n';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'A', titleSource: 'auto' });
+    });
+
     it('when primary appears on multiple lines, picks the latest and its own secondary', () => {
       const text = [
         '{"subtype":"custom_title","customTitle":"A","titleSource":"manual"}',
@@ -504,6 +549,19 @@ describe('sessionStorageUtils', () => {
       const text =
         '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n' +
         '{"subtype":"custom_title","customTitle":"B';
+      const hit = extractLastJsonStringFields(
+        text,
+        'customTitle',
+        ['titleSource'],
+        'custom_title',
+      );
+      expect(hit).toEqual({ customTitle: 'A', titleSource: 'auto' });
+    });
+
+    it('rejects a truncated record with a dangling escape before newline', () => {
+      const text =
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n' +
+        '{"subtype":"custom_title","customTitle":"B\\\n{"type":"assistant","titleSource":"manual"}';
       const hit = extractLastJsonStringFields(
         text,
         'customTitle',

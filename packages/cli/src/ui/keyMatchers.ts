@@ -29,28 +29,32 @@ function matchKeyBinding(keyBinding: KeyBinding, key: Key): boolean {
     return false;
   }
 
-  // Check modifiers - follow original logic:
-  // undefined = ignore this modifier (original behavior)
-  // true = modifier must be pressed
-  // false = modifier must NOT be pressed
+  // Check modifiers:
+  // binding undefined = ignore this modifier
+  // binding true  = modifier must be pressed (key value must be truthy)
+  // binding false = modifier must NOT be pressed (key value falsy or undefined)
+  //
+  // Using !!key.X normalizes undefined → false so that a binding requiring
+  // shift: false matches keys where shift is either false or omitted (common
+  // in test mocks that construct partial Key objects).
 
-  if (keyBinding.ctrl !== undefined && key.ctrl !== keyBinding.ctrl) {
+  if (keyBinding.ctrl !== undefined && !!key.ctrl !== keyBinding.ctrl) {
     return false;
   }
 
-  if (keyBinding.shift !== undefined && key.shift !== keyBinding.shift) {
+  if (keyBinding.shift !== undefined && !!key.shift !== keyBinding.shift) {
     return false;
   }
 
-  if (keyBinding.command !== undefined && key.meta !== keyBinding.command) {
+  if (keyBinding.command !== undefined && !!key.meta !== keyBinding.command) {
     return false;
   }
 
-  if (keyBinding.paste !== undefined && key.paste !== keyBinding.paste) {
+  if (keyBinding.paste !== undefined && !!key.paste !== keyBinding.paste) {
     return false;
   }
 
-  if (keyBinding.meta !== undefined && key.meta !== keyBinding.meta) {
+  if (keyBinding.meta !== undefined && !!key.meta !== keyBinding.meta) {
     return false;
   }
 

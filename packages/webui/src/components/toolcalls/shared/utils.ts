@@ -264,6 +264,7 @@ export const hasToolCallOutput = (toolCall: ToolCallData): boolean => {
  * Map a tool call status to a ToolCallContainer status (bullet color)
  * - pending/in_progress -> loading
  * - completed -> success
+ * - cancelled -> warning
  * - failed -> error
  * - default fallback
  */
@@ -276,6 +277,8 @@ export const mapToolStatusToContainerStatus = (
       return 'loading';
     case 'failed':
       return 'error';
+    case 'cancelled':
+      return 'warning';
     case 'completed':
       return 'success';
     default:

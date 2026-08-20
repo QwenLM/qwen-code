@@ -30,6 +30,9 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+// Keep in sync with SETTINGS_VERSION in packages/cli/src/config/settings.ts.
+const CURRENT_SETTINGS_VERSION = 4;
+
 // Helper: list files under a directory recursively, returning relative paths
 function listFilesRecursive(dir: string, base = dir): string[] {
   if (!existsSync(dir)) return [];
@@ -57,6 +60,7 @@ describe('QWEN_HOME environment variable', () => {
     // Always clean up env vars regardless of test outcome
     delete process.env['QWEN_HOME'];
     delete process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
     await rig.cleanup();
   });
 
@@ -73,7 +77,7 @@ describe('QWEN_HOME environment variable', () => {
      * --help exits before that point.
      */
     it('1a: installation_id is written inside QWEN_HOME, not ~/.qwen', async () => {
-      rig.setup('qwen-home-1a-installation-id');
+      await rig.setup('qwen-home-1a-installation-id');
 
       customConfigDir = join(rig.testDir!, 'custom-config');
       mkdirSync(customConfigDir, { recursive: true });
@@ -98,7 +102,7 @@ describe('QWEN_HOME environment variable', () => {
      * 1b. CLI creates the config dir structure when the path does not yet exist.
      */
     it('1b: config dir is created when it does not exist', async () => {
-      rig.setup('qwen-home-1b-dir-creation');
+      await rig.setup('qwen-home-1b-dir-creation');
 
       // Point to a path that does NOT exist yet
       customConfigDir = join(rig.testDir!, 'nonexistent-config');
@@ -134,7 +138,7 @@ describe('QWEN_HOME environment variable', () => {
      * <testDir>/custom-qwen inside the subprocess.
      */
     it('1c: relative QWEN_HOME path is resolved against subprocess cwd', async () => {
-      rig.setup('qwen-home-1c-relative-path');
+      await rig.setup('qwen-home-1c-relative-path');
 
       const relativePath = './custom-qwen';
       process.env['QWEN_HOME'] = relativePath;
@@ -158,7 +162,7 @@ describe('QWEN_HOME environment variable', () => {
      * 1d. Default behaviour is preserved when QWEN_HOME is unset.
      */
     it('1d: CLI functions normally when QWEN_HOME is not set', async () => {
-      rig.setup('qwen-home-1d-default-behaviour');
+      await rig.setup('qwen-home-1d-default-behaviour');
 
       // Explicitly ensure QWEN_HOME is absent for this test
       delete process.env['QWEN_HOME'];
@@ -184,7 +188,7 @@ describe('QWEN_HOME environment variable', () => {
      * process before `loadSettings()` runs.)
      */
     it('2b: settings migration runs in QWEN_HOME dir', async () => {
-      rig.setup('qwen-home-2b-settings-migration');
+      await rig.setup('qwen-home-2b-settings-migration');
 
       customConfigDir = join(rig.testDir!, 'migration-config');
       mkdirSync(customConfigDir, { recursive: true });
@@ -216,9 +220,7 @@ describe('QWEN_HOME environment variable', () => {
       );
       const migrated = JSON.parse(migratedRaw) as Record<string, unknown>;
 
-      // Migration should have bumped the version to the current SETTINGS_VERSION
-      // (packages/cli/src/config/settings.ts). Update this when the schema bumps.
-      expect(migrated['$version']).toBe(4);
+      expect(migrated['$version']).toBe(CURRENT_SETTINGS_VERSION);
     });
   });
 
@@ -241,17 +243,23 @@ describe('QWEN_HOME environment variable', () => {
      * (which triggers migration) without needing an API key.
      */
     it('3a: workspace settings are read from project .qwen/, not from QWEN_HOME', async () => {
-      rig.setup('qwen-home-3a-isolation');
+      await rig.setup('qwen-home-3a-isolation');
 
       customConfigDir = join(rig.testDir!, 'global-config');
       mkdirSync(customConfigDir, { recursive: true });
       process.env['QWEN_HOME'] = customConfigDir;
 
       // Seed QWEN_HOME with the current schema version so it shouldn't migrate.
-      // Bump alongside SETTINGS_VERSION in packages/cli/src/config/settings.ts.
       writeFileSync(
         join(customConfigDir, 'settings.json'),
-        JSON.stringify({ $version: 4, customKey: 'in-global-dir' }, null, 2),
+        JSON.stringify(
+          {
+            $version: CURRENT_SETTINGS_VERSION,
+            customKey: 'in-global-dir',
+          },
+          null,
+          2,
+        ),
       );
 
       // Overwrite the workspace settings.json with V1 format so migration is observable
@@ -283,14 +291,14 @@ describe('QWEN_HOME environment variable', () => {
       }
 
       // The workspace settings.json must have been migrated to the current
-      // SETTINGS_VERSION — proving the CLI read it from the workspace dir, not
-      // from QWEN_HOME. Update the version when the schema bumps.
+      // settings version, proving the CLI read it from the workspace dir, not
+      // from QWEN_HOME.
       const workspaceRaw = readFileSync(workspaceSettingsPath, 'utf-8');
       const workspaceSettings = JSON.parse(workspaceRaw) as Record<
         string,
         unknown
       >;
-      expect(workspaceSettings['$version']).toBe(4);
+      expect(workspaceSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(workspaceSettings['customWorkspaceKey']).toBe('workspace-value');
 
       // The QWEN_HOME settings.json must be unchanged (still at the version we wrote)
@@ -315,7 +323,7 @@ describe('QWEN_HOME environment variable', () => {
      * Runtime files (debug logs) go to QWEN_RUNTIME_DIR.
      */
     it('4a: config files land in QWEN_HOME and runtime files land in QWEN_RUNTIME_DIR', async () => {
-      rig.setup('qwen-home-4a-independence');
+      await rig.setup('qwen-home-4a-independence');
 
       customConfigDir = join(rig.testDir!, 'config-dir');
       const runtimeDir = join(rig.testDir!, 'runtime-dir');
@@ -324,6 +332,7 @@ describe('QWEN_HOME environment variable', () => {
 
       process.env['QWEN_HOME'] = customConfigDir;
       process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
 
       try {
         await rig.run('say hello');

@@ -13,11 +13,15 @@ import type {
   ServerGeminiStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatVisionBridgeNoticeDisplay,
   GeminiEventType,
+  isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
+  toolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -31,6 +35,7 @@ import type {
   ContentBlock,
   ControlMessage,
   ExtendedUsage,
+  PermissionSuggestion,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
@@ -38,6 +43,8 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
+import { observeHeadlessToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -96,11 +103,11 @@ export interface MessageEmitter {
    * In non-streaming mode, this is a no-op.
    *
    * @param request - Tool call request info
-   * @param progress - Structured MCP progress data
+   * @param progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void;
 }
 
@@ -645,6 +652,17 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
+      case GeminiEventType.ModelFallback:
+        // Surface model fallback transitions so non-interactive consumers
+        // (CI pipelines, SDK clients) can observe capacity-driven model
+        // switches without parsing assistant content.
+        this.emitSystemMessage('model_fallback', {
+          fromModel: event.fromModel,
+          toModel: event.toModel,
+          statusCode: event.statusCode,
+          fallbackIndex: event.fallbackIndex,
+        });
+        break;
       default:
         break;
     }
@@ -1043,8 +1061,10 @@ export abstract class BaseJsonOutputAdapter {
       is_error: hasError,
     };
     const content = toolResultContent(response);
+    let projectedContent: string | undefined;
     if (content !== undefined) {
-      block.content = content;
+      projectedContent = projectHeadlessToolResultContent(content);
+      block.content = projectedContent;
     }
 
     const message: CLIUserMessage = {
@@ -1057,6 +1077,19 @@ export abstract class BaseJsonOutputAdapter {
         content: [block],
       },
     };
+    if (content !== undefined && projectedContent !== undefined) {
+      observeHeadlessToolResultProjection(
+        message,
+        content,
+        projectedContent,
+        request.callId,
+        response.boundaryArtifact ??
+          toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          ),
+      );
+    }
     this.emitMessageImpl(message);
   }
 
@@ -1087,6 +1120,7 @@ export abstract class BaseJsonOutputAdapter {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     const message: ControlMessage = {
       type: 'control_request',
@@ -1096,7 +1130,7 @@ export abstract class BaseJsonOutputAdapter {
         tool_name: toolName,
         tool_use_id: toolUseId,
         input,
-        permission_suggestions: null,
+        permission_suggestions: permissionSuggestions,
         blocked_path: blockedPath,
       },
     };
@@ -1144,11 +1178,11 @@ export abstract class BaseJsonOutputAdapter {
    * to emit stream events when includePartialMessages is enabled.
    *
    * @param _request - Tool call request info
-   * @param _progress - Structured MCP progress data
+   * @param _progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     _request: ToolCallRequestInfo,
-    _progress: McpToolProgressData,
+    _progress: McpToolProgressData | ShellProgressData,
   ): void {
     // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
     // as stream events when includePartialMessages is enabled.
@@ -1389,13 +1423,38 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
-  if (response.error) {
-    return response.error.message;
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
   }
-  // Check for errors in responseParts (e.g., cancelled responses)
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.error) {
+      return `${notice}\n${response.error.message}`;
+    }
+    const responsePartsError = checkResponsePartsForError(
+      response.responseParts,
+    );
+    if (responsePartsError) {
+      return `${notice}\n${responsePartsError}`;
+    }
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return notice;
+  }
+  // Prefer model-facing detail over the short operational error summary.
   const responsePartsError = checkResponsePartsForError(response.responseParts);
   if (responsePartsError) {
     return responsePartsError;
+  }
+  if (response.error) {
+    return response.error.message;
   }
   if (
     typeof response.resultDisplay === 'string' &&

@@ -5,12 +5,15 @@
  */
 
 import * as fs from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import {
   AUTO_MEMORY_SCHEMA_VERSION,
@@ -39,6 +42,11 @@ export function createDefaultAutoMemoryExtractCursor(
 
 export function createDefaultAutoMemoryIndex(): string {
   return '';
+}
+
+export interface AutoMemoryIndexRead {
+  content: string;
+  stats: Stats;
 }
 
 async function writeFileIfMissing(
@@ -91,6 +99,57 @@ export async function readAutoMemoryIndex(
     }
     throw error;
   }
+}
+
+async function readMemoryIndexWithStats(
+  indexPath: string,
+): Promise<AutoMemoryIndexRead | null> {
+  try {
+    const stats = await fs.stat(indexPath);
+    const content = await fs.readFile(indexPath, 'utf-8');
+    return { content, stats };
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function readAutoMemoryIndexWithStats(
+  projectRoot: string,
+): Promise<AutoMemoryIndexRead | null> {
+  return readMemoryIndexWithStats(getAutoMemoryIndexPath(projectRoot));
+}
+
+/**
+ * Ensure the user-level (cross-project) auto-memory dir + empty index exist.
+ * Unlike the per-project scaffold, this does NOT seed meta.json or
+ * extract-cursor.json — user memory has no per-project state to track.
+ */
+export async function ensureUserAutoMemoryScaffold(): Promise<void> {
+  await fs.mkdir(getUserAutoMemoryRoot(), { recursive: true });
+  await writeFileIfMissing(
+    getUserAutoMemoryIndexPath(),
+    createDefaultAutoMemoryIndex(),
+  );
+}
+
+export async function readUserAutoMemoryIndex(): Promise<string | null> {
+  try {
+    return await fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8');
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function readUserAutoMemoryIndexWithStats(): Promise<AutoMemoryIndexRead | null> {
+  return readMemoryIndexWithStats(getUserAutoMemoryIndexPath());
 }
 
 export { AUTO_MEMORY_INDEX_FILENAME };

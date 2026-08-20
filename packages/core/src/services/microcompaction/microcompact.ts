@@ -7,11 +7,32 @@
 import type { Content, Part } from '@google/genai';
 
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
+
+// Matches the FULL placeholder shape this module emits
+// (`${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${mime}]`; the mime is sanitized
+// to contain no `]` and may be EMPTY — sanitizeMimeForPlaceholder returns
+// '' for empty/whitespace-only/bracket-only mimeTypes, and the producer's
+// `??` fallback only covers null/undefined), not just the prefix. The
+// interior also rejects \r/\n/\t because sanitizeMimeForPlaceholder
+// normalizes them to spaces, so the producer can never emit them inside
+// the placeholder — accepting them would let multi-line user text that
+// merely starts with the prefix be misclassified as a placeholder. Derived
+// from the constant above so producer and consumer cannot drift. A genuine
+// user prompt that merely *begins* with the prefix is NOT a placeholder and
+// must keep counting as user text wherever this predicate is used.
+const CLEARED_MEDIA_PLACEHOLDER_RE = new RegExp(
+  `^${MICROCOMPACT_CLEARED_IMAGE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} [^\\]\\r\\n\\t]*\\]$`,
+);
+
+export function isClearedMediaPlaceholder(text: string): boolean {
+  return CLEARED_MEDIA_PLACEHOLDER_RE.test(text);
+}
 
 // IMPORTANT: any new file-touching tool added here MUST also be added
 // to FILE_PATH_TOOLS below, or microcompaction will blank its output
@@ -22,8 +43,11 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
+  ToolNames.READ_MCP_RESOURCE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
+  ToolNames.SKILL,
 ]);
 
 /**
@@ -118,6 +142,12 @@ interface CollectedRefs {
   nestedMedia: PartRef[];
 }
 
+export type PreserveReadFileResult = (filePath: string) => boolean;
+
+function refKey(r: PartRef): string {
+  return `${r.contentIndex}:${r.partIndex}`;
+}
+
 function hasNestedMedia(part: Part): boolean {
   const nested = (part.functionResponse as { parts?: unknown } | undefined)
     ?.parts;
@@ -143,7 +173,10 @@ function hasNestedMedia(part: Part): boolean {
  * `toolResultsNumToKeep: 1` keeps 1 tool result AND 1 media item, not
  * 1 entry total across the combined list.
  */
-function collectCompactablePartRefs(history: Content[]): CollectedRefs {
+function collectCompactablePartRefs(
+  history: Content[],
+  preserveReadFileResult?: PreserveReadFileResult,
+): CollectedRefs {
   const tool: PartRef[] = [];
   const media: PartRef[] = [];
   const nestedMedia: PartRef[] = [];
@@ -168,7 +201,20 @@ function collectCompactablePartRefs(history: Content[]): CollectedRefs {
       }
     }
   }
-  return { tool, media, nestedMedia };
+  if (!preserveReadFileResult) {
+    return { tool, media, nestedMedia };
+  }
+
+  const preservedRefs = buildPreservedReadRefs(
+    history,
+    tool,
+    preserveReadFileResult,
+  );
+  return {
+    tool: tool.filter((ref) => !preservedRefs.has(refKey(ref))),
+    media,
+    nestedMedia,
+  };
 }
 
 // --- Helpers ---
@@ -236,11 +282,254 @@ function stripNestedMedia(
   return rest;
 }
 
+function getPart(history: Content[], ref: PartRef): Part | undefined {
+  return history[ref.contentIndex]?.parts?.[ref.partIndex];
+}
+
+function getToolOutputChars(part: Part | undefined): number {
+  if (
+    !part ||
+    !part.functionResponse?.name ||
+    !COMPACTABLE_TOOLS.has(part.functionResponse.name) ||
+    isErrorResponse(part) ||
+    isAlreadyCleared(part)
+  ) {
+    return 0;
+  }
+  const output = part.functionResponse.response?.['output'];
+  return typeof output === 'string' ? output.length : 0;
+}
+
+function normalizePendingContent(
+  pendingContent: Content | Content[] | undefined,
+): Content[] {
+  if (!pendingContent) return [];
+  return Array.isArray(pendingContent) ? pendingContent : [pendingContent];
+}
+
+function getToolResultsTotalCharsThreshold(
+  settings: ClearContextOnIdleSettings,
+): number {
+  if (settings.toolResultsTotalCharsThreshold !== undefined) {
+    return settings.toolResultsTotalCharsThreshold;
+  }
+  if ((settings.toolResultsThresholdMinutes ?? 0) < 0) {
+    return -1;
+  }
+  return DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD;
+}
+
+function buildKeepRefs(refs: PartRef[], keepRecent: number): Set<string> {
+  return new Set(refs.slice(-keepRecent).map(refKey));
+}
+
+function buildClearMap(
+  clearRefs: PartRef[],
+): Map<number, Map<number, PartKind>> {
+  const clearMap = new Map<number, Map<number, PartKind>>();
+  for (const ref of clearRefs) {
+    let parts = clearMap.get(ref.contentIndex);
+    if (!parts) {
+      parts = new Map();
+      clearMap.set(ref.contentIndex, parts);
+    }
+    parts.set(ref.partIndex, ref.kind);
+  }
+  return clearMap;
+}
+
+function getFilePathsForResponse(
+  part: Part | undefined,
+  callIdToFilePath: Map<string, string[]>,
+): string[] | undefined {
+  const response = part?.functionResponse;
+  if (!response?.id || !response.name || !FILE_PATH_TOOLS.has(response.name)) {
+    return undefined;
+  }
+  const paths = callIdToFilePath.get(response.id);
+  return paths && paths.length > 0 ? [...new Set(paths)] : undefined;
+}
+
+function buildPreservedReadRefs(
+  history: Content[],
+  refs: PartRef[],
+  preserveReadFileResult: PreserveReadFileResult,
+): Set<string> {
+  const callIdToFilePath = buildCallIdToFilePath(history);
+  const preserved = new Set<string>();
+  for (const ref of refs) {
+    const part = getPart(history, ref);
+    if (
+      part?.functionResponse?.name !== ToolNames.READ_FILE ||
+      isErrorResponse(part)
+    ) {
+      continue;
+    }
+    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    if (
+      paths &&
+      paths.length > 0 &&
+      paths.every((filePath) => preserveReadFileResult(filePath))
+    ) {
+      preserved.add(refKey(ref));
+    }
+  }
+  return preserved;
+}
+
+function buildKeptFilePaths(
+  history: Content[],
+  refs: PartRef[],
+  keepRefs: Set<string>,
+  callIdToFilePath: Map<string, string[]>,
+): Set<string> {
+  const kept = new Set<string>();
+  for (const ref of refs) {
+    if (!keepRefs.has(refKey(ref))) continue;
+    const part = getPart(history, ref);
+    if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
+    // Only write_file results anchor the file's complete current bytes:
+    // the functionCall carries the full `content` on a model-role part
+    // microcompaction never blanks. read_file results can be cache-hit
+    // placeholders or partial slices, and edit results carry only an
+    // old/new snippet while still setting the cache's sticky full-read
+    // flags — neither proves the file stays resident (issue #4239).
+    if (part.functionResponse?.name !== ToolNames.WRITE_FILE) {
+      continue;
+    }
+    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    // If an id maps to multiple possible paths, a kept result cannot prove
+    // which file is still resident. Keep the #4239-safe behavior and do not
+    // let it protect any candidate path from disarming.
+    if (paths?.length === 1) {
+      kept.add(paths[0]!);
+    }
+  }
+  return kept;
+}
+
+interface SizeClearPlan {
+  clearRefs: PartRef[];
+  toolRefs: PartRef[];
+  keepToolRefs: Set<string>;
+  toolResultCharsBefore: number;
+  toolResultCharsAfter: number;
+  pendingToolResultChars: number;
+  toolResultsTotalCharsThreshold: number;
+  toolResultsLowWatermark: number;
+}
+
+function planSizeBasedClearing(
+  history: Content[],
+  settings: ClearContextOnIdleSettings,
+  keepRecent: number,
+  pendingContent: Content | Content[] | undefined,
+  preserveReadFileResult?: PreserveReadFileResult,
+): SizeClearPlan | null {
+  const threshold = getToolResultsTotalCharsThreshold(settings);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return null;
+  }
+  // Clear down to half the threshold, not just below it: stopping at the
+  // threshold leaves the total riding the limit, so every subsequent turn
+  // re-triggers and rewrites one more old result, breaking the provider
+  // prompt-cache prefix on every request. The watermark is a best-effort
+  // target — protected results may keep the total above it.
+  const lowWatermark = Math.floor(threshold / 2);
+
+  const pending = normalizePendingContent(pendingContent);
+  const virtualHistory =
+    pending.length > 0 ? [...history, ...pending] : history;
+  const { tool } = collectCompactablePartRefs(virtualHistory);
+  const charsByRef = new Map<string, number>();
+  let totalChars = 0;
+  let pendingChars = 0;
+  for (const ref of tool) {
+    const chars = getToolOutputChars(getPart(virtualHistory, ref));
+    if (chars <= 0) continue;
+    charsByRef.set(refKey(ref), chars);
+    totalChars += chars;
+    if (ref.contentIndex >= history.length) {
+      pendingChars += chars;
+    }
+  }
+  if (totalChars <= threshold) {
+    return null;
+  }
+
+  const preservedToolRefs = preserveReadFileResult
+    ? buildPreservedReadRefs(virtualHistory, tool, preserveReadFileResult)
+    : new Set<string>();
+  const compactableToolRefs = tool.filter(
+    (ref) => !preservedToolRefs.has(refKey(ref)),
+  );
+  // keepRecent protects the most-recent committed results that are
+  // actually at risk of clearing — refs present in charsByRef (positive,
+  // successful, uncleared output). Zero-char refs (errors, prior
+  // placeholders, empty output) are never cleared, so letting them absorb
+  // protection slots would strand real recent outputs unprotected.
+  // Pending refs are excluded entirely: they are uncleared by
+  // construction (contentIndex guard below), and a pending read_file
+  // result may be a cache-hit placeholder rather than file bytes, so it
+  // must not vouch for path residency either — an over-disarm only costs
+  // a redundant re-read (issue #4239).
+  const keepToolRefs = buildKeepRefs(
+    compactableToolRefs.filter(
+      (ref) => ref.contentIndex < history.length && charsByRef.has(refKey(ref)),
+    ),
+    keepRecent,
+  );
+  const clearRefs: PartRef[] = [];
+  let remainingChars = totalChars;
+  for (const ref of compactableToolRefs) {
+    if (remainingChars <= lowWatermark) break;
+
+    const key = refKey(ref);
+    const chars = charsByRef.get(key) ?? 0;
+    if (
+      chars <= 0 ||
+      ref.contentIndex >= history.length ||
+      keepToolRefs.has(key)
+    ) {
+      continue;
+    }
+
+    clearRefs.push(ref);
+    remainingChars -= chars;
+  }
+
+  return {
+    clearRefs,
+    toolRefs: compactableToolRefs,
+    keepToolRefs,
+    toolResultCharsBefore: totalChars,
+    toolResultCharsAfter: remainingChars - pendingChars,
+    pendingToolResultChars: pendingChars,
+    toolResultsTotalCharsThreshold: threshold,
+    toolResultsLowWatermark: lowWatermark,
+  };
+}
+
 // --- Main entry point ---
 
+export type MicrocompactTriggerReason = 'force' | 'idle' | 'size';
+
+export interface MicrocompactOptions {
+  force?: boolean;
+  sizeOnly?: boolean;
+  pendingContent?: Content | Content[];
+  preserveReadFileResult?: PreserveReadFileResult;
+}
+
 export interface MicrocompactMeta {
+  triggerReason: MicrocompactTriggerReason;
   gapMinutes: number;
   thresholdMinutes: number;
+  toolResultCharsBefore?: number;
+  toolResultCharsAfter?: number;
+  pendingToolResultChars?: number;
+  toolResultsTotalCharsThreshold?: number;
+  toolResultsLowWatermark?: number;
   /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
   /** Count of media parts cleared (`media` top-level + `nested-media` under non-compactable tools). */
@@ -263,8 +552,13 @@ export interface MicrocompactMeta {
 }
 
 /**
- * Microcompact history: clear old compactable tool results when the
- * time-based trigger fires.
+ * Microcompact history: clear old compactable tool results and media when the
+ * idle/force trigger fires, or clear old compactable tool results only when
+ * the cumulative tool-result size trigger fires.
+ *
+ * Pass `opts.force: true` to skip trigger checks and always run the full
+ * clearing logic (used by `/compress-fast`). Pass `opts.sizeOnly: true` with
+ * optional `pendingContent` for ToolResult turns.
  *
  * Returns the (potentially modified) history and optional metadata
  * about what was cleared (for logging by the caller).
@@ -273,150 +567,237 @@ export function microcompactHistory(
   history: Content[],
   lastApiCompletionTimestamp: number | null,
   settings: ClearContextOnIdleSettings,
+  opts?: MicrocompactOptions,
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const trigger = evaluateTimeBasedTrigger(
-    lastApiCompletionTimestamp,
-    settings,
+  const keepRecent = resolveKeepRecent(
+    process.env['QWEN_MC_KEEP_RECENT'],
+    settings.toolResultsNumToKeep,
   );
-  if (!trigger) {
-    return { history };
-  }
-  const { gapMs } = trigger;
 
-  const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
-  const rawKeepRecent =
-    envKeep !== undefined && Number.isFinite(Number(envKeep))
-      ? Number(envKeep)
-      : (settings.toolResultsNumToKeep ?? 5);
-  const keepRecent = Number.isFinite(rawKeepRecent)
-    ? Math.max(1, rawKeepRecent)
-    : 5;
+  let triggerReason: MicrocompactTriggerReason | undefined;
+  let gapMs = 0;
+  let tool: PartRef[] = [];
+  let media: PartRef[] = [];
+  let nestedMedia: PartRef[] = [];
+  let keepRefs = new Set<string>();
+  let clearRefs: PartRef[] = [];
+  let toolResultCharsBefore: number | undefined;
+  let toolResultCharsAfter: number | undefined;
+  let pendingToolResultChars: number | undefined;
+  let toolResultsTotalCharsThreshold: number | undefined;
+  let toolResultsLowWatermark: number | undefined;
+  let keptPathHistory = history;
+  let keptPathRefs: PartRef[] = [];
 
-  const { tool, media, nestedMedia } = collectCompactablePartRefs(history);
-  // Each kind gets its own keepRecent budget: setting
-  // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
-  // matches what users typically expect when they configure the
-  // threshold for "tool results".
-  const refKey = (r: PartRef) => `${r.contentIndex}:${r.partIndex}`;
-  const keepRefs = new Set([
-    ...tool.slice(-keepRecent).map(refKey),
-    ...media.slice(-keepRecent).map(refKey),
-    ...nestedMedia.slice(-keepRecent).map(refKey),
-  ]);
-  const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
-  const clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
-
-  if (clearRefs.length === 0) {
-    return { history };
-  }
-
-  // Build a lookup: contentIndex → Map of partIndex → kind
-  const clearMap = new Map<number, Map<number, PartKind>>();
-  for (const ref of clearRefs) {
-    let parts = clearMap.get(ref.contentIndex);
-    if (!parts) {
-      parts = new Map();
-      clearMap.set(ref.contentIndex, parts);
+  if (opts?.force) {
+    triggerReason = 'force';
+  } else if (!opts?.sizeOnly) {
+    const timeTrigger = evaluateTimeBasedTrigger(
+      lastApiCompletionTimestamp,
+      settings,
+    );
+    if (timeTrigger) {
+      triggerReason = 'idle';
+      gapMs = timeTrigger.gapMs;
     }
-    parts.set(ref.partIndex, ref.kind);
   }
 
-  const callIdToFilePath = buildCallIdToFilePath(history);
+  if (triggerReason === 'force' || triggerReason === 'idle') {
+    ({ tool, media, nestedMedia } = collectCompactablePartRefs(
+      history,
+      opts?.preserveReadFileResult,
+    ));
+    // Each kind gets its own keepRecent budget: setting
+    // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
+    // matches what users typically expect when they configure the
+    // threshold for "tool results".
+    // Zero-char tool refs (errors, already-cleared placeholders, empty
+    // output) are never clearable, so letting them absorb protection
+    // slots would strand real recent outputs unprotected. Media-carrying
+    // results (image/PDF reads) have empty text output but ARE clearable
+    // on this path, so they must stay protection candidates. Media uses
+    // the same budget by count but is always clearable.
+    const keepToolRefs = buildKeepRefs(
+      tool.filter((ref) => {
+        const part = getPart(history, ref);
+        return getToolOutputChars(part) > 0 || (!!part && hasNestedMedia(part));
+      }),
+      keepRecent,
+    );
+    keepRefs = new Set([
+      ...keepToolRefs,
+      ...media.slice(-keepRecent).map(refKey),
+      ...nestedMedia.slice(-keepRecent).map(refKey),
+    ]);
+    const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
+    const toolKeys = new Set(tool.map(refKey));
+    clearRefs = allRefs.filter((r) => {
+      if (keepRefs.has(refKey(r))) return false;
+      const part = getPart(history, r);
+      // Zero-character non-media tool refs are never clearable (mirrors the
+      // size path's `chars <= 0` skip). They are excluded from keepRecent
+      // candidates above, so without this guard they would be blanked here.
+      if (
+        toolKeys.has(refKey(r)) &&
+        getToolOutputChars(part) === 0 &&
+        !(part && hasNestedMedia(part))
+      ) {
+        return false;
+      }
+      return true;
+    });
+    keptPathRefs = tool;
+  } else {
+    const pending = normalizePendingContent(opts?.pendingContent);
+    const sizePlan = planSizeBasedClearing(
+      history,
+      settings,
+      keepRecent,
+      pending,
+      opts?.preserveReadFileResult,
+    );
+    if (!sizePlan) {
+      return { history };
+    }
+    triggerReason = 'size';
+    tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
+    keptPathHistory =
+      pending.length > 0 ? [...history, ...pending] : keptPathHistory;
+    keptPathRefs = sizePlan.toolRefs;
+    keepRefs = sizePlan.keepToolRefs;
+    clearRefs = sizePlan.clearRefs;
+    toolResultCharsBefore = sizePlan.toolResultCharsBefore;
+    toolResultCharsAfter = sizePlan.toolResultCharsAfter;
+    pendingToolResultChars = sizePlan.pendingToolResultChars;
+    toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
+    toolResultsLowWatermark = sizePlan.toolResultsLowWatermark;
+  }
+
+  if (clearRefs.length === 0 && triggerReason !== 'size') {
+    return { history };
+  }
+
   const evictedReadPaths = new Set<string>();
   let unresolvedEvictedReads = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
   let mediaCleared = 0;
+  let result = history;
 
-  const result: Content[] = history.map((content, ci) => {
-    const partsToClean = clearMap.get(ci);
-    if (!partsToClean || !content.parts) return content;
+  if (clearRefs.length > 0) {
+    const clearMap = buildClearMap(clearRefs);
+    const callIdToFilePath = buildCallIdToFilePath(keptPathHistory);
+    const keptFilePaths = buildKeptFilePaths(
+      keptPathHistory,
+      keptPathRefs,
+      keepRefs,
+      callIdToFilePath,
+    );
 
-    let touched = false;
-    const newParts = content.parts.map((part, pi) => {
-      const kind = partsToClean.get(pi);
-      if (kind === undefined) return part;
-      if (isAlreadyCleared(part)) return part;
+    result = history.map((content, ci) => {
+      const partsToClean = clearMap.get(ci);
+      if (!partsToClean || !content.parts) return content;
 
-      if (
-        kind === 'tool' &&
-        part.functionResponse?.name &&
-        COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
-        !isErrorResponse(part)
-      ) {
-        tokensSaved += estimatePartTokens(part);
-        toolsCleared++;
-        touched = true;
-        // Record the blanked file's path so the caller disarms its
-        // fast-path; if unrecoverable, count it so the caller falls
-        // back to the blanket wipe (issue #4239).
-        if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-          const filePaths = part.functionResponse.id
-            ? callIdToFilePath.get(part.functionResponse.id)
-            : undefined;
-          if (filePaths && filePaths.length > 0) {
-            for (const p of filePaths) evictedReadPaths.add(p);
-          } else {
-            unresolvedEvictedReads++;
+      let touched = false;
+      const newParts = content.parts.map((part, pi) => {
+        const kind = partsToClean.get(pi);
+        if (kind === undefined) return part;
+        if (isAlreadyCleared(part)) return part;
+
+        if (
+          kind === 'tool' &&
+          part.functionResponse?.name &&
+          COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
+          !isErrorResponse(part)
+        ) {
+          tokensSaved += estimatePartTokens(part);
+          toolsCleared++;
+          touched = true;
+          // Record the blanked file's path so the caller disarms its
+          // fast-path unless a kept result for the same path is still
+          // quotable from history. If unrecoverable, count it so the
+          // caller falls back to the blanket wipe (issue #4239).
+          if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
+            const filePaths = getFilePathsForResponse(part, callIdToFilePath);
+            if (filePaths && filePaths.length > 0) {
+              for (const p of filePaths) {
+                if (!keptFilePaths.has(p)) {
+                  evictedReadPaths.add(p);
+                }
+              }
+            } else {
+              unresolvedEvictedReads++;
+            }
           }
+          return {
+            functionResponse: {
+              ...stripNestedMedia(part.functionResponse),
+              response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+            },
+          };
         }
-        return {
-          functionResponse: {
-            ...stripNestedMedia(part.functionResponse),
-            response: { output: MICROCOMPACT_CLEARED_MESSAGE },
-          },
-        };
-      }
 
-      if (
-        kind === 'nested-media' &&
-        part.functionResponse &&
-        !isErrorResponse(part)
-      ) {
-        // Non-compactable tool result: keep response.output, drop only
-        // the nested media on functionResponse.parts.
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          functionResponse: stripNestedMedia(part.functionResponse),
-        };
-      }
+        if (
+          kind === 'nested-media' &&
+          part.functionResponse &&
+          !isErrorResponse(part)
+        ) {
+          // Non-compactable tool result: keep response.output, drop only
+          // the nested media on functionResponse.parts.
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            functionResponse: stripNestedMedia(part.functionResponse),
+          };
+        }
 
-      if (kind === 'media' && (part.inlineData || part.fileData)) {
-        const mime =
-          part.inlineData?.mimeType ??
-          part.fileData?.mimeType ??
-          'application/octet-stream';
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
-        };
-      }
+        if (kind === 'media' && (part.inlineData || part.fileData)) {
+          const mime =
+            part.inlineData?.mimeType ??
+            part.fileData?.mimeType ??
+            'application/octet-stream';
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
+          };
+        }
 
-      return part;
+        return part;
+      });
+
+      if (!touched) return content;
+      return { ...content, parts: newParts };
     });
+  }
 
-    if (!touched) return content;
-    return { ...content, parts: newParts };
-  });
-
-  if (tokensSaved === 0) {
+  if (tokensSaved === 0 && triggerReason !== 'size') {
     return { history };
   }
 
   const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
-  const toolsKept = tool.length - toolsCleared;
-  const mediaKept = media.length + nestedMedia.length - mediaCleared;
+  // Only count items that were actually protected by keepRecent, not
+  // already-cleared items that were skipped during the clearing pass.
+  const toolsKept = tool.filter((r) => keepRefs.has(refKey(r))).length;
+  const mediaKept =
+    triggerReason === 'size'
+      ? 0
+      : Math.min(media.length + nestedMedia.length, keepRecent);
 
   return {
     history: result,
     meta: {
+      triggerReason,
       gapMinutes: Math.round(gapMs / 60_000),
       thresholdMinutes,
+      toolResultCharsBefore,
+      toolResultCharsAfter,
+      pendingToolResultChars,
+      toolResultsTotalCharsThreshold,
+      toolResultsLowWatermark,
       toolsCleared,
       mediaCleared,
       toolsKept,
@@ -427,4 +808,24 @@ export function microcompactHistory(
       unresolvedEvictedReads,
     },
   };
+}
+
+function resolveKeepRecent(
+  envValue: string | undefined,
+  settingsValue: number | undefined,
+): number {
+  const normalize = (value: number | undefined): number | undefined => {
+    if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+    return Math.max(1, value);
+  };
+
+  if (envValue !== undefined) {
+    const trimmed = envValue.trim();
+    if (/^-?\d+$/.test(trimmed)) {
+      const envKeep = normalize(Number(trimmed));
+      if (envKeep !== undefined) return envKeep;
+    }
+  }
+
+  return normalize(settingsValue) ?? 5;
 }

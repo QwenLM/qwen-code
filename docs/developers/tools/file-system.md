@@ -24,18 +24,21 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 ## 2. `read_file` (ReadFile)
 
-`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Media files whose modality is not supported by the current model are rejected with a helpful error message. Other binary file types are generally skipped.
+`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Unsupported PDFs attempt text extraction and the bounded vision fallback described below; other unsupported media files return a helpful error message. Other binary file types are generally skipped.
 
 - **Tool name:** `read_file`
 - **Display name:** ReadFile
 - **File:** `read-file.ts`
 - **Parameters:**
-  - `path` (string, required): The absolute path to the file to read.
+  - `file_path` (string, required): The absolute path to the file to read.
   - `offset` (number, optional): For text files, the 0-based line number to start reading from. Requires `limit` to be set.
   - `limit` (number, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
+  - `pages` (string, optional): For PDFs, a 1-indexed page or closed page range such as `"3"` or `"20-25"`. A request may contain at most 20 pages.
 - **Behavior:**
   - For text files: Returns the content. If `offset` and `limit` are used, returns only that slice of lines. Indicates if content was truncated due to line limits or line length limits.
   - For media files (images, PDFs, audio, video): If the current model supports the file's modality, returns the file content as a base64-encoded `inlineData` object. If the model does not support the modality, returns an error message with guidance (e.g., suggesting skills or external tools).
+  - For PDFs with a text-only primary model: Text extraction is attempted first. If extraction fails, or an explicitly requested (or actual) single page still exceeds the 12K-token text budget, a configured vision bridge automatically renders and transcribes at most four pages beginning at the requested first page. The requested range is clipped to the actual document end when known. The result identifies the transcribed range and either the pages known to remain or, when the page count is unavailable, that additional pages may exist. Ordinary multi-page text overflow still asks for a narrower `pages` range instead of switching to vision.
+  - Vision bridge PDF transcription is lossy and marked as untrusted machine-generated content. The tool result contains text rather than rendered images, and its user-facing TUI, ACP, non-interactive structured output, and export displays identify the vision model and endpoint when known. If the bridge fails, the exact original PDF extraction error is returned to the model while the user display still discloses the bridge attempt.
   - For other binary files: Attempts to identify and skip them, returning a message indicating it's a generic binary file.
 - **Output:** (`llmContent`):
   - For text files: The file content, potentially prefixed with a truncation message (e.g., `[File content truncated: showing lines 1-100 of 500 total lines...]\nActual file content...`).
@@ -139,7 +142,7 @@ notebook_edit(
 - **Behavior:**
   - Searches for files matching the glob pattern within the specified directory.
   - Returns a list of absolute paths, sorted with the most recently modified files first.
-  - Respects .gitignore and .qwenignore patterns by default.
+  - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files by default.
   - Limits results to 100 files to prevent context overflow.
 - **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
 - **Confirmation:** No.
@@ -155,12 +158,12 @@ notebook_edit(
   - `pattern` (string, required): The regular expression pattern to search for in file contents (e.g., `"function\\s+myFunction"`, `"log.*Error"`).
   - `path` (string, optional): File or directory to search in. Defaults to current working directory.
   - `glob` (string, optional): Glob pattern to filter files (e.g. `"*.js"`, `"src/**/*.{ts,tsx}"`).
-  - `limit` (number, optional): Limit output to first N matching lines. Optional - shows all matches if not specified.
+  - `limit` (integer, optional): Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.
 - **Behavior:**
   - Uses ripgrep for fast search when available; otherwise falls back to a JavaScript-based search implementation.
   - Returns matching lines with file paths and line numbers.
   - Case-insensitive by default.
-  - Respects .gitignore and .qwenignore patterns.
+  - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files.
   - Limits output to prevent context overflow.
 - **Output (`llmContent`):** A formatted string of matches, e.g.:
 

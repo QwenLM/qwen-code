@@ -20,7 +20,9 @@ const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
 const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
-  return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
+  // macOS terminals (iTerm2, Terminal.app) intercept Cmd+V for text paste, so
+  // advertise Ctrl+V and Option+V, which reach the CLI as image-paste keys.
+  return process.platform === 'darwin' ? 'ctrl+v / option+v' : 'ctrl+v';
 };
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
@@ -38,11 +40,12 @@ const getShortcuts = (): Shortcut[] => [
   { key: 'ctrl+c', description: t('to quit') },
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },
+  { key: 'ctrl+o', description: t('to expand details') },
   { key: 'ctrl+r', description: t('to search history') },
   { key: 'ctrl+y', description: t('to retry last request') },
+  { key: 'ctrl+q', description: t('to queue for the next turn') },
   { key: getPasteKey(), description: t('to paste images') },
   { key: getExternalEditorKey(), description: t('for external editor') },
-  { key: 'ctrl+o', description: t('to toggle compact mode') },
 ];
 
 const ShortcutItem: React.FC<{ shortcut: Shortcut }> = ({ shortcut }) => (
@@ -56,11 +59,11 @@ const COLUMN_GAP = 4;
 const MARGIN_LEFT = 2;
 const MARGIN_RIGHT = 2;
 
-// Column distribution for different layouts (5+4+4 for 3 cols, 7+6 for 2 cols)
+// Column distribution for different layouts (5+5+4 for 3 cols, 7+7 for 2 cols)
 const COLUMN_SPLITS: Record<number, number[]> = {
-  3: [5, 4, 4],
-  2: [7, 6],
-  1: [13],
+  3: [5, 5, 4],
+  2: [7, 7],
+  1: [14],
 };
 
 export const KeyboardShortcuts: React.FC = () => {

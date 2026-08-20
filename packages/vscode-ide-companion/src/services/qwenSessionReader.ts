@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
@@ -11,6 +12,7 @@ import * as crypto from 'crypto';
 import { getGitBranch, getProjectHash } from '@qwen-code/qwen-code-core';
 import { getRuntimeBaseDir } from '../utils/paths.js';
 import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
+import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 
 export interface QwenMessage {
   id: string;
@@ -71,7 +73,7 @@ export class QwenSessionReader {
         // All projects
         const tmpDir = path.join(this.runtimeDir, 'tmp');
         if (!fs.existsSync(tmpDir)) {
-          console.log('[QwenSessionReader] Tmp directory not found:', tmpDir);
+          logger.log('[QwenSessionReader] Tmp directory not found:', tmpDir);
           return [];
         }
 
@@ -91,7 +93,7 @@ export class QwenSessionReader {
 
       return sessions;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to get sessions:', error);
+      logger.error('[QwenSessionReader] Failed to get sessions:', error);
       return [];
     }
   }
@@ -124,7 +126,7 @@ export class QwenSessionReader {
         session.filePath = filePath;
         sessions.push(session);
       } catch (error) {
-        console.error(
+        logger.error(
           '[QwenSessionReader] Failed to read session file:',
           filePath,
           error,
@@ -141,7 +143,7 @@ export class QwenSessionReader {
           sessions.push(session);
         }
       } catch (error) {
-        console.error(
+        logger.error(
           '[QwenSessionReader] Failed to read JSONL session file:',
           filePath,
           error,
@@ -260,7 +262,10 @@ export class QwenSessionReader {
             seenUuids.add(uuid);
           }
 
-          const text = this.contentToText(obj.message);
+          const text =
+            type === 'user'
+              ? qwenRecordToText(obj)
+              : qwenContentToText(obj.message);
           if (includeMessages) {
             messages.push({
               id: uuid || `${messages.length}`,
@@ -313,38 +318,8 @@ export class QwenSessionReader {
         cwd,
       };
     } catch (error) {
-      console.error(
-        '[QwenSessionReader] Failed to parse JSONL session:',
-        error,
-      );
+      logger.error('[QwenSessionReader] Failed to parse JSONL session:', error);
       return null;
-    }
-  }
-
-  // Extract plain text from CLI Content structure
-  private contentToText(message: unknown): string {
-    try {
-      if (typeof message !== 'object' || message === null) {
-        return '';
-      }
-
-      const typed = message as { parts?: unknown[] };
-      const parts = Array.isArray(typed.parts) ? typed.parts : [];
-      const texts: string[] = [];
-      for (const part of parts) {
-        if (typeof part !== 'object' || part === null) {
-          continue;
-        }
-        const p = part as Record<string, unknown>;
-        if (typeof p.text === 'string') {
-          texts.push(p.text);
-        } else if (typeof p.data === 'string') {
-          texts.push(p.data);
-        }
-      }
-      return texts.join('\n');
-    } catch {
-      return '';
     }
   }
 
@@ -405,7 +380,7 @@ export class QwenSessionReader {
       fs.unlinkSync(session.filePath);
       return true;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to delete session:', error);
+      logger.error('[QwenSessionReader] Failed to delete session:', error);
       return false;
     }
   }
@@ -450,7 +425,7 @@ export class QwenSessionReader {
       fs.appendFileSync(session.filePath, record + '\n');
       return true;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to rename session:', error);
+      logger.error('[QwenSessionReader] Failed to rename session:', error);
       return false;
     }
   }

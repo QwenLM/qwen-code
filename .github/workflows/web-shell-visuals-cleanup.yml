@@ -1,0 +1,54 @@
+name: 'PR Asset Branch Cleanup'
+
+# When a PR closes, delete its per-PR asset branches so the `pr-assets/*`
+# refs (one per PR that ever produced a preview or a verification report)
+# don't accumulate without bound in the base repository. Runs in the base
+# context (pull_request_target) but never checks out or runs PR code — it
+# only deletes refs by name.
+#
+# All producers are covered, and every new `pr-assets/*` producer must be
+# added here: a branch nothing deletes is permanent.
+on:
+  pull_request_target:
+    types:
+      - 'closed'
+
+permissions:
+  contents: 'read'
+
+jobs:
+  delete-asset-branch:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    # Checks out nothing and runs no repository code (pull_request_target
+    # events use base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    steps:
+      - name: 'Delete the PR asset branches'
+        env:
+          # Deleting a ref needs contents:write, which the CI_BOT_PAT carries.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -uo pipefail
+          # Not `set -e`: one branch missing, or one delete failing, must not
+          # stop the others. Each is independent and absence is normal — most
+          # PRs produce neither.
+          status=0
+          for branch in \
+            "pr-assets/web-shell-visuals-${PR_NUMBER}" \
+            "pr-assets/${PR_NUMBER}-verify" \
+            "pr-assets/${PR_NUMBER}-review"; do
+            if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
+              echo "No asset branch ${branch}; nothing to delete."
+              continue
+            fi
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"; then
+              echo "Deleted ${branch}."
+            else
+              echo "::warning::Failed to delete ${branch}; it will need removing by hand."
+              status=1
+            fi
+          done
+          exit "$status"

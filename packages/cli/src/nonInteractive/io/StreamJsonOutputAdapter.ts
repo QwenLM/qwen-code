@@ -10,6 +10,7 @@ import type {
   ServerGeminiStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import { GeminiEventType } from '@qwen-code/qwen-code-core';
 import type {
@@ -28,6 +29,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
+import { observeHeadlessToolResultWire } from '../../utils/tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately
@@ -39,6 +41,7 @@ export class StreamJsonOutputAdapter
   implements JsonOutputAdapterInterface
 {
   private mainTurnMessageStartEmitted = false;
+  private lastGoalStateSignature: string | undefined;
   private readonly outputStream: NodeJS.WritableStream;
 
   constructor(
@@ -65,7 +68,11 @@ export class StreamJsonOutputAdapter
     }
 
     // Emit messages immediately in stream mode
-    this.outputStream.write(`${JSON.stringify(message)}\n`);
+    const frame = `${JSON.stringify(message)}\n`;
+    if ('session_id' in message) {
+      observeHeadlessToolResultWire(message as CLIMessage, frame);
+    }
+    this.outputStream.write(frame);
   }
 
   /**
@@ -125,6 +132,24 @@ export class StreamJsonOutputAdapter
   }
 
   override processEvent(event: ServerGeminiStreamEvent): void {
+    if (event.type === GeminiEventType.GoalState) {
+      const signature = JSON.stringify(event.value);
+      if (signature === this.lastGoalStateSignature) return;
+      this.lastGoalStateSignature = signature;
+      const partial: CLIPartialAssistantMessage = {
+        type: 'stream_event',
+        uuid: randomUUID(),
+        session_id: this.getSessionId(),
+        parent_tool_use_id: null,
+        event: {
+          type: 'goal_state',
+          goal_state: event.value,
+        },
+      };
+      this.emitMessageImpl(partial);
+      return;
+    }
+
     // Active goal updates are session-level metadata, not message content.
     // They intentionally bypass the base finalized guard so late goal state
     // changes can still reach stream consumers.
@@ -310,7 +335,7 @@ export class StreamJsonOutputAdapter
    */
   override emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void {
     if (!this.includePartialMessages) {
       return;

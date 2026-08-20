@@ -24,6 +24,22 @@ import { InputFormat } from '../output/types.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
+function parseAnswerQuestionIndex(
+  key: string,
+  questionCount: number,
+): number | undefined {
+  const index = Number(key);
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= questionCount ||
+    String(index) !== key
+  ) {
+    return undefined;
+  }
+  return index;
+}
+
 export interface QuestionOption {
   label: string;
   description: string;
@@ -232,15 +248,23 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
       // Format the answers for LLM consumption
       const answersContent = Object.entries(this.userAnswers)
-        .map(([key, value]) => {
-          const questionIndex = parseInt(key, 10);
-          const question = this.params.questions[questionIndex];
-          return `**${question?.header || `Question ${questionIndex + 1}`}**: ${value}`;
+        .flatMap(([key, value]) => {
+          const questionIndex = parseAnswerQuestionIndex(
+            key,
+            this.params.questions.length,
+          );
+          if (questionIndex === undefined) return [];
+          const question = this.params.questions[questionIndex]!;
+          return `**${question.header || `Question ${questionIndex + 1}`}**: ${value}`;
         })
         .join('\n');
 
-      const llmMessage = `User has provided the following answers:\n\n${answersContent}`;
-      const displayMessage = `User has provided the following answers:\n\n${answersContent}`;
+      const messageBody =
+        answersContent.length > 0
+          ? answersContent
+          : 'No valid answers were provided.';
+      const llmMessage = `User has provided the following answers:\n\n${messageBody}`;
+      const displayMessage = `User has provided the following answers:\n\n${messageBody}`;
 
       return {
         llmContent: llmMessage,
@@ -315,9 +339,12 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         return `Question ${i + 1}: "header" must be a non-empty string.`;
       }
 
-      if (question.header.length > 12) {
-        return `Question ${i + 1}: "header" must be 12 characters or less.`;
-      }
+      // The schema advertises "max 12 chars" so the model keeps headers short
+      // enough for the chip/tab layout, but we deliberately do NOT hard-reject
+      // longer headers here: bouncing a slightly over-length label (e.g.
+      // "Target config", 13 chars) back to the model as a tool error is far
+      // worse UX than simply showing it. The TUI truncates over-length headers
+      // in the compact tab/chip contexts (see AskUserQuestionDialog).
 
       if (!Array.isArray(question.options)) {
         return `Question ${i + 1}: "options" must be an array.`;

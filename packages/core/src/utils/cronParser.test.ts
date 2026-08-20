@@ -35,9 +35,31 @@ describe('parseCron', () => {
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([0, 15, 30, 45]);
   });
 
+  it('uses the leading character for Vixie day wildcard flags', () => {
+    expect(parseCron('0 0 */2 * 1').domIsWild).toBe(true);
+    expect(parseCron('0 0 15 * */3').dowIsWild).toBe(true);
+    expect(parseCron('0 0 *,10 * 1').domIsWild).toBe(true);
+    expect(parseCron('0 0 15 * *,3').dowIsWild).toBe(true);
+    expect(parseCron('0 0 1,* * 1').domIsWild).toBe(false);
+    expect(parseCron('0 0 15 * 1,*').dowIsWild).toBe(false);
+  });
+
   it('parses range with step', () => {
     const fields = parseCron('1-10/3 * * * *');
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([1, 4, 7, 10]);
+  });
+
+  it('applies a step to a single starting value (N/step means N-max/step)', () => {
+    // Vixie-cron: `5/15` starts at 5 and steps to the field maximum,
+    // i.e. minutes 5, 20, 35, 50 — not just {5}.
+    const fields = parseCron('5/15 * * * *');
+    expect([...fields.minute].sort((a, b) => a - b)).toEqual([5, 20, 35, 50]);
+  });
+
+  it('applies a step to a single starting hour value', () => {
+    // `0/6` in the hour field → hours 0, 6, 12, 18.
+    const fields = parseCron('* 0/6 * * *');
+    expect([...fields.hour].sort((a, b) => a - b)).toEqual([0, 6, 12, 18]);
   });
 
   it('throws on wrong number of fields', () => {
@@ -63,6 +85,15 @@ describe('parseCron', () => {
 
   it('throws on invalid step', () => {
     expect(() => parseCron('*/0 * * * *')).toThrow('Invalid step');
+  });
+
+  it('throws on malformed numeric tokens', () => {
+    expect(() => parseCron('5x * * * *')).toThrow('Invalid value');
+    expect(() => parseCron('1-5x * * * *')).toThrow('Invalid range');
+    expect(() => parseCron('1-2-3 * * * *')).toThrow('Invalid range');
+    expect(() => parseCron('*/15garbage * * * *')).toThrow('Invalid step');
+    expect(() => parseCron('1-10/3x * * * *')).toThrow('Invalid step');
+    expect(() => parseCron('5/2x * * * *')).toThrow('Invalid step');
   });
 });
 
@@ -109,6 +140,20 @@ describe('matches', () => {
     expect(matches('0 10 1 * *', date)).toBe(false);
     // dom=*, dow=1 → AND, dow doesn't match
     expect(matches('0 10 * * 1', date)).toBe(false);
+  });
+
+  it('uses AND logic for day fields that start with a wildcard step', () => {
+    const date = new Date(2025, 0, 1, 0, 0); // Wednesday
+    expect(matches('0 0 */2 * 1', date)).toBe(false);
+    expect(matches('0 0 15 * */3', date)).toBe(false);
+  });
+
+  it('matches an N/step minute pattern at every stepped minute', () => {
+    // `5/15` fires at :05, :20, :35, :50 — not only :05.
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 5))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 20))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 50))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 10))).toBe(false);
   });
 
   it('matches every-N-minutes pattern', () => {
@@ -170,5 +215,15 @@ describe('nextFireTime', () => {
     const now = new Date(2025, 0, 15, 10, 0, 0); // exactly 10:00:00
     const next = nextFireTime('*/5 * * * *', now);
     expect(next.getTime()).toBeGreaterThan(now.getTime());
+  });
+
+  it('uses AND logic for leading-wildcard day fields', () => {
+    const after = new Date(2024, 11, 31, 23, 59);
+    expect(nextFireTime('0 0 */2 * 1', after)).toEqual(
+      new Date(2025, 0, 13, 0, 0),
+    );
+    expect(nextFireTime('0 0 15 * */3', after)).toEqual(
+      new Date(2025, 0, 15, 0, 0),
+    );
   });
 });

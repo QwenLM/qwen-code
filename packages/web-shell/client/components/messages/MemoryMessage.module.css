@@ -1,0 +1,155 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 400px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.memoryCard {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.memoryCard:hover,
+.memoryCardActive {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.memoryCardActive {
+  border-color: var(--agent-blue-500);
+}
+
+.memoryTitle {
+  font-weight: 500;
+}
+
+.detailPath,
+.status {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.actionButton,
+.primaryButton,
+.secondaryButton {
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.actionButton:hover,
+.secondaryButton:hover {
+  background: var(--secondary);
+}
+
+.detail {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detailHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.detailTitleWrap {
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.actionButton {
+  padding: 4px 9px;
+}
+
+.status {
+  padding: 2px 0;
+}
+
+.content,
+.editor {
+  flex: 1 1 auto;
+  min-height: 300px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.editor {
+  resize: vertical;
+  outline: none;
+}
+
+.editorFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.primaryButton,
+.secondaryButton {
+  padding: 4px 10px;
+}
+
+.primaryButton {
+  border-color: var(--agent-blue-500);
+  background: var(--agent-blue-500);
+  color: var(--background);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.actionButton:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+@media (max-width: 760px) {
+  .page {
+    min-height: 0;
+  }
+}

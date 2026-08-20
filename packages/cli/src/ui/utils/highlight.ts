@@ -14,7 +14,7 @@ export type HighlightToken = {
 };
 
 const HIGHLIGHT_REGEX =
-  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@(?:\\ |[a-zA-Z0-9_./-])+)/g;
+  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
 
 export function parseInputForHighlighting(
   text: string,

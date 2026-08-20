@@ -135,6 +135,18 @@ describe('BlockStreamer', () => {
     expect(s.blockCount).toBe(0);
   });
 
+  it('stop clears the idle timer and drops buffered text', async () => {
+    const s = createStreamer({ minChars: 5, idleMs: 500 });
+    s.push('Hello world');
+
+    s.stop();
+    vi.advanceTimersByTime(500);
+    await s.flush();
+
+    expect(sent).toEqual([]);
+    expect(s.blockCount).toBe(0);
+  });
+
   it('trims whitespace from emitted blocks', async () => {
     const s = createStreamer({ minChars: 5 });
     s.push('  \n  Hello world  \n\n  Next  ');

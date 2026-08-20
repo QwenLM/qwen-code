@@ -5,9 +5,10 @@ const markdownPrompt = `Output a compact Markdown rendering verification sample 
 1. A mermaid flowchart fenced code block with a branch and a loop.
 2. A mermaid sequenceDiagram fenced code block.
 3. A markdown table with two rows.
-4. Inline math $x = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$.
+4. Inline math $x$ and $y = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$.
 5. One display math block using $$ fences.
 6. One checked and one unchecked task list item.
+7. Literal inline code \`$zz$\`, escaped prose \\\\$xy$, formula $x + \\\\$5$, and the boundaries \\\\$$x^2$ and $x^2\\\\$$.
 
 Do not explain the sample.`;
 

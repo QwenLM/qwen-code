@@ -98,6 +98,30 @@ describe('StreamJsonOutputAdapter — dual-output extensions', () => {
       });
     });
 
+    it('emits supplied warning-aware permission suggestions', () => {
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      stdoutWriteSpy.mockClear();
+      const suggestions = [
+        {
+          type: 'allow' as const,
+          label: 'Allow Command',
+          description: 'Exact one-off approval required',
+        },
+      ];
+
+      adapter.emitPermissionRequest(
+        'req-warning',
+        'run_shell_command',
+        'tool-warning',
+        { command: "python -c 'print(1)'" },
+        null,
+        suggestions,
+      );
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed.request.permission_suggestions).toEqual(suggestions);
+    });
+
     it('emits a control_response with the supplied request_id and allowed flag', () => {
       const adapter = new StreamJsonOutputAdapter(mockConfig, false);
       stdoutWriteSpy.mockClear();

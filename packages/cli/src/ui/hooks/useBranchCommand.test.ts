@@ -7,33 +7,59 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
-vi.mock('../utils/restoreGoal.js', () => ({
-  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
-}));
+const mockSettings = {
+  merged: { ui: { history: { collapseOnResume: false } } },
+} as unknown as LoadedSettings;
 
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
   let loadSession: ReturnType<typeof vi.fn>;
+  let removeSession: ReturnType<typeof vi.fn>;
+  let renameSession: ReturnType<typeof vi.fn>;
   let finalize: ReturnType<typeof vi.fn>;
+  let flush: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
+  let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
-  let recordCustomTitle: ReturnType<typeof vi.fn>;
+  let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
   let setSessionName: ReturnType<typeof vi.fn>;
   let remount: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let backgroundTaskRegistry: {
+    hasRunningTasks: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let monitorRegistry: {
+    getRunning: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let backgroundShellRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let workflowRunRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let config: any;
 
   const makeOptions = () => ({
     config,
+    settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    clearPendingState,
     setSessionName,
     remount,
   });
@@ -54,10 +80,11 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
-    vi.mocked(restoreGoalFromHistory).mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
+    removeSession = vi.fn().mockResolvedValue(true);
+    renameSession = vi.fn().mockResolvedValue(true);
     loadSession = vi.fn().mockResolvedValue({
       conversation: {
         messages: [userRecord('help me fix the login bug')],
@@ -66,30 +93,108 @@ describe('useBranchCommand', () => {
       lastCompletedUuid: 'u2',
     });
     finalize = vi.fn();
-    recordCustomTitle = vi.fn().mockReturnValue(true);
+    flush = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
+    getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
     setSessionName = vi.fn();
     remount = vi.fn();
     addItem = vi.fn();
+    backgroundTaskRegistry = {
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    };
+    monitorRegistry = {
+      getRunning: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    };
+    backgroundShellRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    };
+    workflowRunRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+      abortAll: vi.fn(),
+    };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
       getSessionService: () => ({
         forkSession,
         loadSession,
+        removeSession,
+        renameSession,
         findSessionTitlesByPrefix,
       }),
-      getChatRecordingService: () => ({ finalize, recordCustomTitle }),
+      getChatRecordingService: () => ({ finalize, flush }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
+      getBackgroundTaskRegistry: () => backgroundTaskRegistry,
+      getMonitorRegistry: () => monitorRegistry,
+      getBackgroundShellRegistry: () => backgroundShellRegistry,
+      getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
+      getGoalRuntimeReady,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
 
-  it('runs finalize → snapshot → forkSession → loadSession → config.startNewSession in order', async () => {
+  it('refuses to branch while background work is running', async () => {
+    backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+    backgroundTaskRegistry.getAll.mockReturnValue([
+      {
+        agentId: 'bg_ab12cd34',
+        isBackgrounded: true,
+        status: 'running',
+        description: 'long-running research',
+        startTime: Date.now(),
+      },
+    ]);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('blocked');
+    });
+
+    expect(finalize).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain('running background tasks');
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
+  });
+
+  it('clears terminal background state after the branch initializes', async () => {
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('ready');
+    });
+
+    expect(backgroundTaskRegistry.reset).toHaveBeenCalledOnce();
+    expect(monitorRegistry.reset).toHaveBeenCalledOnce();
+    expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
+    expect(workflowRunRegistry.reset).toHaveBeenCalledOnce();
+    expect(clearPendingState).toHaveBeenCalledOnce();
+    expect(clearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+      loadHistory.mock.invocationCallOrder[0]!,
+    );
+    expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+      backgroundTaskRegistry.reset.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('persists and reloads the title before switching core or UI', async () => {
     // The parent snapshot must come AFTER finalize(): finalize() appends a
     // trailing custom_title record to the parent JSONL, advancing the
     // recorder's lastCompletedUuid. A snapshot taken before that captures
@@ -98,6 +203,9 @@ describe('useBranchCommand', () => {
     // orphaning the custom_title record from the parent chain.
     const order: string[] = [];
     finalize.mockImplementation(() => order.push('finalize'));
+    flush.mockImplementation(async () => {
+      order.push('flush');
+    });
     forkSession.mockImplementation(async () => {
       order.push('fork');
       return { filePath: '/tmp/new.jsonl', copiedCount: 2 };
@@ -110,7 +218,15 @@ describe('useBranchCommand', () => {
         lastCompletedUuid: 'u',
       };
     });
+    renameSession.mockImplementation(async () => {
+      order.push('rename');
+      return true;
+    });
     startNewSessionConfig.mockImplementation(() => order.push('config.start'));
+    getGoalRuntimeReady.mockImplementation(async () => {
+      order.push('goal.ready');
+      return {};
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -119,27 +235,77 @@ describe('useBranchCommand', () => {
 
     expect(order).toEqual([
       'finalize',
+      'flush',
       'load', // parent snapshot for rollback (after finalize so it captures the custom_title append)
       'fork',
-      'load', // forked session
+      'load', // provisional fork load
+      'rename',
+      'load', // final load after title persistence
       'config.start',
+      'goal.ready',
     ]);
   });
 
-  it('re-arms /goal against the forked sessionId after the UI swap', async () => {
-    // The branched JSONL is a verbatim copy of the parent's, so an active
-    // goal sentinel rides along. Without this restore call the forked
-    // session inherits the goal in transcript only — store stays empty,
-    // footer pill shows nothing, and the Stop hook never fires under the
-    // new sessionId. Same root cause as the /resume gap; pin it here.
+  it('starts the forked recorder from the post-title JSONL tail', async () => {
+    const parent = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/parent.jsonl',
+      lastCompletedUuid: 'parent-tail',
+    };
+    const provisional = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'fork-tail',
+    };
+    const titled = {
+      ...provisional,
+      lastCompletedUuid: 'title-tail',
+    };
+    loadSession
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(provisional)
+      .mockResolvedValueOnce(titled);
+
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
-      expect.any(Array),
-      config,
-      addItem,
+
+    expect(startNewSessionConfig).toHaveBeenCalledWith(
+      expect.any(String),
+      titled,
+    );
+  });
+
+  it('waits for the forked session Goal runtime exactly once', async () => {
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls core back when the fork contains malformed Goal state', async () => {
+    getGoalRuntimeReady.mockRejectedValueOnce(
+      new Error('unsupported Goal lifecycle record'),
+    );
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(clearItems).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/unsupported Goal lifecycle record/),
+      }),
+      expect.any(Number),
     );
   });
 
@@ -148,7 +314,11 @@ describe('useBranchCommand', () => {
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(recordCustomTitle).toHaveBeenCalledWith('my-branch (Branch)');
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'my-branch (Branch)',
+      'manual',
+    );
     expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch)');
   });
 
@@ -162,7 +332,11 @@ describe('useBranchCommand', () => {
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(recordCustomTitle).toHaveBeenCalledWith('my-branch (Branch 2)');
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'my-branch (Branch 2)',
+      'manual',
+    );
     expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch 2)');
   });
 
@@ -185,7 +359,11 @@ describe('useBranchCommand', () => {
 
     expect(findSessionTitlesByPrefix).toHaveBeenCalledTimes(1);
     expect(findSessionTitlesByPrefix).toHaveBeenCalledWith('my-branch (Branch');
-    expect(recordCustomTitle).toHaveBeenCalledWith('my-branch (Branch 5)');
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'my-branch (Branch 5)',
+      'manual',
+    );
   });
 
   it('derives the base title from the first user ChatRecord when no name is given', async () => {
@@ -195,8 +373,10 @@ describe('useBranchCommand', () => {
     });
     // deriveFirstPrompt collapses whitespace and truncates to 100 chars;
     // "help me fix the login bug" fits, then + " (Branch)"
-    expect(recordCustomTitle).toHaveBeenCalledWith(
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
       'help me fix the login bug (Branch)',
+      'auto',
     );
   });
 
@@ -210,8 +390,10 @@ describe('useBranchCommand', () => {
     await act(async () => {
       await result.current.handleBranch();
     });
-    expect(recordCustomTitle).toHaveBeenCalledWith(
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
       'Branched conversation (Branch)',
+      'auto',
     );
   });
 
@@ -232,8 +414,10 @@ describe('useBranchCommand', () => {
     await act(async () => {
       await result.current.handleBranch();
     });
-    expect(recordCustomTitle).toHaveBeenCalledWith(
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
       'what does this codebase do (Branch)',
+      'auto',
     );
   });
 
@@ -304,6 +488,81 @@ describe('useBranchCommand', () => {
     );
   });
 
+  it('does not create a fork when the source recording cannot flush', async () => {
+    flush.mockRejectedValue(new Error('recording failed'));
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+  });
+
+  it('does not create a fork when source finalization throws', async () => {
+    finalize.mockImplementation(() => {
+      throw new Error('finalize failed');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(flush).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['returns false', () => renameSession.mockResolvedValue(false)],
+    [
+      'throws',
+      () => renameSession.mockRejectedValue(new Error('title write failed')),
+    ],
+  ])(
+    'removes the fork and leaves the parent active when title persistence %s',
+    async (_label, arrange) => {
+      arrange();
+
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch('x');
+      });
+
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      expect(startNewSessionConfig).not.toHaveBeenCalled();
+      expect(startNewSessionUI).not.toHaveBeenCalled();
+      expect(setSessionName).not.toHaveBeenCalled();
+    },
+  );
+
+  it('removes the fork when the final post-title reload fails', async () => {
+    const loaded = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'u2',
+    };
+    loadSession
+      .mockResolvedValueOnce(loaded) // parent rollback snapshot
+      .mockResolvedValueOnce(loaded) // provisional fork
+      .mockResolvedValueOnce(undefined); // final titled fork
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(renameSession).toHaveBeenCalledTimes(1);
+    expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+  });
+
   it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {
     // The reviewer's scenario: config.startNewSession succeeds (core is now
     // on the fork), but then getGeminiClient().initialize() rejects. Without
@@ -322,8 +581,8 @@ describe('useBranchCommand', () => {
       filePath: '/tmp/new.jsonl',
       lastCompletedUuid: 'uparent',
     };
-    // Called twice: once up front to snapshot the parent for rollback,
-    // once after forkSession to load the fork.
+    // The parent is loaded once for rollback. The fork is loaded before and
+    // after its title append so the live recorder starts at the true tail.
     loadSession.mockImplementation(async (sid: string) =>
       sid === oldSessionId ? parentResumed : forkResumed,
     );
@@ -358,6 +617,8 @@ describe('useBranchCommand', () => {
     expect(loadHistory).not.toHaveBeenCalled();
     expect(startNewSessionUI).not.toHaveBeenCalled();
     expect(setSessionName).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
     // User sees the failure.
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -398,6 +659,7 @@ describe('useBranchCommand', () => {
       oldSessionId,
       expect.any(Object),
     );
+    expect(removeSession).toHaveBeenCalledTimes(1);
     expect(debugWarn).toHaveBeenCalledWith(
       expect.stringContaining('Rollback after failed /branch init failed'),
     );
@@ -413,7 +675,7 @@ describe('useBranchCommand', () => {
 
   it('does not roll core back to parent when a post-UI-swap step throws', async () => {
     // The reviewer's reverse split-brain: once the UI commits to the branch,
-    // any subsequent failure (recordCustomTitle, hook fire, remount,
+    // any subsequent failure (hook fire, remount,
     // announcement render) must NOT trigger the catch block's core rollback.
     // If it did, the user would see the branch UI but every new prompt
     // would be recorded into the parent's JSONL.
@@ -469,6 +731,7 @@ describe('useBranchCommand', () => {
     });
 
     expect(forkSession).toHaveBeenCalledTimes(1);
+    expect(removeSession).toHaveBeenCalledTimes(1);
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
     expect(startNewSessionUI).not.toHaveBeenCalled();
@@ -478,6 +741,37 @@ describe('useBranchCommand', () => {
         text: expect.stringMatching(/Failed to branch conversation.*core boom/),
       }),
       expect.any(Number),
+    );
+  });
+
+  it('applies collapse policy when collapseOnResume is true', async () => {
+    const settingsWithCollapse = {
+      merged: { ui: { history: { collapseOnResume: true } } },
+    } as unknown as LoadedSettings;
+
+    const { result } = renderHook(() =>
+      useBranchCommand({
+        ...makeOptions(),
+        settings: settingsWithCollapse,
+      }),
+    );
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    // loadHistory should have been called with items that include
+    // suppressOnRestore and a collapse-summary item.
+    expect(loadHistory).toHaveBeenCalledTimes(1);
+    const loadedItems = loadHistory.mock.calls[0][0];
+    expect(loadedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          display: expect.objectContaining({ suppressOnRestore: true }),
+        }),
+        expect.objectContaining({
+          display: expect.objectContaining({ kind: 'collapse-summary' }),
+        }),
+      ]),
     );
   });
 });

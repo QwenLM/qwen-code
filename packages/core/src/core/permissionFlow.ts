@@ -25,11 +25,14 @@ import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
 } from './permission-helpers.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 
-export type PermissionFlowPermission = 'allow' | 'deny' | 'ask' | 'default';
+export type PermissionFlowPermission = PermissionDecision;
 
 export interface PermissionFlowResult {
+  /** The tool's intrinsic L3 permission before PermissionManager rules. */
+  defaultPermission: PermissionFlowPermission;
   /** The final permission after L3→L4 (allow | deny | ask | default) */
   finalPermission: PermissionFlowPermission;
   /** Whether PM forced 'ask' (hides "Always Allow" buttons) */
@@ -38,6 +41,8 @@ export interface PermissionFlowResult {
   denyMessage?: string;
   /** Permission check context (needed for injectPermissionRulesIfMissing) */
   pmCtx: ReturnType<typeof buildPermissionCheckContext>;
+  /** Whether automatic approval paths must be bypassed for this invocation. */
+  requiresUserInteraction: boolean;
 }
 
 /**
@@ -60,7 +65,7 @@ export async function evaluatePermissionFlow(
   toolParams: Record<string, unknown>,
 ): Promise<PermissionFlowResult> {
   // ── L3: Tool's default permission ───────────────────────────────────
-  const defaultPermission: string = await invocation.getDefaultPermission();
+  const defaultPermission = await invocation.getDefaultPermission();
 
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
@@ -68,18 +73,27 @@ export async function evaluatePermissionFlow(
     toolName,
     toolParams,
     config.getTargetDir?.() ?? '',
+    invocation.permissionAliases,
   );
   const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
     pm,
     defaultPermission,
     pmCtx,
   );
+  const requiresUserInteraction =
+    invocation.requiresUserInteraction?.() === true;
+  const effectivePermission =
+    requiresUserInteraction && finalPermission !== 'deny'
+      ? 'ask'
+      : finalPermission;
 
   // Build result
   const result: PermissionFlowResult = {
-    finalPermission: finalPermission as PermissionFlowPermission,
+    defaultPermission,
+    finalPermission: effectivePermission as PermissionFlowPermission,
     pmForcedAsk,
     pmCtx,
+    requiresUserInteraction,
   };
 
   // Add deny message if denied
@@ -112,7 +126,14 @@ export function needsConfirmation(
   finalPermission: PermissionFlowPermission,
   approvalMode: ApprovalMode,
   toolName: string,
+  requiresUserInteraction = false,
 ): boolean {
+  if (finalPermission === 'deny') {
+    return false;
+  }
+  if (requiresUserInteraction) {
+    return true;
+  }
   const isAskUserQuestionTool = toolName === ToolNames.ASK_USER_QUESTION;
 
   // YOLO mode auto-approves everything except ask_user_question
@@ -121,6 +142,16 @@ export function needsConfirmation(
   }
 
   return finalPermission === 'ask' || finalPermission === 'default';
+}
+
+export function getEffectivePermissionForConfirmation(
+  finalPermission: PermissionFlowPermission,
+  forceConfirmationForAllow: boolean,
+): PermissionFlowPermission {
+  if (forceConfirmationForAllow && finalPermission === 'allow') {
+    return 'ask';
+  }
+  return finalPermission;
 }
 
 /**
@@ -134,11 +165,13 @@ export function isPlanModeBlocked(
   isExitPlanModeTool: boolean,
   isAskUserQuestionTool: boolean,
   confirmationDetails?: ToolCallConfirmationDetails,
+  isEnterPlanModeTool?: boolean,
 ): boolean {
   return (
     isPlanMode &&
     !isExitPlanModeTool &&
     !isAskUserQuestionTool &&
+    !isEnterPlanModeTool &&
     confirmationDetails?.type !== 'info'
   );
 }

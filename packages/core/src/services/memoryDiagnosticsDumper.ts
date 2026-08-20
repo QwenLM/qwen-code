@@ -22,6 +22,7 @@ import { collectMemoryDiagnostics } from '../utils/memoryDiagnostics.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
+import type { RuntimeSample } from './memoryPressureMonitor.js';
 
 const debugLogger = createDebugLogger('MEMORY_DUMP');
 
@@ -66,6 +67,7 @@ export class MemoryDiagnosticsDumper {
    */
   async dump(
     trigger: 'hard' | 'critical',
+    recentSamples: RuntimeSample[] = [],
   ): Promise<MemoryDumpResult | undefined> {
     if (this.dumpCount >= MAX_DUMPS_PER_SESSION) {
       debugLogger.debug(
@@ -94,13 +96,30 @@ export class MemoryDiagnosticsDumper {
       const fileName = `memory-${sessionId.slice(0, 8)}-${timestamp}.json`;
       const filePath = path.join(diagnosticsDir, fileName);
 
-      // Phase 1: synchronous minimal write — survives crash during Phase 2
+      // Phase 1: synchronous minimal write — survives crash during Phase 2.
+      // Reuse the most recent ring sample for the memory figures instead of a
+      // fresh process.memoryUsage(): this path triggers under extreme memory
+      // pressure, the exact condition where a redundant syscall is most likely
+      // to throw — and a throw here would lose recentSamples too. The last
+      // sample carries the same rss/heap fields; arrayBuffers (absent from the
+      // ring) is filled by the richer Phase 2 collection.
+      const lastSample = recentSamples[recentSamples.length - 1];
+      const memoryUsage = lastSample
+        ? {
+            rss: lastSample.rss,
+            heapUsed: lastSample.heapUsed,
+            heapTotal: lastSample.heapTotal,
+            external: lastSample.external,
+            arrayBuffers: 0,
+          }
+        : process.memoryUsage();
       const minimalPayload = {
         trigger,
         dumpNumber,
         timestamp: new Date().toISOString(),
-        memoryUsage: process.memoryUsage(),
+        memoryUsage,
         v8HeapStats: v8.getHeapStatistics(),
+        recentSamples,
         session: this.collectSessionStats(),
         suggestion: this.getSuggestion(trigger),
         collectionComplete: false,
@@ -125,6 +144,7 @@ export class MemoryDiagnosticsDumper {
         trigger,
         dumpNumber,
         ...diagnostics,
+        recentSamples,
         session: this.collectSessionStats(),
         suggestion: this.getSuggestion(trigger),
         collectionComplete: true,

@@ -9,14 +9,21 @@ import { enableCommand, handleEnable } from './enable.js';
 import yargs from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 
-const mockEnableExtension = vi.hoisted(() => vi.fn());
+const mockEnableExtension = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ warnings: [] }),
+);
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
-vi.mock('./utils.js', () => ({
-  getExtensionManager: vi.fn().mockResolvedValue({
-    enableExtension: mockEnableExtension,
-  }),
-}));
+vi.mock('./utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./utils.js')>();
+  return {
+    ...actual,
+    getExtensionManager: vi.fn().mockResolvedValue({
+      enableExtension: mockEnableExtension,
+    }),
+  };
+});
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -35,36 +42,42 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
-  writeStderrLine: vi.fn(),
+  writeStderrLine: mockWriteStderrLine,
   clearScreen: vi.fn(),
 }));
 
 describe('extensions enable command', () => {
+  const parseEnableCommand = (command: string) =>
+    yargs([]).command(enableCommand).fail(false).locale('en').parse(command);
+
   it('should fail if no name is provided', () => {
-    const validationParser = yargs([])
-      .command(enableCommand)
-      .fail(false)
-      .locale('en');
-    expect(() => validationParser.parse('enable')).toThrow(
+    expect(() => parseEnableCommand('enable')).toThrow(
       'Not enough non-option arguments: got 0, need at least 1',
     );
   });
 
   it('should fail if invalid scope is provided', () => {
-    const validationParser = yargs([])
-      .command(enableCommand)
-      .fail(false)
-      .locale('en');
     expect(() =>
-      validationParser.parse('enable test-extension --scope=invalid'),
+      parseEnableCommand('enable test-extension --scope=invalid'),
     ).toThrow(/Invalid scope: invalid/);
   });
 
+  it('should fail if unsupported system scopes are provided', () => {
+    expect(() =>
+      parseEnableCommand('enable test-extension --scope=system'),
+    ).toThrow(/Invalid scope: system/);
+    expect(() =>
+      parseEnableCommand('enable test-extension --scope=systemdefaults'),
+    ).toThrow(/Invalid scope: systemdefaults/);
+  });
+
   it('should accept valid scope values', () => {
-    const parser = yargs([]).command(enableCommand).fail(false).locale('en');
     // Just check that the scope option is recognized, actual execution needs name first
     expect(() =>
-      parser.parse('enable my-extension --scope=user'),
+      parseEnableCommand('enable my-extension --scope=user'),
+    ).not.toThrow();
+    expect(() =>
+      parseEnableCommand('enable my-extension --scope=workspace'),
     ).not.toThrow();
   });
 });
@@ -72,6 +85,21 @@ describe('extensions enable command', () => {
 describe('handleEnable', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEnableExtension.mockResolvedValue({ warnings: [] });
+  });
+
+  it('prints committed activation warnings', async () => {
+    mockEnableExtension.mockResolvedValueOnce({
+      warnings: [
+        { code: 'extension_runtime_refresh_failed', error: 'refresh failed' },
+      ],
+    });
+
+    await handleEnable({ name: 'test-extension', scope: 'user' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'extension_runtime_refresh_failed: refresh failed',
+    );
   });
 
   it('should enable an extension with user scope', async () => {
@@ -118,10 +146,19 @@ describe('handleEnable', () => {
     );
   });
 
+  it('should reject unsupported system scopes without enabling at user scope', async () => {
+    await expect(
+      handleEnable({
+        name: 'test-extension',
+        scope: 'system',
+      }),
+    ).rejects.toThrow(/Invalid scope: system/);
+
+    expect(mockEnableExtension).not.toHaveBeenCalled();
+  });
+
   it('should throw FatalConfigError when enable fails', async () => {
-    mockEnableExtension.mockImplementationOnce(() => {
-      throw new Error('Enable failed');
-    });
+    mockEnableExtension.mockRejectedValueOnce(new Error('Enable failed'));
 
     await expect(
       handleEnable({

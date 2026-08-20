@@ -63,10 +63,12 @@ describe('HookSystem', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       getAllowedHttpHookUrls: vi.fn().mockReturnValue([]),
+      getAllowPrivateNetworkHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     mockHookRegistry = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      reloadConfiguredHooks: vi.fn().mockResolvedValue(undefined),
       setHookEnabled: vi.fn(),
       getAllHooks: vi.fn().mockReturnValue([]),
       getHooksForEvent: vi.fn().mockReturnValue([]),
@@ -87,10 +89,13 @@ describe('HookSystem', () => {
 
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
+      fireInstructionsLoadedEvent: vi.fn(),
       fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
+      fireMessageDisplayEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
+      fireSessionDeleteEvent: vi.fn(),
       firePreToolUseEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
       firePostToolUseFailureEvent: vi.fn(),
@@ -136,6 +141,14 @@ describe('HookSystem', () => {
       await hookSystem.initialize();
 
       expect(mockHookRegistry.initialize).toHaveBeenCalled();
+    });
+  });
+
+  describe('reload', () => {
+    it('should reload configured hooks', async () => {
+      await hookSystem.reload();
+
+      expect(mockHookRegistry.reloadConfiguredHooks).toHaveBeenCalled();
     });
   });
 
@@ -253,6 +266,16 @@ describe('HookSystem', () => {
       );
     });
 
+    it('should check the correct event name for SessionDelete', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('SessionDelete');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'SessionDelete',
+      );
+    });
+
     it('returns true when only a session function hook is registered', () => {
       vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
       const sessionId = 'sess-1';
@@ -294,6 +317,7 @@ describe('HookSystem', () => {
         true,
         'last message',
         undefined,
+        undefined,
       );
       expect(result).toEqual(mockResult);
     });
@@ -316,7 +340,40 @@ describe('HookSystem', () => {
         false,
         '',
         undefined,
+        undefined,
       );
+    });
+
+    it('should forward context usage to hookEventHandler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const contextUsage = {
+        context_usage: 0.75,
+        context_limit: 200000,
+        input_tokens: 150000,
+      };
+      const result = await hookSystem.fireStopEvent(
+        true,
+        'last message',
+        contextUsage,
+      );
+
+      expect(mockHookEventHandler.fireStopEvent).toHaveBeenCalledWith(
+        true,
+        'last message',
+        contextUsage,
+        undefined,
+      );
+      expect(result).toEqual(mockResult);
     });
 
     it('should return AggregatedHookResult even when no final output', async () => {
@@ -332,6 +389,57 @@ describe('HookSystem', () => {
       );
 
       const result = await hookSystem.fireStopEvent();
+
+      expect(result).toEqual(mockResult);
+      expect(result.finalOutput).toBeUndefined();
+    });
+  });
+
+  describe('fireMessageDisplayEvent', () => {
+    it('should fire message display event and return AggregatedHookResult', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 5,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireMessageDisplayEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello',
+        false,
+      );
+
+      expect(mockHookEventHandler.fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-1',
+        'Hello',
+        false,
+        undefined,
+      );
+      expect(result).toEqual(mockResult);
+    });
+
+    it('should return AggregatedHookResult even when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireMessageDisplayEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello, world.',
+        true,
+      );
 
       expect(result).toEqual(mockResult);
       expect(result.finalOutput).toBeUndefined();
@@ -358,7 +466,7 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('test prompt', undefined);
+      ).toHaveBeenCalledWith('test prompt', undefined, undefined);
       expect(result).toBeDefined();
     });
 
@@ -380,7 +488,31 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('my custom prompt', undefined);
+      ).toHaveBeenCalledWith('my custom prompt', undefined, undefined);
+    });
+
+    it('should pass submitted prompt after the existing signal argument', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+      const signal = new AbortController().signal;
+
+      await hookSystem.fireUserPromptSubmitEvent(
+        'model prompt',
+        signal,
+        'submitted prompt',
+      );
+
+      expect(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).toHaveBeenCalledWith('model prompt', signal, 'submitted prompt');
     });
 
     it('should return undefined when no final output', async () => {
@@ -442,6 +574,55 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('Some additional context');
+    });
+  });
+
+  describe('fireInstructionsLoadedEvent', () => {
+    it('should delegate to hookEventHandler.fireInstructionsLoadedEvent', async () => {
+      const mockResult = createMockAggregatedResult(true);
+      vi.mocked(
+        mockHookEventHandler.fireInstructionsLoadedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireInstructionsLoadedEvent(
+        '/repo/QWEN.md',
+        'project',
+        'session_start',
+        { triggerFilePath: '/repo/src/app.ts' },
+      );
+
+      expect(
+        mockHookEventHandler.fireInstructionsLoadedEvent,
+      ).toHaveBeenCalledWith(
+        '/repo/QWEN.md',
+        'project',
+        'session_start',
+        { triggerFilePath: '/repo/src/app.ts' },
+        undefined,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput when finalOutput exists', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'allow' as HookDecision,
+        hookSpecificOutput: {
+          additionalContext: 'observed load',
+        },
+      });
+      vi.mocked(
+        mockHookEventHandler.fireInstructionsLoadedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireInstructionsLoadedEvent(
+        '/repo/.qwen/QWEN.local.md',
+        'local',
+        'include',
+        { parentFilePath: '/repo/QWEN.md' },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('observed load');
     });
   });
 
@@ -676,6 +857,25 @@ describe('HookSystem', () => {
     });
   });
 
+  describe('fireSessionDeleteEvent', () => {
+    it('should fire the event with the deleted session id', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'allow',
+      });
+      vi.mocked(mockHookEventHandler.fireSessionDeleteEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionDeleteEvent('deleted-id');
+
+      expect(mockHookEventHandler.fireSessionDeleteEvent).toHaveBeenCalledWith(
+        'deleted-id',
+        undefined,
+      );
+      expect(result).toBeDefined();
+    });
+  });
+
   describe('firePreToolUseEvent', () => {
     it('should fire PreToolUse event and return output', async () => {
       const mockResult = {
@@ -704,6 +904,7 @@ describe('HookSystem', () => {
         { command: 'ls' },
         'toolu_test123',
         PermissionMode.AutoEdit,
+        undefined,
         undefined,
       );
       expect(result).toBeDefined();
@@ -736,6 +937,40 @@ describe('HookSystem', () => {
         'toolu_test456',
         PermissionMode.Yolo,
         undefined,
+        undefined,
+      );
+    });
+
+    it('should forward tool_call_id to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePreToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+        undefined,
+        'call_abc123',
+      );
+
+      expect(mockHookEventHandler.firePreToolUseEvent).toHaveBeenCalledWith(
+        'bash',
+        { command: 'ls' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+        undefined,
+        'call_abc123',
       );
     });
 
@@ -850,6 +1085,7 @@ describe('HookSystem', () => {
         'toolu_test123',
         PermissionMode.AutoEdit,
         undefined,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -883,6 +1119,42 @@ describe('HookSystem', () => {
         'toolu_test456',
         PermissionMode.Plan,
         undefined,
+        undefined,
+      );
+    });
+
+    it('should forward tool_call_id to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePostToolUseEvent(
+        'read_file',
+        { path: '/test.txt' },
+        { content: 'file content' },
+        'toolu_test789',
+        PermissionMode.Plan,
+        undefined,
+        'call_def456',
+      );
+
+      expect(mockHookEventHandler.firePostToolUseEvent).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/test.txt' },
+        { content: 'file content' },
+        'toolu_test789',
+        PermissionMode.Plan,
+        undefined,
+        'call_def456',
       );
     });
 
@@ -1025,6 +1297,7 @@ describe('HookSystem', () => {
         false,
         PermissionMode.AutoEdit,
         undefined,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1062,6 +1335,46 @@ describe('HookSystem', () => {
         true,
         PermissionMode.Yolo,
         undefined,
+        undefined,
+      );
+    });
+
+    it('should forward tool_call_id to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test123',
+        'bash',
+        { command: 'ls' },
+        'Command not found',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+        'call_ghi789',
+      );
+
+      expect(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).toHaveBeenCalledWith(
+        'toolu_test123',
+        'bash',
+        { command: 'ls' },
+        'Command not found',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+        'call_ghi789',
       );
     });
 
@@ -1091,6 +1404,7 @@ describe('HookSystem', () => {
         'bash',
         { command: 'ls' },
         'Error occurred',
+        undefined,
         undefined,
         undefined,
         undefined,
@@ -1594,8 +1908,36 @@ describe('HookSystem', () => {
         'toolu-denied-1',
         'classifier_blocked',
         undefined,
+        undefined,
       );
       expect(result).toBeUndefined();
+    });
+
+    it('should forward tool_call_id to event handler', async () => {
+      const mockResult = createMockAggregatedResult(false);
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-2',
+        'classifier_blocked',
+        undefined,
+        'call_jkl012',
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-2',
+        'classifier_blocked',
+        undefined,
+        'call_jkl012',
+      );
     });
 
     it('should return DefaultHookOutput when finalOutput exists', async () => {

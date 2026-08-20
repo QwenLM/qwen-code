@@ -1,0 +1,180 @@
+.section {
+  display: flex;
+  flex-direction: column;
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.header {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.headerRow:hover,
+.headerRow:focus-within {
+  background: var(--sidebar-accent);
+}
+
+.headerDisabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.headerDisabled .header {
+  cursor: not-allowed;
+}
+
+.headerContent {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chevron {
+  display: inline-flex;
+  align-items: center;
+}
+
+.folderIcon {
+  display: block;
+}
+
+.chevronOpen {
+  color: var(--sidebar-foreground);
+}
+
+.name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 10px;
+  color: var(--muted-foreground);
+  background: var(--sidebar-accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Live git chip in the folder header. */
+.gitPill {
+  --git-branch-icon-size: 12px;
+  --git-branch-badge-size: 5px;
+  --git-branch-badge-offset: -1px;
+
+  display: inline-flex;
+  flex: 0 0 24px;
+  width: 24px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.gitPill [data-web-shell-git-branch] {
+  width: 24px;
+  max-width: 24px;
+  flex-basis: 24px;
+  padding: 0 5px;
+}
+
+/* Keep the icon directly after the folder name. */
+.headerRow:has(.gitPill) .header {
+  flex-grow: 0;
+}
+
+/* Trusted sessions use the sidebar's shared row with its own left indent;
+   read-only rows apply the same indent below. */
+.sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.empty {
+  padding: 4px 8px 4px 26px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.error {
+  padding: 4px 8px 4px 26px;
+  color: var(--error-color);
+  font-size: 13px;
+}
+
+.sessionItemReadOnly {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 26px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: default;
+}
+
+.sessionName {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sessionName[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.sessionNameInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.sessionItemReadOnly:hover .sessionNameInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes sessionTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionItemReadOnly:hover .sessionNameInner {
+    animation: none;
+  }
+}

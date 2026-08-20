@@ -181,8 +181,8 @@ The `agent` tool accepts an optional `isolation: "worktree"` parameter. When set
 
 Two constraints:
 
-- `isolation: "worktree"` requires a `subagent_type` — forked sub-agents (no `subagent_type`) reuse the parent's full conversation context, so isolating them would split intent from working tree.
-- Background agents (`run_in_background: true`) work fine with isolation; the cleanup runs when the agent reports completion.
+- `isolation: "worktree"` requires a non-fork `subagent_type` — forked sub-agents (`subagent_type: "fork"`) reuse the parent's full conversation context, so isolating them would split intent from working tree.
+- Agents using `isolation: "worktree"` follow the default background behavior; the cleanup runs when the agent reports completion. Set `run_in_background: false` for an inline result. Caller-owned `working_dir` launches remain foreground by default because their lifecycle is managed externally.
 
 ### Automatic Stale Cleanup
 

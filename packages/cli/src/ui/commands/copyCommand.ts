@@ -8,6 +8,7 @@ import { copyToClipboard } from '../utils/commandUtils.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { findInlineMathExpressions } from '../utils/inline-math.js';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -40,12 +41,6 @@ interface SelectedInlineLatexExpression {
   expression: InlineLatexExpression;
   label: string;
 }
-
-const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_REGEX = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)([^$\n]{1,${INLINE_MATH_MAX_CHARS}})\$(?![\w$])`,
-  'g',
-);
 
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
@@ -139,14 +134,11 @@ function parseInlineLatexExpressions(
       continue;
     }
 
-    for (const match of line.matchAll(INLINE_MATH_REGEX)) {
-      const content = match[1];
-      if (content) {
-        expressions.push({
-          content,
-          index: expressions.length + 1,
-        });
-      }
+    for (const content of findInlineMathExpressions(line)) {
+      expressions.push({
+        content,
+        index: expressions.length + 1,
+      });
     }
   }
 
@@ -293,11 +285,15 @@ function selectCodeBlock(
 
   let lang: string | null = null;
   let requestedIndex: number | null = null;
-  const selectorTokens =
-    firstToken === 'code' ? tokens.slice(1) : tokens.map((token) => token);
-  if (firstToken !== 'code') {
-    lang = firstToken;
-  }
+  // Only the leading `code` keyword is consumed here. Every other token is
+  // classified by the loop below, which already assigns `lang` for anything
+  // that is not a number. Seeding `lang` from the first token beforehand was
+  // redundant for `/copy ts` and actively wrong once a message index has been
+  // stripped off the front: `/copy 1 2` leaves "2" as the whole argument, so
+  // this set lang to "2" while the loop set requestedIndex to 2, the filter
+  // looked for blocks written in a language called "2", found none, and
+  // reported that no code block matched.
+  const selectorTokens = firstToken === 'code' ? tokens.slice(1) : tokens;
 
   for (const token of selectorTokens) {
     if (/^\d+$/.test(token)) {
@@ -337,50 +333,105 @@ function formatCodeBlockLabel(
   return `Code block ${block.index}`;
 }
 
+function parseLeadingMessageIndex(args: string): {
+  messageIndex: number | null;
+  subArgs: string;
+} {
+  const trimmed = args.trim();
+  if (!trimmed) return { messageIndex: null, subArgs: '' };
+
+  const firstWhitespace = trimmed.search(/\s/);
+  const firstToken =
+    firstWhitespace === -1 ? trimmed : trimmed.slice(0, firstWhitespace);
+
+  if (!/^\d+$/.test(firstToken)) {
+    return { messageIndex: null, subArgs: args };
+  }
+
+  return {
+    messageIndex: Number(firstToken),
+    subArgs: firstWhitespace === -1 ? '' : trimmed.slice(firstWhitespace + 1),
+  };
+}
+
 export const copyCommand: SlashCommand = {
   name: 'copy',
   get description() {
-    return t('Copy the last result or code snippet to clipboard');
+    return t(
+      'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
+    );
   },
+  argumentHint: '[N] [<lang>|code|latex|mermaid] [<index>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
-  action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
+  action: async (context, args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
     const history = chat?.getHistoryShallow();
+    const aiMessages = history?.filter((item) => item.role === 'model') ?? [];
 
-    // Get the last message from the AI (model role)
-    const lastAiMessage = history
-      ? history.filter((item) => item.role === 'model').pop()
-      : undefined;
-
-    if (!lastAiMessage) {
+    if (aiMessages.length === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: 'No output in history',
       };
     }
+
+    const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
+
+    let selectedAiMessage;
+    if (messageIndex !== null) {
+      if (messageIndex < 1) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content:
+            'Message index must be a positive integer (1 = last AI message).',
+        };
+      }
+      if (messageIndex > aiMessages.length) {
+        const turnLabel =
+          aiMessages.length === 1 ? 'AI message' : 'AI messages';
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `Only ${aiMessages.length} ${turnLabel} in this session.`,
+        };
+      }
+      selectedAiMessage = aiMessages[aiMessages.length - messageIndex];
+    } else {
+      selectedAiMessage = aiMessages[aiMessages.length - 1];
+    }
+
+    const isIndexed = messageIndex !== null && messageIndex > 1;
+    const sourceLabel = isIndexed
+      ? `AI message ${messageIndex}`
+      : 'the last AI output';
+    const sourceLabelCapitalized = isIndexed
+      ? `AI message ${messageIndex}`
+      : 'Last AI output';
+
     // Extract text from the parts
-    const lastAiOutput = lastAiMessage.parts
+    const aiOutput = selectedAiMessage.parts
       ?.filter((part) => part.text && !part.thought)
       .map((part) => part.text)
       .join('');
 
-    if (lastAiOutput) {
+    if (aiOutput) {
       try {
-        const selectedLatexBlock = selectLatexBlock(lastAiOutput, _args);
+        const selectedLatexBlock = selectLatexBlock(aiOutput, subArgs);
         if (selectedLatexBlock === null) {
           return {
             type: 'message',
             messageType: 'info',
             content:
-              _args
+              subArgs
                 .trim()
                 .split(/\s+/)
                 .some((token) => token === 'inline') ||
-              _args.trim().toLowerCase().startsWith('inline-latex')
-                ? 'No matching inline LaTeX expression found in the last AI output.'
-                : 'No matching LaTeX block found in the last AI output.',
+              subArgs.trim().toLowerCase().startsWith('inline-latex')
+                ? `No matching inline LaTeX expression found in ${sourceLabel}.`
+                : `No matching LaTeX block found in ${sourceLabel}.`,
           };
         }
         if (selectedLatexBlock !== undefined) {
@@ -397,16 +448,16 @@ export const copyCommand: SlashCommand = {
           };
         }
 
-        const selectedCodeBlock = selectCodeBlock(lastAiOutput, _args);
+        const selectedCodeBlock = selectCodeBlock(aiOutput, subArgs);
         if (selectedCodeBlock === null) {
           return {
             type: 'message',
             messageType: 'info',
-            content: 'No matching code block found in the last AI output.',
+            content: `No matching code block found in ${sourceLabel}.`,
           };
         }
 
-        const copiedText = selectedCodeBlock?.block.content ?? lastAiOutput;
+        const copiedText = selectedCodeBlock?.block.content ?? aiOutput;
         await copyToClipboard(copiedText);
 
         return {
@@ -414,7 +465,9 @@ export const copyCommand: SlashCommand = {
           messageType: 'info',
           content: selectedCodeBlock
             ? `${selectedCodeBlock.label} copied to the clipboard`
-            : 'Last output copied to the clipboard',
+            : isIndexed
+              ? `AI message ${messageIndex} copied to the clipboard`
+              : 'Last output copied to the clipboard',
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -430,7 +483,7 @@ export const copyCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Last AI output contains no text to copy.',
+        content: `${sourceLabelCapitalized} contains no text to copy.`,
       };
     }
   },

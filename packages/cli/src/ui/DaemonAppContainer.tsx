@@ -21,6 +21,7 @@ import { DaemonStreamContext } from './hooks/daemon/DaemonStreamContext.js';
 import { useDaemonStreamAdapter } from './hooks/daemon/useDaemonStreamAdapter.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 export interface DaemonAppContainerProps {
@@ -29,6 +30,9 @@ export interface DaemonAppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  initialUseVirtualViewport?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
+  repaintViewport?: () => void;
   daemonUrl: string;
   daemonToken: string;
 }

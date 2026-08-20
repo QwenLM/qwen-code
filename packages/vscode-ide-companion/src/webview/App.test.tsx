@@ -12,13 +12,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import type { CompletionItem } from '../types/completionItemTypes.js';
 
-const { mockPostMessage, mockOpenCompletion, mockCloseCompletion } = vi.hoisted(
-  () => ({
-    mockPostMessage: vi.fn(),
-    mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
-    mockCloseCompletion: vi.fn(),
-  }),
-);
+const {
+  mockPostMessage,
+  mockOpenCompletion,
+  mockCloseCompletion,
+  mockMessageState,
+  mockAddMessage,
+  mockEndStreaming,
+} = vi.hoisted(() => ({
+  mockPostMessage: vi.fn(),
+  mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
+  mockCloseCompletion: vi.fn(),
+  mockMessageState: {
+    isStreaming: false,
+    isWaitingForResponse: false,
+  },
+  mockAddMessage: vi.fn(),
+  mockEndStreaming: vi.fn(),
+}));
 
 const slashSkillsItem: CompletionItem = {
   id: 'skills',
@@ -87,11 +98,11 @@ vi.mock('./hooks/file/useFileContext.js', () => ({
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
   useMessageHandling: () => ({
     messages: [],
-    isStreaming: false,
-    isWaitingForResponse: false,
+    isStreaming: mockMessageState.isStreaming,
+    isWaitingForResponse: mockMessageState.isWaitingForResponse,
     loadingMessage: null,
-    addMessage: vi.fn(),
-    endStreaming: vi.fn(),
+    addMessage: mockAddMessage,
+    endStreaming: mockEndStreaming,
     setWaitingForResponse: vi.fn(),
   }),
 }));
@@ -230,11 +241,13 @@ vi.mock('./components/layout/InputForm.js', () => ({
   InputForm: ({
     inputText,
     inputFieldRef,
+    onCancel,
     onCompletionSelect,
     onCompletionFill,
   }: {
     inputText: string;
     inputFieldRef: React.RefObject<HTMLDivElement>;
+    onCancel: () => void;
     onCompletionSelect: (item: CompletionItem) => void;
     onCompletionFill?: (item: CompletionItem) => void;
   }) => (
@@ -248,6 +261,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
         {inputText}
       </div>
       <div data-testid="input-text">{inputText}</div>
+      <button onClick={onCancel}>cancel-input</button>
       <button onClick={() => onCompletionSelect(slashSkillsItem)}>
         select-skills-command
       </button>
@@ -409,6 +423,8 @@ describe('App /skills secondary picker', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMessageState.isStreaming = false;
+    mockMessageState.isWaitingForResponse = false;
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -557,5 +573,52 @@ describe('App /skills secondary picker', () => {
 
     expect(mockPostMessage).not.toHaveBeenCalled();
     expect(getRenderedInputText(rendered.container)).toBe('/clear ');
+  });
+
+  it('blurs and preserves composer text on idle cancel without cancelling the session', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, 'draft after escape');
+
+    const input = rendered.container.querySelector(
+      '[data-testid="input-field"]',
+    ) as HTMLDivElement;
+    const blurSpy = vi.spyOn(input, 'blur');
+
+    clickButton(rendered.container, 'cancel-input');
+
+    expect(blurSpy).toHaveBeenCalled();
+    expect(input.getAttribute('data-empty')).toBe('false');
+    expect(getRenderedInputText(rendered.container)).toBe('draft after escape');
+    expect(mockPostMessage).not.toHaveBeenCalledWith({
+      type: 'cancelStreaming',
+      data: {},
+    });
+  });
+
+  it('still cancels the session while streaming', async () => {
+    mockMessageState.isStreaming = true;
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    clickButton(rendered.container, 'cancel-input');
+
+    expect(mockEndStreaming).toHaveBeenCalled();
+    expect(mockAddMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Interrupted',
+      }),
+    );
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'cancelStreaming',
+      data: {},
+    });
   });
 });

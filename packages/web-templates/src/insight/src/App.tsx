@@ -16,6 +16,7 @@ import {
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
 import type { InsightData } from './types';
+import { dayKey, parseDayKey } from './dates';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -94,7 +95,7 @@ function InsightApp({ data }: { data: InsightData }) {
       const imgData = canvas.toDataURL('image/png');
       const link = document.createElement('a');
       link.href = imgData;
-      link.download = `qwen-insights-card-${new Date().toISOString().slice(0, 10)}.png`;
+      link.download = `qwen-insights-card-${dayKey(new Date())}.png`;
       link.click();
     } catch (error) {
       console.error('Export card error:', error);
@@ -131,11 +132,11 @@ function InsightApp({ data }: { data: InsightData }) {
   const heatmapKeys = Object.keys(data.heatmap || {});
   let dateRangeStr = '';
   if (heatmapKeys.length > 0) {
-    const dates = heatmapKeys.map((d) => new Date(d));
+    const dates = heatmapKeys.map((d) => parseDayKey(d));
     const timestamps = dates.map((d) => d.getTime());
     const minDate = new Date(Math.min(...timestamps));
     const maxDate = new Date(Math.max(...timestamps));
-    const formatDate = (d: Date) => d.toISOString().split('T')[0];
+    const formatDate = (d: Date) => dayKey(d);
     dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
   }
 

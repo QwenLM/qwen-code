@@ -9,15 +9,20 @@
  *
  * The two execution paths are selected by whether cacheSafeParams is supplied:
  *
- *   WITH cacheSafeParams  → GeminiChat single-turn, NO tools, shares parent
- *                            prompt cache (systemInstruction + history).
+ *   WITH cacheSafeParams  → GeminiChat single-turn, shares parent prompt
+ *                            cache (systemInstruction + history). Tools are
+ *                            stripped by default (NO_TOOLS) to prevent
+ *                            function calls; pass preserveTools: true to
+ *                            keep the parent's tools prefix for Anthropic
+ *                            prompt-cache hits.
  *                            Use for: /btw, suggestions, pipelined suggestions.
  *
  *   WITHOUT cacheSafeParams → AgentHeadless multi-turn, full tool access,
  *                              isolated session (no shared history).
  *                              Use for: memory extract, dream consolidation.
  *
- * Tool-deny for forked queries is enforced at the per-request level (NO_TOOLS).
+ * Tool-deny for forked queries is enforced at the per-request level (NO_TOOLS)
+ * unless the caller opts out via preserveTools to share the cache prefix.
  *
  * Callers (extractScheduler, dreamScheduler) own concurrency control.
  * runSideQuery() remains a separate primitive for structured-JSON calls that
@@ -28,6 +33,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -37,6 +43,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import { createDebugLogger } from './debugLogger.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -48,11 +55,17 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
+import { toModelVisibleSubagentResult } from '../agents/subagent-result.js';
 import {
   buildModelIdContext,
   resolveModelId,
   type ResolvedModelId,
 } from './modelId.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
+import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
+
+const debugLogger = createDebugLogger('FORKED_AGENT');
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -66,17 +79,48 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (shallow copy; consumers must not mutate) */
+  /**
+   * Curated conversation history with copied Content, parts arrays, and Part
+   * objects. Nested functionResponse parts are copied too; leaf payloads remain
+   * shared and must not be mutated.
+   */
   history: Content[];
   /** Model identifier */
   model: string;
   /** Version number — increments when systemInstruction or tools change */
   version: number;
+  /**
+   * The session that saved these params. The slot is a process-global, so
+   * in a multi-session daemon it can hold another session's params; readers
+   * must match this against their own session id before trusting it, or a
+   * forked query could be built from a different session's transcript
+   * (cross-session content leak) (#9233).
+   */
+  sessionId?: string;
 }
 
 // Module-level slot written after each successful main turn.
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
+
+function clonePart(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
+  };
+}
+
+function copyHistoryContainers(history: Content[]): Content[] {
+  return history.map((content) => ({
+    ...content,
+    ...(content.parts ? { parts: content.parts.map(clonePart) } : {}),
+  }));
+}
 
 /**
  * Save cache-safe params after a successful main conversation turn.
@@ -86,6 +130,7 @@ export function saveCacheSafeParams(
   generationConfig: GenerateContentConfig,
   history: Content[],
   model: string,
+  sessionId?: string,
 ): void {
   const prevConfig = currentCacheSafeParams?.generationConfig;
   const sysChanged =
@@ -102,9 +147,10 @@ export function saveCacheSafeParams(
 
   currentCacheSafeParams = {
     generationConfig: structuredClone(generationConfig),
-    history,
+    history: copyHistoryContainers(history),
     model,
     version: currentVersion,
+    sessionId,
   };
 }
 
@@ -112,9 +158,18 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams
-    ? structuredClone(currentCacheSafeParams)
-    : null;
+  if (!currentCacheSafeParams) return null;
+  return {
+    generationConfig: structuredClone(currentCacheSafeParams.generationConfig),
+    history: copyHistoryContainers(currentCacheSafeParams.history),
+    model: currentCacheSafeParams.model,
+    version: currentCacheSafeParams.version,
+    sessionId: currentCacheSafeParams.sessionId,
+  };
+}
+
+export function getCacheSafeParamsSessionId(): string | undefined {
+  return currentCacheSafeParams?.sessionId;
 }
 
 /**
@@ -128,7 +183,11 @@ export function clearCacheSafeParams(): void {
 // Forked chat — shared by runForkedAgent (cache path) and speculation
 // ---------------------------------------------------------------------------
 
-/** Per-request config that strips tools so the model never produces function calls. */
+/**
+ * Per-request config that strips tools so the model never produces function
+ * calls. Applied by default in the cache path; skipped when preserveTools
+ * is true (to share the Anthropic prompt-cache prefix).
+ */
 const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
   GenerateContentConfig,
   'tools'
@@ -250,7 +309,8 @@ export async function runWithForkedChatModel<T>(
 
 /**
  * Result from a cache-path runForkedAgent (with cacheSafeParams).
- * Single-turn, text-only — tools are denied.
+ * Single-turn, text-only. Tools stripped by default; pass preserveTools
+ * to keep the parent's tools for cache-prefix matching.
  */
 export interface ForkedQueryResult {
   /** Extracted text response, or null if no text */
@@ -263,6 +323,8 @@ export interface ForkedQueryResult {
     outputTokens: number;
     cacheHitTokens: number;
   };
+  /** Resolved model id used for the query (after selector/alias resolution). */
+  model: string;
 }
 
 function extractQueryUsage(
@@ -288,7 +350,7 @@ function extractQueryUsage(
  */
 export type ForkedAgentParams = CachePathParams | AgentPathParams;
 
-/** Cache path: single-turn, tool-free, shares parent prompt cache. */
+/** Cache path: single-turn, shares parent prompt cache. */
 export interface CachePathParams {
   /** Runtime config. */
   config: Config;
@@ -302,6 +364,15 @@ export interface CachePathParams {
   model?: string;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Do not route the query through configured model fallbacks. */
+  disableModelFallbacks?: boolean;
+  /**
+   * When true, keep the parent's tools in the per-request config so the
+   * Anthropic prompt-cache key (system + tools) matches the main agent's.
+   * Default (false/omitted): strip tools via NO_TOOLS to prevent function
+   * calls — appropriate for most forked queries.
+   */
+  preserveTools?: boolean;
 }
 
 /** AgentHeadless path: multi-turn, full tool access, isolated session. */
@@ -332,8 +403,17 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
+  /**
+   * Preserve an explicit empty `extraHistory` as caller-owned history.
+   * Most callers use [] to mean "no prior history"; keep that as undefined so
+   * AgentCore still bootstraps workspace env context. Clean remember sets this
+   * to intentionally suppress that bootstrap.
+   */
+  preserveEmptyExtraHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Suppress chat-recording UI telemetry for hidden internal agents. */
+  suppressChatRecording?: boolean;
 }
 
 export interface ForkedAgentResult {
@@ -342,8 +422,10 @@ export interface ForkedAgentResult {
   finalText?: string;
   /** AgentTerminateMode string explaining why the agent stopped. */
   terminateReason?: string;
-  /** File paths observed in Write/Edit tool calls during execution. */
+  /** File paths observed in path-like tool call arguments during execution. */
   filesTouched: string[];
+  /** File paths from successful mutating tool results. */
+  filesWritten?: string[];
 }
 
 /**
@@ -380,13 +462,18 @@ function extractFilePathsFromArgs(args: Record<string, unknown>): string[] {
   return [...matches];
 }
 
+function isMutatingFileTool(toolName: string): boolean {
+  return toolName === ToolNames.WRITE_FILE || toolName === ToolNames.EDIT;
+}
+
 /**
  * Unified forked-agent execution primitive.
  *
  * Two overloads selected by the shape of `params`:
  *
  *   params.cacheSafeParams present  → cache path (ForkedQueryResult)
- *     Single-turn, NO tools, shares parent prompt cache.
+ *     Single-turn, tools stripped by default (preserveTools overrides),
+ *     shares parent prompt cache.
  *     Use for: /btw, suggestions, pipelined suggestions.
  *
  *   params.taskPrompt present        → agent path (ForkedAgentResult)
@@ -404,8 +491,15 @@ export async function runForkedAgent(
 ): Promise<ForkedQueryResult | ForkedAgentResult> {
   // ── Cache path ────────────────────────────────────────────────────────────
   if ('cacheSafeParams' in params) {
-    const { config, userMessage, cacheSafeParams, jsonSchema, abortSignal } =
-      params;
+    const {
+      config,
+      userMessage,
+      cacheSafeParams,
+      jsonSchema,
+      abortSignal,
+      preserveTools,
+      disableModelFallbacks,
+    } = params;
     const modelSelector = params.model ?? cacheSafeParams.model;
     const modelRuntime = await buildForkedModelRuntime(
       config,
@@ -416,18 +510,28 @@ export async function runForkedAgent(
     return runWithForkedModelRuntime(modelRuntime, async (model) => {
       const chat = createForkedChat(config, cacheSafeParams);
 
-      const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
+      const requestConfig: GenerateContentConfig = preserveTools
+        ? {}
+        : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
       if (jsonSchema) {
         requestConfig.responseMimeType = 'application/json';
         requestConfig.responseJsonSchema = jsonSchema;
       }
 
-      const stream = await chat.sendMessageStream(
-        model,
-        { message: [{ text: userMessage }], config: requestConfig },
-        'forked_query',
-      );
+      const sendParams = {
+        message: [{ text: userMessage }],
+        config: requestConfig,
+      };
+      const stream = disableModelFallbacks
+        ? await chat.sendMessageStream(
+            model,
+            sendParams,
+            'forked_query',
+            undefined,
+            { disableModelFallbacks: true },
+          )
+        : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
       let usage: ForkedQueryResult['usage'] = {
@@ -439,8 +543,22 @@ export async function runForkedAgent(
       for await (const event of stream) {
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
-        const text = response.candidates?.[0]?.content?.parts
-          ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+
+        // Defensive: when preserveTools is true the model could produce
+        // functionCall parts instead of text. Log and discard them.
+        if (
+          preserveTools &&
+          parts.some((p) => (p as Record<string, unknown>)['functionCall'])
+        ) {
+          debugLogger.warn(
+            'Cache-path forked query received functionCall with preserveTools; discarding.',
+          );
+        }
+
+        const text = parts
+          .filter((p) => !(p as Record<string, unknown>)['thought'])
+          .filter((p) => !(p as Record<string, unknown>)['functionCall'])
           .map((p) => p.text ?? '')
           .join('');
         if (text) fullText += text;
@@ -458,7 +576,7 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage };
+      return { text: trimmed, jsonResult, usage, model };
     });
   }
 
@@ -483,17 +601,39 @@ export async function runForkedAgent(
   // this function ever switches away from YOLO the lifecycle stays
   // correct without further refactor.
   const filesTouched = new Set<string>();
+  const pendingMutatingPaths = new Map<string, string[]>();
+  const filesWritten = new Set<string>();
 
   const emitter = new AgentEventEmitter();
   emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    for (const filePath of extractFilePathsFromArgs(event.args)) {
+    const filePaths = extractFilePathsFromArgs(event.args);
+    for (const filePath of filePaths) {
       filesTouched.add(filePath);
+    }
+    if (isMutatingFileTool(event.name)) {
+      pendingMutatingPaths.set(event.callId, filePaths);
+    }
+  });
+  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+    if (!event.success) {
+      pendingMutatingPaths.delete(event.callId);
+      return;
+    }
+    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+    pendingMutatingPaths.delete(event.callId);
+    for (const filePath of filePaths) {
+      filesWritten.add(filePath);
     }
   });
 
+  const initialMessages =
+    params.extraHistory &&
+    (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
+      ? params.extraHistory
+      : undefined;
   const promptConfig: PromptConfig = {
     systemPrompt: params.systemPrompt,
-    initialMessages: params.extraHistory,
+    initialMessages,
   };
   const modelSelector =
     params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
@@ -527,13 +667,24 @@ export async function runForkedAgent(
 
     const context = new ContextState();
     context.set('task_prompt', params.taskPrompt);
-    await runWithForkedModelRuntime(modelRuntime, async () => {
-      await headless.execute(context, params.abortSignal);
-    });
+    context.set('hook_context', '');
+    const execute = () =>
+      runWithForkedModelRuntime(modelRuntime, async () => {
+        await headless.execute(context, params.abortSignal);
+      });
+
+    if (params.suppressChatRecording) {
+      await runWithChatRecordingSuppressed(execute);
+    } else {
+      await execute();
+    }
 
     const terminateReason = headless.getTerminateMode();
-    const finalText = headless.getFinalText() || undefined;
+    const finalText =
+      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
+      undefined;
     const touched = [...filesTouched];
+    const written = [...filesWritten];
 
     if (terminateReason === AgentTerminateMode.CANCELLED) {
       return {
@@ -541,17 +692,16 @@ export async function runForkedAgent(
         terminateReason,
         finalText,
         filesTouched: touched,
+        filesWritten: written,
       };
     }
-    if (
-      terminateReason === AgentTerminateMode.ERROR ||
-      terminateReason === AgentTerminateMode.TIMEOUT
-    ) {
+    if (terminateReason !== AgentTerminateMode.GOAL) {
       return {
         status: 'failed',
         terminateReason,
         finalText,
         filesTouched: touched,
+        filesWritten: written,
       };
     }
     return {
@@ -559,6 +709,7 @@ export async function runForkedAgent(
       terminateReason,
       finalText,
       filesTouched: touched,
+      filesWritten: written,
     };
   } finally {
     // Release the per-fork ToolRegistry so AgentTool / SkillTool

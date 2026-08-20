@@ -16,6 +16,8 @@
  *                            notification XML points here
  *   agent-<id>.meta.json   — sidecar with agentType, description, parent
  *                            session/agent IDs, createdAt
+ *   agent-<id>.jsonl.stream — transient live text, removed when the writer
+ *                            closes
  */
 
 import * as fs from 'node:fs';
@@ -25,22 +27,32 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
-  type AgentToolResultEvent,
+  type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
+  type AgentStreamTextEvent,
   type AgentExternalMessageEvent,
 } from './runtime/agent-events.js';
 import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
+import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
-import type { FunctionDeclaration, Content } from '@google/genai';
+import type { Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
+const MAX_PENDING_STREAM_BYTES = 64 * 1024;
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/** Root dir holding every session's subagent transcripts: `<projectDir>/subagents/`. */
+export function getSubagentsRootDir(projectDir: string): string {
+  return path.join(projectDir, 'subagents');
 }
 
 /**
@@ -59,8 +71,7 @@ export function getSubagentSessionDir(
   // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
   // could carry path-traversal bytes).
   return path.join(
-    projectDir,
-    'subagents',
+    getSubagentsRootDir(projectDir),
     sanitizeFilenameComponent(sessionId),
   );
 }
@@ -95,6 +106,8 @@ export interface AgentMeta {
   description: string;
   /** SessionId of the user session that launched this agent. */
   parentSessionId: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /** AgentId of the launching subagent for nested forks; null for top-level. */
   parentAgentId: string | null;
   /** ISO 8601 creation time. */
@@ -104,18 +117,92 @@ export interface AgentMeta {
    * `running` as resumable work that was interrupted by process exit.
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /**
+   * Whether the original launch ran asynchronously. Completed entries are
+   * restored only when this is explicitly true so legacy foreground sidecars
+   * are never exposed as reusable background agents.
+   */
+  isBackgrounded?: boolean;
+  /** Whether the original launch used temporary worktree isolation. */
+  isolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /**
+   * Immutable launch-time execution policy for a restricted fork.
+   * Legacy absence allows every tool except the mandatory interaction-tool
+   * exclusion; an empty list means deny-all.
+   */
+  executionAllowedTools?: string[];
+  /** Launch-time CLI/runtime flags that should survive process restart. */
+  persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
   resumeCount?: number;
+  /**
+   * Nesting depth at launch time; restored on background/foreground resume
+   * via {@link normalizeResumedAgentDepth} — never trust the raw value.
+   */
+  depth?: number;
+  /**
+   * Concrete model ID this agent runs with. Persisted so a process-restart
+   * recovery can enforce per-model concurrency caps on the revive path.
+   */
+  model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
+}
+
+export interface AgentPersistedCliFlags {
+  /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
+  approvalMode?: string;
+  bare?: boolean;
+  safeMode?: boolean;
+  sandbox?: SandboxConfig | null;
+  screenReader?: boolean;
+  model?: string;
+  authType?: string;
+  baseUrl?: string;
+  maxSessionTurns?: number;
+  maxToolCalls?: number;
+  /**
+   * Launch-time nesting cap. Interprets the persisted `depth` — without it a
+   * nested agent launched under a lower cap would resume after restart under
+   * the new session's (or default) cap and regain spawn capacity.
+   *
+   * Always a normalized 1–100 integer when written by this codebase; the
+   * resume path still re-normalizes because the sidecar is a plain JSON
+   * file a malformed or hand-edited copy of which can carry anything.
+   */
+  maxSubagentDepth?: number;
+}
+
+/**
+ * Normalizes a persisted launch depth read from an agent sidecar before it
+ * is pinned via the `runWithAgentContext` depthOverride. The sidecar is a
+ * plain JSON file, so a malformed or hand-edited value must not mint spawn
+ * capacity: a negative depth (or `-1e309`, which parses to -Infinity) would
+ * make `canSpawnNestedAgent()` pass for every cap.
+ *
+ * Absent values return undefined (the resume frame derives its depth as a
+ * fresh launch). Anything but an integer within 0–{@link
+ * MAX_SUBAGENT_DEPTH_LIMIT} fails CLOSED to the limit: the resumed agent
+ * keeps running but cannot spawn — clamping a corrupt value down to 0 would
+ * fail open by granting full spawn capacity.
+ */
+export function normalizeResumedAgentDepth(
+  value: number | undefined,
+): number | undefined {
+  if (value == null) return undefined;
+  return Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_SUBAGENT_DEPTH_LIMIT
+    ? value
+    : MAX_SUBAGENT_DEPTH_LIMIT;
 }
 
 /**
@@ -127,6 +214,16 @@ export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
   } catch (error) {
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
+    return;
+  }
+  try {
+    const now = new Date();
+    fs.utimesSync(path.dirname(metaPath), now, now);
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to refresh agent session directory for ${metaPath}:`,
+      error,
+    );
   }
 }
 
@@ -208,17 +305,9 @@ export interface AttachJsonlOptions {
   initialUserPrompt?: string;
   /**
    * Exact bootstrap history that seeded the agent before its first runtime
-   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   * turn. Used by transcript-first resume to reconstruct fork context.
    */
   bootstrapHistory?: Content[];
-  /**
-   * Immutable launch-time system instruction for fork resume.
-   */
-  bootstrapSystemInstruction?: string | Content;
-  /**
-   * Immutable launch-time tool declarations / allowlist for fork resume.
-   */
-  bootstrapTools?: Array<string | FunctionDeclaration>;
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -236,6 +325,53 @@ export interface AttachJsonlOptions {
    * branch away from any dangling tail produced by an interrupted turn.
    */
   initialParentUuid?: string | null;
+  /**
+   * 1-based attempt number when this attach resumes a transcript after a
+   * failed attempt (2+). Seeds an `agent_retry` system marker at the seam so
+   * the retry is visible on disk. Not implied by `appendToExisting` —
+   * background resume also appends without being a retry.
+   */
+  retryAttempt?: number;
+}
+
+/** Path + options pair for {@link attachJsonlTranscriptWriter}. */
+export interface AgentTranscriptAttachTarget {
+  jsonlPath: string;
+  options: AttachJsonlOptions;
+}
+
+/**
+ * Single owner of the agent-transcript attach contract: the JSONL path plus
+ * the launch metadata shared by every attach site (AgentTool's foreground
+ * and background launches, workflow dispatch, background resume). Each site
+ * layers its extras on top, so a new launch-metadata field added here lands
+ * in every transcript instead of only the sites that happened to be updated.
+ *
+ * The path follows the merged `sessionId` — the live session by default;
+ * background resume overrides it with the persisted parent session.
+ */
+export function buildAgentTranscriptAttach(
+  config: Config,
+  agentId: string,
+  extras?: Partial<AttachJsonlOptions>,
+): AgentTranscriptAttachTarget {
+  const projectRoot = config.getProjectRoot();
+  const options: AttachJsonlOptions = {
+    agentId,
+    sessionId: config.getSessionId(),
+    cwd: projectRoot,
+    version: config.getCliVersion() || 'unknown',
+    gitBranch: getCachedGitBranch(projectRoot),
+    ...extras,
+  };
+  return {
+    jsonlPath: getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      options.agentId,
+    ),
+    options,
+  };
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -249,7 +385,7 @@ export interface AttachJsonlTranscriptResult {
  * the transcript tree the same way they walk the main session log.
  *
  * Holds a single append-mode fd for the lifetime of the writer so streaming
- * tools (which can fire many TOOL_CALL/TOOL_RESULT events per round) avoid
+ * tools (which can fire many TOOL_CALL events per round) avoid
  * an open+write+close syscall storm. The fd is opened lazily on the first
  * write so callers that attach but never produce a record don't materialize
  * an empty file.
@@ -266,7 +402,22 @@ export function attachJsonlTranscriptWriter(
         ? readLastTranscriptRecordUuidSync(jsonlPath)
         : null;
   let fd: number | null = null;
+  let streamFd: number | null = null;
+  const streamPath = `${jsonlPath}.stream`;
+  const streamRunId = randomUUID();
+  let pendingStreamText = '';
+  let pendingStreamBytes = 0;
+  let streamFlushTimer: NodeJS.Timeout | null = null;
   let openFailed = false;
+
+  try {
+    fs.rmSync(streamPath, { force: true });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to reset streaming transcript ${streamPath}:`,
+      error,
+    );
+  }
 
   const ensureOpen = (): boolean => {
     if (fd !== null) return true;
@@ -307,11 +458,65 @@ export function attachJsonlTranscriptWriter(
     }
   };
 
+  const flushStreamText = () => {
+    streamFlushTimer = null;
+    if (!pendingStreamText) return;
+    const text = pendingStreamText;
+    pendingStreamText = '';
+    pendingStreamBytes = 0;
+    try {
+      if (streamFd === null) {
+        fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+        streamFd = fs.openSync(streamPath, 'w');
+      }
+      fs.writeSync(streamFd, text);
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to append streaming transcript ${streamPath}:`,
+        error,
+      );
+    }
+  };
+
+  const appendStreamText = (event: AgentStreamTextEvent) => {
+    const record = `${JSON.stringify({
+      v: 1,
+      runId: event.runId ?? streamRunId,
+      round: event.round,
+      text: event.text,
+      thought: event.thought === true,
+      timestamp: event.timestamp,
+    })}\n`;
+    pendingStreamText += record;
+    pendingStreamBytes += Buffer.byteLength(record);
+    if (pendingStreamBytes >= MAX_PENDING_STREAM_BYTES) {
+      if (streamFlushTimer !== null) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      flushStreamText();
+      return;
+    }
+    if (streamFlushTimer === null) {
+      streamFlushTimer = setTimeout(flushStreamText, 100);
+      streamFlushTimer.unref();
+    }
+  };
+
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (!event.text) return;
+    const parts = [
+      ...(event.thoughtText
+        ? [{ text: event.thoughtText, thought: true }]
+        : []),
+      ...(event.text ? [{ text: event.text }] : []),
+    ];
+    if (parts.length === 0 && !event.usageMetadata) return;
     append({
       ...baseFields('assistant'),
-      message: { role: 'model', parts: [{ text: event.text }] },
+      message: { role: 'model', parts },
+      usageMetadata: event.usageMetadata,
+      agentRunId: event.runId ?? streamRunId,
+      agentRound: event.round,
     });
   };
 
@@ -333,31 +538,21 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const onToolResult = (event: AgentToolResultEvent) => {
-    // Prefer the real response parts the model saw; fall back to a status
-    // stub only when the agent aborted before a response was formed.
-    const parts = event.responseParts ?? [
-      {
-        functionResponse: {
-          id: event.callId,
-          name: event.name,
-          response: {
-            success: event.success,
-            ...(event.error ? { error: event.error } : {}),
-          },
+  const onToolResponsesFinalized = (
+    event: AgentToolResponsesFinalizedEvent,
+  ) => {
+    for (const response of event.responses) {
+      append({
+        ...baseFields('tool_result'),
+        message: { role: 'user', parts: response.responseParts },
+        toolCallResult: {
+          callId: response.callId,
+          ...(response.durationMs !== undefined
+            ? { durationMs: response.durationMs }
+            : {}),
         },
-      },
-    ];
-    append({
-      ...baseFields('tool_result'),
-      message: { role: 'user', parts },
-      toolCallResult: {
-        callId: event.callId,
-        ...(event.durationMs !== undefined
-          ? { durationMs: event.durationMs }
-          : {}),
-      },
-    });
+      });
+    }
   };
 
   const recordUserMessage = (
@@ -387,25 +582,10 @@ export function attachJsonlTranscriptWriter(
     recordUserMessage(event.text, event.kind ?? 'message');
   };
 
-  const hasBootstrapPayload =
-    options.bootstrapHistory !== undefined ||
-    options.bootstrapSystemInstruction !== undefined ||
-    options.bootstrapTools !== undefined;
-
-  if (hasBootstrapPayload) {
+  if (options.bootstrapHistory !== undefined) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
-      ...(options.bootstrapSystemInstruction !== undefined
-        ? {
-            systemInstruction: structuredClone(
-              options.bootstrapSystemInstruction,
-            ),
-          }
-        : {}),
-      ...(options.bootstrapTools !== undefined
-        ? { tools: structuredClone(options.bootstrapTools) }
-        : {}),
     };
     recordSystem('agent_bootstrap', payload);
   }
@@ -420,16 +600,30 @@ export function attachJsonlTranscriptWriter(
     });
   }
 
+  if (options.retryAttempt !== undefined) {
+    recordSystem('agent_retry', { attempt: options.retryAttempt });
+  }
+
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
+  emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
+    emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(
+      AgentEventType.TOOL_RESPONSES_FINALIZED,
+      onToolResponsesFinalized,
+    );
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+    if (streamFlushTimer !== null) {
+      clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
+    }
+    flushStreamText();
     if (fd !== null) {
       try {
         fs.closeSync(fd);
@@ -437,6 +631,22 @@ export function attachJsonlTranscriptWriter(
         // best effort
       }
       fd = null;
+    }
+    if (streamFd !== null) {
+      try {
+        fs.closeSync(streamFd);
+      } catch {
+        // Best-effort cleanup; the process will release the descriptor.
+      }
+      streamFd = null;
+    }
+    try {
+      fs.rmSync(streamPath, { force: true });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to remove streaming transcript ${streamPath}:`,
+        error,
+      );
     }
   };
 

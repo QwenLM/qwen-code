@@ -165,7 +165,7 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
     if (outcome === 'send_failed') {
       // Rollback: no zombie sessions, no half-spawned agents.
       try {
-        await deps.daemon.endSession(sessionId);
+        await deps.daemon.closeSession(sessionId);
       } catch {
         // Best-effort — the daemon may already have dropped the session.
       }
@@ -330,7 +330,7 @@ export function createAgentCancelRoute(deps: AgentRoutesDeps): RequestHandler {
       return;
     }
     try {
-      await deps.daemon.endSession(rec.sessionId);
+      await deps.daemon.closeSession(rec.sessionId);
     } catch {
       res
         .status(502)

@@ -5,18 +5,27 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
-  directoryCommand,
   expandHomeDir,
-  getDirPathCompletions,
-} from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
-import type { CommandContext } from './types.js';
-import { MessageType } from '../types.js';
+  loadServerHierarchicalMemory,
+  type Config,
+  type WorkspaceContext,
+} from '@qwen-code/qwen-code-core';
+import type { CommandContext, SlashCommandActionReturn } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    loadServerHierarchicalMemory: vi.fn(),
+  };
+});
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
@@ -29,6 +38,25 @@ describe('directoryCommand', () => {
   const showCommand = directoryCommand.subCommands?.find(
     (c) => c.name === 'show',
   );
+
+  it('declares acp in supportedModes for parent and subcommands', () => {
+    expect(directoryCommand.supportedModes).toEqual(['interactive', 'acp']);
+    expect(addCommand!.supportedModes).toEqual(['interactive', 'acp']);
+    expect(showCommand!.supportedModes).toEqual(['interactive', 'acp']);
+  });
+
+  it('add subcommand has argumentHint', () => {
+    expect(addCommand!.argumentHint).toBe('<path>[,<path>,...]');
+  });
+
+  it('returns usage hint when invoked without a subcommand', async () => {
+    const result = await directoryCommand.action?.({} as CommandContext, '');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('/directory add'),
+    });
+  });
 
   beforeEach(() => {
     mockWorkspaceDirectories = [
@@ -53,6 +81,7 @@ describe('directoryCommand', () => {
       }),
       getWorkingDir: () => '/test/dir',
       shouldLoadMemoryFromIncludeDirectories: () => false,
+      isSafeMode: () => false,
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
@@ -80,46 +109,104 @@ describe('directoryCommand', () => {
   });
 
   describe('show', () => {
-    it('should display the list of directories', () => {
+    it('should return error when config is null', async () => {
       if (!showCommand?.action) throw new Error('No action');
-      showCommand.action(mockContext, '');
+      const nullConfigContext = {
+        services: { config: null },
+      } as unknown as CommandContext;
+      const result = await showCommand.action(nullConfigContext, '');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Configuration'),
+      });
+    });
+
+    it('should return the list of directories', async () => {
+      if (!showCommand?.action) throw new Error('No action');
+      const result = await showCommand.action(mockContext, '');
       expect(mockWorkspaceContext.getDirectories).toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Current workspace directories:\n- ${path.normalize(
-            '/home/user/project1',
-          )}\n- ${path.normalize('/home/user/project2')}`,
-        }),
-        expect.any(Number),
-      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Current workspace directories:\n- ${path.normalize(
+          '/home/user/project1',
+        )}\n- ${path.normalize('/home/user/project2')}`,
+      });
     });
   });
 
   describe('add', () => {
-    it('should show an error if no path is provided', () => {
+    it('should return error when config is null', async () => {
       if (!addCommand?.action) throw new Error('No action');
-      addCommand.action(mockContext, '');
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: 'Please provide at least one path to add.',
-        }),
-        expect.any(Number),
-      );
+      const nullConfigContext = {
+        services: { config: null },
+      } as unknown as CommandContext;
+      const result = await addCommand.action(nullConfigContext, '/some/path');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Configuration'),
+      });
     });
 
-    it('should call addDirectory and show a success message for a single path', async () => {
+    it('should return an error if no path is provided', async () => {
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, '');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Please provide at least one path to add.',
+      });
+    });
+
+    it('should return an error on restrictive sandbox', async () => {
+      vi.mocked(mockConfig.isRestrictiveSandbox).mockReturnValue(true);
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, '/some/path');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('restrictive sandbox'),
+      });
+    });
+
+    it('should handle paths with spaces without splitting on space', async () => {
+      const spacePath = path.normalize('/home/user/My Project');
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, spacePath);
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(spacePath);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          `Successfully added directories:\n- ${spacePath}`,
+        ),
+      });
+    });
+
+    it('should call addDirectory and return a success message for a single path', async () => {
       const newPath = path.normalize('/home/user/new-project');
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, newPath);
+      const result = await addCommand.action(mockContext, newPath);
       expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(newPath);
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Successfully added directories:\n- ${newPath}`,
-        }),
-        expect.any(Number),
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          `Successfully added directories:\n- ${newPath}`,
+        ),
+      });
+    });
+
+    it('should expand Windows-style home-relative paths before adding directories', async () => {
+      const homeProject = path.join(os.homedir(), 'new-project');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, '~\\new-project');
+
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(
+        homeProject,
       );
     });
 
@@ -162,6 +249,46 @@ describe('directoryCommand', () => {
       );
     });
 
+    it('refreshes context file paths when reloading memory from include directories', async () => {
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: 'reloaded memory',
+        fileCount: 2,
+        contextFilePaths: ['a/QWEN.md', '~/.qwen/QWEN.md'],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/test/dir',
+      });
+      mockConfig.shouldLoadMemoryFromIncludeDirectories = () => true;
+      mockConfig.getFolderTrust = vi.fn().mockReturnValue(true);
+      mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
+      mockConfig.setContextFilePaths = vi.fn();
+      mockConfig.setConditionalRulesRegistry = vi.fn();
+      mockContext.ui.setGeminiMdFileCount = vi.fn();
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(
+        mockContext,
+        path.normalize('/home/user/new-project'),
+      );
+
+      // Pin the CWD anchor (getWorkingDir, not process.cwd) and the new
+      // directory so an anchor regression can't slip through green.
+      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.arrayContaining([path.normalize('/home/user/new-project')]),
+        expect.anything(),
+        expect.anything(),
+        true,
+        'tree',
+        expect.anything(),
+      );
+      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
+      expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
+        'a/QWEN.md',
+        '~/.qwen/QWEN.md',
+      ]);
+    });
+
     it('should not persist directories skipped by the workspace context', async () => {
       const skippedPath = path.normalize('/home/user/missing-project');
       vi.mocked(mockWorkspaceContext.addDirectory).mockImplementation(
@@ -169,38 +296,33 @@ describe('directoryCommand', () => {
       );
 
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, skippedPath);
+      const result = (await addCommand.action(
+        mockContext,
+        skippedPath,
+      )) as SlashCommandActionReturn;
 
       expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
-      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Successfully added directories:\n- ${skippedPath}`,
-        }),
-        expect.any(Number),
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      expect((result as { content: string }).content).not.toContain(
+        'Successfully added directories',
       );
     });
 
-    it('should show already-added directories without an empty success message', async () => {
+    it('should return already-added directories without a success message', async () => {
       const existingPath = path.normalize('/home/user/project1');
 
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, existingPath);
+      const result = await addCommand.action(mockContext, existingPath);
 
       expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Directories already in workspace:\n- ${existingPath}`,
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: 'Successfully added QWEN.md files from the following directories if there are:\n- ',
-        }),
-        expect.any(Number),
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('already in workspace'),
+      });
+      expect((result as { content: string }).content).toContain(existingPath);
+      expect((result as { content: string }).content).not.toContain(
+        'Successfully added',
       );
     });
 
@@ -235,53 +357,56 @@ describe('directoryCommand', () => {
       });
 
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, inputPath);
+      const result = await addCommand.action(mockContext, inputPath);
 
       expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
         SettingScope.Workspace,
         'context.includeDirectories',
         [acceptedPath],
       );
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Successfully added directories:\n- ${acceptedPath}`,
-        }),
-        expect.any(Number),
-      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          `Successfully added directories:\n- ${acceptedPath}`,
+        ),
+      });
     });
 
-    it('should call addDirectory for each path and show a success message for multiple paths', async () => {
+    it('should call addDirectory for each path and return a success message for multiple paths', async () => {
       const newPath1 = path.normalize('/home/user/new-project1');
       const newPath2 = path.normalize('/home/user/new-project2');
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, `${newPath1},${newPath2}`);
+      const result = await addCommand.action(
+        mockContext,
+        `${newPath1},${newPath2}`,
+      );
       expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(newPath1);
       expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(newPath2);
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Successfully added directories:\n- ${newPath1}\n- ${newPath2}`,
-        }),
-        expect.any(Number),
-      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          `Successfully added directories:\n- ${newPath1}\n- ${newPath2}`,
+        ),
+      });
     });
 
-    it('should show an error if addDirectory throws an exception', async () => {
+    it('should return an error if addDirectory throws an exception', async () => {
       const error = new Error('Directory does not exist');
       vi.mocked(mockWorkspaceContext.addDirectory).mockImplementation(() => {
         throw error;
       });
       const newPath = path.normalize('/home/user/invalid-project');
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, newPath);
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: `Error adding '${newPath}': ${error.message}`,
-        }),
-        expect.any(Number),
-      );
+      const result = await addCommand.action(mockContext, newPath);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          `Error adding '${newPath}': ${error.message}`,
+        ),
+      });
     });
 
     it('should handle a mix of successful and failed additions', async () => {
@@ -300,23 +425,48 @@ describe('directoryCommand', () => {
       );
 
       if (!addCommand?.action) throw new Error('No action');
-      await addCommand.action(mockContext, `${validPath},${invalidPath}`);
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Successfully added directories:\n- ${validPath}`,
-        }),
-        expect.any(Number),
+      const result = await addCommand.action(
+        mockContext,
+        `${validPath},${invalidPath}`,
       );
 
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: `Error adding '${invalidPath}': ${error.message}`,
-        }),
-        expect.any(Number),
+      // Mixed result should be warning type since some paths succeeded
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'warning',
+      });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        `Successfully added directories:\n- ${validPath}`,
       );
+      expect(content).toContain(
+        `Error adding '${invalidPath}': ${error.message}`,
+      );
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [validPath],
+      );
+    });
+
+    it('should warn when gemini.addDirectoryContext throws', async () => {
+      vi.mocked(mockConfig.getGeminiClient).mockReturnValue({
+        addDirectoryContext: vi
+          .fn()
+          .mockRejectedValue(new Error('gemini unavailable')),
+      } as unknown as ReturnType<typeof mockConfig.getGeminiClient>);
+      const newPath = path.normalize('/home/user/new-project');
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, newPath);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'warning',
+      });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        'Error notifying model of new directories: gemini unavailable',
+      );
+      expect(content).toContain('Successfully added directories');
     });
   });
   it('should correctly expand a Windows-style home directory path', () => {
@@ -380,12 +530,19 @@ describe('getDirPathCompletions', () => {
 
         // Directory values should end with path separator for continued navigation
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-
-        // Should match one of our created directories
-        const dirNameWithoutSlash = suggestion.value.slice(0, -1);
-        const basename = path.basename(dirNameWithoutSlash);
-        expect(['sub1', 'sub2'].includes(basename)).toBe(true);
       });
+
+      // The first result should be the typed directory itself (#7318)
+      const normalizedTempDir = tempTestDir.endsWith(path.sep)
+        ? tempTestDir
+        : tempTestDir + path.sep;
+      expect(results[0].value).toBe(normalizedTempDir);
+
+      // Remaining results should be child directories
+      const childBasenames = results
+        .slice(1)
+        .map((s) => path.basename(s.value.slice(0, -1)));
+      expect(childBasenames).toEqual(expect.arrayContaining(['sub1', 'sub2']));
     });
 
     it('should filter by prefix while preserving isDirectory flag', () => {
@@ -404,6 +561,33 @@ describe('getDirPathCompletions', () => {
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
       });
+    });
+
+    it('should complete Windows-style home-relative paths', () => {
+      const homeSubdir = fs.mkdtempSync(
+        path.join(os.homedir(), `qwen-dir-complete-${process.pid}-`),
+      );
+      const partialName = path.basename(homeSubdir).slice(0, -2);
+
+      try {
+        const results = getDirPathCompletions(`~\\${partialName}`);
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(
+          results.some(
+            (suggestion) => suggestion.value === homeSubdir + path.sep,
+          ),
+        ).toBe(true);
+        results.forEach((suggestion) => {
+          expect(suggestion.isDirectory).toBe(true);
+          expect(path.basename(suggestion.value.slice(0, -1))).toContain(
+            partialName,
+          );
+          expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        });
+      } finally {
+        fs.rmSync(homeSubdir, { recursive: true, force: true });
+      }
     });
 
     it('should support comma-separated paths with isDirectory flag on last segment', () => {
@@ -426,12 +610,15 @@ describe('getDirPathCompletions', () => {
 
       expect(deepResults.length).toBeGreaterThan(0);
 
-      // Only directories inside sub1 should be returned
-      deepResults.forEach((suggestion) => {
+      // First result should be the typed directory itself (#7318)
+      const sub1Path = path.join(tempTestDir, 'sub1') + path.sep;
+      expect(deepResults[0].value).toBe(sub1Path);
+
+      // Remaining results should be directories inside sub1
+      deepResults.slice(1).forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value).toContain('sub1');
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-        // The nested 'deep' directory should be in the results
         const basename = path.basename(suggestion.value.slice(0, -1));
         expect(basename).toBe('deep');
       });

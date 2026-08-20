@@ -81,6 +81,7 @@ const SchemaSummary: React.FC<{ schema: object }> = ({ schema }) => {
 export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
   tool,
   onBack,
+  isActive = true,
 }) => {
   useKeypress(
     (key) => {
@@ -88,7 +89,7 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
         onBack();
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (!tool) {

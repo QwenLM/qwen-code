@@ -1,0 +1,261 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ArgumentsCamelCase } from 'yargs';
+
+const loadSettings = vi.fn();
+const checkForUpdatesDetailed = vi.fn();
+const getInstallationInfo = vi.fn();
+const resolveUpdateCommand = vi.fn(
+  (updateCommand: string, latestVersion: string) =>
+    updateCommand.replace('@latest', `@${latestVersion}`),
+);
+const formatUpdateInstructions = vi.fn(
+  (
+    installationInfo: {
+      updateMessage?: string;
+      updateCommand?: string;
+      isStandalone?: boolean;
+    },
+    latestVersion: string,
+  ) => {
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+      return [installationInfo.updateMessage];
+    }
+    if (installationInfo.updateCommand) {
+      return [
+        'Run the following to update:',
+        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
+      ];
+    }
+    return ['Manual update required. Please reinstall Qwen Code.'];
+  },
+);
+const performStandaloneUpdate = vi.fn();
+const getPackageJson = vi.fn();
+const writeStdoutLine = vi.fn();
+const writeStderrLine = vi.fn();
+const initializeI18n = vi.fn();
+const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
+
+vi.mock('../config/settings.js', () => ({ loadSettings }));
+vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
+  checkForUpdatesDetailed,
+}));
+vi.mock('../utils/installationInfo.js', () => ({
+  formatUpdateInstructions,
+  getInstallationInfo,
+  resolveUpdateCommand,
+}));
+vi.mock('../utils/standalone-update.js', () => ({ performStandaloneUpdate }));
+vi.mock('../utils/package.js', () => ({ getPackageJson }));
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStdoutLine,
+  writeStderrLine,
+}));
+vi.mock('../i18n/index.js', () => ({
+  initializeI18n,
+  resolveLanguageSetting,
+  t: (key: string, params?: Record<string, string>) =>
+    key.replace(
+      /\{\{(\w+)\}\}/g,
+      (_, param: string) => params?.[param] ?? `{{${param}}}`,
+    ),
+}));
+
+const { updateCommand } = await import('./update.js');
+
+const updateArgs: ArgumentsCamelCase<object> = {
+  _: [],
+  $0: 'qwen',
+};
+
+function settings(enableAutoUpdate?: boolean) {
+  return {
+    merged: {
+      general: { enableAutoUpdate, language: 'zh' },
+    },
+  };
+}
+
+describe('update command', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = undefined;
+    loadSettings.mockReturnValue(settings(undefined));
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available: 1.2.3',
+        update: { latest: '1.2.3' },
+      },
+    });
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+    });
+  });
+
+  it('prints the package-manager update command even when auto-update is disabled', async () => {
+    loadSettings.mockReturnValue(settings(false));
+
+    await updateCommand.handler(updateArgs);
+
+    expect(resolveLanguageSetting).toHaveBeenCalledWith('zh');
+    expect(initializeI18n).toHaveBeenCalledWith('zh');
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
+    expect(writeStdoutLine).toHaveBeenCalledWith('Update available: 1.2.3');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Run the following to update:',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      '  npm install -g @qwen-code/qwen-code@1.2.3',
+    );
+  });
+
+  it('sets a non-zero exit code when a standalone update fails', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockRejectedValue(new Error('boom'));
+
+    await updateCommand.handler(updateArgs);
+
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStderrLine).toHaveBeenCalledWith('Update failed: boom');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('updates standalone installs even when auto-update is disabled', async () => {
+    loadSettings.mockReturnValue(settings(false));
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
+  it('does not print generic fallback when installation info has updateMessage', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateMessage: 'Running via npx, update not applicable.',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running via npx, update not applicable.',
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      'Manual update required. Please reinstall Qwen Code.',
+    );
+  });
+
+  it('prints the update message when no update command is available', async () => {
+    getInstallationInfo.mockReturnValue({
+      updateMessage:
+        'Running from a local git clone. Please update with "git pull".',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running from a local git clone. Please update with "git pull".',
+    );
+  });
+
+  it('prints success message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
+  it('prints deferred message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('deferred');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update downloaded. It will be applied after you exit this session.',
+    );
+  });
+
+  it('prints the current version when no update is available', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Qwen Code 1.0.0 is up to date!',
+    );
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check fails', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check is skipped', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'skipped',
+      reason: 'development mode',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Unable to check for updates: development mode',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+});

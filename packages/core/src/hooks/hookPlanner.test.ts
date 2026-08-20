@@ -6,7 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
-import { getHookMatcherTarget, HookPlanner } from './hookPlanner.js';
+import {
+  getHookMatcherTarget,
+  getToolMatcherTargets,
+  HookPlanner,
+} from './hookPlanner.js';
 import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 describe('HookPlanner', () => {
@@ -83,6 +87,17 @@ describe('HookPlanner', () => {
       });
     });
 
+    it('returns file path targets for instruction load events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.InstructionsLoaded, {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        }),
+      ).toEqual({
+        kind: 'filePath',
+        target: '/repo/.qwen/QWEN.local.md',
+      });
+    });
+
     it('returns command name targets for user prompt expansion events', () => {
       expect(
         getHookMatcherTarget(HookEventName.UserPromptExpansion, {
@@ -96,6 +111,10 @@ describe('HookPlanner', () => {
         undefined,
       );
       expect(getHookMatcherTarget(HookEventName.PostToolBatch)).toBe(undefined);
+      expect(getHookMatcherTarget(HookEventName.SessionDelete)).toBe(undefined);
+      expect(getHookMatcherTarget(HookEventName.MessageDisplay)).toBe(
+        undefined,
+      );
     });
   });
 
@@ -341,6 +360,114 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it('matches built-in tool display names against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'WriteFile',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'write_file',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('matches pipe-separated display names against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'WriteFile|Edit',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'write_file',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('matches legacy tool aliases against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'SearchFiles',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'grep_search',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('matches legacy runtime aliases against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'search_file_content',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'grep_search',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('does not match regex against tool aliases', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'Edit',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'notebook_edit',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('does not let alias expansion bypass runtime id regex exclusions', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: '^(?!write_file).*$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'write_file',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('passes through unknown tool ids without aliases', () => {
+      expect(getToolMatcherTargets('computer_use__click')).toEqual([
+        'computer_use__click',
+      ]);
+    });
+
     it('should not match tool name with different exact string', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },
@@ -563,6 +690,46 @@ describe('HookPlanner', () => {
       });
 
       expect(result).not.toBeNull();
+    });
+
+    it('should match instruction loaded file paths with regex', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        },
+      );
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match unrelated instruction loaded file paths', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/QWEN.md',
+        },
+      );
+
+      expect(result).toBeNull();
     });
 
     it('should match auth_success notification type', () => {

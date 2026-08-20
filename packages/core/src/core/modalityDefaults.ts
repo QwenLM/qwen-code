@@ -40,9 +40,12 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Alibaba / Qwen
   // -------------------
-  // Qwen3.5-Plus, Qwen3.6-Plus: image + video support
+  // Qwen Plus models: image + video support
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
+  [/^qwen3\.7-plus/, { image: true, video: true }],
+  // Qwen Max models (3.8+): image support
+  [/^qwen3\.8-max/, { image: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
@@ -76,8 +79,21 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k2\.5/, { image: true, video: true }],
+  [/^kimi-k3/, { image: true, video: true }],
+  [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
+
+  // -------------------
+  // ByteDance Doubao — Seed-series and *-vision / *-vl models accept image
+  // input; other Doubao models (pro / lite / text) are text-only.
+  // (QwenLM/qwen-code#4876)
+  // -------------------
+  // seedance (text→video) and seedream (text→image) are generation models with
+  // text-only input — exclude them before the multimodal Seed chat series.
+  [/^doubao-seed(ance|ream)/, {}],
+  [/^doubao-seed/, { image: true }],
+  [/^doubao-.*(vision|vl)/, { image: true }],
+  [/^doubao/, {}],
 ];
 
 /**
@@ -95,4 +111,35 @@ export function defaultModalities(model: string): InputModalities {
     }
   }
   return {};
+}
+
+/**
+ * True for wire model ids in the qwen family: any `qwen*` id plus
+ * `coder-model`, the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
+ * config/models.ts, aliased to a Qwen 3.6 Plus hybrid), which doesn't
+ * start with `qwen` but is the most common hybrid-thinking model for
+ * first-time users. Shared by the pipeline's disable/tool-choice gates
+ * and the DashScope provider's effort mapping so the family fact lives
+ * in one place.
+ */
+export function isQwenFamilyWireModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const normalized = model.toLowerCase();
+  return normalized.startsWith('qwen') || normalized === 'coder-model';
+}
+
+/**
+ * True for the qwen3.8-max wire model family — the only family that
+ * reads the tiered `reasoning_effort` field directly. Prefix-matched so
+ * dated snapshots and `-latest` aliases are covered, consistent with the
+ * family pattern in MODALITY_PATTERNS above. Older qwen hybrids expose
+ * only the on/off `enable_thinking` switch instead.
+ */
+export function isTieredEffortWireModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  return model.toLowerCase().startsWith('qwen3.8-max');
 }

@@ -45,6 +45,7 @@ export function isSyntheticHistoryItem(
     case 'warning':
     case 'success':
     case 'retry_countdown':
+    case 'vision_notice':
     case 'notification':
     case 'tool_use_summary':
     case 'gemini_thought':
@@ -56,21 +57,29 @@ export function isSyntheticHistoryItem(
     case 'stop_hook_system_message':
       return true;
 
+    // Steer messages (mid-turn user injections) are typed 'user' but
+    // carry sentToModel === false; treat them as synthetic so the
+    // cancel handler can still do a full rewind when only a steer
+    // follows the real prompt.
+    case 'user':
+      return item.sentToModel === false;
+
     // Meaningful: user input, model text, tool runs, slash-command
     // results the user explicitly asked for. Auto-restore must bail
     // when any of these appear after the candidate user prompt.
-    case 'user':
     case 'user_shell':
     case 'gemini':
     case 'gemini_content':
     case 'tool_group':
     case 'btw':
+    case 'advisor':
     case 'memory_saved':
     case 'about':
     case 'help':
     case 'stats':
     case 'model_stats':
     case 'tool_stats':
+    case 'skill_stats':
     case 'quit':
     case 'compression':
     case 'summary':
@@ -84,6 +93,7 @@ export function isSyntheticHistoryItem(
     case 'arena_agent_complete':
     case 'arena_session_complete':
     case 'goal_status':
+    case 'goal_state':
       return false;
 
     default: {
@@ -120,7 +130,48 @@ export function itemsAfterAreOnlySynthetic(
 /** Index of the last `user` (real prompt) item, or -1. */
 export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user') return i;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) return i;
   }
   return -1;
+}
+
+/** Texts of real (non-steer) user prompts in `history`, oldest-first. */
+export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
+  return history
+    .filter(
+      (item): item is HistoryItem & { type: 'user'; text: string } =>
+        item.type === 'user' &&
+        item.sentToModel !== false &&
+        typeof item.text === 'string' &&
+        item.text.trim() !== '',
+    )
+    .map((item) => item.text);
+}
+
+/**
+ * Map every thought item to the id of its group's `gemini_thought` head.
+ *
+ * A "thought" is one `gemini_thought` head followed by zero or more
+ * `gemini_thought_content` continuations. Both the head and its continuations
+ * map to the head id, so a single click on the head can expand/collapse the
+ * whole group as a unit (see the per-thought inline expansion in
+ * HistoryItemDisplay).
+ */
+export function buildThoughtHeadIdMap(
+  items: readonly HistoryItem[],
+): Map<HistoryItem, number> {
+  const map = new Map<HistoryItem, number>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (item.type !== 'gemini_thought') continue;
+    const headId = item.id;
+    map.set(item, headId);
+    for (let j = i + 1; j < items.length; j++) {
+      const next = items[j]!;
+      if (next.type !== 'gemini_thought_content') break;
+      map.set(next, headId);
+    }
+  }
+  return map;
 }

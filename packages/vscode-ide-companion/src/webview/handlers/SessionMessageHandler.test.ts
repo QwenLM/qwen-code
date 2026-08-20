@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { pathToFileURL } from 'node:url';
 
 const {
   mockProcessImageAttachments,
@@ -219,7 +220,71 @@ describe('SessionMessageHandler', () => {
         type: 'resource_link',
         name: 'clipboard-123.png',
         mimeType: 'image/png',
-        uri: 'file:///tmp/clipboard/clipboard-123.png',
+        uri: pathToFileURL('/tmp/clipboard/clipboard-123.png').href,
+      },
+    ]);
+  });
+
+  it('sends image file context as prompt image blocks', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'describe it',
+        context: [
+          {
+            type: 'file',
+            name: 'screen shot.png',
+            value: '/workspace/screen shot.png',
+            isImage: true,
+          },
+          {
+            type: 'file',
+            name: 'notes.md',
+            value: '/workspace/notes.md',
+            isImage: false,
+          },
+        ],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: '/workspace/screen shot.png\n/workspace/notes.md\n\ndescribe it',
+      },
+      {
+        type: 'resource_link',
+        name: 'screen shot.png',
+        mimeType: 'image/png',
+        uri: pathToFileURL('/workspace/screen shot.png').href,
       },
     ]);
   });

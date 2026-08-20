@@ -8,13 +8,28 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { loadServerHierarchicalMemory } from './memoryDiscovery.js';
+import {
+  loadServerHierarchicalMemory,
+  formatContextFileDisplayPath,
+} from './memoryDiscovery.js';
 import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
+  LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { QWEN_DIR } from './paths.js';
+import type { InstructionsLoadedNotification } from './memoryDiscovery.js';
+
+const mockLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => mockLogger,
+}));
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
@@ -130,6 +145,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: '',
       fileCount: 0,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -168,6 +184,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: '',
       fileCount: 0,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -207,6 +224,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
       fileCount: 1,
+      contextFilePaths: [path.relative(cwd, explicitContextFile)],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -230,6 +248,9 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---`,
       fileCount: 1,
+      contextFilePaths: [
+        path.join('~', path.relative(homedir, defaultContextFile)),
+      ],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -256,6 +277,9 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, customContextFile)} ---\ncustom context content\n--- End of Context from: ${path.relative(cwd, customContextFile)} ---`,
       fileCount: 1,
+      contextFilePaths: [
+        path.join('~', path.relative(homedir, customContextFile)),
+      ],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -286,6 +310,10 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectContextFile)} ---\nproject context content\n--- End of Context from: ${path.relative(cwd, projectContextFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdContextFile)} ---\ncwd context content\n--- End of Context from: ${path.relative(cwd, cwdContextFile)} ---`,
       fileCount: 2,
+      contextFilePaths: [
+        path.relative(cwd, projectContextFile),
+        path.relative(cwd, cwdContextFile),
+      ],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -314,6 +342,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${customFilename} ---\nCWD custom memory\n--- End of Context from: ${customFilename} ---`,
       fileCount: 1,
+      contextFilePaths: [customFilename],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -341,6 +370,10 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, srcGeminiFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcGeminiFile)} ---`,
       fileCount: 2,
+      contextFilePaths: [
+        path.relative(cwd, projectRootGeminiFile),
+        path.relative(cwd, srcGeminiFile),
+      ],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -369,6 +402,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${DEFAULT_CONTEXT_FILENAME} ---\nCWD memory\n--- End of Context from: ${DEFAULT_CONTEXT_FILENAME} ---`,
       fileCount: 1,
+      contextFilePaths: [DEFAULT_CONTEXT_FILENAME],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -409,6 +443,12 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootGeminiFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdGeminiFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdGeminiFile)} ---`,
       fileCount: 4,
+      contextFilePaths: [
+        path.join('~', path.relative(homedir, defaultContextFile)),
+        path.relative(cwd, rootGeminiFile),
+        path.relative(cwd, projectRootGeminiFile),
+        path.relative(cwd, cwdGeminiFile),
+      ],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -432,10 +472,428 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, extensionFilePath)} ---\nExtension memory content\n--- End of Context from: ${path.relative(cwd, extensionFilePath)} ---`,
       fileCount: 1,
+      contextFilePaths: [path.relative(cwd, extensionFilePath)],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
     });
+  });
+
+  it('announces extension context files with custom basenames', async () => {
+    const extensionFilePath = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/system-prompt.md'),
+      'Extension custom context content',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFilePath],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    // The file is attached by concatenateInstructions even though its
+    // basename is not a configured memory filename, so it must be announced.
+    expect(result.fileCount).toBe(0);
+    expect(result.memoryContent).toContain('Extension custom context content');
+    expect(result.contextFilePaths).toEqual([
+      path.relative(cwd, extensionFilePath),
+    ]);
+  });
+
+  it('counts but does not announce whitespace-only context files', async () => {
+    await createTestFile(path.join(cwd, DEFAULT_CONTEXT_FILENAME), '   \n\t ');
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    // The file is discovered, but its blank content never reaches the system
+    // prompt, so it must not be announced as attached.
+    expect(result.fileCount).toBe(1);
+    expect(result.memoryContent).toBe('');
+    expect(result.contextFilePaths).toEqual([]);
+  });
+
+  it('notifies when startup instruction files are loaded', async () => {
+    const globalFile = await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    const extensionFile = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/QWEN.md'),
+      'extension context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFile],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        {
+          filePath: globalFile,
+          memoryType: 'user',
+          loadReason: 'session_start',
+        },
+        {
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        },
+        {
+          filePath: extensionFile,
+          memoryType: 'extension',
+          loadReason: 'session_start',
+        },
+      ]),
+    );
+  });
+
+  it('uses refresh load reason for explicit memory refreshes', async () => {
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        loadReason: 'refresh',
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        {
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'refresh',
+        },
+      ]),
+    );
+  });
+
+  it('classifies home-directory project files as project memory', async () => {
+    await createEmptyDir(path.join(homedir, '.git'));
+    const globalFile = await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
+    const projectFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'home project context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(homedir),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toContainEqual({
+      filePath: globalFile,
+      memoryType: 'user',
+      loadReason: 'session_start',
+    });
+    expect(notifications).toContainEqual({
+      filePath: projectFile,
+      memoryType: 'project',
+      loadReason: 'session_start',
+    });
+  });
+
+  it('notifies when imported instruction files are loaded', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    const importedFile = await createTestFile(
+      path.join(projectRoot, 'included.md'),
+      'included content',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context @./included.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        }),
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'project',
+          loadReason: 'include',
+          triggerFilePath: projectFile,
+          parentFilePath: projectFile,
+        }),
+      ]),
+    );
+    expect(
+      notifications.findIndex((item) => item.filePath === projectFile),
+    ).toBeGreaterThan(
+      notifications.findIndex((item) => item.filePath === importedFile),
+    );
+  });
+
+  it('inherits memory type from the importing instruction file', async () => {
+    const importedFile = await createTestFile(
+      path.join(homedir, 'rules', 'personal.md'),
+      'personal included content',
+    );
+    const userFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'user context @./rules/personal.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: userFile,
+          memoryType: 'user',
+          loadReason: 'session_start',
+        }),
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'user',
+          loadReason: 'include',
+          triggerFilePath: userFile,
+          parentFilePath: userFile,
+        }),
+      ]),
+    );
+  });
+
+  it('inherits memory type from the root instruction file for nested imports', async () => {
+    const nestedFile = await createTestFile(
+      path.join(homedir, 'rules', 'nested.md'),
+      'nested included content',
+    );
+    const importedFile = await createTestFile(
+      path.join(homedir, 'rules', 'personal.md'),
+      'personal included content @./nested.md',
+    );
+    const userFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'user context @./rules/personal.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: nestedFile,
+          memoryType: 'user',
+          loadReason: 'include',
+          triggerFilePath: userFile,
+          parentFilePath: importedFile,
+        }),
+      ]),
+    );
+  });
+
+  it('reports the root trigger and immediate parent for nested imports', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    const grandchildFile = await createTestFile(
+      path.join(projectRoot, 'grandchild.md'),
+      'grandchild content',
+    );
+    const childFile = await createTestFile(
+      path.join(projectRoot, 'child.md'),
+      'child content @./grandchild.md',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context @./child.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    // The grandchild is imported by child.md, but the chain was started by the
+    // top-level discovered QWEN.md, so trigger != parent at depth > 1.
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: grandchildFile,
+          loadReason: 'include',
+          triggerFilePath: projectFile,
+          parentFilePath: childFile,
+        }),
+      ]),
+    );
+  });
+
+  it('classifies extension-owned imports as extension memory', async () => {
+    const extensionDir = path.join(testRootDir, 'extensions/ext1');
+    const importedFile = await createTestFile(
+      path.join(extensionDir, 'included.md'),
+      'extension included content',
+    );
+    const extensionFile = await createTestFile(
+      path.join(extensionDir, DEFAULT_CONTEXT_FILENAME),
+      'extension context @./included.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFile],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'extension',
+          loadReason: 'include',
+          triggerFilePath: extensionFile,
+          parentFilePath: extensionFile,
+        }),
+      ]),
+    );
+  });
+
+  it('still loads memory when instruction load notification fails', async () => {
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: () => {
+          throw new Error('hook failed');
+        },
+      },
+    );
+
+    expect(result.fileCount).toBe(1);
+    expect(result.memoryContent).toContain(
+      `--- Context from: ${path.relative(cwd, projectFile)} ---\nproject context`,
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      `InstructionsLoaded notification failed for ${projectFile}: hook failed`,
+    );
   });
 
   it('should load memory from included directories', async () => {
@@ -458,6 +916,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, includedFile)} ---\nincluded directory memory\n--- End of Context from: ${path.relative(cwd, includedFile)} ---`,
       fileCount: 1,
+      contextFilePaths: [path.relative(cwd, includedFile)],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
@@ -564,6 +1023,39 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.fileCount).toBe(1);
       expect(result.memoryContent).toContain(
         `--- Context from: ${path.relative(cwd, localFile)} ---\nlocal context content`,
+      );
+    });
+
+    it('notifies when QWEN.local.md is loaded', async () => {
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local context content',
+      );
+      const notifications: InstructionsLoadedNotification[] = [];
+
+      await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+        'tree',
+        [],
+        {
+          onInstructionsLoaded: (notification) => {
+            notifications.push(notification);
+          },
+        },
+      );
+
+      expect(notifications).toEqual(
+        expect.arrayContaining([
+          {
+            filePath: localFile,
+            memoryType: 'local',
+            loadReason: 'session_start',
+          },
+        ]),
       );
     });
 
@@ -859,5 +1351,87 @@ describe('loadServerHierarchicalMemory', () => {
       ).length;
       expect(occurrences).toBe(1);
     });
+  });
+});
+
+describe('formatContextFileDisplayPath', () => {
+  // Fixtures share one volume (os.tmpdir()) so `..` relationships hold on
+  // every platform; POSIX literals like '/proj' behave differently under
+  // path.win32 and would fail the Windows merge-queue gate.
+  const root = os.tmpdir();
+  const proj = path.join(root, 'proj');
+  const other = path.join(root, 'other');
+  const home = path.join(root, 'u');
+  const siblingHome = path.join(root, 'u2');
+
+  beforeEach(() => {
+    vi.mocked(os.homedir).mockReturnValue(home);
+  });
+
+  it('returns CWD-relative paths for files inside the CWD tree', () => {
+    expect(formatContextFileDisplayPath(path.join(proj, 'QWEN.md'), proj)).toBe(
+      'QWEN.md',
+    );
+    expect(
+      formatContextFileDisplayPath(path.join(proj, 'sub', 'QWEN.md'), proj),
+    ).toBe(path.join('sub', 'QWEN.md'));
+  });
+
+  it('shortens home-dir files outside the CWD tree to ~ paths', () => {
+    expect(
+      formatContextFileDisplayPath(path.join(home, '.qwen', 'QWEN.md'), proj),
+    ).toBe(path.join('~', '.qwen', 'QWEN.md'));
+  });
+
+  it('prefers CWD-relative paths for projects under the home dir', () => {
+    const projUnderHome = path.join(home, 'proj');
+    expect(
+      formatContextFileDisplayPath(
+        path.join(projUnderHome, 'QWEN.md'),
+        projUnderHome,
+      ),
+    ).toBe('QWEN.md');
+  });
+
+  it('keeps CWD-relative paths for directories with leading-dot names', () => {
+    // '..cfg' merely starts with two dots; it is not a real '..' segment, so
+    // the file is inside the CWD tree and must not be tildeified.
+    const projUnderHome = path.join(home, 'proj2');
+    expect(
+      formatContextFileDisplayPath(
+        path.join(projUnderHome, '..cfg', 'QWEN.md'),
+        projUnderHome,
+      ),
+    ).toBe(path.join('..cfg', 'QWEN.md'));
+  });
+
+  it('does not tildeify sibling directories sharing the home prefix', () => {
+    const file = path.join(siblingHome, 'proj', 'QWEN.md');
+    expect(formatContextFileDisplayPath(file, proj)).toBe(
+      path.relative(proj, file),
+    );
+  });
+
+  it('keeps relative paths for files outside both CWD and home', () => {
+    const file = path.join(other, 'QWEN.md');
+    expect(formatContextFileDisplayPath(file, proj)).toBe(
+      path.relative(proj, file),
+    );
+  });
+
+  it('passes through non-absolute paths unchanged', () => {
+    expect(formatContextFileDisplayPath('QWEN.md', proj)).toBe('QWEN.md');
+  });
+
+  it('strips ANSI escapes and control characters from display paths', () => {
+    // stripVTControlCharacters matches ESC[2Jb…\x07 as one BEL-terminated
+    // sequence, swallowing 'b' with the BEL; a bare BEL would survive it,
+    // which is why this fixture pairs the two to exercise that pass.
+    expect(
+      formatContextFileDisplayPath(
+        path.join(proj, 'a\u001b[2Jb\u0007.md'),
+        proj,
+      ),
+    ).toBe('a.md');
   });
 });

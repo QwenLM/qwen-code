@@ -8,6 +8,7 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { DaemonSessionSummary } from '@qwen-code/sdk';
+import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
 
 export interface StubDaemon {
   baseUrl: string;
@@ -15,7 +16,7 @@ export interface StubDaemon {
   lastEventIdHeader: string | undefined;
   /** True once an /events request socket closed before the stub ended it. */
   eventsAbortedByClient: boolean;
-  /** Session id passed to the most recent POST /session/:id/end request. */
+  /** Session id passed to the most recent DELETE /session/:id request. */
   lastEndedSessionId: string | undefined;
   /** Number of POST /session calls the stub has served. */
   createdSessionCount: number;
@@ -94,17 +95,31 @@ export interface StubDaemonOptions {
   sessions?: DaemonSessionSummary[];
   /** Status for GET /capabilities (default 200). Non-200 → { error }. */
   capabilitiesStatus?: number;
-  /** Status for POST /session/:id/end (default 200). Non-200 → { error }. */
+  /**
+   * Status for DELETE /session/:id (default 204). The "success" statuses
+   * (200/204) respond 204 (the SDK's closeSession accepts 204/404); any other
+   * value is returned verbatim as an error.
+   */
   endSessionStatus?: number;
   /** Status for POST /session/:id/rewind (default 200). */
   rewindStatus?: number;
   /**
    * Response body for POST /session/:id/rewind on success. Defaults to
-   * `{ targetTurnIndex: <the request's toTurn>, apiTruncateIndex: 0 }` so a
-   * test that doesn't care about the exact value still gets one that's
-   * consistent with what it sent.
+   * `{ rewound: true, targetTurnIndex: 0, filesChanged: [], filesFailed: [] }`.
    */
-  rewindResult?: { targetTurnIndex: number; apiTruncateIndex: number };
+  rewindResult?: {
+    rewound: boolean;
+    targetTurnIndex: number;
+    filesChanged: string[];
+    filesFailed: string[];
+  };
+  /**
+   * Snapshots served by GET /session/:id/rewind/snapshots (default []). The
+   * SDK's `daemon.getRewindSnapshots(sessionId)` hits this route; the
+   * gateway's rewind route maps a resolved `toTurn` onto
+   * `snapshots.find(s => s.turnIndex === toTurn).promptId`.
+   */
+  rewindSnapshots?: DaemonRewindSnapshotInfo[];
   /** Status for POST /session/:id/approval-mode (default 200). */
   approvalModeStatus?: number;
   /**
@@ -308,14 +323,21 @@ export async function startStubDaemon(
     );
   });
 
-  app.post('/session/:id/end', (req, res) => {
+  app.delete('/session/:id', (req, res) => {
     state.lastEndedSessionId = req.params.id;
-    const status = opts.endSessionStatus ?? 200;
-    if (status === 200) {
-      res.status(200).json({ sessionId: req.params.id, ended: true });
+    const status = opts.endSessionStatus ?? 204;
+    // The SDK's closeSession resolves on 204 (closed) or 404 (already gone)
+    // and throws on anything else. Map the "success" statuses (200/204) to a
+    // 204 so a real DaemonClient resolves cleanly; pass other statuses through.
+    if (status === 200 || status === 204) {
+      res.status(204).end();
     } else {
       res.status(status).json({ error: 'stub error' });
     }
+  });
+
+  app.get('/session/:id/rewind/snapshots', (_req, res) => {
+    res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
 
   app.post('/session/:id/rewind', (req, res) => {
@@ -325,11 +347,12 @@ export async function startStubDaemon(
       res.status(status).json({ error: 'stub error' });
       return;
     }
-    const toTurn = (req.body as { toTurn?: unknown })?.toTurn;
     res.status(200).json(
       opts.rewindResult ?? {
-        targetTurnIndex: typeof toTurn === 'number' ? toTurn : 0,
-        apiTruncateIndex: 0,
+        rewound: true,
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
       },
     );
   });

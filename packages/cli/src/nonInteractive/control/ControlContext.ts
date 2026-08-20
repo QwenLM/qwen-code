@@ -31,6 +31,7 @@ export interface IControlContext {
   readonly streamJson: StreamJsonOutputAdapter;
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
+  readonly getActiveTurnAbortSignal?: () => AbortSignal | undefined;
   readonly debugMode: boolean;
   readonly settings: LoadedSettings;
 
@@ -41,6 +42,12 @@ export interface IControlContext {
   inputClosed: boolean;
 
   onInterrupt?: () => void;
+  /**
+   * Continue the most recent unfinished turn (continue_last_turn control
+   * request). Resolves with `{ accepted, interruption }`; the resumed
+   * turn's output flows through the regular stream afterwards.
+   */
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 }
 
 /**
@@ -51,6 +58,7 @@ export class ControlContext implements IControlContext {
   readonly streamJson: StreamJsonOutputAdapter;
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
+  readonly getActiveTurnAbortSignal?: () => AbortSignal | undefined;
   readonly debugMode: boolean;
   readonly settings: LoadedSettings;
 
@@ -61,20 +69,24 @@ export class ControlContext implements IControlContext {
   inputClosed: boolean;
 
   onInterrupt?: () => void;
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 
   constructor(options: {
     config: Config;
     streamJson: StreamJsonOutputAdapter;
     sessionId: string;
     abortSignal: AbortSignal;
+    getActiveTurnAbortSignal?: () => AbortSignal | undefined;
     settings: LoadedSettings;
     permissionMode?: PermissionMode;
     onInterrupt?: () => void;
+    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
   }) {
     this.config = options.config;
     this.streamJson = options.streamJson;
     this.sessionId = options.sessionId;
     this.abortSignal = options.abortSignal;
+    this.getActiveTurnAbortSignal = options.getActiveTurnAbortSignal;
     this.debugMode = options.config.getDebugMode();
     this.settings = options.settings;
     this.permissionMode = options.permissionMode || 'default';
@@ -82,5 +94,6 @@ export class ControlContext implements IControlContext {
     this.mcpClients = new Map();
     this.inputClosed = false;
     this.onInterrupt = options.onInterrupt;
+    this.onContinueLastTurn = options.onContinueLastTurn;
   }
 }

@@ -27,7 +27,7 @@ export function createSessionEndRoute(
     const actorTokenId = req.rcClient?.id;
 
     try {
-      await daemon.endSession(sessionId);
+      await daemon.closeSession(sessionId);
     } catch {
       res.status(502).json({
         error: 'Daemon unavailable',

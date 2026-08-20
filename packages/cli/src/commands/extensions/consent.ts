@@ -8,6 +8,7 @@ import type {
 import type { ConfirmationRequest } from '../../ui/types.js';
 import chalk from 'chalk';
 import prompts from 'prompts';
+import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
@@ -152,7 +153,7 @@ export function extensionConsentString(
   originSource: string = 'QwenCode',
 ): string {
   const output: string[] = [];
-  if (originSource !== 'QwenCode') {
+  if (originSource !== 'QwenCode' && originSource !== 'AgentPlugins') {
     output.push(
       t(
         'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.',
@@ -161,9 +162,14 @@ export function extensionConsentString(
     );
   }
   const mcpServerEntries = Object.entries(extensionConfig.mcpServers || {});
-  output.push(
-    t('Installing extension "{{name}}".', { name: extensionConfig.name }),
-  );
+  const displayLabel = extensionConfig.displayName ?? extensionConfig.name;
+  output.push(t('Installing extension "{{name}}".', { name: displayLabel }));
+  if (
+    typeof extensionConfig.description === 'string' &&
+    extensionConfig.description
+  ) {
+    output.push(stripAnsi(extensionConfig.description));
+  }
   output.push(
     t(
       '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**',

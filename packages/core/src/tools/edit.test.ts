@@ -64,6 +64,7 @@ describe('EditTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(geminiClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getTargetDir: () => rootDir,
+      getProjectRoot: () => rootDir,
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
@@ -225,6 +226,79 @@ describe('EditTool', () => {
     });
   });
 
+  describe('team memory', () => {
+    const teamFile = () =>
+      path.join(rootDir, '.qwen', 'team-memory', 'feedback', 'x.md');
+
+    it('blocks a secret written to a team-memory path via new_string', () => {
+      const params: EditToolParams = {
+        file_path: teamFile(),
+        old_string: '',
+        new_string: `token = ghp_${'a'.repeat(36)}`,
+      };
+      expect(tool.validateToolParams(params)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+    });
+
+    it('allows clean content on a team-memory path', () => {
+      const params: EditToolParams = {
+        file_path: teamFile(),
+        old_string: '',
+        new_string: 'Use real DBs in integration tests.',
+      };
+      expect(tool.validateToolParams(params)).toBeNull();
+    });
+
+    it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
+      const permission = await tool
+        .build({ file_path: teamFile(), old_string: '', new_string: 'x' })
+        .getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('blocks a secret assembled across edits (scans full result, not just new_string)', async () => {
+      // Prior-read enforcement off so we can edit an existing file directly.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const file = teamFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Existing content holds only the prefix (body < 36 → no match alone).
+      fs.writeFileSync(file, `ghp_${'a'.repeat(10)}`, 'utf8');
+      // new_string has no `ghp_` prefix, so the validate-time scan passes;
+      // only the merged result `ghp_` + 36 chars is a real token.
+      const result = await tool
+        .build({
+          file_path: file,
+          old_string: 'a'.repeat(10),
+          new_string: 'a'.repeat(36),
+        })
+        .execute(new AbortController().signal);
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+    });
+
+    it('reports the pre-existing-secret message and leaves the file untouched', async () => {
+      // Prior-read enforcement off so we can edit an existing file directly.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const file = teamFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Seed the on-disk file with a FULL detectable token so currentContent
+      // itself trips the scanner — exercises the preExisting branch.
+      const original = `secret = ghp_${'a'.repeat(36)}\nkeep`;
+      fs.writeFileSync(file, original, 'utf8');
+      // Edit a clean line; the committed secret survives in the merged result.
+      const result = await tool
+        .build({ file_path: file, old_string: 'keep', new_string: 'kept' })
+        .execute(new AbortController().signal);
+      expect(JSON.stringify(result)).toMatch(
+        /secret already exists in the current file content/i,
+      );
+      // The blocked edit must not have written anything.
+      expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    });
+  });
+
   describe('validateToolParams', () => {
     it('should return null for valid params', () => {
       const params: EditToolParams = {
@@ -377,6 +451,30 @@ describe('EditTool', () => {
       ).rejects.toThrow();
     });
 
+    it('should surface plain object read errors without object stringification', async () => {
+      fs.writeFileSync(filePath, 'some old content here');
+      seedPriorRead(filePath);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        message: 'Plain object read error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      const invocation = tool.build(params);
+      const err = await invocation
+        .getConfirmationDetails(new AbortController().signal)
+        .catch((error: unknown) => error);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain(
+        'Error preparing edit: Plain object read error',
+      );
+      expect((err as Error).message).not.toContain('[object Object]');
+    });
+
     it('should request confirmation for creating a new file (empty old_string)', async () => {
       const newFileName = 'new_file.txt';
       const newFilePath = path.join(rootDir, newFileName);
@@ -492,6 +590,7 @@ describe('EditTool', () => {
         old_string: 'old',
         new_string: 'new',
       };
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
 
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
@@ -505,6 +604,9 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -659,6 +761,7 @@ describe('EditTool', () => {
       (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
         ApprovalMode.AUTO_EDIT,
       );
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
 
@@ -668,6 +771,9 @@ describe('EditTool', () => {
       );
       expect(fs.existsSync(newFilePath)).toBe(true);
       expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
 
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(/\+Content for the new file\./);
@@ -1000,6 +1106,28 @@ describe('EditTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_CHANGE);
     });
 
+    it('should return EDIT_PREPARATION_FAILURE with plain object read error messages', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        message: 'Plain object read error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_PREPARATION_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error preparing edit: Plain object read error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
+
     it('should throw INVALID_PARAMETERS error for relative path', async () => {
       const params: EditToolParams = {
         file_path: 'relative/path.txt',
@@ -1026,6 +1154,29 @@ describe('EditTool', () => {
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
     });
+
+    it('should surface plain object write error messages without object stringification', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
+
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce({
+        message: 'Plain object edit error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error executing edit: Plain object edit error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
   });
 
   describe('getDescription', () => {
@@ -1043,7 +1194,7 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return a snippet of old and new strings if they are different', () => {
+    it('should return the file path when old and new strings differ', () => {
       const testFileName = 'test.txt';
       const params: EditToolParams = {
         file_path: path.join(rootDir, testFileName),
@@ -1051,14 +1202,10 @@ describe('EditTool', () => {
         new_string: 'this is the new string value',
       };
       const invocation = tool.build(params);
-      // shortenPath will be called internally, resulting in just the file name
-      // The snippets are truncated at 30 chars + '...'
-      expect(invocation.getDescription()).toBe(
-        `${testFileName}: this is the old string value => this is the new string value`,
-      );
+      expect(invocation.getDescription()).toBe(testFileName);
     });
 
-    it('should handle very short strings correctly in the description', () => {
+    it('should return the file path for short strings', () => {
       const testFileName = 'short.txt';
       const params: EditToolParams = {
         file_path: path.join(rootDir, testFileName),
@@ -1066,22 +1213,7 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(`${testFileName}: old => new`);
-    });
-
-    it('should truncate long strings in the description', () => {
-      const testFileName = 'long.txt';
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, testFileName),
-        old_string:
-          'this is a very long old string that will definitely be truncated',
-        new_string:
-          'this is a very long new string that will also be truncated',
-      };
-      const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(
-        `${testFileName}: this is a very long old string... => this is a very long new string...`,
-      );
+      expect(invocation.getDescription()).toBe(testFileName);
     });
   });
 
@@ -1164,6 +1296,47 @@ describe('EditTool', () => {
       expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
     });
 
+    it('rejects an edit terminally when the filesystem reports ino 0', async () => {
+      // FAT/exFAT and some SMB mounts report `ino: 0` for every file, so
+      // the cache cannot prove the model read *this* file. Re-reading
+      // would not help, so the model must be told to stop rather than be
+      // sent round the "re-read it first" loop forever.
+      fs.writeFileSync(filePath, 'untouched content', 'utf8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({
+            file_path: filePath,
+            old_string: 'untouched',
+            new_string: 'modified',
+          })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/use a different mechanism/i);
+        // Not the message that tells the model to re-read — that would
+        // loop, because the re-read cannot change the inode.
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+      } finally {
+        stat.mockRestore();
+      }
+    });
+
     it('allows an edit after a ranged (offset/limit) read', async () => {
       // A partial read still counts as a prior read: requiring the
       // model to re-read multi-thousand-line files just to change one
@@ -1187,6 +1360,39 @@ describe('EditTool', () => {
         .execute(abortSignal);
       expect(result.error).toBeUndefined();
       expect(fs.readFileSync(filePath, 'utf8')).toBe('X\nline b\nline c\n');
+    });
+
+    it('allows editing a large text file after a ranged read', async () => {
+      const initialContent = [
+        'target',
+        'context 1',
+        'context 2',
+        'context 3',
+        'context 4',
+        'x'.repeat(11 * 1024 * 1024),
+      ].join('\n');
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: false,
+        cacheable: true,
+      });
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'target',
+          new_string: 'updated',
+        })
+        .execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8').startsWith('updated\n')).toBe(
+        true,
+      );
     });
 
     it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {

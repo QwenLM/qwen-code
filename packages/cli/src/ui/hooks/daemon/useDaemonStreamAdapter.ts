@@ -60,8 +60,13 @@ export const useDaemonStreamAdapter: typeof useGeminiStream = (
     submitQuery: (query) => ds.submitQuery(toText(query)),
     initError: ds.initError,
     pendingHistoryItems: ds.pendingHistoryItems,
+    // No local pending state to clear: the in-flight turn lives in the daemon.
+    clearPendingState: () => {},
     thought: ds.thought,
     cancelOngoingRequest: ds.cancelOngoingRequest,
+    // Goal-turn preemption is an in-process admission concern; the daemon
+    // session's goal turns are not admitted through this adapter.
+    preemptGoalTurn: () => {},
     retryLastPrompt: ds.retryLastPrompt,
     // Live tool display deferred (see file header); results land via history.
     pendingToolCalls: [],

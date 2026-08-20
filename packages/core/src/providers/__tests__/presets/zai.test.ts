@@ -32,12 +32,20 @@ describe('zaiProvider', () => {
     const plan = buildInstallPlan(zaiProvider, {
       baseUrl: 'https://api.z.ai/api/coding/paas/v4',
       apiKey: 'sk-zai',
-      modelIds: ['GLM-5.1', 'GLM-5'],
+      modelIds: ['GLM-5.2', 'GLM-5.1', 'GLM-5'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
-    expect(models).toHaveLength(2);
+    expect(models).toHaveLength(3);
     expect(models?.[0]).toMatchObject({
+      id: 'GLM-5.2',
+      name: '[Z.AI] GLM-5.2',
+      generationConfig: {
+        contextWindowSize: 1000000,
+        extra_body: { enable_thinking: true },
+      },
+    });
+    expect(models?.[1]).toMatchObject({
       id: 'GLM-5.1',
       name: '[Z.AI] GLM-5.1',
       generationConfig: {
@@ -45,7 +53,7 @@ describe('zaiProvider', () => {
         extra_body: { enable_thinking: true },
       },
     });
-    expect(models?.[1]).toMatchObject({
+    expect(models?.[2]).toMatchObject({
       id: 'GLM-5',
       generationConfig: { contextWindowSize: 204800 },
     });

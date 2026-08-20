@@ -347,10 +347,10 @@ This immediately resumes your most recent conversation without any prompts.
 **2. Continue in non-interactive mode**
 
 ```bash
-qwen --continue --p "Continue with my task"
+qwen --continue -p "Continue with my task"
 ```
 
-Use `--print` with `--continue` to resume the most recent conversation in non-interactive mode, perfect for scripts or automation.
+Use `-p` (or `--prompt`) with `--continue` to resume the most recent conversation in non-interactive mode, perfect for scripts or automation.
 
 **3. Show conversation picker**
 
@@ -387,13 +387,13 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 > qwen --continue
 >
 > # Continue most recent conversation with a specific prompt
-> qwen --continue --p "Show me our progress"
+> qwen --continue -p "Show me our progress"
 >
 > # Show conversation picker
 > qwen --resume
 >
 > # Continue most recent conversation in non-interactive mode
-> qwen --continue --p "Run the tests again"
+> qwen --continue -p "Run the tests again"
 > ```
 
 ## Run parallel Qwen Code sessions with Git worktrees

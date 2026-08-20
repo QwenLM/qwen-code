@@ -4,16 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { isLoopbackBind } from './loopback-binds.js';
+import {
+  singleTokenCredentials,
+  type ListenerScopedCredentials,
+} from './local-control/credentials.js';
+import { listenerIdentityOf } from './local-control/listener-identity.js';
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
  * set Origin; only browsers do. Returning a deterministic 403 JSON keeps
  * the daemon from CSRF-ing itself (and is more useful to clients than the
  * 500 HTML default that the `cors` package's error-callback path produces
- * when no Express error middleware is registered).
+ * when no Express error middleware is registered). `Vary: Origin` keeps
+ * intermediary caches from mixing browser and CLI/SDK responses.
  */
 export const denyBrowserOriginCors: RequestHandler = (
   req: Request,
@@ -21,11 +26,244 @@ export const denyBrowserOriginCors: RequestHandler = (
   next: NextFunction,
 ) => {
   if (req.headers.origin) {
+    res.setHeader('Vary', 'Origin');
     res.status(403).json({ error: 'Request denied by CORS policy' });
     return;
   }
   next();
 };
+
+/**
+ * Parsed shape of `--allow-origin <pattern>...`. The
+ * literal `*` collapses into a single boolean flag; explicit origin
+ * strings live in a Set keyed by the lowercased origin (RFC 6454 §4
+ * scheme/host case-insensitivity, port-sensitive).
+ */
+export interface ParsedAllowOriginPatterns {
+  allowAny: boolean;
+  origins: Set<string>;
+}
+
+/**
+ * Thrown by `parseAllowOriginPatterns` when an entry
+ * is neither the `*` literal nor a value that round-trips through
+ * `new URL(...).origin`. Caught at boot in `runQwenServe` and converted
+ * to a structured stderr message identifying the malformed entry.
+ *
+ * Rejection is strict by intent: trailing slashes, paths, userinfo, and
+ * query strings all fail the equality check. Auto-normalizing would
+ * silently accept ambiguous input — operators are better served by an
+ * explicit "fix your config" than a silent accept-and-rewrite.
+ */
+export class InvalidAllowOriginPatternError extends Error {
+  readonly pattern: string;
+  constructor(pattern: string, reason: string) {
+    super(
+      `Invalid --allow-origin pattern ${JSON.stringify(pattern)}: ${reason}. ` +
+        'Expected `*` or a URL origin of the form `<scheme>://<host>[:<port>]` ' +
+        '(no trailing slash, no path, no userinfo, no query).',
+    );
+    this.name = 'InvalidAllowOriginPatternError';
+    this.pattern = pattern;
+  }
+}
+
+/**
+ * Validate the raw `--allow-origin` arg list and fold
+ * it into the lookup-friendly `ParsedAllowOriginPatterns` shape. Throws
+ * `InvalidAllowOriginPatternError` on the first malformed entry so the
+ * operator sees the exact value to fix.
+ *
+ * Entries are matched origin-style (scheme + host + port). Scheme/host
+ * lowercase per RFC 6454 §4; port stays exact (origins don't carry a
+ * path, so there's nothing to canonicalize past `.origin`).
+ */
+export function parseAllowOriginPatterns(
+  raw: readonly string[],
+): ParsedAllowOriginPatterns {
+  const origins = new Set<string>();
+  let allowAny = false;
+  for (const entry of raw) {
+    if (entry === '*') {
+      allowAny = true;
+      continue;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
+    }
+    // Browser-extension schemes (`chrome-extension:`, `moz-extension:`) get an
+    // opaque `null` origin from the URL spec, so they can't round-trip through
+    // `.origin`. Rebuild their canonical origin from scheme+host; the equality
+    // check below still rejects a trailing slash / path / userinfo / query
+    // because each of those makes `entry` differ from `<scheme>//<host>`.
+    const canonical =
+      parsed.origin === 'null'
+        ? `${parsed.protocol}//${parsed.host}`
+        : parsed.origin;
+    if (canonical !== entry) {
+      throw new InvalidAllowOriginPatternError(
+        entry,
+        `expected the canonical origin ${JSON.stringify(canonical)} ` +
+          'without trailing slash, path, userinfo, or query',
+      );
+    }
+    origins.add(canonical.toLowerCase());
+  }
+  return { allowAny, origins };
+}
+
+/**
+ * The read side of the CORS allowlist, so the middleware can be built once at
+ * app construction over a set that changes later.
+ */
+export interface OriginMatcher {
+  allows(origin: string): boolean;
+}
+
+/**
+ * A CORS allowlist that accepts runtime additions.
+ *
+ * `--allow-origin` entries are fixed at boot, but a Local Control session
+ * advertises a LAN origin that does not exist until it is enabled and must
+ * stop being honored the moment it is disabled. Registering a second CORS
+ * middleware at that point would not work — Express middleware order is fixed
+ * once the app is built — so the middleware is installed once over this
+ * object and the set behind it moves instead.
+ *
+ * Dynamic entries are keyed so a caller revokes exactly what it added,
+ * without needing to know whether the same origin was also configured
+ * statically (in which case removing it must not revoke the operator's entry).
+ */
+export class MutableOriginAllowlist implements OriginMatcher {
+  readonly #allowAny: boolean;
+  readonly #static: ReadonlySet<string>;
+  readonly #dynamic = new Map<string, string>();
+
+  constructor(base: ParsedAllowOriginPatterns) {
+    this.#allowAny = base.allowAny;
+    this.#static = new Set(base.origins);
+  }
+
+  allows(origin: string): boolean {
+    if (this.#allowAny) return true;
+    const normalized = origin.toLowerCase();
+    if (this.#static.has(normalized)) return true;
+    for (const value of this.#dynamic.values()) {
+      if (value === normalized) return true;
+    }
+    return false;
+  }
+
+  /** Add a runtime origin under `key`; re-adding the same key replaces it. */
+  add(key: string, origin: string): void {
+    this.#dynamic.set(key, origin.toLowerCase());
+  }
+
+  remove(key: string): void {
+    this.#dynamic.delete(key);
+  }
+}
+
+function toMatcher(
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
+): OriginMatcher {
+  return 'allows' in patterns
+    ? patterns
+    : {
+        allows: (origin: string) =>
+          patterns.allowAny || patterns.origins.has(origin.toLowerCase()),
+      };
+}
+
+/**
+ * Build the CORS allowlist middleware. Replaces
+ * `denyBrowserOriginCors` when `--allow-origin` is configured — owns both
+ * halves of the policy (match → allow with CORS headers, unmatched →
+ * 403). When no `Origin` header is present (CLI/SDK clients), passes
+ * through with no work.
+ *
+ * Mirrors the `denyBrowserOriginCors` 403 body verbatim so existing
+ * clients that parsed the wall's response don't have to special-case the
+ * allowlist deployment shape.
+ *
+ * OPTIONS preflight short-circuits with 204 when the browser includes a
+ * preflight request header. Plain OPTIONS requests keep flowing downstream
+ * with CORS headers attached.
+ *
+ * `Access-Control-Allow-Credentials` is intentionally NOT set: the
+ * daemon's auth model is bearer-token-in-`Authorization`, which works
+ * cross-origin without `credentials: 'include'`. Adding credentials
+ * would require a separate flag plus a "no `*` allowed" boot check
+ * (CORS spec forbids `*` with credentials).
+ */
+export function allowOriginCors(
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
+): RequestHandler {
+  const matcher = toMatcher(patterns);
+  const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+  // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
+  // (DAEMON-001): it must survive preflight AND be readable from the
+  // response, or cross-origin clients silently lose stale-cursor detection.
+  const allowedHeaders =
+    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch';
+  const maxAgeSeconds = '86400';
+  const exposedHeaders =
+    'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id';
+  return (req: Request, res: Response, next: NextFunction) => {
+    const origin = req.headers.origin;
+    if (!origin) {
+      next();
+      return;
+    }
+    // `Origin: null` is sent by sandboxed iframes, file:// documents,
+    // data: URLs, and cross-origin redirects. Echoing it under `*`
+    // would let any attacker page mint a sandboxed iframe to read API
+    // responses without holding the bearer locally. The CORS spec
+    // doesn't forbid `null` echoes but the threat surface is non-
+    // obvious. Operators who genuinely need null origins (a rare set
+    // — typically only debugging file:// HTML) can ask for an opt-in
+    // flag if/when that materializes.
+    if (origin === 'null') {
+      res.setHeader('Vary', 'Origin');
+      res.status(403).json({ error: 'Request denied by CORS policy' });
+      return;
+    }
+    const matched = matcher.allows(origin);
+    if (matched) {
+      // Echo the request's origin verbatim (not literal `*`) even under
+      // the any-origin pattern. Browser caches use the echo paired with
+      // `Vary: Origin` as the response key, and echoing leaves room to
+      // add `Access-Control-Allow-Credentials` in a future flag without
+      // a schema change (the CORS spec forbids `*` with credentials).
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', allowedMethods);
+      res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
+      res.setHeader('Access-Control-Max-Age', maxAgeSeconds);
+      res.setHeader('Access-Control-Expose-Headers', exposedHeaders);
+      if (
+        req.method === 'OPTIONS' &&
+        (req.headers['access-control-request-method'] ||
+          req.headers['access-control-request-headers'])
+      ) {
+        res.status(204).end();
+        return;
+      }
+      next();
+      return;
+    }
+    // `Vary: Origin` on the reject path too — the daemon now returns
+    // different status codes for the same URL depending on Origin, and
+    // an intermediary cache (corporate proxy, CDN) without origin
+    // awareness could otherwise serve a stale 403 to a different
+    // origin. The match path sets the same header for symmetry.
+    res.setHeader('Vary', 'Origin');
+    res.status(403).json({ error: 'Request denied by CORS policy' });
+  };
+}
 
 /**
  * Reject requests whose Host header isn't one of the bound interfaces.
@@ -36,6 +274,41 @@ export const denyBrowserOriginCors: RequestHandler = (
  * and only learn the actual port once `listen()` has resolved.
  */
 export function hostAllowlist(
+  bind: string,
+  getPort: () => number,
+): RequestHandler {
+  const primaryGate = buildPrimaryHostGate(bind, getPort);
+  return (req: Request, res: Response, next: NextFunction) => {
+    const listener = listenerIdentityOf(req);
+    if (listener.kind !== 'local-control') {
+      primaryGate(req, res, next);
+      return;
+    }
+    // The LAN listener always carries a real Host gate, whatever the primary
+    // bind is. This is the DNS-rebinding defense the CLI path lacked: it bound
+    // the daemon itself to `0.0.0.0`, which took the non-loopback opt-out
+    // below and left the LAN with no Host check at all, while the Rust proxy
+    // enforced one per request.
+    //
+    // Accept the exact bind authority plus the canonical authority browsers
+    // send when the scheme uses its default port.
+    const host = (req.headers.host || '').toLowerCase();
+    const browserHost =
+      listener.origin === undefined
+        ? undefined
+        : new URL(listener.origin).host.toLowerCase();
+    if (
+      listener.authority === undefined ||
+      (host !== listener.authority && host !== browserHost)
+    ) {
+      res.status(403).json({ error: 'Invalid Host header' });
+      return;
+    }
+    next();
+  };
+}
+
+function buildPrimaryHostGate(
   bind: string,
   getPort: () => number,
 ): RequestHandler {
@@ -63,11 +336,11 @@ export function hostAllowlist(
       `host.docker.internal:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
-    // the URI scheme's default. http → 80, https → 443. The qwen
-    // serve daemon is plain HTTP, so accept the no-port forms when
-    // we're listening on port 80 (uncommon but valid for an operator
-    // who points at a privileged port for clean URLs).
-    if (port === 80) {
+    // the URI scheme's default. http → 80, https → 443. Accept the
+    // no-port forms when we're listening on either default port
+    // (uncommon but valid for an operator who points at a privileged
+    // port for clean URLs, or who enables TLS on 443).
+    if (port === 80 || port === 443) {
       cachedAllowed.add('localhost');
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');
@@ -92,21 +365,28 @@ export function hostAllowlist(
 }
 
 /**
- * Bearer token middleware. When `token` is undefined the gate is open — used
- * for the loopback-only developer default. `runQwenServe` enforces that any
- * non-loopback bind has a token, and that `--require-auth` boots only with a
- * token configured, so this no-token branch is reachable only on loopback
- * developer setups that opted out of `--require-auth`.
+ * Bearer token middleware. Primary loopback requests may be open when the
+ * configured source has no token; Local Control always requires its pairing
+ * credential. `runQwenServe` still enforces that any non-loopback primary bind
+ * has a token, and that `--require-auth` boots only with a token configured.
  */
-export function bearerAuth(token: string | undefined): RequestHandler {
-  if (!token) {
-    return (_req: Request, _res: Response, next: NextFunction) => next();
-  }
-  // Pre-hash the configured token once. Per-request we hash the candidate and
-  // constant-time compare; this avoids leaking byte positions through string
-  // inequality short-circuiting.
-  const expected = createHash('sha256').update(token, 'utf8').digest();
+export function bearerAuth(
+  source: string | undefined | ListenerScopedCredentials,
+): RequestHandler {
+  const credentials =
+    typeof source === 'object' && source !== null
+      ? source
+      : singleTokenCredentials(source);
   return (req: Request, res: Response, next: NextFunction) => {
+    // Resolved per request rather than once at construction: the same app is
+    // served by both the primary listener and, while Local Control is on, the
+    // LAN listener — and they accept different credentials. See
+    // `local-control/credentials.ts` for the scoping table.
+    const listener = listenerIdentityOf(req);
+    if (credentials.isOpen(listener)) {
+      next();
+      return;
+    }
     const header = req.headers.authorization;
     if (!header) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -148,30 +428,44 @@ export function bearerAuth(token: string | undefined): RequestHandler {
     ) {
       credStart++;
     }
-    const credentials = header.slice(credStart);
-    if (credentials.length === 0) {
+    const presented = header.slice(credStart);
+    if (presented.length === 0) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const candidate = createHash('sha256').update(credentials, 'utf8').digest();
-    if (!timingSafeEqual(candidate, expected)) {
+    if (!credentials.verify(presented, listener)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] = true;
     next();
   };
 }
 
+export const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
+
 /**
- * Per-route mutation gate (issue #4175 PR 15).
+ * Whether the request presented credentials that `bearerAuth` verified.
+ * NOTE: "open" loopback requests on a no-token daemon pass `bearerAuth`
+ * without being authenticated — this helper tells the two apart, which is
+ * what the Local Control routes use to decide whether a response may carry
+ * the pairing secret (#9106).
+ */
+export function requestWasAuthenticated(req: Request): boolean {
+  return (
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] === true
+  );
+}
+
+/**
+ * Per-route mutation gate.
  *
- * Wave 4 (PR 16-21) will add broadly state-changing routes — memory
- * CRUD, agent CRUD, tool enable/disable, MCP restart, file write/edit,
- * device-flow auth, etc. The roadmap calls for "a single mutation-gating
- * helper rather than open-code auth checks per route" so all those
- * routes share one choke point. This factory is that choke point;
- * Wave 1-2 routes apply it as a centralization marker (no behavior
- * change today), and Wave 4 routes opt into `strict: true` to enforce
+ * A single mutation-gating helper so all state-changing routes share one
+ * choke point. Routes opt into `strict: true` to enforce
  * "token required even on loopback" without depending on the operator
  * also passing `--require-auth`.
  *
@@ -182,7 +476,8 @@ export function bearerAuth(token: string | undefined): RequestHandler {
  * | requireAuth=true           | any               | passthrough (1) |
  * | token configured           | any               | passthrough (2) |
  * | no token (loopback dev)    | strict=false      | passthrough     |
- * | no token (loopback dev)    | strict=true       | 401 + code      |
+ * | no token, authenticated LAN| strict=true       | passthrough     |
+ * | no token, open loopback    | strict=true       | 401 + code      |
  *
  * (1) `--require-auth` boots only with a token, so the global
  *     `bearerAuth` middleware already 401'd unauthenticated requests
@@ -202,12 +497,25 @@ export function bearerAuth(token: string | undefined): RequestHandler {
  */
 export interface MutationGateOptions {
   /**
-   * When true, this route refuses to serve unauthenticated callers
-   * even on loopback no-token defaults. Used by Wave 4 mutation routes
+   * When true, this route refuses to serve unauthenticated callers even on
+   * loopback no-token defaults, while allowing requests that passed a
+   * listener-scoped pairing credential. Used by mutation routes
    * (memory, file edit, tool enable, MCP restart, device-flow auth)
    * that should never be reachable without explicit operator opt-in.
-   * Defaults to false so Wave 1-2 routes that already exist can adopt
-   * the helper without behavior change.
+   * Defaults to false so existing routes can adopt the helper without
+   * behavior change.
+   *
+   * Resolved caveat (#9106): the pairing credential used to be minted and
+   * read back by any unauthenticated loopback caller through the Local
+   * Control enable/status routes, letting a local process present the
+   * credential on the LAN listener and pass this gate. The Local Control
+   * routes no longer return the pairing URL or QR to unauthenticated
+   * callers (`requestWasAuthenticated` gate in
+   * `routes/workspace-local-control.ts`); on a no-token daemon the pairing
+   * URL is printed to the daemon's own terminal instead. Obtaining the
+   * credential therefore requires the daemon token (or terminal access),
+   * so the strict surface no longer inherits the loopback trust boundary
+   * through these routes.
    */
   strict?: boolean;
 }
@@ -253,7 +561,7 @@ export function createMutationGate(
   // routes preserve the legacy "open on loopback" behavior; strict
   // routes refuse with a structured 401 the SDK can surface.
   //
-  // Body-parser ordering (PR #4236 review #3254485915): the strict 401
+  // Body-parser ordering: the strict 401
   // fires AFTER `express.json()` because the gate is per-route
   // middleware, not app-level. On no-token loopback defaults a strict
   // route therefore parses the request body before refusing it —
@@ -268,14 +576,22 @@ export function createMutationGate(
   // `express.json()`); tracked as a Wave 4 follow-up rather than
   // re-architecting the helper here.
   //
-  // Allocation symmetry (PR #4236 review #3254467193): cache the strict
+  // Allocation symmetry: cache the strict
   // denier alongside `passthrough` so a route table with N strict
   // routes doesn't allocate N identical closures. The auth.test.ts
   // identity assertion anchors this — a future change that loses the
   // cache is visible.
-  const strictDenier: RequestHandler = (_req: Request, res: Response) => {
+  const strictDenier: RequestHandler = (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    if (requestWasAuthenticated(req)) {
+      next();
+      return;
+    }
     // Only list remediations that work standalone. `--require-auth` is
-    // paired-required-with-a-token at boot (`runQwenServe.ts` refuses
+    // paired-required-with-a-token at boot (`run-qwen-serve.ts` refuses
     // to start with the flag set but no token), so naming it as a
     // third standalone option here would loop the operator into a
     // different boot error. Configuring a token via `QWEN_SERVER_TOKEN`

@@ -8,9 +8,22 @@ Your plugin sits in the Platform Adapter layer. You handle platform-specific con
 
 ```
 Your Plugin  →  builds Envelope  →  handleInbound()
-ChannelBase  →  gates → commands → routing → AcpBridge.prompt()
+ChannelBase  →  gates → commands → routing → ChannelAgentBridge.prompt()
 ChannelBase  →  calls your sendMessage() with the agent's response
 ```
+
+`ChannelAgentBridge` is the adapter-facing bridge contract. The current standalone `qwen channel start` path provides an `AcpBridge`, but plugin code should type constructor parameters as `ChannelAgentBridge` so the same adapter can run behind other bridge implementations later.
+
+Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
+
+## Runtime Modes
+
+The same plugin adapter can be hosted by either channel runtime:
+
+- `qwen channel start [name]` is the standalone ACP-backed service. It still uses `AcpBridge` and remains the stable command for running channels outside a daemon.
+- `qwen serve --channel <name>` and repeatable `--channel` flags start experimental daemon-managed channel workers. Named channels are grouped by owning workspace, with one worker per owning runtime. `--channel all` intentionally starts only the primary workspace's configured channels. Workers are owned by `qwen serve`, connect to that daemon through the SDK, and pass adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
+
+Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. Every named channel must resolve to exactly one registered, trusted workspace; its worker receives that runtime's canonical cwd and environment overlay. A user/system channel with no cwd is ambiguous when several workspaces are registered, while a channel in a workspace-local settings file belongs to that workspace by default. `--channel all` remains primary-only and cannot be combined with named selections.
 
 ## The Plugin Object
 
@@ -35,9 +48,24 @@ Extend `ChannelBase` and implement three methods:
 
 ```typescript
 import { ChannelBase } from '@qwen-code/channel-base';
-import type { Envelope } from '@qwen-code/channel-base';
+import type {
+  ChannelBaseOptions,
+  ChannelAgentBridge,
+  ChannelConfig,
+  Envelope,
+  SessionTarget,
+} from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
+  }
+
   async connect(): Promise<void> {
     // Connect to your platform, register message handlers
     // When a message arrives:
@@ -64,6 +92,10 @@ export class MyChannel extends ChannelBase {
 }
 ```
 
+Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
+
+If your adapter exposes shell-command behavior, check that `bridge.shellCommand` exists before enabling it. Daemon-managed workers omit that optional method unless the daemon advertises the `session_shell_command` capability.
+
 ## The Envelope
 
 The normalized message object you build from platform data. The boolean flags drive gate logic, so they must be accurate.
@@ -74,6 +106,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `senderId`       | string       | Yes      | Must be stable across messages (used for session routing + access control) |
 | `senderName`     | string       | Yes      | Display name                                                               |
 | `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
+| `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
 | `text`           | string       | Yes      | Strip bot @mentions                                                        |
 | `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
@@ -169,6 +202,27 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 **Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId)` to customize final delivery.
 
 **Block streaming** — set `blockStreaming: "on"` in the channel config. The base class automatically splits responses into multiple messages at paragraph boundaries. No plugin code needed — it works alongside `onResponseChunk`.
+
+**Proactive delivery** — override `supportsProactiveSend()` to return `true` when the adapter can send without an active inbound request. `ChannelBase` uses this capability for persistent channel loops, webhook tasks, background-agent results, and daemon delivery. The default target policy rejects threaded targets; override the protected target checks only for target shapes your platform can deliver safely:
+
+```typescript
+override supportsProactiveSend(): boolean {
+  return true;
+}
+
+protected override supportsProactiveTarget(target: SessionTarget): boolean {
+  return target.threadId === undefined;
+}
+
+protected override async pushProactive(
+  target: SessionTarget,
+  text: string,
+): Promise<void> {
+  await this.platformClient.send(target.chatId, text);
+}
+```
+
+Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a different target shape, and `supportsProactiveWebhookTarget()` when webhook delivery differs from loops and background results. Keep unsupported targets rejected rather than falling back to another conversation.
 
 **Media** — populate `envelope.attachments` with images/files. See [Attachments](#attachments) above.
 

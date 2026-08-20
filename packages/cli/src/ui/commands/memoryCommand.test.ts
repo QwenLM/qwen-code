@@ -21,4 +21,8 @@ describe('memoryCommand', () => {
       dialog: 'memory',
     });
   });
+
+  it('does not advertise unsupported subcommands', () => {
+    expect(memoryCommand.argumentHint).toBeUndefined();
+  });
 });

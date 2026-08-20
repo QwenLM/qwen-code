@@ -28,7 +28,18 @@ export const VISIBLE_LOGS_COUNT = 15;
  */
 export const VISIBLE_TOOLS_COUNT = 10;
 
-export const SOURCE_ORDER = ['user', 'project', 'extension'] as const;
+/**
+ * 资源列表可视区域最大显示数量
+ */
+export const VISIBLE_RESOURCES_COUNT = 10;
+
+export const SOURCE_ORDER = [
+  'user',
+  'project',
+  'workspace',
+  'system',
+  'extension',
+] as const;
 
 /**
  * 状态显示文本

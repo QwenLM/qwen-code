@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { WorkspaceContext } from './workspaceContext.js';
+import { resolveWorkspacePath, WorkspaceContext } from './workspaceContext.js';
 
 describe('WorkspaceContext with real filesystem', () => {
   let tempDir: string;
@@ -153,6 +153,16 @@ describe('WorkspaceContext with real filesystem', () => {
     it('should handle non-existent paths correctly', () => {
       const workspaceContext = new WorkspaceContext(cwd, [otherDir]);
       const nonExistentPath = path.join(cwd, 'does-not-exist.txt');
+      expect(workspaceContext.isPathWithinWorkspace(nonExistentPath)).toBe(
+        true,
+      );
+    });
+
+    it('should preserve paths with missing intermediate components', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      const nonExistentPath = path.join(cwd, 'missing', 'nested.txt');
+
+      expect(resolveWorkspacePath(nonExistentPath)).toBe(nonExistentPath);
       expect(workspaceContext.isPathWithinWorkspace(nonExistentPath)).toBe(
         true,
       );
@@ -368,6 +378,27 @@ describe('WorkspaceContext with real filesystem', () => {
 
       expect(dirs1).not.toBe(dirs2);
       expect(dirs1).toEqual(dirs2);
+    });
+  });
+
+  describe('applyRootDirectories', () => {
+    it('should preserve runtime-added directories when changing roots', () => {
+      const runtimeDir = path.join(tempDir, 'runtime-added');
+      const nextRoot = path.join(tempDir, 'next-project');
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      fs.mkdirSync(nextRoot, { recursive: true });
+
+      const workspaceContext = new WorkspaceContext(cwd);
+      workspaceContext.addDirectory(runtimeDir);
+
+      workspaceContext.applyRootDirectories(
+        WorkspaceContext.resolveRootDirectories(nextRoot),
+      );
+
+      expect(workspaceContext.getDirectories()).toEqual([nextRoot, runtimeDir]);
+      expect(workspaceContext.getInitialDirectories()).toEqual([nextRoot]);
+      expect(workspaceContext.removeDirectory(runtimeDir)).toBe(true);
+      expect(workspaceContext.removeDirectory(nextRoot)).toBe(false);
     });
   });
 });

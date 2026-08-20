@@ -36,6 +36,22 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
 const codePointsCache = new Map<string, string[]>();
 const MAX_STRING_LENGTH_TO_CACHE = 1000;
 
+/** Max entries in each text cache before eviction */
+export const TEXT_CACHE_MAX_ENTRIES = 500;
+
+/**
+ * Evict oldest entry if a cache reaches the soft cap.
+ * Map iteration order is insertion order, so the first key is the oldest.
+ */
+function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+}
+
 export function toCodePoints(str: string): string[] {
   // ASCII fast path - check if all chars are ASCII (0-127)
   let isAscii = true;
@@ -59,8 +75,9 @@ export function toCodePoints(str: string): string[] {
 
   const result = Array.from(str);
 
-  // Cache result (unlimited like Ink)
+  // Cache result (bounded; oldest entry evicted at the cap)
   if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    evictOldestTextCacheEntry(codePointsCache);
     codePointsCache.set(str, result);
   }
 
@@ -127,8 +144,9 @@ export function stripUnsafeCharacters(str: string): string {
 const stringWidthCache = new Map<string, number>();
 
 /**
- * Cached version of stringWidth function for better performance
- * Follows Ink's approach with unlimited cache (no eviction)
+ * Cached version of stringWidth function for better performance.
+ * Bounded with oldest-entry eviction so long sessions cannot grow it
+ * without limit.
  */
 export const getCachedStringWidth = (str: string): number => {
   // ASCII printable chars have width 1
@@ -136,15 +154,52 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
+  evictOldestTextCacheEntry(stringWidthCache);
   stringWidthCache.set(str, width);
 
   return width;
 };
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
 
 export interface VisualHeightSlice {
   text: string;
@@ -250,7 +305,44 @@ export const clearStringWidthCache = (): void => {
   stringWidthCache.clear();
 };
 
+/**
+ * Report current sizes of the module-level text caches.
+ * @internal — only used in tests to verify cache bounds.
+ */
+export const __getTextUtilsCacheSizes = (): {
+  codePoints: number;
+  stringWidth: number;
+} => ({
+  codePoints: codePointsCache.size,
+  stringWidth: stringWidthCache.size,
+});
+
 const regex = ansiRegex();
+
+// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
+// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
+// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
+// are intentionally preserved: they legitimately structure multi-line output.
+// eslint-disable-next-line no-control-regex
+const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+// Unicode bidirectional override / isolate characters (the "Trojan Source"
+// attack class, CVE-2021-42572) that can visually reorder rendered text.
+const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Full sanitization for raw, untrusted text about to be rendered into a
+ * terminal `<Text>` (e.g. tool output in the Ctrl+O transcript, or a caught
+ * error message). Three passes: (1) neutralize ESC-prefixed ANSI sequences
+ * (alt-screen exit, OSC 52 clipboard, …); (2) strip bare C0/C1 control bytes
+ * ansi-regex misses, keeping only TAB/LF; (3) strip bidi override/isolate chars
+ * (Trojan Source). Single source of truth so every render site stays aligned.
+ */
+export function sanitizeTerminalText(value: string): string {
+  return escapeAnsiCtrlCodes(value)
+    .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
@@ -395,10 +487,21 @@ export function sanitizeSensitiveText(
 // `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
 // bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
 // inject terminal effects when rendered as part of a git-supplied filename.
-// eslint-disable-next-line no-control-regex
-const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
+// The Unicode bidi embedding/isolate controls (U+202A–202E, U+2066–2069) are
+// also stripped so a crafted filename can't visually spoof its extension.
+/* eslint-disable no-control-regex */
+const FILENAME_CONTROL_CHARS_REGEX =
+  /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
-function escapeFilenameControlChar(ch: string): string {
+// Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
+// (benign indentation), which multi-line display treats as layout.
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+function escapeControlChar(ch: string): string {
   switch (ch) {
     case '\b':
       return '\\b';
@@ -434,6 +537,20 @@ function escapeFilenameControlChar(ch: string): string {
 export function sanitizeFilenameForDisplay(name: string): string {
   return escapeAnsiCtrlCodes(name).replace(
     FILENAME_CONTROL_CHARS_REGEX,
-    escapeFilenameControlChar,
+    escapeControlChar,
+  );
+}
+
+/**
+ * Make untrusted multi-line text (e.g. model-generated file contents) safe to
+ * render in the TUI while preserving its line structure: neutralizes
+ * multi-byte ANSI/VT sequences (via `escapeAnsiCtrlCodes`), then escapes the
+ * remaining bare control bytes — BEL, BS, CR, DEL, C1, the 8-bit CSI — as
+ * inert, visible text. `\n` and `\t` pass through untouched.
+ */
+export function sanitizeMultilineForDisplay(text: string): string {
+  return escapeAnsiCtrlCodes(text).replace(
+    MULTILINE_CONTROL_CHARS_REGEX,
+    escapeControlChar,
   );
 }

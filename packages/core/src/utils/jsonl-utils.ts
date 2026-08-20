@@ -31,6 +31,14 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
 
+type JsonlReadOptions = {
+  throwOnNonEnoentError?: boolean;
+};
+
+type JsonlReadLinesOptions = {
+  signal?: AbortSignal;
+};
+
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
  */
@@ -167,11 +175,15 @@ async function closeLineReader(
 export async function readLines<T = unknown>(
   filePath: string,
   count: number,
+  options: JsonlReadLinesOptions = {},
 ): Promise<T[]> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
-    fileStream = fs.createReadStream(filePath);
+    options.signal?.throwIfAborted();
+    fileStream = options.signal
+      ? fs.createReadStream(filePath, { signal: options.signal })
+      : fs.createReadStream(filePath);
     rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
@@ -188,8 +200,10 @@ export async function readLines<T = unknown>(
       }
     }
 
+    options.signal?.throwIfAborted();
     return results;
   } catch (error) {
+    options.signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(
         `Error reading first ${count} lines from ${filePath}:`,
@@ -199,6 +213,7 @@ export async function readLines<T = unknown>(
     return [];
   } finally {
     await closeLineReader(rl, fileStream);
+    options.signal?.throwIfAborted();
   }
 }
 
@@ -206,7 +221,10 @@ export async function readLines<T = unknown>(
  * Reads all lines from a JSONL file.
  * Returns an array of parsed objects.
  */
-export async function read<T = unknown>(filePath: string): Promise<T[]> {
+export async function read<T = unknown>(
+  filePath: string,
+  options: JsonlReadOptions = {},
+): Promise<T[]> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
@@ -229,6 +247,9 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(`Error reading ${filePath}:`, error);
+      if (options.throwOnNonEnoentError) {
+        throw error;
+      }
     }
     return [];
   } finally {
@@ -313,13 +334,16 @@ export function writeLineSync(filePath: string, data: unknown): void {
  * Each object will be written as a separate line.
  */
 export function write(filePath: string, data: unknown[]): void {
-  const lines = data.map((item) => JSON.stringify(item)).join('\n');
+  // Terminate each record rather than joining with separators: joining an
+  // empty array yields '' and the trailing newline then writes a 1-byte file
+  // that read() reports as empty but exists() reports as non-empty.
+  const lines = data.map((item) => `${JSON.stringify(item)}\n`).join('');
   // Ensure directory exists before writing
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  atomicWriteFileSync(filePath, `${lines}\n`, { encoding: 'utf8' });
+  atomicWriteFileSync(filePath, lines, { encoding: 'utf8' });
 }
 
 /**

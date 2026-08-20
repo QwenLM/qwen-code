@@ -18,6 +18,11 @@ export interface PtyProcess {
 }
 
 export const getPty = async (): Promise<PtyImplementation> => {
+  // Bun can load @lydell/node-pty, but it hangs under Desktop's runtime.
+  if ('bun' in process.versions) {
+    return null;
+  }
+
   try {
     const lydell = '@lydell/node-pty';
     const module = await import(lydell);

@@ -11,30 +11,45 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-// External dependencies
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
-
 // Types
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
+import {
+  getQualifiedVisionModelId,
+  isFullTurnVisionCapable,
+  selectVisionBridgeModel,
+} from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
+import type { TeamManager } from '../agents/team/TeamManager.js';
+import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  selectDashScopeThinkingKnob,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -44,16 +59,19 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitService } from '../services/gitService.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
-import { CronScheduler } from '../services/cronScheduler.js';
+import {
+  CronScheduler,
+  DEFAULT_RECURRING_MAX_AGE_DAYS,
+  normalizeRecurringMaxAge,
+} from '../services/cronScheduler.js';
 import {
   MemoryPressureMonitor,
   DEFAULT_PRESSURE_CONFIG,
   validateMemoryPressureConfig,
   type MemoryPressureConfig,
 } from '../services/memoryPressureMonitor.js';
+import { findGitRoot } from '../utils/gitUtils.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -67,13 +85,26 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
+import type {
+  ArtifactHostConfig,
+  ArtifactOssConfig,
+} from '../tools/artifact/publisher.js';
+import type {
+  LspClient,
+  LspServiceReinitializeResult,
+  LspStatusSnapshot,
+} from '../lsp/types.js';
+import type { InstructionLoadReason } from '../hooks/types.js';
+import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
+import type { SkillLevel } from '../skills/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -84,18 +115,27 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
+import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
   isTelemetrySdkInitialized,
+  addDaemonRequestAttribute,
   initializeTelemetry,
   shutdownTelemetry,
   refreshSessionContext,
   logStartSession,
+  logSessionEnd,
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
@@ -105,7 +145,11 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem, createHookOutput } from '../hooks/index.js';
+import {
+  HookSystem,
+  createHookOutput,
+  createInstructionsLoadedCallback,
+} from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -122,6 +166,17 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import {
+  createGoalRuntime,
+  GoalPersistenceUnavailableError,
+  type GoalRuntime,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
+import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
+import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
+import { createGoalVerifier } from '../goals/goal-verifier.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -129,8 +184,13 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import {
+  loadUndici,
+  setResolvedProxyUrlForRuntimeFetch,
+  redactProxyError,
+} from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -138,18 +198,47 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
+import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
+import {
+  registerSessionModel,
+  registerSessionProjectDir,
+  unregisterSessionModel,
+  unregisterSessionProjectDir,
+} from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
-import { ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  ChatRecordingService,
+  type ChatRecordingFailureEvent,
+  type ChatRecordingFailureListener,
+} from '../services/chatRecordingService.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
+  deriveSessionName,
+  patchSessionRecord,
+  unregisterSession,
+} from '../services/session-registry.js';
+import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
-import { randomUUID } from 'node:crypto';
+import type {
+  SessionRestoreProjection,
+  SessionRuntimeResumeState,
+} from '../services/session-transcript-reader.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterError,
+  SessionWriterLease,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+} from '../services/session-writer-lease.js';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
@@ -157,22 +246,72 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot } from '../memory/paths.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
+} from '../memory/paths.js';
+import {
+  type AutoMemoryIndexRead,
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
+} from '../memory/store.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { isSafeModeEnv } from '../utils/safe-mode.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
+const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+/** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
+const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
+
+// Default `tools.toolSearch.threshold` (percent of the context window):
+// mirrors the settings-schema default in packages/cli.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type AvailableModel,
+  type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
+import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
+
+export function parseVisionModelSetting(setting: string | undefined):
+  | {
+      selector: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!setting) return undefined;
+  const nullIdx = setting.indexOf('\0');
+  if (nullIdx < 0) return { selector: setting };
+  const selector = setting.slice(0, nullIdx);
+  if (!selector) return undefined;
+  return {
+    selector,
+    baseUrl: setting.slice(nullIdx + 1) || undefined,
+  };
+}
+
+function formatVisionModelSettingForLog(setting: string): string {
+  return setting.replace(/\0/g, '\\0');
+}
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -183,15 +322,7 @@ export {
 
 export type ModelInvocableCommandExecutorResult = string | { error: string };
 
-export enum ApprovalMode {
-  PLAN = 'plan',
-  DEFAULT = 'default',
-  AUTO_EDIT = 'auto-edit',
-  AUTO = 'auto',
-  YOLO = 'yolo',
-}
-
-export const APPROVAL_MODES = Object.values(ApprovalMode);
+export { ApprovalMode, APPROVAL_MODES } from './approval-mode.js';
 
 /**
  * Thrown by `Config.setApprovalMode` when the requested mode would grant
@@ -217,6 +348,22 @@ export interface ApprovalModeInfo {
   id: ApprovalMode;
   name: string;
   description: string;
+}
+
+type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
+
+interface ManualPlanExitNoticeEventState {
+  version: number;
+  kind: ManualPlanExitNoticeEventKind;
+}
+
+interface ManualPlanExitNoticeCursorState {
+  seenVersion: number;
+}
+
+export interface ManualPlanExitNotice {
+  version: number;
+  currentMode: ApprovalMode;
 }
 
 /**
@@ -259,14 +406,51 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
  * Use `permissions.allow / ask / deny` for hard rules.
  */
 export interface AutoModeSettings {
+  classifier?: {
+    timeouts?: {
+      /** Stage-1 fast classifier timeout in milliseconds. */
+      stage1Ms?: number;
+      /** Stage-2 review classifier timeout in milliseconds. */
+      stage2Ms?: number;
+    };
+    thinking?: {
+      /** Whether stage 2 may use provider/API-level thinking. */
+      stage2Enabled?: boolean;
+    };
+  };
   hints?: {
     /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
     allow?: string[];
-    /** Natural-language descriptions of actions the user wants AUTO mode to block. */
+    /**
+     * Natural-language descriptions of destructive / irreversible actions the
+     * user wants AUTO mode to soft-block. Soft-block means the classifier
+     * blocks the action unless the user's most recent explicit request
+     * authorised that exact action and scope.
+     */
+    softDeny?: string[];
+    /**
+     * Natural-language descriptions of security-boundary actions the user
+     * wants the AUTO classifier to hard-block. Hard-block applies inside the
+     * classifier even when an autoMode allow hint or recent user request would
+     * normally authorise the action. This does not override
+     * `permissions.allow`; use `permissions.deny` for deterministic hard
+     * permission rules.
+     */
+    hardDeny?: string[];
+    /**
+     * @deprecated Use `softDeny`. Kept as a backward-compatible alias —
+     * entries here are merged into the SOFT BLOCK user section.
+     */
     deny?: string[];
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -310,21 +494,36 @@ export interface ChatCompressionSettings {
   enableScreenshotTrigger?: boolean;
   /**
    * Tool-returned image count at or above which the screenshot trigger
-   * fires (only when `enableScreenshotTrigger`). Default 50.
+   * fires (only when `enableScreenshotTrigger`). Default 20.
    * Env override: `QWEN_COMPACT_SCREENSHOT_THRESHOLD`.
    */
   screenshotTriggerThreshold?: number;
+  /**
+   * Inline image count at or above which historical image payloads are
+   * replaced with text references and only recent images are reattached.
+   * Below this threshold images stay in-place untouched. Default 20.
+   * Env override: `QWEN_IMAGE_PAYLOAD_THRESHOLD`.
+   */
+  imagePayloadThreshold?: number;
 }
 
+export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
+
 /**
- * Settings for clearing stale context after idle periods.
+ * Settings for clearing stale or oversized tool-result context.
  * Threshold values of -1 mean "never clear" (disabled).
  */
+
 export interface ClearContextOnIdleSettings {
   /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
   toolResultsThresholdMinutes?: number;
   /** Number of most-recent tool results to preserve. Default 5. */
   toolResultsNumToKeep?: number;
+  /**
+   * Total compactable tool result output chars before clearing old results.
+   * Default 500000. Use -1 to disable.
+   */
+  toolResultsTotalCharsThreshold?: number;
 }
 
 export interface TelemetrySettings {
@@ -339,7 +538,13 @@ export interface TelemetrySettings {
   /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
+  /**
+   * Stable end-user identifier written to GenAI spans as `gen_ai.user.id`.
+   * This is an ARMS extension and may contain linkable personal data.
+   */
+  userId?: string;
   includeSensitiveSpanAttributes?: boolean;
+  sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
   /**
    * Static resource attributes attached to every span/log/metric the SDK
@@ -363,6 +568,10 @@ export interface TelemetrySettings {
   resourceAttributeWarnings?: string[];
 }
 
+export type ResolvedTelemetrySettings = TelemetrySettings & {
+  sensitiveSpanAttributeMaxLength: number;
+};
+
 export interface TelemetryMetricsSettings {
   /**
    * Include `session.id` on every metric data point. Default: false.
@@ -383,8 +592,7 @@ export interface TelemetryMetricsSettings {
  * collector / file outfile). The settings here control data flow OUT of
  * the qwen-code process and INTO third-party LLM provider request
  * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
- * different consent decision, so a different settings tree. See PR
- * #4390 review (LaZzyMan) for the framing rationale.
+ * different consent decision, so a different settings tree.
  *
  * All values default to off / no propagation. Operators who want to
  * propagate trace context for server-side trace stitching (e.g. ARMS
@@ -481,23 +689,138 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
+export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
+  type:
+    | 'git'
+    | 'local'
+    | 'link'
+    | 'github-release'
+    | 'npm'
+    | 'archive-url'
+    | 'snapshot';
+  installId?: string;
+  credentialPersistence?: 'stored';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
+  gitCommit?: string; // Commit recorded when the installation source was cloned.
+  externalContent?: boolean; // Installed content came from a source nested outside the recorded source.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
   marketplaceConfig?: ClaudeMarketplaceConfig;
   pluginName?: string;
+  networkPolicy?: ExtensionNetworkPolicy;
 }
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
+/**
+ * Per-message budget (chars) for the combined model-facing output of one
+ * batch of tool calls. When a batch's total output exceeds this, the largest
+ * results are offloaded to disk (with a recoverable pointer). `<= 0` disables.
+ */
+export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
+
+/**
+ * Provenance of an MCP server config. Two purposes (see issue #4615):
+ *
+ * - **Approval gating**: `'project'` (a workspace `.mcp.json`) and `'workspace'`
+ *   (a workspace `.qwen/settings.json`) are checked-in / shareable and therefore
+ *   untrusted — both are held behind the pending-approval gate. See
+ *   {@link isGatedMcpScope}.
+ * - **Precedence**: `'workspace'` and `'system'` rank ABOVE a `.mcp.json`
+ *   server, while user/default-scoped servers (left `scope` unset) rank below it
+ *   — so `.mcp.json` overrides user settings but never enterprise-enforced
+ *   `'system'` settings.
+ *
+ * Configs from user/default settings, extensions, and `--mcp-config` leave
+ * `scope` unset.
+ */
+export type McpServerScope = 'project' | 'workspace' | 'system';
+
+/**
+ * Why an MCP server's tools are currently unavailable, used to give the model a
+ * precise tool-not-found recovery action. See
+ * {@link Config.getMcpServerUnavailableReason}.
+ * - `removed`: deleted from config this session.
+ * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+ * - `excluded`: present in the `mcp.excluded` list.
+ * - `pending_approval`: a gated server awaiting approval (#4615).
+ */
+export type McpServerUnavailableReason =
+  | 'removed'
+  | 'not_allowed'
+  | 'excluded'
+  | 'pending_approval';
+
+/**
+ * Scopes whose servers are checked-in / shareable and therefore untrusted: they
+ * must be approved before the discovery layer connects them. `'system'`
+ * (enterprise-enforced) and unset (user/default/CLI/extension) scopes are
+ * trusted and never gated. See issue #4615.
+ */
+export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
+  return scope === 'project' || scope === 'workspace';
+}
+
+/**
+ * Test whether a server name matches a single pattern. Patterns use simple
+ * glob semantics: `*` matches any sequence of characters (including empty),
+ * `?` matches exactly one character. A pattern without glob characters is
+ * compared as an exact string (no behavior change for existing configs).
+ * Uses an iterative two-pointer algorithm — O(n×m) worst case, no regex,
+ * no backtracking vulnerability.
+ */
+export function matchesServerPattern(name: string, pattern: string): boolean {
+  if (!pattern.includes('*') && !pattern.includes('?')) {
+    return name === pattern;
+  }
+  let ni = 0;
+  let pi = 0;
+  let starNi = -1;
+  let starPi = -1;
+  while (ni < name.length) {
+    if (
+      pi < pattern.length &&
+      (pattern[pi] === '?' || pattern[pi] === name[ni])
+    ) {
+      ni++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starPi = pi++;
+      starNi = ni;
+    } else if (starPi !== -1) {
+      pi = starPi + 1;
+      ni = ++starNi;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi++;
+  return pi === pattern.length;
+}
+
+/**
+ * Test whether a server name matches any pattern in the given list.
+ * Returns false for an empty or undefined list.
+ */
+export function matchesAnyServerPattern(
+  name: string,
+  patterns: string[] | undefined,
+): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some((p) => matchesServerPattern(name, p));
+}
 
 export class MCPServerConfig {
   constructor(
@@ -541,6 +864,17 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    /**
+     * Provenance of this server config (see {@link McpServerScope}). Gated
+     * scopes (`'project'`, `'workspace'`) are held behind the pending-approval
+     * gate; `'system'` and unset scopes connect as before. Also drives
+     * precedence in `assembleMcpServers`. Appended at the end of the parameter
+     * list to avoid shifting positional arguments at the many
+     * `new MCPServerConfig(...)` call sites. See issue #4615.
+     */
+    readonly scope?: McpServerScope,
+    readonly alwaysLoadTools?: boolean,
+    readonly agentPluginV1?: boolean,
   ) {}
 }
 
@@ -563,10 +897,6 @@ export interface SandboxConfig {
 }
 
 /**
- * Settings shared across multi-agent collaboration features
- * (Arena, Team, Swarm).
- */
-/**
  * General-purpose worktree settings (Phase D-2). Distinct from
  * {@link AgentsCollabSettings.arena.worktreeBaseDir}, which only governs
  * Arena multi-model worktrees.
@@ -587,7 +917,29 @@ export interface WorktreeSettings {
   symlinkDirectories?: readonly string[];
 }
 
+/** Settings shared across agents and multi-agent collaboration features. */
 export interface AgentsCollabSettings {
+  /** Built-in subagent settings */
+  builtin?: {
+    /** Model selector for the built-in Explore subagent (default: inherit). */
+    exploreModel?: string;
+  };
+  /** Maps model grade names exposed to the Agent tool to model selectors. */
+  modelGrades?: Record<string, string>;
+  /** Optional whitelist of model grades exposed to the Agent tool. */
+  allowedGrades?: string[];
+  /**
+   * Global maximum number of background sub-agents running concurrently.
+   * When the cap is reached, additional launches wait for a slot.
+   */
+  maxParallelAgents?: number;
+  /**
+   * Per-model maximum number of background sub-agents running concurrently,
+   * keyed by concrete model ID. Overrides the global `maxParallelAgents` for
+   * the matched model; models not listed here fall back to the global limit.
+   * Useful when a model has a lower concurrency capacity than the rest.
+   */
+  maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
   /** Arena-specific settings */
@@ -601,11 +953,20 @@ export interface AgentsCollabSettings {
     /** Total timeout in seconds for the Arena session. No limit if unset. */
     timeoutSeconds?: number;
   };
+  /** Team-specific settings */
+  team?: {
+    /** Maximum number of teammates (default: 10). */
+    maxTeammates?: number;
+  };
 }
 
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
+  sessionRestoreProjection?: SessionRestoreProjection;
+  sessionRestoreProjectionSource?: () => Promise<
+    SessionRestoreProjection | undefined
+  >;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -641,18 +1002,47 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
+  /**
+   * Skill discovery levels that should not be loaded. Sourced from
+   * `settings.skills.disabledLevels`.
+   */
+  disabledSkillLevels?: readonly SkillLevel[];
+  /**
+   * Additional directories to scan for skills (SKILL.md files).
+   * Sourced from `settings.skills.directories`. Paths are raw
+   * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
+   */
+  customSkillDirs?: readonly string[];
   /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
    * appear in `/tools`, `getAllTools()`, or function-call discovery.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
-   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
-   * 17). Active sessions retain already-registered tools — the disabled
+   * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
   disabledTools?: string[];
+  /**
+   * Deferred tool names that bypass the `shouldDefer` behaviour and
+   * are made visible in function declarations from session start,
+   * without requiring the model to call `tool_search`.
+   * Sourced from `settings.tools.visible`. Non-existent names are
+   * silently ignored (they don't cause config errors).
+   */
+  visibleTools?: string[];
+  /**
+   * Percentage of the model's context window used as the session-start
+   * budget for preloading deferred tools. When the combined estimated
+   * schema size of every deferred tool — bundled built-ins and MCP alike
+   * — fits within the budget, they are all revealed upfront instead of
+   * loaded on demand via `tool_search`, keeping the declaration list
+   * stable for the whole session (prefix-cache friendly). `0` disables
+   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   */
+  toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -661,10 +1051,22 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional host policy evaluated with final tool arguments immediately
+   * before execution. A configured guard fails closed.
+   */
+  toolInvocationGuard?: ToolInvocationGuard;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  /**
+   * Session-injected (ACP/IDE) + `--mcp-config` servers that sit above the
+   * settings layer and `.mcp.json` and are never gated (#4615). Retained so the
+   * hot-reload subscriber (sub-task 3) can re-assemble the effective map the
+   * same way boot did. See `assembleMcpServers`.
+   */
+  topTierMcpServers?: Record<string, MCPServerConfig>;
   lsp?: {
     enabled?: boolean;
   };
@@ -674,7 +1076,13 @@ export interface ConfigParameters {
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
+  showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
+  /**
+   * Delay SDK startup for interactive render paths. Telemetry settings still
+   * remain readable from Config; only the global SDK side effect is deferred.
+   */
+  deferTelemetryInitialization?: boolean;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
@@ -689,10 +1097,10 @@ export interface ConfigParameters {
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
+    customIgnoreFiles?: string[];
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
-  checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
@@ -705,8 +1113,17 @@ export interface ConfigParameters {
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
   /**
+   * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
+   * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
+   * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
+   * five levels deep. Values `< 1` are clamped to `1`. This governs *nesting*
+   * only; it never disables sub-agents. Teammates, forks, and
+   * workflow-spawned agents are excluded from nesting in v1.
+   */
+  maxSubagentDepth?: number;
+  /**
    * Wall-clock budget for an unattended run, in seconds. `-1` (default)
-   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * means no limit. Enforced by the CLI's non-interactive run loop
    * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
    * Issue: QwenLM/qwen-code#4103.
    */
@@ -720,20 +1137,69 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
-  forkSubagentEnabled?: boolean;
+  /**
+   * Days a recurring cron job lives before auto-expiring. `0` disables
+   * expiry. Unset or invalid falls back to the 7-day default.
+   */
+  cronRecurringMaxAgeDays?: number;
+  agentTeamEnabled?: boolean;
+  workflowsEnabled?: boolean;
+  artifactEnabled?: boolean;
+  artifactAutoOpen?: boolean;
+  artifactPublisher?: 'local' | 'host' | 'oss';
+  artifactHost?: ArtifactHostConfig;
+  artifactOss?: ArtifactOssConfig;
+  /** Image generation model selected through `/model --image`. */
+  imageModel?: string;
+  /**
+   * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
+   * When `true`, the registry-side warning latch is bypassed and the
+   * banner is not prepended to the run's display payload. Defaults to
+   * `false`. The banner itself is per-session (registry-scoped), so
+   * even when unset it fires at most once per process.
+   */
+  skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
+  computerUseMaxImageDimension?: number;
+  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
+  locale?: string;
   allowedMcpServers?: string[];
+  /**
+   * The startup `--allowed-mcp-server-names` CLI flag value, if passed (the
+   * flag only — NOT the settings-derived allow-list). When present it is an
+   * immutable upper bound on MCP admission: a hot-reload may narrow within it
+   * but never widen beyond it. Undefined when the flag was not passed (then
+   * settings fully drive admission). See issue #3696 sub-task 3.
+   */
+  cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
+  /**
+   * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
+   * (pending or rejected). These are loaded so they can be listed, but the
+   * discovery layer must not connect them. See issue #4615.
+   */
+  pendingMcpServers?: string[];
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
+  /** Exact initial model registry baseUrl; null selects an implicit route. */
+  initialModelRegistryBaseUrl?: string | null;
   /**
    * Optional source map for generationConfig fields (e.g. CLI/env/settings attribution).
    * This is used to produce per-field source badges in the UI.
@@ -744,17 +1210,37 @@ export interface ConfigParameters {
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
   chatCompression?: ChatCompressionSettings;
+  autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
+  /** Prevent the system from sleeping while model or tool work is in flight. */
+  preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
+  /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
+  maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
+  toolOutputBatchBudget?: number;
+  /**
+   * Default timeout, in ms, for foreground shell commands. A per-call
+   * timeout on the shell tool takes precedence; when both are unset the
+   * shell tool falls back to its built-in default. See
+   * getShellDefaultTimeoutMs.
+   */
+  shellDefaultTimeoutMs?: number;
+  /**
+   * Interval, in ms, between liveness heartbeats emitted while a foreground
+   * shell command produces no output. 0 disables heartbeats; unset falls
+   * back to the shell tool's built-in default. See
+   * getShellHeartbeatIntervalMs.
+   */
+  shellHeartbeatIntervalMs?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -791,9 +1277,11 @@ export interface ConfigParameters {
    * watches it to process messages as if the user typed them.
    */
   inputFile?: string;
-  /** Model providers configuration grouped by authType */
+  /** Model providers configuration grouped by provider id */
   modelProvidersConfig?: ModelProvidersConfig;
-  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  /** Maps custom provider ids to their SDK protocol (AuthType) */
+  providerProtocolConfig?: ProviderProtocolConfig;
+  /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
   worktree?: WorktreeSettings;
@@ -801,8 +1289,28 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /**
+   * Enable the git-shared team memory tier. Defaults to false (opt-in).
+   * Overridable at runtime by `QWEN_CODE_MEMORY_TEAM` ('0'/'1') via
+   * {@link Config.getTeamMemoryEnabled}.
+   */
+  enableTeamMemory?: boolean;
+  enableTeamMemorySync?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
+  /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
+  autoSkillConfirm?: boolean;
+  /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Unset → per-agent defaults; 0 → no time limit.
+   */
+  memoryAgentTimeoutMinutes?: number;
+  /**
+   * Max turns for background memory agents (extraction, dream, remember, and
+   * skill review). Unset means each agent uses its built-in default; 0
+   * disables the turn limit.
+   */
+  memoryAgentMaxTurns?: number;
   /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
@@ -810,6 +1318,49 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
+   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
+   * is true and `model` resolves to a DashScope-compatible modelProviders
+   * entry carrying a direct API key — or, for environments that cannot write
+   * settings.json, when an env-declared backend is supplied (`baseUrl` from
+   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
+   * precedence over modelProviders resolution.
+   */
+  webSearch?: WebSearchSettings;
+  /**
+   * Safe mode: disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   * Activated via `--safe-mode` CLI flag or `QWEN_CODE_SAFE_MODE=true` env var.
+   */
+  safeMode?: boolean;
+  /**
+   * Explicit vision model for the vision bridge. When a text-only primary model
+   * receives an image, the bridge transcribes it through this model instead of
+   * auto-picking a same-provider one. Corresponds to the `visionModel` setting
+   * (configurable via `/model --vision`).
+   */
+  visionModel?: string;
+  /**
+   * Dedicated model for chat compression (auto-compaction). Falls back to
+   * the main model. Corresponds to the `compactionModel` setting
+   * (configurable via `/model --compaction`).
+   */
+  compactionModel?: string;
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Unset → built-in 30s. Corresponds to the `visionBridgeTimeoutMs`
+   * setting; useful for slow or proxied vision endpoints.
+   */
+  visionBridgeTimeoutMs?: number;
+  /**
+   * Ordered list of fallback model IDs to try when the primary model hits
+   * capacity errors (429/503/529). At most 3 entries; duplicate fallback
+   * entries are filtered during normalization, and primary/current model
+   * matches are skipped at runtime.
+   * Configurable via the `modelFallbacks` setting or `--fallback-model` CLI flag.
+   */
+  modelFallbacks?: string[];
   /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
@@ -842,6 +1393,11 @@ export interface ConfigParameters {
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
   allowedHttpHookUrls?: string[];
   /**
+   * When true, HTTP hooks may target private/link-local IP ranges
+   * (from security.allowPrivateNetworkHooks; trusted scopes only).
+   */
+  allowPrivateNetworkHooks?: boolean;
+  /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
    * to project or user settings when the user clicks "Always Allow".
@@ -855,6 +1411,18 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
+  settingsWatcher?: { stopWatching(): void };
+}
+
+export type TerminalImageRenderSupport =
+  | { available: true }
+  | { available: false; reason: string };
+
+export interface ImageGenerationConfig {
+  model: string;
+  baseUrl: string;
+  apiKeyEnv: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -893,8 +1461,12 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
       config.criticalRatio,
     );
 
-    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
-      config.enableExplicitGC = true;
+    const enableGC = process.env['QWEN_MEMORY_ENABLE_GC'];
+    if (
+      enableGC &&
+      ['0', 'false', 'off', 'no'].includes(enableGC.trim().toLowerCase())
+    ) {
+      config.enableExplicitGC = false;
     }
 
     validateMemoryPressureConfig(config);
@@ -908,6 +1480,78 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
   }
 
   return config;
+}
+
+/** Default sub-agent nesting cap (1-based levels). */
+export const DEFAULT_MAX_SUBAGENT_DEPTH = 5;
+/** Ceiling for the nesting cap — catches typos the way maxToolCalls' does. */
+export const MAX_SUBAGENT_DEPTH_LIMIT = 100;
+
+/**
+ * Normalizes a maxSubagentDepth value: absent or non-finite values fall back
+ * to the default (NaN would silently block all nesting, Infinity — e.g.
+ * JSON `1e309` — would unbound the recursion cap), and finite values floor
+ * and clamp to the 1–{@link MAX_SUBAGENT_DEPTH_LIMIT} range. Values below 1
+ * clamp up so the knob never disables sub-agents outright — it only bounds
+ * nesting.
+ *
+ * Shared by the Config constructor and the resume path that restores
+ * persisted launch flags, so a malformed or tampered agent sidecar cannot
+ * bypass the nesting cap.
+ */
+export function normalizeMaxSubagentDepth(
+  value: number | null | undefined,
+): number {
+  return value == null || !Number.isFinite(value)
+    ? DEFAULT_MAX_SUBAGENT_DEPTH
+    : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * Validates the session-turn limit at config and persisted-agent boundaries.
+ */
+export function validateMaxSessionTurns(value: number | undefined): number {
+  const resolved = value ?? -1;
+  if (!Number.isInteger(resolved)) {
+    throw new FatalConfigError(
+      `Invalid maxSessionTurns: must be an integer, got ${String(resolved)}`,
+    );
+  }
+  return resolved;
+}
+
+function validateMaxToolCallsPerTurn(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+  if (!Number.isInteger(resolved)) {
+    throw new FatalConfigError(
+      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(resolved)}`,
+    );
+  }
+  return resolved;
+}
+
+/** Maximum number of fallback models allowed in the chain. */
+const MAX_MODEL_FALLBACKS = 3;
+
+/**
+ * Normalize model fallback entries: deduplicate, trim, remove blanks,
+ * and cap at {@link MAX_MODEL_FALLBACKS}.
+ *
+ * @param raw - Raw fallback model IDs, or undefined.
+ * @returns A deduplicated, capped array of model IDs (may be empty).
+ */
+function normalizeModelFallbacks(raw: string[] | undefined): string[] {
+  if (!raw || raw.length === 0) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of raw) {
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+    if (result.length >= MAX_MODEL_FALLBACKS) break;
+  }
+  return result;
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
@@ -937,6 +1581,47 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipGeminiInitialization?: boolean;
+  /**
+   * skip MCP
+   * discovery entirely (both inline tool-registry-time discovery AND
+   * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
+   * The bootstrap config in ACP daemon mode uses this to AVOID spawning
+   * MCP servers under the bootstrap's pool-less McpClientManager.
+   * Pre-fix every stdio MCP server was spawned twice — once by the
+   * bootstrap (legacy per-server path, invisible to pool / budget /
+   * drainAll / pid-sweep) and once by each session's pool-routed
+   * discovery — silently violating the workspace budget contract.
+   * The bootstrap's MCP clients were never actually used to serve a
+   * session (each session builds its own per-session Config and runs
+   * its own discovery), so skipping at the bootstrap layer is safe
+   * AND closes the 2N subprocess leak.
+   */
+  skipMcpDiscovery?: boolean;
+  /**
+   * Skip hook system and hook MessageBus initialization. Read-only replay
+   * helpers use this to avoid loading or subscribing user/workspace hooks.
+   */
+  skipHooks?: boolean;
+  /**
+   * Skip SkillManager creation and file watching. Read-only replay helpers do
+   * not need skill discovery and must not start long-lived watchers.
+   */
+  skipSkillManager?: boolean;
+  /**
+   * Force file checkpointing off for read-only replay helpers, even when the
+   * Config was constructed with checkpointing enabled.
+   */
+  skipFileCheckpointing?: boolean;
+  /**
+   * Warm the tool registry in best-effort (non-strict) mode. Read-only replay
+   * Configs set this so a tool whose constructor requires a subsystem this
+   * Config deliberately skipped (e.g. `SkillTool` needs the `SkillManager` that
+   * `skipSkillManager` omits) is logged and skipped instead of aborting
+   * `initialize()`. Replay only needs optional tool_call metadata, and
+   * `ToolCallEmitter` already falls back to the recorded tool name when a tool
+   * is absent from the registry.
+   */
+  lenientToolWarmup?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -958,10 +1643,141 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // overwriting the real session's ID while still allowing nested qwen-code
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
+let projectDirEnvClaimed = false;
+let modelEnvClaimed = false;
+
+function resolveSensitiveSpanAttributeMaxLength(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
+  }
+
+  if (!isValidSensitiveSpanAttributeMaxLength(value)) {
+    throw new FatalConfigError(
+      `Invalid telemetry.sensitiveSpanAttributeMaxLength: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+
+  return value;
+}
+
+/**
+ * Resolves the recurring cron max age (in days) once at Config
+ * construction — the setting declares `requiresRestart`, so re-reading
+ * the environment per call could let the tool description, tool output,
+ * and scheduler each report a different expiry if the env var changed
+ * mid-session. The QWEN_CODE_CRON_MAX_AGE_DAYS environment variable
+ * overrides the settings value (convenient for cloud/container
+ * deployments). `normalizeRecurringMaxAge` owns the `0 → Infinity`
+ * (no expiry) contract shared with the CronScheduler constructor.
+ * Negative or unparseable values fall back to the 7-day default with a
+ * console warning — debug file logging is usually off in the daemon
+ * deployments this knob targets, and the misconfiguration would
+ * otherwise surface only as "jobs stopped firing after 7 days".
+ */
+function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
+  const env = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+  const fromEnv = env !== undefined && env.trim() !== '';
+  const raw = fromEnv ? Number(env) : setting;
+  if (raw === undefined || !Number.isFinite(raw) || raw < 0) {
+    if (raw !== undefined) {
+      // eslint-disable-next-line no-console -- operator-facing misconfiguration breadcrumb; debug file logging is usually off in daemon deployments
+      console.warn(
+        (fromEnv
+          ? `QWEN_CODE_CRON_MAX_AGE_DAYS="${env}" is invalid`
+          : `cronRecurringMaxAgeDays=${setting} is invalid`) +
+          `; recurring cron jobs will expire after the ` +
+          `${DEFAULT_RECURRING_MAX_AGE_DAYS}-day default.`,
+      );
+    }
+    return DEFAULT_RECURRING_MAX_AGE_DAYS;
+  }
+  return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
+}
+
+/** Request from the `create_sub_session` tool to spawn a fresh top-level
+ * sub-session and run a prompt in it. */
+export interface SubSessionSpawnRequest {
+  prompt: string;
+  /** `'sent'` = resolve as soon as the prompt is dispatched; `'first-turn'` =
+   * resolve after the sub-session's first turn finishes (result returned). */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session. */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+}
+
+/** Result returned to the `create_sub_session` tool. `result` (the sub-session's
+ * first-turn output) is present only for `completion: 'first-turn'`. */
+export interface SubSessionSpawnResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+  /** Whether the parent lineage was durably persisted to the sub-session's
+   * transcript. `false` = live-only (the parent link disappears from the
+   * persisted session list after a daemon restart). Absent when unknown. */
+  parentSessionPersisted?: boolean;
+}
+
+/**
+ * Injected capability that spawns a sub-session. Used by the `create_sub_session`
+ * tool. Wired ONLY by the daemon/ACP session layer (`Session.ts` →
+ * `this.client.extMethod`); absent in interactive TUI / headless (no bridge),
+ * which is precisely the tool's daemon-only gate.
+ */
+export type SubSessionSpawner = (
+  req: SubSessionSpawnRequest,
+) => Promise<SubSessionSpawnResult>;
+
+/**
+ * A higher-priority static DashScope thinking knob that shadows the global
+ * reasoning-effort tier on the wire (see getReasoningEffortOverride).
+ */
+export type ReasoningEffortOverride = {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+};
+
+class SessionWriterShutdownError extends SessionWriterUnavailableError {}
+
+function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
+  return (
+    error === candidate ||
+    (error instanceof Error &&
+      error.cause instanceof AggregateError &&
+      error.cause.errors.includes(candidate))
+  );
+}
 
 export class Config {
   private sessionId: string;
+  private sessionSourceType?: string;
+  private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  private pendingSessionRestoreProjection?: SessionRestoreProjection;
+  private sessionRestoreRuntime?: SessionRuntimeResumeState;
+  private readonly sessionRestoreProjectionSource?: () => Promise<
+    SessionRestoreProjection | undefined
+  >;
+  private restoredFileHistory = false;
+  private goalRestoreActivation?: () => Promise<void>;
+  private rejectGoalRestoreActivation?: (reason?: unknown) => void;
+  private readonly sessionRuntimeBaseDir: string;
+  private sessionProjectDirRegistered = false;
+  private pendingSessionWriterLease?: SessionWriterLease;
+  private pendingSessionWriterRelease:
+    | { lease: SessionWriterLease; promise: Promise<void> }
+    | undefined;
+  private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
+  private sessionWriterShutdownRequested = false;
+  private sessionWriterHandoffRequested = false;
+  private sessionWriterActivationPromise: Promise<void> | undefined;
+  private sessionWriterClosePromise: Promise<void> | undefined;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
    * CLI was launched with `--worktree`. The active entry point (TUI XOR
@@ -976,10 +1792,11 @@ export class Config {
    * process exit (which dies with the process — no leak).
    */
   private pendingStartupWorktreeNotice: string | null = null;
+  private pendingRecoveredAgentsNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
-   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * callback stashed BEFORE
    * `initialize()` runs and applied as soon as `toolRegistry` is up,
    * so the manager's `setOnBudgetEvent` is wired before
    * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
@@ -990,13 +1807,15 @@ export class Config {
    */
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
+  private resourceRegistry!: ResourceRegistry;
   private subagentManager!: SubagentManager;
   private memoryPressureConfig?: MemoryPressureConfig;
   private memoryPressureMonitor?: MemoryPressureMonitor;
-  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly backgroundTaskRegistry: BackgroundTaskRegistry;
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
   // — see getFileReadCache() for the per-instance lazy initialization
@@ -1005,6 +1824,7 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -1014,6 +1834,10 @@ export class Config {
         args?: string,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
+  // Skill keys (e.g. "skill:foo") that coreToolScheduler announced inline on a
+  // tool result. The client's drain consumes this set so it can mark them as
+  // announced and avoid double-announcing in the same turn's tail reminder.
+  private pendingInlineAnnouncedSkillKeys = new Set<string>();
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -1022,8 +1846,9 @@ export class Config {
 
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
+  private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
-  private readonly targetDir: string;
+  private targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -1032,6 +1857,7 @@ export class Config {
   private readonly question: string | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
+  private liveAppendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -1039,7 +1865,22 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
-  private readonly disabledTools: ReadonlySet<string>;
+  private readonly terminalImageRenderSupportProvider:
+    | (() => Promise<TerminalImageRenderSupport>)
+    | null;
+  private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
+  private readonly customSkillDirs: readonly string[];
+  //   `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
+  private readonly visibleTools: ReadonlySet<string>;
+  private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1048,53 +1889,139 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  /**
+   * Names of MCP servers that were present in the effective server map but
+   * disappeared after a runtime reconcile (hot-reload / `/reload`). Used only
+   * to give a precise "this MCP server was removed this session" message when
+   * the model later calls a tool that no longer exists (see
+   * `CoreToolScheduler.getToolNotFoundMessage`). Self-heals: a name is dropped
+   * from the set the moment the server reappears in the effective map.
+   */
+  private readonly recentlyRemovedMcpServers = new Set<string>();
+  private readonly topTierMcpServers:
+    | Record<string, MCPServerConfig>
+    | undefined;
+  private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
-  private readonly allowedMcpServers?: string[];
+  private allowedMcpServers?: string[];
+  /** Immutable upper bound from `--allowed-mcp-server-names`; see ConfigParameters. */
+  private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
+  private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
+  /**
+   * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
+   * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
+   * shares no such lock; without this, two `reinitializeMcpServers` calls could
+   * interleave their `discoverAllMcpToolsIncremental` passes. See sub-task 3.
+   */
+  private mcpReconcileInProgress = false;
+  private mcpReconcilePending = false;
+  /**
+   * The in-flight reconcile (pass 1 + its coalesced drain loop), exposed so a
+   * call arriving mid-flight can await the same work instead of returning
+   * before its coalesced change has actually been applied. Cleared when the
+   * loop settles.
+   */
+  private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  /**
+   * The cross-session-stable prefix of the main-session system prompt —
+   * the stable → context layers `GeminiClient.getMainSessionSystemInstruction()`
+   * assembles before the volatile tails (git status, auto-memory). Recorded
+   * so the Anthropic converter can place an early cache breakpoint on the
+   * stable prefix; consumers match it via `startsWith` and fail open to the
+   * single-block layout when it doesn't match the request's system text.
+   */
+  private staticSystemPrefix: string | undefined;
+  /**
+   * Volatile system-prompt layer: the managed auto-memory section
+   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
+   * (context files, stable in-session) because it is rewritten on every
+   * memory save — prompt assembly appends it last so a save invalidates
+   * the shortest possible cached prompt prefix.
+   */
+  private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private approvalModeRevision = 0;
+  private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
+    version: 0,
+    kind: 'clear',
+  };
+  private manualPlanExitNoticeCursorState: ManualPlanExitNoticeCursorState = {
+    seenVersion: 0,
+  };
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
-  private readonly telemetrySettings: TelemetrySettings;
+  private readonly showResponseTokensPerSecond: boolean;
+  private readonly telemetrySettings: ResolvedTelemetrySettings;
+  private readonly telemetryInitializationDeferred: boolean;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
+  private activeTodoReminders = new Map<string, string>();
+  private activeTodoWorkChainOwners = new Map<string, string>();
+  private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
+    customIgnoreFiles: string[];
     enableRecursiveFileSearch: boolean;
     enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
-  private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
-  private readonly fileCheckpointingEnabled: boolean;
+  private goalRuntime: GoalRuntime | undefined;
+  private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  /**
+   * A Goal restore held back because the session writer is not accepting
+   * writes yet. Settled by {@link startPendingGoalRestore} once the
+   * recorder has its lease, or by {@link settlePendingGoalRestore} when the
+   * writer never arrives.
+   */
+  private pendingGoalRestore:
+    | {
+        readonly runtime: GoalRuntime;
+        readonly resolve: (runtime: GoalRuntime) => void;
+        readonly reject: (error: unknown) => void;
+      }
+    | undefined;
+  private goalTurnHost: GoalTurnHost | undefined;
+  private goalTurnHostUnbind: (() => void) | undefined;
+  private goalTurnHostGeneration = 0;
+  private readonly chatRecordingFailureListeners =
+    new Set<ChatRecordingFailureListener>();
+  private fileCheckpointingEnabled: boolean;
+  // Object (not primitive) so sub-agents via Object.create(parentConfig)
+  // share the same budget instance through prototype lookup.
+  private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
-  private readonly cwd: string;
+  private cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
-  private readonly outputLanguageFilePath?: string;
+  private outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
@@ -1104,20 +2031,37 @@ export class Config {
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
+  private sessionRegistryActive = false;
+  private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly cronEnabled: boolean = false;
-  private readonly forkSubagentEnabled: boolean = false;
+  private readonly sessionWriterLeaseEnabled: boolean = false;
+  private readonly cronEnabled: boolean = true;
+  /** Recurring cron max age in days, resolved once at construction
+   * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
+  private readonly cronRecurringMaxAgeDays: number;
+  private readonly agentTeamEnabled: boolean = false;
+  private readonly artifactEnabled: boolean = true;
+  private readonly artifactAutoOpen: boolean = true;
+  private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
+  private readonly artifactHost?: ArtifactHostConfig;
+  private readonly artifactOss?: ArtifactOssConfig;
+  private workflowsEnabled = false;
+  private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
+  private readonly computerUseMaxImageDimension?: number;
+  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
   private readonly chatCompression: ChatCompressionSettings | undefined;
+  private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
+  private readonly preventSystemSleep: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
@@ -1125,23 +2069,45 @@ export class Config {
     | ((manager: ArenaManager | null) => void)
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
+  private teamManager: TeamManager | null = null;
+  private teamManagerChangeCallbacks = new Set<
+    (manager: TeamManager | null) => void
+  >();
+  private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
+  private readonly maxToolCallsPerTurn: number;
+  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
+  private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
+  private readonly allowPrivateNetworkHooks: boolean;
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
-  readonly storage: Storage;
+  private initializationPromise?: Promise<void>;
+  private initializationSucceeded = false;
+  private initializationSettled = false;
+  private shutdownRequested = false;
+  private resourceShutdownAfterInitializationScheduled = false;
+  private resourceShutdownPromise?: Promise<void>;
+  private proxyDispatcherReady?: Promise<void>;
+  storage: Storage;
+  private runtimeStatusWrite: Promise<void> = Promise.resolve();
+  private sessionRegistryWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
+  private readonly truncateToolOutputThresholdExplicit: boolean;
   private readonly truncateToolOutputLines: number;
+  private readonly toolOutputBatchBudget: number;
+  private readonly shellDefaultTimeoutMs: number | undefined;
+  private readonly shellHeartbeatIntervalMs: number | undefined;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1153,8 +2119,25 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
-  private readonly enableAutoSkill: boolean;
+  private readonly enableTeamMemory: boolean;
+  private readonly enableTeamMemorySync: boolean;
+  // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
+  // warning is emitted at most once per repo, even though refreshHierarchicalMemory
+  // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
+  // re-checks shareability instead of reusing the first repo's result.
+  private readonly teamMemoryShareabilityChecked = new Set<string>();
+  private enableAutoSkill: boolean;
+  private readonly autoSkillConfirm: boolean;
+  private readonly memoryAgentTimeoutMinutes: number | undefined;
+  private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private readonly webSearchSettings?: WebSearchSettings;
+  private webSearchNoticeEmitted = false;
+  private visionModel?: string;
+  private compactionModel?: string;
+  private imageModel?: string;
+  private readonly visionBridgeTimeoutMs: number | undefined;
+  private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1167,8 +2150,14 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
+  // (first in this process); gates the global write in publishModelEnv so no
+  // other instance updates it. Per-session publishing is not gated on it.
+  private readonly ownsModelEnvSlot: boolean = false;
+  private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
     // throwaway Config instances (e.g. telemetry-only) don't clobber
@@ -1181,6 +2170,8 @@ export class Config {
       sessionEnvClaimed = true;
     }
     this.sessionData = params.sessionData;
+    this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.setSessionRestoreProjection(params.sessionRestoreProjection);
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
@@ -1213,26 +2204,48 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.terminalImageRenderSupportProvider =
+      params.terminalImageRenderSupportProvider ?? null;
+    this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
+    this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
+    this.visibleTools = new Set(
+      (params.visibleTools ?? []).filter(
+        (name): name is string => typeof name === 'string',
+      ),
+    );
+    this.toolSearchThreshold =
+      params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.topTierMcpServers = params.topTierMcpServers;
     this.lspEnabled = params.lsp?.enabled ?? false;
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
+    this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
+    this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
-    this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
+    this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
     this.accessibility = params.accessibility ?? {};
+    this.showResponseTokensPerSecond =
+      params.showResponseTokensPerSecond ?? false;
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
@@ -1242,13 +2255,19 @@ export class Config {
       otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
       otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
+      userId: params.telemetry?.userId?.trim() || undefined,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
+      sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
+        params.telemetry?.sensitiveSpanAttributeMaxLength,
+      ),
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.telemetryInitializationDeferred =
+      params.deferTelemetryInitialization ?? false;
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
@@ -1265,11 +2284,13 @@ export class Config {
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
       respectQwenIgnore: params.fileFiltering?.respectQwenIgnore ?? true,
+      customIgnoreFiles: params.fileFiltering?.customIgnoreFiles ?? [
+        ...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+      ],
       enableRecursiveFileSearch:
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
-    this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
       params.fileCheckpointingEnabled ??
       (!params.sdkMode && (params.interactive ?? false));
@@ -1277,21 +2298,43 @@ export class Config {
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
-    this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
+    this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
+    const clearContextOnIdle = params.clearContextOnIdle;
+    const toolResultsThresholdMinutes =
+      clearContextOnIdle?.toolResultsThresholdMinutes ?? 60;
     this.clearContextOnIdle = {
-      toolResultsThresholdMinutes:
-        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
-      toolResultsNumToKeep:
-        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsThresholdMinutes,
+      toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+      toolResultsTotalCharsThreshold:
+        clearContextOnIdle?.toolResultsTotalCharsThreshold ??
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
+          ? -1
+          : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.cronEnabled = params.cronEnabled ?? false;
-    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.sessionWriterLeaseEnabled =
+      this.experimentalZedIntegration === true &&
+      params.sessionWriterLeaseEnabled === true;
+    this.cronEnabled = params.cronEnabled ?? true;
+    this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
+      params.cronRecurringMaxAgeDays,
+    );
+    this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.artifactEnabled = params.artifactEnabled ?? true;
+    this.artifactAutoOpen = params.artifactAutoOpen ?? true;
+    this.artifactPublisher = params.artifactPublisher ?? 'local';
+    this.artifactHost = params.artifactHost;
+    this.artifactOss = params.artifactOss;
+    this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
+    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
+    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1300,6 +2343,7 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.providerProtocolConfig = params.providerProtocolConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -1308,14 +2352,28 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
+    this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
+      params.maxToolCallsPerTurn,
+    );
+    // Whether the user explicitly set the cap (vs. the resolved default). An
+    // explicit value is honored as a hard cap; the default is adaptive.
+    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
+    this.safeMode = params.safeMode ?? isSafeModeEnv();
+    if (this.safeMode) {
+      this.debugLogger.info(
+        'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
+      );
+    }
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
+    this.allowPrivateNetworkHooks = params.allowPrivateNetworkHooks ?? false;
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // (web search removed)
@@ -1323,30 +2381,92 @@ export class Config {
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
       params.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
+    this.preventSystemSleep = params.preventSystemSleep ?? true;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? true;
     this.shellExecutionConfig = {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
-      pager: params.shellExecutionConfig?.pager ?? 'cat',
+      pager: params.shellExecutionConfig?.pager,
+      maxBufferedOutputBytes:
+        params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    // Preserve whether the raw setting was provided: Shell uses its own
+    // fallback when it is absent, so producers must not pass a defaulted value.
+    this.truncateToolOutputThresholdExplicit =
+      params.truncateToolOutputThreshold != null;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputBatchBudget =
+      params.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
+    // Guard: nothing validates settings.json on the load path (the schema only
+    // runs on the /config write path), so this is the only real gate. The value
+    // reaches `AbortSignal.timeout()`, which requires an integer in [0, 2^31-1];
+    // a negative or fractional value would throw RangeError or silently degrade
+    // to a 1ms timeout. Unlike the vision bridge, 0 is valid here and disables
+    // the timeout. Reject anything the timer can't take and fall back to the
+    // built-in default.
+    this.shellDefaultTimeoutMs =
+      params.shellDefaultTimeoutMs !== undefined &&
+      Number.isInteger(params.shellDefaultTimeoutMs) &&
+      params.shellDefaultTimeoutMs >= 0 &&
+      params.shellDefaultTimeoutMs <= 2_147_483_647
+        ? params.shellDefaultTimeoutMs
+        : undefined;
+    // Same timer-safety gate as shellDefaultTimeoutMs: the value reaches
+    // `setInterval`, which needs an integer in [0, 2^31-1]. 0 is valid and
+    // disables heartbeats.
+    this.shellHeartbeatIntervalMs =
+      params.shellHeartbeatIntervalMs !== undefined &&
+      Number.isInteger(params.shellHeartbeatIntervalMs) &&
+      params.shellHeartbeatIntervalMs >= 0 &&
+      params.shellHeartbeatIntervalMs <= 2_147_483_647
+        ? params.shellHeartbeatIntervalMs
+        : undefined;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
     this.jsonSchema = params.jsonSchema;
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
-    this.storage = new Storage(this.targetDir);
+    this.storage = new Storage(this.targetDir, this.sessionRuntimeBaseDir);
+    // Publish the project dir a subprocess needs to find this session's harness
+    // records. It is derived from the session's *launch* cwd, so a subprocess
+    // that has `cd`-ed elsewhere — which the /review skill explicitly does, into
+    // a PR worktree — cannot recompute it from `process.cwd()`; it would land on
+    // a directory that never existed.
+    //
+    // Registered per session, not claimed in one process-global slot. In daemon
+    // mode one process serves many sessions: a single slot would hold whichever
+    // booted first, and every later session would hand its subprocesses another
+    // session's directory. The env var is still set for the single-session CLI,
+    // where it is the only consumer and there is nothing to collide with.
+    if (!projectDirEnvClaimed && process.env) {
+      process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
+      projectDirEnvClaimed = true;
+    }
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
+    this.backgroundTaskRegistry = new BackgroundTaskRegistry({
+      ...(this.agentsSettings.maxParallelAgents !== undefined
+        ? {
+            maxConcurrentBackgroundAgents:
+              this.agentsSettings.maxParallelAgents,
+          }
+        : {}),
+      ...(this.agentsSettings.maxParallelAgentsByModel !== undefined
+        ? {
+            maxConcurrentBackgroundAgentsByModel:
+              this.agentsSettings.maxParallelAgentsByModel,
+          }
+        : {}),
+    });
     this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -1359,36 +2479,148 @@ export class Config {
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
+      providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
         baseUrl: params.generationConfig?.baseUrl,
       },
       generationConfigSources: params.generationConfigSources,
+      initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    if (this.telemetrySettings.enabled) {
-      initializeTelemetry(this);
+    // Publish the active model id for shell subprocesses. Every Config
+    // publishes its own session's model — publishModelEnv registers it per
+    // session, like the project dir above, so daemon-mode subprocesses read
+    // theirs, not the first session's. The process-global slot is claimed
+    // first-writer-wins, as QWEN_CODE_SESSION_ID is, so a throwaway Config
+    // never clobbers the live session's global value. Done here rather than
+    // alongside the session ID because the value comes from the ModelsConfig
+    // just constructed.
+    if (!modelEnvClaimed && process.env) {
+      modelEnvClaimed = true;
+      this.ownsModelEnvSlot = true;
+    }
+    this.publishModelEnv();
+
+    if (
+      this.telemetrySettings.enabled &&
+      !this.telemetryInitializationDeferred
+    ) {
+      // Fire-and-forget: the SDK module loads asynchronously (issue #4748),
+      // and spans/logs emitted before it settles are dropped by the
+      // isTelemetrySdkInitialized() gates — same as the deferred TUI path.
+      // Promise.resolve guards against auto-mocked initializeTelemetry
+      // returning undefined in tests.
+      void Promise.resolve(initializeTelemetry(this)).catch((error) => {
+        this.debugLogger.error('Failed to initialize telemetry:', error);
+      });
     }
 
     const proxyUrl = this.getProxy();
     if (proxyUrl) {
-      setGlobalDispatcher(new ProxyAgent(proxyUrl));
+      // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
+      // honored. A bare ProxyAgent tunnels EVERY request — including local
+      // MCP servers reached over `http://localhost:...` — through the proxy,
+      // which typically can't route back to localhost and fails with an
+      // opaque `fetch failed`. EnvHttpProxyAgent connects hosts listed in
+      // `NO_PROXY` (e.g. `localhost,127.0.0.1`) directly while still proxying
+      // everything else (LLM API calls, remote MCP). The explicit
+      // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
+      // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
+      // environment. See issue #3696 (local MCP + corporate proxy).
+      //
+      // undici loads behind a dynamic import to keep it out of the eager
+      // startup closure (issue #7264); initialize() awaits this promise so
+      // the dispatcher is installed before any network activity.
+      this.proxyDispatcherReady = loadUndici()
+        .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          setGlobalDispatcher(
+            new EnvHttpProxyAgent({
+              httpProxy: proxyUrl,
+              httpsProxy: proxyUrl,
+            }),
+          );
+          // Paths that pin their own dispatcher off the global one (the MCP
+          // streamable HTTP fetch) read the explicit proxy back from here
+          // (#7195).
+          setResolvedProxyUrlForRuntimeFetch(proxyUrl);
+        })
+        .catch((error) => {
+          // Redact before logging: the error can embed the proxy URL with
+          // credentials. Rethrow so initialize() fails loudly, matching the
+          // old synchronous constructor behavior.
+          this.debugLogger.error(
+            'Failed to install proxy dispatcher:',
+            redactProxyError(error),
+          );
+          throw error;
+        });
+      // Swallow an early rejection so it cannot become an unhandledRejection
+      // before initialize() awaits (and surfaces) the stored promise.
+      this.proxyDispatcherReady.catch(() => {});
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
-      ? new ChatRecordingService(this)
+      ? this.createChatRecordingService()
       : undefined;
+    if (
+      !this.sessionRestoreProjectionSource ||
+      this.sessionRestoreRuntime ||
+      !this.sessionWriterLeaseEnabled
+    ) {
+      this.initializeGoalRuntime(
+        this.sessionRestoreRuntime?.goalRecords ??
+          this.sessionData?.conversation.messages,
+        this.sessionRestoreRuntime,
+      );
+    }
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
+      locale: params.locale,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
-    this.enableAutoSkill = params.enableAutoSkill ?? true;
+    this.enableTeamMemory = params.enableTeamMemory ?? false;
+    this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
+    this.enableAutoSkill = params.enableAutoSkill ?? false;
+    this.autoSkillConfirm = params.autoSkillConfirm ?? true;
+    // Clamp: schema validation only runs on interactive edit paths, so a
+    // negative value in settings.json would otherwise reach the agent runtime
+    // and make every memory agent time out immediately.
+    this.memoryAgentTimeoutMinutes =
+      params.memoryAgentTimeoutMinutes !== undefined &&
+      params.memoryAgentTimeoutMinutes >= 0
+        ? params.memoryAgentTimeoutMinutes
+        : undefined;
+    this.memoryAgentMaxTurns =
+      params.memoryAgentMaxTurns !== undefined &&
+      Number.isInteger(params.memoryAgentMaxTurns) &&
+      params.memoryAgentMaxTurns >= 0
+        ? params.memoryAgentMaxTurns
+        : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.webSearchSettings = params.webSearch;
+    this.visionModel = params.visionModel || undefined;
+    this.compactionModel = params.compactionModel || undefined;
+    this.imageModel = params.imageModel || undefined;
+    // Guard: nothing validates settings.json on the load path, so this is the
+    // only real gate. `AbortSignal.timeout()` requires an integer in
+    // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
+    // schema still accepts via /config) would throw RangeError or silently
+    // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
+    // timer can't take and fall back to the built-in default.
+    this.visionBridgeTimeoutMs =
+      params.visionBridgeTimeoutMs !== undefined &&
+      Number.isInteger(params.visionBridgeTimeoutMs) &&
+      params.visionBridgeTimeoutMs > 0 &&
+      params.visionBridgeTimeoutMs <= 2_147_483_647
+        ? params.visionBridgeTimeoutMs
+        : undefined;
+    this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -1398,6 +2630,7 @@ export class Config {
     this.projectHooks = params.projectHooks;
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
   }
 
@@ -1409,28 +2642,93 @@ export class Config {
     if (this.initialized) {
       throw Error('Config was already initialized');
     }
+    if (this.shutdownRequested) {
+      throw Error('Config is shutting down');
+    }
     this.initialized = true;
+    const initialization = this.initializeOnce(options);
+    this.initializationPromise = initialization;
+    try {
+      await initialization;
+      this.initializationSucceeded = true;
+    } finally {
+      this.initializationSettled = true;
+    }
+  }
+
+  private async initializeOnce(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
+    try {
+      const activation = this.activateChatRecording();
+      this.sessionWriterActivationPromise = activation;
+      try {
+        await activation;
+      } finally {
+        if (this.sessionWriterActivationPromise === activation) {
+          this.sessionWriterActivationPromise = undefined;
+        }
+      }
+      registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
+      this.sessionProjectDirRegistered = true;
+      await this.initializeInternal(options);
+    } catch (error) {
+      this.clearSessionRestoreProjection();
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
+      try {
+        await this.closeSessionWriter();
+      } catch (closeError) {
+        if (containsErrorByIdentity(error, closeError)) {
+          throw error;
+        }
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, closeError],
+            'Chat recording close failed during failed initialization',
+          ),
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async initializeInternal(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
     this.debugLogger.info('Config initialization started');
+    await this.proxyDispatcherReady;
+    if (options?.skipFileCheckpointing === true) {
+      this.fileCheckpointingEnabled = false;
+      this.fileHistoryService = undefined;
+    }
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
-    if (this.getCheckpointingEnabled()) {
-      await this.getGitService();
-    }
     this.promptRegistry = new PromptRegistry();
+    this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
-    const explicitExtensionNames = this.getExplicitExtensionNames();
-    if (!this.getBareMode()) {
+    const explicitExtensionNames = this.isSafeMode()
+      ? []
+      : (this.overrideExtensions ?? []).filter(
+          (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
+        );
+    recordStartupEvent('config_initialize_extensions_initial_start');
+    if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
-    } else if (explicitExtensionNames.length > 0) {
+    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
     }
+    recordStartupEvent('config_initialize_extensions_initial_end');
     this.debugLogger.debug('Extension manager initialized');
 
-    // Bare mode skips all hook loading and execution.
-    if (!this.getDisableAllHooks()) {
+    // Bare mode and read-only replay helpers skip all hook loading and execution.
+    recordStartupEvent('config_initialize_hooks_start');
+    if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -1468,6 +2766,8 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
+            let hasNonGoalBlockingStopHook: boolean | undefined;
+            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -1475,6 +2775,10 @@ export class Config {
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
                   signal,
+                  typeof input['submitted_prompt'] === 'string' &&
+                    input['submitted_prompt'].trim().length > 0
+                    ? input['submitted_prompt']
+                    : undefined,
                 );
                 break;
               case 'UserPromptExpansion':
@@ -1486,15 +2790,64 @@ export class Config {
                 );
                 break;
               case 'Stop': {
+                // Extract context usage data from input with runtime validation
+                const contextUsageData = buildContextUsage(
+                  input['context_limit'] as number | undefined,
+                  (input['input_tokens'] as number | undefined) ?? 0,
+                );
+
                 const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
+                  contextUsageData,
                   signal,
                 );
                 result = stopResult.finalOutput
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
+                const goalHookId =
+                  stopResult.finalOutput?.hookSpecificOutput?.[
+                    GOAL_HOOK_ID_OUTPUT_KEY
+                  ];
+                if (typeof goalHookId === 'string') {
+                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
+                    (output) =>
+                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
+                        goalHookId &&
+                      (output.decision === 'block' ||
+                        output.decision === 'deny' ||
+                        output.continue === false),
+                  );
+                  hasNonGoalBlockingStopHook =
+                    nonGoalBlockingOutputs.length > 0;
+                  if (hasNonGoalBlockingStopHook) {
+                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
+                      .map(
+                        (output) =>
+                          output.stopReason ||
+                          output.reason ||
+                          'No reason provided',
+                      )
+                      .join('\n');
+                  }
+                }
+                break;
+              }
+              case 'MessageDisplay': {
+                const messageDisplayResult =
+                  await hookSystem.fireMessageDisplayEvent(
+                    (input['message_id'] as string) || '',
+                    (input['displayed_text'] as string) || '',
+                    (input['is_final'] as boolean) || false,
+                    signal,
+                  );
+                result = messageDisplayResult.finalOutput
+                  ? createHookOutput(
+                      'MessageDisplay',
+                      messageDisplayResult.finalOutput,
+                    )
+                  : undefined;
                 break;
               }
               case 'PreToolUse': {
@@ -1505,6 +2858,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               }
@@ -1516,6 +2870,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -1527,6 +2882,7 @@ export class Config {
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'PostToolBatch':
@@ -1565,6 +2921,7 @@ export class Config {
                   (input['reason'] as PermissionDeniedReason) ||
                     'classifier_blocked',
                   signal,
+                  (input['tool_call_id'] as string) || undefined,
                 );
                 break;
               case 'SubagentStart':
@@ -1603,6 +2960,8 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
+              hasNonGoalBlockingStopHook,
+              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -1620,15 +2979,39 @@ export class Config {
     } else {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
+    recordStartupEvent('config_initialize_hooks_end');
 
     this.subagentManager = new SubagentManager(this);
-    this.skillManager = new SkillManager(this);
-    if (this.getBareMode()) {
-      await this.skillManager.refreshCache();
+    recordStartupEvent('config_initialize_skills_start');
+    if (!options?.skipSkillManager) {
+      if (this.getAutoSkillEnabled() && this.isTrustedFolder()) {
+        try {
+          const curatorResult = await maybeRunAutoSkillCurator(
+            this.getProjectRoot(),
+          );
+          if (curatorResult.status === 'ran') {
+            this.debugLogger.debug(
+              `Auto-skill curator checked ${curatorResult.result.checked} skill(s) and archived ${curatorResult.result.archived.length}.`,
+            );
+          }
+        } catch (error) {
+          this.debugLogger.warn(
+            `Auto-skill curator skipped: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      this.skillManager = new SkillManager(this);
+      if (this.getBareMode() || this.isSafeMode()) {
+        await this.skillManager.refreshCache();
+      } else {
+        await this.skillManager.startWatching();
+      }
+      this.debugLogger.debug('Skill manager initialized');
     } else {
-      await this.skillManager.startWatching();
+      this.skillManager = null;
+      this.debugLogger.debug('Skill manager skipped');
     }
-    this.debugLogger.debug('Skill manager initialized');
+    recordStartupEvent('config_initialize_skills_end');
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -1645,11 +3028,15 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    if (!this.getBareMode()) {
+    recordStartupEvent('config_initialize_extensions_final_start');
+    if (!this.getBareMode() && !this.isSafeMode()) {
       await this.extensionManager.refreshCache();
     }
+    recordStartupEvent('config_initialize_extensions_final_end');
 
-    await this.refreshHierarchicalMemory();
+    recordStartupEvent('config_initialize_hierarchical_memory_start');
+    await this.refreshHierarchicalMemory('session_start');
+    recordStartupEvent('config_initialize_hierarchical_memory_end');
     this.debugLogger.debug('Hierarchical memory loaded');
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
@@ -1661,12 +3048,22 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    // Also force the inline-discovery skip when the caller opts
+    // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
+    // blocking mode would still spawn MCP servers via the tool-registry
+    // construction path.
+    const skipInlineMcpDiscovery =
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      !legacyBlockingMcp ||
+      options?.skipMcpDiscovery === true;
 
+    recordStartupEvent('config_initialize_tool_registry_start');
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    recordStartupEvent('config_initialize_tool_registry_end');
     recordStartupEvent('tool_registry_created', {
       toolCount: this.toolRegistry.getAllToolNames().length,
       mcpInline: !skipInlineMcpDiscovery,
@@ -1686,15 +3083,45 @@ export class Config {
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
     // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
-    // Use strict mode so a broken built-in tool surfaces immediately at startup.
-    await this.toolRegistry.warmAll({ strict: true });
+    // Strict by default so a broken built-in tool surfaces immediately at startup;
+    // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
+    // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
+    // a SkillManager) is logged and skipped instead of aborting initialize().
+    recordStartupEvent('config_initialize_tool_warmup_start');
+    await this.toolRegistry.warmAll({
+      strict: options?.lenientToolWarmup !== true,
+    });
+    recordStartupEvent('config_initialize_tool_warmup_end');
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    //
+    // Also gated on `!options?.skipMcpDiscovery` — the ACP
+    // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
+    // config doesn't run discovery under its pool-less manager.
+    //
+    // Safe/bare mode still skip discovery when there's nothing to discover
+    // (the common case: no top-tier servers supplied) — this block predates
+    // the safe-mode `getMcpServers()` fix (PR #7827) and was written when
+    // `getMcpServers()` always returned `{}` under both modes, making the
+    // unconditional skip a harmless no-op regardless. Now that
+    // caller-supplied top-tier servers survive safe mode AND bare mode,
+    // unconditionally skipping discovery in either would silently strand
+    // them: `getMcpServers()` reports them as configured, but nothing ever
+    // connects to them or registers their tools (a live repro of exactly
+    // this — `qwen --bare --mcp-config` with a top-tier server — surfaced
+    // the bare-mode half of this gate was never updated alongside safe
+    // mode's). Checking `getMcpServers()` (not `topTierMcpServers` directly)
+    // also respects the `allowedMcpServers` filter already applied there.
+    const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
+    if (
+      skipInlineMcpDiscovery &&
+      (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
+      !options?.skipMcpDiscovery
+    ) {
       this.startMcpDiscoveryInBackground();
     }
 
@@ -1725,8 +3152,7 @@ export class Config {
           // subdir, not the repo root) always early-returned and the
           // sweep was permanently a no-op. Fast-bail still happens, just
           // against the *correct* directory.
-          const probe = new GitWorktreeService(this.targetDir);
-          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const root = findGitRoot(this.targetDir) ?? this.targetDir;
           const worktreesDir = path.join(root, '.qwen', 'worktrees');
           try {
             await fsPromises.access(worktreesDir);
@@ -1767,6 +3193,138 @@ export class Config {
           );
         }
       })();
+    }
+  }
+
+  private async activateChatRecording(): Promise<void> {
+    if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
+      return;
+    }
+    if (this.sessionWriterShutdownRequested) {
+      throw new SessionWriterShutdownError();
+    }
+    const recorder = this.chatRecordingService;
+    if (!recorder) throw new SessionWriterUnavailableError();
+    let lease: SessionWriterLease | undefined;
+    try {
+      lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath: this.getTranscriptPath(),
+        processKind: 'acp',
+        qwenVersion: this.cliVersion ?? null,
+        reclaimPolicy: this.sessionWriterReclaimPolicy,
+        takeoverPolicy: this.sessionWriterTakeoverPolicy,
+        onOwnershipAcquired: (acquiredLease) => {
+          lease = acquiredLease;
+          this.pendingSessionWriterLease = acquiredLease;
+          if (this.sessionWriterShutdownRequested) {
+            this.startPendingSessionWriterRelease(acquiredLease);
+          }
+        },
+      });
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
+      const location = await this.getSessionService().getSessionLocation(
+        this.sessionId,
+      );
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
+      if (location === 'conflict' || location === 'archived') {
+        throw new SessionTranscriptChangedError();
+      }
+      let authoritative: ResumedSessionData | undefined;
+      let projection: SessionRestoreProjection | undefined;
+      if (this.sessionRestoreProjectionSource) {
+        addDaemonRequestAttribute(
+          'qwen-code.daemon.session_restore.projection_acquisition',
+          'after_writer_lease',
+        );
+        projection = await this.sessionRestoreProjectionSource();
+        this.setSessionRestoreProjection(projection);
+      } else if (this.sessionData || lease.transcriptExistedAtAcquire) {
+        authoritative = await this.getSessionService().loadSession(
+          this.sessionId,
+        );
+        if (!authoritative) throw new SessionWriterUnavailableError();
+      } else if (location !== undefined) {
+        throw new SessionTranscriptChangedError();
+      }
+      const persistedTitleInfo = authoritative
+        ? this.getSessionService().getSessionTitleInfo(this.sessionId)
+        : undefined;
+      await lease.assertOwnedAndUnchanged();
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
+      this.sessionData = authoritative;
+      recorder.activate(
+        lease,
+        authoritative,
+        persistedTitleInfo,
+        projection?.runtime.recording,
+      );
+      if (this.sessionRestoreProjectionSource) {
+        this.initializeGoalRuntime(
+          projection?.runtime.goalRecords,
+          projection?.runtime,
+        );
+      }
+      this.pendingSessionWriterLease = undefined;
+      lease = undefined;
+      // The recorder can take writes now, so the restore the constructor
+      // held back can finally run — against `authoritative`, which is
+      // fresher than what the constructor had. Not awaited: activation
+      // latency is unchanged, and `getGoalRuntimeReady()` is what waits.
+      this.startPendingGoalRestore();
+    } catch (error) {
+      let failure: unknown = error;
+      if (
+        !(failure instanceof SessionWriterError) &&
+        failure &&
+        typeof failure === 'object' &&
+        typeof (failure as NodeJS.ErrnoException).code === 'string'
+      ) {
+        failure = new SessionWriterUnavailableError({ cause: failure });
+      }
+      try {
+        const ownedLease = lease ?? this.pendingSessionWriterLease;
+        await this.startPendingSessionWriterRelease(ownedLease);
+        if (
+          this.pendingSessionWriterLease === ownedLease &&
+          (ownedLease?.isReleased ?? true)
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+        if (
+          this.sessionWriterShutdownRequested &&
+          failure instanceof SessionWriterLostError &&
+          ownedLease?.isReleased
+        ) {
+          failure = new SessionWriterShutdownError();
+        }
+      } catch (releaseError) {
+        if (
+          releaseError instanceof SessionWriterLostError ||
+          (lease ?? this.pendingSessionWriterLease)?.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        } else if (!containsErrorByIdentity(failure, releaseError)) {
+          failure = new SessionWriterUnavailableError({
+            cause: new AggregateError(
+              [failure, releaseError],
+              'Session writer lease release failed during activation cleanup',
+            ),
+          });
+        }
+      }
+      // The writer never became available, so the deferred restore can never
+      // run. Fail it with the activation error instead of leaving every
+      // `getGoalRuntimeReady()` caller pending forever.
+      this.settlePendingGoalRestore(failure);
+      throw failure;
     }
   }
 
@@ -1821,14 +3379,15 @@ export class Config {
       .then(async () => {
         // After background discovery completes, push the newly-registered
         // MCP tools into the active GeminiChat so the next model request
-        // sees them. Interactive mode also calls setTools() via
-        // AppContainer's batch-flush effect — this trailing call is
-        // idempotent there, but it's the ONLY path that updates
-        // `chat.tools` for non-interactive runs (no AppContainer).
+        // sees both the updated declarations and added-tool reminder deltas.
+        // Interactive mode also calls setTools() via AppContainer's
+        // batch-flush effect — this trailing call is idempotent there, but
+        // it's the ONLY path that updates `chat.tools` for non-interactive
+        // runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
         // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
-        // every MCP tool — a regression vs the legacy synchronous path.
+        // progressive MCP tools — a regression vs the legacy synchronous path.
         try {
           await this.geminiClient?.setTools();
         } catch (err) {
@@ -1898,6 +3457,9 @@ export class Config {
       if (this.isMcpServerDisabled(name)) {
         continue;
       }
+      if (this.isMcpServerPendingApproval(name)) {
+        continue;
+      }
       if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
         failed.push(name);
       }
@@ -1905,36 +3467,216 @@ export class Config {
     return failed;
   }
 
-  async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
+  async refreshHierarchicalMemory(
+    loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+  ): Promise<void> {
+    // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
+    if (this.isSafeMode()) {
+      this.setUserMemory('');
+      this.autoMemoryPrompt = '';
+      this.setGeminiMdFileCount(0);
+      this.setContextFilePaths([]);
+      this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+        [],
         this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        { explicitOnly: this.getBareMode() },
       );
-    if (this.getManagedAutoMemoryEnabled()) {
-      const managedAutoMemoryIndex = await readAutoMemoryIndex(
-        this.getProjectRoot(),
-      );
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
+      return;
+    }
+    const {
+      memoryContent,
+      fileCount,
+      contextFilePaths,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
         ),
+      },
+    );
+    if (this.isManagedMemoryAvailable()) {
+      // User-level read is best-effort — an EACCES on
+      // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
+      // section out of the system prompt. Project-level read still bubbles
+      // (its failure is a real config-load problem).
+      const teamMemoryEnabled =
+        this.getTeamMemoryEnabled() && this.isTrustedFolder();
+      if (this.getTeamMemoryEnabled() && !this.isTrustedFolder()) {
+        // Surface why team memory is silently absent from the prompt.
+        this.debugLogger.debug(
+          'Team memory enabled but inactive: workspace is not trusted.',
+        );
+      }
+      const teamProjectRoot = this.getProjectRoot();
+      // When the tier is active, warn (once per repo) if its directory is not
+      // actually git-shareable — no git root, or a directory-form .gitignore
+      // swallowing it — so the tier never silently shares nothing.
+      if (
+        teamMemoryEnabled &&
+        !this.teamMemoryShareabilityChecked.has(teamProjectRoot)
+      ) {
+        this.teamMemoryShareabilityChecked.add(teamProjectRoot);
+        const shareabilityWarning =
+          getTeamMemoryShareabilityWarning(teamProjectRoot);
+        if (shareabilityWarning) {
+          this.warnings.push(shareabilityWarning);
+          this.debugLogger.warn(shareabilityWarning);
+        }
+      }
+      // Rebuild the team index BEFORE syncing so the freshly generated MEMORY.md
+      // is what gets committed and pushed, not a stale one. Then, when opted in,
+      // best-effort git sync (never throws — a failure must not break session
+      // start): pull collaborators' updates and push local ones. If the sync
+      // PULLED new files, rebuild once more so the in-prompt index reflects them.
+      let teamAutoMemoryIndex: string | null = null;
+      if (teamMemoryEnabled) {
+        // rebuildTeamAutoMemoryIndex throws for two distinct classes, and only
+        // ONE may block sync:
+        //   • SECURITY — a symlink/escape rejection (TeamMemoryRootSecurityError)
+        //     means the team root could redirect the committed index OUTSIDE the
+        //     repo. Sync MUST be blocked: otherwise syncTeamMemory would git
+        //     add/commit/push that out-of-repo dir, defeating the indexer's
+        //     refusal. This invariant is non-negotiable.
+        //   • OPERATIONAL — EACCES/ENOSPC/EPERM on lstat/readdir/write. Not a
+        //     security problem, so it must NOT permanently gate legitimate sync;
+        //     it self-corrects on the next successful rebuild. Log and sync on.
+        let teamRootSecurityBlocked = false;
+        try {
+          teamAutoMemoryIndex =
+            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+        } catch (err) {
+          if (err instanceof TeamMemoryRootSecurityError) {
+            teamRootSecurityBlocked = true;
+            this.debugLogger.warn(
+              'team memory root failed the symlink/escape safety check; skipping sync',
+              err,
+            );
+          } else {
+            this.debugLogger.warn(
+              'team memory index rebuild failed (operational); not security-gating sync',
+              err,
+            );
+          }
+        }
+        if (!teamRootSecurityBlocked && this.getTeamMemorySyncEnabled()) {
+          const syncResult = await syncTeamMemory(teamProjectRoot, {
+            message: 'chore(memory): sync team memory',
+          }).catch((err) => {
+            this.debugLogger.warn('team memory sync failed', err);
+            return undefined;
+          });
+          // Surface the silent no-op: the user opted into sync but, e.g., the
+          // repo has no upstream, so nothing is shared. Debug-level — not every
+          // session should warn loudly, but an operator can see why sync did
+          // nothing.
+          if (syncResult?.skippedReason) {
+            this.debugLogger.warn(
+              `team memory sync skipped: ${syncResult.skippedReason}`,
+            );
+          }
+          if (syncResult?.pulled) {
+            teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+              teamProjectRoot,
+            ).catch(() => teamAutoMemoryIndex);
+          }
+        }
+      }
+      const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
+        await Promise.all([
+          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readUserAutoMemoryIndexWithStats().catch(() => null),
+        ]);
+      this.recordAutoMemoryIndexRead(
+        getAutoMemoryIndexPath(this.getProjectRoot()),
+        managedAutoMemoryIndexRead,
+      );
+      this.recordAutoMemoryIndexRead(
+        getUserAutoMemoryIndexPath(),
+        userAutoMemoryIndexRead,
+      );
+      const managedAutoMemoryIndex =
+        managedAutoMemoryIndexRead?.content ?? null;
+      const userAutoMemoryIndex = userAutoMemoryIndexRead?.content ?? null;
+      // Always surface the user-level section so the main assistant knows the
+      // dir exists and can route ad-hoc "remember this cross-project" saves
+      // there. When empty the prompt builder emits a "MEMORY.md is currently
+      // empty" placeholder — the same shape the per-project layer has used
+      // since day one — so the cost is one extra index header.
+      this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
+    this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
+    );
+  }
+
+  private recordAutoMemoryIndexRead(
+    indexPath: string,
+    indexRead: AutoMemoryIndexRead | null,
+  ): void {
+    if (indexRead === null || this.getFileReadCacheDisabled()) {
+      return;
+    }
+
+    this.getFileReadCache().recordRead(indexPath, indexRead.stats, {
+      full: true,
+      cacheable: true,
+    });
+  }
+
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize ??
+      this.modelsConfig.getGenerationConfig().contextWindowSize ??
+      tokenLimit(this.getModel(), 'input');
+    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+      return undefined;
+    }
+
+    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const thresholdTokens = Math.floor(
+      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    if (estimatedTokens <= thresholdTokens) {
+      return undefined;
+    }
+
+    return (
+      `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ` +
+      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `Consider trimming long always-loaded context or moving details into ` +
+      `on-demand files.`
     );
   }
 
@@ -2005,17 +3747,38 @@ export class Config {
    * Should be called before refreshAuth when settings.json has been updated.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
+    this.modelsConfig.reloadModelProvidersConfig(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
+    this.baseLlmClient?.clearPerModelGeneratorCache();
   }
 
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    // The global reasoning effort (settings.model.reasoningEffort, seeded into
+    // the generation config by the CLI) is NOT a provider field, but
+    // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
+    // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
+    // provider preset's value (undefined for reasoning). Capture the effort
+    // before the sync wipes it and re-apply it after the config is rebuilt, so
+    // /effort survives an auth refresh, including the initial one at startup.
+    // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
+    // already excludes both `false` and `undefined`.
+    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    const priorReasoningEffort = priorReasoning
+      ? priorReasoning.effort
+      : undefined;
+
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
@@ -2042,6 +3805,14 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    // Auth flows call refreshAuth directly — no model-change notification
+    // fires — and the resolved model can differ from the pre-auth one.
+    this.publishModelEnv();
+
+    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -2086,13 +3857,106 @@ export class Config {
     return this.sessionId;
   }
 
+  getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
+    return this.sessionRestoreRuntime;
+  }
+
+  consumeSessionRestoreProjection(): SessionRestoreProjection | undefined {
+    const projection = this.pendingSessionRestoreProjection;
+    this.pendingSessionRestoreProjection = undefined;
+    return projection;
+  }
+
+  hydrateSessionRestoreFileHistory(): void {
+    if (this.restoredFileHistory) return;
+    const snapshots = this.sessionRestoreRuntime?.fileHistorySnapshots;
+    if (!snapshots?.length) return;
+    const service = this.getFileHistoryService();
+    if (!service.isEnabled()) return;
+    service.restoreFromSnapshots(snapshots);
+    this.restoredFileHistory = true;
+  }
+
+  finalizeSessionRestore(): void {
+    const runtime = this.sessionRestoreRuntime;
+    if (!runtime) return;
+    this.sessionRestoreRuntime = undefined;
+
+    if (runtime.attributionSnapshot) {
+      try {
+        CommitAttributionService.getInstance().restoreFromSnapshot(
+          runtime.attributionSnapshot,
+        );
+      } catch (error) {
+        this.debugLogger.error(
+          `Session restore attribution activation failed: ${error}`,
+        );
+      }
+    }
+
+    const activateGoal = this.goalRestoreActivation;
+    this.goalRestoreActivation = undefined;
+    this.rejectGoalRestoreActivation = undefined;
+    if (activateGoal) {
+      try {
+        void activateGoal().catch((error) => {
+          this.debugLogger.error(
+            `Session restore goal activation failed: ${error}`,
+          );
+        });
+      } catch (error) {
+        this.debugLogger.error(
+          `Session restore goal activation failed: ${error}`,
+        );
+      }
+    }
+
+    if (this.restoredFileHistory && this.fileHistoryService) {
+      try {
+        void this.fileHistoryService
+          .validateRestoredSnapshots()
+          .catch((error) => {
+            this.debugLogger.error(
+              `FileHistory: validateRestoredSnapshots failed: ${error}`,
+            );
+          });
+      } catch (error) {
+        this.debugLogger.error(
+          `FileHistory: validateRestoredSnapshots failed: ${error}`,
+        );
+      }
+    }
+  }
+
+  setSessionSource(sourceType: string, sourceId?: string): void {
+    this.sessionSourceType = sourceType;
+    this.sessionSourceId = sourceId;
+  }
+
+  getSessionSourceType(): string | undefined {
+    return this.sessionSourceType;
+  }
+
+  getSessionSourceId(): string | undefined {
+    return this.sessionSourceId;
+  }
+
   /**
    * Returns warnings generated during configuration resolution.
    * These warnings are collected from model configuration resolution
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    return this.warnings;
+    // Both layers are always loaded into the system prompt, so the size
+    // estimate must cover context files and the auto-memory section alike.
+    const memoryContextWarning = this.buildMemoryContextWarning(
+      [this.getUserMemory(), this.autoMemoryPrompt]
+        .filter(Boolean)
+        .join('\n\n'),
+    );
+    return memoryContextWarning
+      ? [...this.warnings, memoryContextWarning]
+      : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -2106,27 +3970,64 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      throw new SessionWriterUnavailableError();
+    }
+    if (Object.hasOwn(this, 'goalRuntime')) {
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalRuntime?.dispose();
+    }
     // Finalize the outgoing session before switching.
+    const outgoingChatRecordingService = this.chatRecordingService;
     try {
-      this.chatRecordingService?.finalize();
+      outgoingChatRecordingService?.finalize();
     } catch {
       // Best-effort — don't block session switch
     }
+    void outgoingChatRecordingService?.flush().catch(() => {
+      // Best-effort — don't block session switch
+    });
 
     const previousSessionId = this.sessionId;
-    this.sessionId = sessionId ?? randomUUID();
+    const nextSessionId = sessionId ?? randomUUID();
+    // Resuming the session the user is already in keeps the same id. That is
+    // not a lifecycle transition: ending it here would record session.end for
+    // a live session and pair it with a duplicate session.start.
+    const isSessionTransition = nextSessionId !== previousSessionId;
+    if (isSessionTransition) {
+      logSessionEnd(this);
+    }
+    this.sessionId = nextSessionId;
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
+    // Re-key the per-session model registry onto the new session id. Without
+    // this the entry stays keyed on the outgoing id, so after /clear (or
+    // /reset, /new, /resume) a non-owner Config's subprocesses resolve the
+    // model by the new id, miss, and fall back to another session's value.
+    // Drop the orphaned entry too — shutdown only unregisters the current id.
+    unregisterSessionModel(previousSessionId);
+    this.publishModelEnv();
     this.sessionData = sessionData;
+    this.clearSessionRestoreProjection();
+    this.pendingRecoveredAgentsNotice = null;
+    this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
+    // Pin the outgoing recorder to the session it wrote so late writes (a
+    // turn settling after this rotation) keep targeting that session's
+    // transcript instead of resolving the new session id from this Config.
+    outgoingChatRecordingService?.pinSessionIdentity(previousSessionId);
     this.chatRecordingService = this.chatRecordingEnabled
-      ? new ChatRecordingService(this)
+      ? this.createChatRecordingService()
       : undefined;
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
     // earlier in the *current* conversation. Carrying entries across
@@ -2137,6 +4038,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
@@ -2147,7 +4049,11 @@ export class Config {
     // one, and the "N-shotted" PR label would span sessions.
     CommitAttributionService.resetInstance();
     if (this.initialized) {
-      logStartSession(this, new StartSessionEvent(this));
+      logStartSession(
+        this,
+        new StartSessionEvent(this),
+        sessionData && isSessionTransition ? previousSessionId : undefined,
+      );
     }
 
     // Refresh the runtime.json sidecar so external observers (terminal
@@ -2160,27 +4066,47 @@ export class Config {
     // Only refresh when THIS process established its own sidecar at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id —
-    // mirrors kimi-cli PR #2082's "write only when a session is
+    // sidecar that happens to share the outgoing session id
+    // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
-      const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
-      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
-      const cliVersion = this.cliVersion ?? null;
-      const workDir = this.targetDir;
-      const newSessionId = this.sessionId;
-      void (async () => {
-        try {
+    if (isSessionTransition) {
+      if (this.runtimeStatusEnabled) {
+        const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+        const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+        const cliVersion = this.cliVersion ?? null;
+        const workDir = this.targetDir;
+        const newSessionId = this.sessionId;
+        this.queueRuntimeStatusWrite(async () => {
           await clearRuntimeStatus(oldPath);
           await writeRuntimeStatus(newPath, {
             sessionId: newSessionId,
             workDir,
             qwenVersion: cliVersion,
           });
-        } catch {
-          // ignored: best-effort cleanup
-        }
-      })();
+        });
+      }
+      if (this.sessionRegistryActive) {
+        const workDir = this.targetDir;
+        const newSessionId = this.sessionId;
+        // Keep the session registry in step: this PID's record would
+        // otherwise point discovery at the previous transcript. Keyed by
+        // PID, so a swap is a patch rather than a delete-and-rewrite.
+        //
+        // Gated on the registry lifecycle rather than the sidecar's
+        // `runtimeStatusEnabled`: the failure domains are independent.
+        // When registration is still pending, this patch queues behind it;
+        // when registration fails, `patchSessionRecord` no-ops on the
+        // missing record. Either way a sidecar failure cannot leave `ps`
+        // advertising the pre-/clear session id until exit.
+        //
+        // `name` is deliberately not patched: it is the handle a user
+        // just read out of `qwen sessions ps`, and re-deriving it here
+        // would rename a live session on every /clear for no gain — the
+        // directory it names has not changed.
+        this.queueSessionRegistryWrite(async () => {
+          await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
+        });
+      }
     }
 
     return this.sessionId;
@@ -2197,6 +4123,124 @@ export class Config {
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
+  }
+
+  /**
+   * Serializes initial registration with mid-session patches and cleanup.
+   * The registration promise is deliberately not awaited by UI startup.
+   */
+  trackSessionRegistration(registration: Promise<boolean>): void {
+    this.sessionRegistryActive = true;
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep registration independent from an earlier best-effort write.
+      })
+      .then(async () => {
+        this.sessionRegistered = await registration;
+        if (!this.sessionRegistered) this.sessionRegistryActive = false;
+      })
+      .catch(() => {
+        this.sessionRegistered = false;
+        this.sessionRegistryActive = false;
+      });
+  }
+
+  /** Drain queued patches, then remove this process's registered record. */
+  async unregisterSessionRegistry(): Promise<void> {
+    this.sessionRegistryActive = false;
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep cleanup alive after a best-effort patch failure.
+      })
+      .then(async () => {
+        if (!this.sessionRegistered) return;
+        this.sessionRegistered = false;
+        await unregisterSession();
+      })
+      .catch(() => {
+        // ignored: registry cleanup must not disrupt process teardown.
+      });
+    await this.sessionRegistryWrite;
+  }
+
+  private queueRuntimeStatusWrite(write: () => Promise<void>): void {
+    this.runtimeStatusWrite = this.runtimeStatusWrite
+      .catch(() => {
+        // Keep later writes alive after a best-effort sidecar failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: runtime status must not disrupt session control flow.
+      });
+  }
+
+  /**
+   * Queue a session-registry patch on its own serial chain.
+   *
+   * The chain is separate from `runtimeStatusWrite` and is deliberately
+   * never awaited by session-transition paths:
+   *
+   * - A sidecar write that rejects or hangs must not skip or block the
+   *   patch — the two target independent failure domains (project-local
+   *   `chats/` dir vs the global Qwen dir).
+   * - The patch writes the HOME filesystem, while `/cd` flushes the
+   *   sidecar chain: awaiting the patch there would hang `/cd` whenever
+   *   HOME stalls while the project directory is healthy. Registry
+   *   patches are best-effort by contract — `ps` settles a tick after
+   *   the transition returns. Process cleanup drains the chain before
+   *   unregistering so a late patch cannot recreate the deleted record.
+   *
+   * Patches still serialize among themselves so back-to-back /clear and
+   * /cd transitions cannot interleave their read-modify-write.
+   */
+  private queueSessionRegistryWrite(write: () => Promise<void>): void {
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep later patches alive after a best-effort patch failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: registry patches must not disrupt session control flow.
+      });
+  }
+
+  private async flushRuntimeStatusWrites(): Promise<void> {
+    await this.runtimeStatusWrite.catch(() => {
+      // ignored: runtime status is best-effort.
+    });
+  }
+
+  private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
+    const sessionId = this.sessionId;
+    // The sidecar write and the registry patch ride separate chains
+    // (see queueSessionRegistryWrite): a sidecar failure on the
+    // project filesystem must neither skip the patch nor hang `/cd` on
+    // the HOME write. The failure domains are independent.
+    if (this.runtimeStatusEnabled) {
+      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
+      this.queueRuntimeStatusWrite(async () => {
+        await writeRuntimeStatus(sidecarPath, {
+          sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        });
+      });
+    }
+    if (this.sessionRegistryActive) {
+      this.queueSessionRegistryWrite(async () => {
+        // The registry's DIRECTORY column is how a user tells two live
+        // sessions apart, so a mid-session directory switch has to reach
+        // it too — otherwise `qwen sessions ps` keeps advertising the
+        // folder this session left. Unlike the /clear path, `name`
+        // follows: it is derived from the directory's basename, which is
+        // exactly what changed here.
+        await patchSessionRecord({
+          cwd: workDir,
+          name: deriveSessionName(workDir, sessionId),
+        });
+      });
+    }
+    await this.flushRuntimeStatusWrites();
   }
 
   /**
@@ -2239,6 +4283,24 @@ export class Config {
     );
   }
 
+  getCurrentModelRegistryBaseUrl(): string | null | undefined {
+    return this.modelsConfig.getCurrentRegistryBaseUrl();
+  }
+
+  /**
+   * Resolve the effective input modalities of the current primary model. The
+   * content generator config always carries resolved modalities (name-based
+   * detection fills them in, defaulting unknown models to text-only), which is
+   * the same source the file reader uses to decide media support. Used to
+   * decide whether the vision bridge should run.
+   *
+   * @returns The resolved input modalities. Unknown models are treated as
+   * text-only so bridge features can conservatively adapt image inputs.
+   */
+  getEffectiveInputModalities(): InputModalities {
+    return this.getContentGeneratorConfig()?.modalities ?? {};
+  }
+
   /**
    * Get the human-readable display name for the currently selected model.
    * Resolves the model id to its name from the model registry.
@@ -2256,10 +4318,67 @@ export class Config {
   }
 
   private notifyModelChangeListeners(): void {
+    this.publishModelEnv();
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
     }
+  }
+
+  // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
+  // has no other authoritative source: settings files miss /model switches and
+  // describe the wrong home under QWEN_HOME isolation. Published per session —
+  // every Config writes its OWN session's model, keyed on sessionId exactly
+  // like the project dir, so in daemon mode each session's subprocesses read
+  // theirs, not the first session's (a process-global slot alone would hold
+  // whichever session booted first). The process-global slot is the
+  // single-session CLI fallback, gated on the claiming instance so a throwaway
+  // Config never clobbers the live session's value there.
+  private publishModelEnv(): void {
+    if (!process.env) {
+      return;
+    }
+    const model = this.getModel();
+    // Both registered per session: the identity is what /review's same-model
+    // gate compares, and in daemon mode one process-global slot holds
+    // whichever session booted first — handing a later session that value
+    // would qualify its model with ANOTHER session's provider, which passes
+    // gates the bare id would have failed.
+    registerSessionModel(this.sessionId, model, this.resolvedModelIdentity());
+    if (this.ownsModelEnvSlot) {
+      process.env['QWEN_CODE_MODEL'] = model;
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = this.resolvedModelIdentity();
+    }
+  }
+
+  /**
+   * The active model qualified by WHERE it resolves — what a bare id cannot
+   * say.
+   *
+   * A model id is unique only inside one provider configuration: two auth
+   * types, or two registry endpoints, can expose the same name over different
+   * underlying models. Anything that treats "same id" as "same model" is
+   * wrong across such a pair, and /review's incremental anchor is exactly
+   * that kind of consumer — it skips code on the strength of "the same model
+   * already reviewed this". The discriminators are hashed rather than spelled
+   * out because the value is persisted and displayed: a base URL can carry a
+   * tenant or a token-bearing host, and eight hex characters separate the
+   * configurations without publishing where they point. The bare id stays the
+   * readable half, so a mismatch still names the model a human recognises.
+   */
+  private resolvedModelIdentity(): string {
+    const model = this.getModel();
+    const authType = this.getContentGeneratorConfig()?.authType ?? '';
+    const baseUrl =
+      this.getContentGeneratorConfig()?.baseUrl ??
+      this.getCurrentModelRegistryBaseUrl() ??
+      '';
+    if (authType === '' && baseUrl === '') return model;
+    const digest = createHash('sha256')
+      .update(`${authType}\u0000${baseUrl}`)
+      .digest('hex')
+      .slice(0, 8);
+    return `${model}@${digest}`;
   }
 
   /**
@@ -2274,7 +4393,15 @@ export class Config {
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
-    if (!available.some((m) => m.id === selector.modelId)) {
+    if (
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
       return undefined;
     }
 
@@ -2284,13 +4411,33 @@ export class Config {
       : selector.modelId;
   }
 
+  /**
+   * Settings for the built-in WebSearch tool. Undefined when the feature was
+   * never configured.
+   */
+  getWebSearchSettings(): WebSearchSettings | undefined {
+    return this.webSearchSettings;
+  }
+
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
+      const rawSelector = resolveModelId(this.fastModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare fast model resolution',
+        );
+        return undefined;
+      }
+
       return resolveModelId(this.fastModel, {
-        currentAuthType: this.getContentGeneratorConfig()?.authType,
-        getAvailableModels: (authTypes) =>
-          this.getAllConfiguredModels(authTypes),
+        currentAuthType,
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
       });
     } catch {
       return undefined;
@@ -2303,6 +4450,347 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  /**
+   * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * same-provider auto-select.
+   */
+  setVisionModel(model: string | undefined): void {
+    this.visionModel = model || undefined;
+  }
+
+  /**
+   * Resolve the compaction model for chat compression (auto-compaction).
+   * Priority: compactionModel (if set) → main model.
+   */
+  getCompactionModel(): string | undefined {
+    const selector = this.resolveCompactionModelSelector();
+    if (selector) {
+      const available = selector.authType
+        ? this.getAllConfiguredModels([selector.authType])
+        : this.getAllConfiguredModels();
+      if (
+        !available.some(
+          (m) =>
+            m.id === selector.modelId &&
+            !m.fastOnly &&
+            !m.voiceOnly &&
+            !m.imageOnly &&
+            !m.visionOnly,
+        )
+      ) {
+        return undefined;
+      }
+      const rawSelector = resolveModelId(this.compactionModel);
+      return rawSelector?.authType
+        ? `${rawSelector.authType}:${selector.modelId}`
+        : selector.modelId;
+    }
+    return this.getModel();
+  }
+
+  private resolveCompactionModelSelector() {
+    if (!this.compactionModel) return undefined;
+    try {
+      const rawSelector = resolveModelId(this.compactionModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare compaction model resolution',
+        );
+        return undefined;
+      }
+
+      return resolveModelId(this.compactionModel, {
+        currentAuthType,
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Update the compaction model at runtime (e.g. `/model --compaction <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * the main model.
+   */
+  setCompactionModel(model: string | undefined): void {
+    this.compactionModel = model || undefined;
+  }
+
+  /**
+   * Update the image generation model and make the tool available immediately
+   * when the selected provider route is valid.
+   */
+  async setImageModel(model: string | undefined): Promise<void> {
+    this.imageModel = model || undefined;
+    if (!this.initialized || !this.isImageGenerationEnabled()) {
+      return;
+    }
+    await this.registerImageGenerationTool(this.toolRegistry);
+    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+  }
+
+  /**
+   * Return the ordered list of fallback model IDs configured for this session.
+   * The list is already normalized (deduplicated, capped at 3, blanks removed).
+   * Returns an empty array when no fallbacks are configured.
+   */
+  getModelFallbacks(): readonly string[] {
+    return this.modelFallbacks;
+  }
+
+  /**
+   * Read the active reasoning-effort tier from the live content-generator
+   * config. Returns undefined when thinking is disabled (`reasoning: false`) or
+   * no tier is set (the model/provider default applies).
+   */
+  getReasoningEffort(): ReasoningEffort | undefined {
+    const reasoning = this.getContentGeneratorConfig()?.reasoning;
+    // `!reasoning` already covers both `false` and `undefined` (both falsy).
+    if (!reasoning) {
+      return undefined;
+    }
+    return reasoning.effort;
+  }
+
+  /**
+   * Return a higher-priority static DashScope knob that shadows the current
+   * global effort on qwen3.8-max, so interactive callers can report the
+   * effective outcome instead of confirming a tier that will not reach the
+   * wire. The provider resolves extra_body before samplingParams before the
+   * unified reasoning setting; same-layer explicit effort still wins budget.
+   */
+  getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
+    const cfg = this.getContentGeneratorConfig();
+    if (
+      !cfg ||
+      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
+      !isTieredEffortWireModel(cfg.model)
+    ) {
+      return undefined;
+    }
+
+    const currentEffort = this.getReasoningEffort();
+    const selected = selectDashScopeThinkingKnob(
+      cfg.model,
+      cfg.extra_body,
+      cfg.samplingParams,
+      currentEffort,
+    );
+    if (
+      !selected ||
+      selected.source === 'reasoning' ||
+      (selected.field === 'reasoning_effort' &&
+        selected.value === currentEffort)
+    ) {
+      return undefined;
+    }
+    if (selected.field === 'enable_thinking' && selected.value === true) {
+      // An on-switch never blocks the tier — the wire drops the switch and
+      // ships it — so only a request-level effort override can still shadow
+      // the current tier from under it.
+      if (selected.source !== 'extra_body') {
+        return undefined;
+      }
+      const below = selectDashScopeThinkingKnob(
+        cfg.model,
+        undefined,
+        cfg.samplingParams,
+        currentEffort,
+      );
+      if (
+        below?.source === 'samplingParams' &&
+        below.field === 'reasoning_effort' &&
+        below.value !== currentEffort
+      ) {
+        return { source: below.source, field: below.field };
+      }
+      return undefined;
+    }
+    return { source: selected.source, field: selected.field };
+  }
+
+  /**
+   * Update the reasoning-effort tier at runtime (e.g. `/effort high`). The
+   * request pipeline reads `reasoning.effort` per request, so mutating the live
+   * config in place takes effect on the next turn without an auth refresh.
+   * Provider adapters clamp the tier to what the active model supports. Pass
+   * undefined to clear the override and fall back to the model/provider default.
+   *
+   * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
+   * cannot silently re-enable it.
+   */
+  setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    const applyEffort = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (!cfg || cfg.reasoning === false) {
+        return;
+      }
+      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
+        ...(cfg.reasoning ?? {}),
+      };
+      if (effort) {
+        next.effort = effort;
+      } else {
+        delete next.effort;
+      }
+      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
+      // sibling budget_tokens) collapses `reasoning` back to undefined rather
+      // than leaving an empty `{}` — an empty object is truthy, so downstream
+      // `if (cfg.reasoning)` checks would treat reasoning as active and the
+      // pipeline would emit `reasoning: {}` as wire noise.
+      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+    };
+    // The main session and a runtime (sub-agent) content generator may hold
+    // distinct config objects; update whichever the request path reads.
+    applyEffort(this.contentGeneratorConfig);
+    const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+    if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+      applyEffort(runtimeCfg);
+    }
+    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
+    applyEffort(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
+   * Whether `model` is the same entry as the current primary model — matched on
+   * the provider identity (auth type, and baseUrl when both carry one), not just
+   * the bare id. The vision bridge must never route at the primary (it's the
+   * text-only model the bridge works around), but a cross-provider namesake —
+   * the same bare id on another provider/endpoint, e.g. `anthropic:shared-model`
+   * vs an `openai` `shared-model` primary — is a different model and stays
+   * eligible. When the primary's auth type is unknown we can't disambiguate, so
+   * fall back to a conservative bare-id match (never risk hitting the primary).
+   */
+  isCurrentPrimaryModel(model: AvailableModel): boolean {
+    if (model.id !== this.getModel()) return false;
+    const cfg = this.getContentGeneratorConfig();
+    const primaryAuthType = cfg?.authType;
+    if (primaryAuthType === undefined) return true;
+    if (model.authType !== primaryAuthType) return false;
+    const primaryBaseUrl = cfg?.baseUrl;
+    if (primaryBaseUrl !== undefined && model.baseUrl !== undefined) {
+      return model.baseUrl === primaryBaseUrl;
+    }
+    return true;
+  }
+
+  /**
+   * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
+   * bridge selection. The selected id is auth-qualified so `runSideQuery`
+   * resolves the exact provider route; the endpoint is looked up for the egress
+   * notice. Returns `undefined` (so the caller falls back to
+   * same-provider auto-select) when no explicit model is set, the selector can't
+   * be parsed, the pinned model isn't actually configured, or it points at the
+   * text-only primary itself — those guards keep a stale/typo'd pin from firing
+   * the bridge at an unreachable, or non-image-capable, model.
+   */
+  private resolveVisionModelSelection():
+    | VisionBridgeModelSelection
+    | undefined {
+    if (!this.visionModel) return undefined;
+    const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
+    const parsedSetting = parseVisionModelSetting(this.visionModel);
+    if (!parsedSetting) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    let selector;
+    try {
+      selector = resolveModelId(parsedSetting.selector);
+    } catch {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    if (!selector) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' resolved to no selector; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    // Each guard below silently drops the pin (the hardest failure mode to
+    // debug, hence the warn): skip selector-only models (a `settings.json`
+    // pin can bypass the slash command's filter), and never route the bridge at
+    // the primary entry itself (the text-only model the bridge works around) —
+    // via the provider-aware identity check so a cross-provider namesake stays
+    // eligible.
+    const routeMatches = this.getAllConfiguredModels().filter(
+      (m) =>
+        m.id === selector.modelId &&
+        (!selector.authType || m.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !m.imageOnly &&
+        !this.isCurrentPrimaryModel(m),
+    );
+    if (routeMatches.length > 1) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' matched multiple configured routes; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const match = routeMatches[0];
+    if (!match) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
+          `(removed, mistyped, selector-only, or the primary itself); falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const agentCapable = isFullTurnVisionCapable(match);
+    return {
+      id: getQualifiedVisionModelId(match),
+      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      }),
+      ...(agentCapable && { agentCapable: true }),
+    };
+  }
+
+  /**
+   * The vision bridge model: the explicit `visionModel` (`/model --vision`) when
+   * set, otherwise an auto-picked image-capable model on the SAME provider as
+   * the text-only primary (see {@link selectVisionBridgeModel} — auto-select
+   * never reaches across providers; an explicit override may). `runSideQuery`
+   * resolves the chosen model's credentials by id.
+   *
+   * @returns The bridge model selection, or `undefined`.
+   */
+  getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const explicit = this.resolveVisionModelSelection();
+    if (explicit) return explicit;
+    const contentGeneratorConfig = this.getContentGeneratorConfig();
+    return selectVisionBridgeModel(
+      this.getModel(),
+      this.getAllConfiguredModels(),
+      {
+        authType: contentGeneratorConfig?.authType,
+        baseUrl: contentGeneratorConfig?.baseUrl,
+      },
+    );
+  }
+
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Resolves the `visionBridgeTimeoutMs` setting; `undefined` means the
+   * bridge's built-in default applies.
+   */
+  getVisionBridgeTimeoutMs(): number | undefined {
+    return this.visionBridgeTimeoutMs;
   }
 
   /**
@@ -2333,6 +4821,13 @@ export class Config {
       return;
     }
 
+    // Reasoning effort is a global, model-independent preference (set via
+    // /effort). Capture it before the rebuild and re-apply after, so switching
+    // models never silently drops the user's chosen effort — neither the
+    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
+    // full refresh path (which rebuilds the config from scratch).
+    const priorReasoningEffort = this.getReasoningEffort();
+
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.
@@ -2357,15 +4852,35 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
+      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
+      // preference captured in `priorReasoningEffort` above and re-applied via
+      // setReasoningEffort() below. Do not add `reasoning` here — that would
+      // overwrite the live tier with the new model's default and make the
+      // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.forceGlobalCacheScope =
+        config.forceGlobalCacheScope;
+      this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
+      this.contentGeneratorConfig.cacheRetentionByBlock =
+        config.cacheRetentionByBlock;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
+      this.contentGeneratorConfig.toolResultContentFormat =
+        config.toolResultContentFormat;
+      // Modalities are model-derived: a hot switch between oauth models with
+      // different image support must update them, or the vision-bridge gate and
+      // image-stripping read the previous model's modalities.
+      this.contentGeneratorConfig.modalities = config.modalities;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('modalities' in sources) {
+        this.contentGeneratorConfigSources['modalities'] =
+          sources['modalities'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -2375,6 +4890,18 @@ export class Config {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
       }
+      if ('forceGlobalCacheScope' in sources) {
+        this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
+          sources['forceGlobalCacheScope'];
+      }
+      if ('cacheRetention' in sources) {
+        this.contentGeneratorConfigSources['cacheRetention'] =
+          sources['cacheRetention'];
+      }
+      if ('cacheRetentionByBlock' in sources) {
+        this.contentGeneratorConfigSources['cacheRetentionByBlock'] =
+          sources['cacheRetentionByBlock'];
+      }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
           sources['contextWindowSize'];
@@ -2383,11 +4910,30 @@ export class Config {
         this.contentGeneratorConfigSources['splitToolMedia'] =
           sources['splitToolMedia'];
       }
+      if ('toolResultContentFormat' in sources) {
+        this.contentGeneratorConfigSources['toolResultContentFormat'] =
+          sources['toolResultContentFormat'];
+      }
+      if (priorReasoningEffort) {
+        this.setReasoningEffort(priorReasoningEffort);
+      }
+      resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
-    // Full refresh path
+    // Full refresh path. `refreshAuth` re-applies the reasoning effort it
+    // captures, but on a model *switch* that capture is already stale: the
+    // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
+    // modelsConfig's `reasoning` with the new model's preset (undefined for most
+    // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
+    // cannot restore the tier. Re-apply here from `priorReasoningEffort`, which
+    // we captured off the still-intact live contentGeneratorConfig above. This is
+    // a no-op when the new model disables thinking (`reasoning: false`), since
+    // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
   }
 
   /**
@@ -2412,6 +4958,19 @@ export class Config {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * Get the fully resolved provider model config (generationConfig defaults
+   * applied) for a specific modelProviders entry.
+   * Delegates to ModelsConfig.
+   */
+  getResolvedModelConfig(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelsConfig.getResolvedModel(authType, modelId, baseUrl);
   }
 
   /**
@@ -2445,6 +5004,10 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getMaxSubagentDepth(): number {
+    return this.maxSubagentDepth;
   }
 
   getMaxWallTimeSeconds(): number {
@@ -2484,6 +5047,208 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  private getCurrentSessionArtifactMoves(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): Array<{ from: string; to: string }> {
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    return [
+      `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
+      `${this.sessionId}.worktree.json`,
+    ].map((fileName) => ({
+      from: path.join(oldChatsDir, fileName),
+      to: path.join(newChatsDir, fileName),
+    }));
+  }
+
+  private moveFile(from: string, to: string): void {
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw error;
+      }
+      let copied = false;
+      try {
+        fs.copyFileSync(from, to);
+        copied = true;
+        fs.unlinkSync(from);
+      } catch (fallbackError) {
+        if (copied) {
+          try {
+            fs.unlinkSync(to);
+          } catch {
+            // Best-effort cleanup; surface the original fallback failure.
+          }
+        }
+        throw fallbackError;
+      }
+    }
+  }
+
+  private moveCurrentSessionArtifacts(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): void {
+    const moved: Array<{ from: string; to: string }> = [];
+    for (const { from, to } of this.getCurrentSessionArtifactMoves(
+      oldStorage,
+      newStorage,
+    )) {
+      if (!fs.existsSync(from)) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      try {
+        this.moveFile(from, to);
+        moved.push({ from, to });
+      } catch (error) {
+        for (const movedArtifact of moved.reverse()) {
+          try {
+            fs.mkdirSync(path.dirname(movedArtifact.from), {
+              recursive: true,
+            });
+            this.moveFile(movedArtifact.to, movedArtifact.from);
+          } catch (rollbackError) {
+            this.debugLogger.warn(
+              'Failed to roll back moved session artifact',
+              rollbackError,
+            );
+          }
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async prepareSessionArtifactMigration(
+    oldStorage: Storage,
+    newStorage: Storage,
+    oldDir: string,
+    opts?: { skipProcessChdir?: boolean },
+  ): Promise<void> {
+    try {
+      this.chatRecordingService?.finalize();
+      await this.chatRecordingService?.flush();
+    } catch (error) {
+      this.debugLogger.debug(
+        'Continuing session artifact migration after chat recording settle failed:',
+        error,
+      );
+    }
+    await this.flushRuntimeStatusWrites();
+    try {
+      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+    } catch (error) {
+      if (!opts?.skipProcessChdir) {
+        try {
+          process.chdir(oldDir);
+        } catch (rollbackError) {
+          this.debugLogger.warn(
+            'Failed to roll back working directory after session artifact migration failed',
+            rollbackError,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  async relocateWorkingDirectory(
+    newDir: string,
+    expectedCanonicalDir?: string,
+    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
+  ): Promise<{
+    memoryRefreshError?: unknown;
+    mcpRefreshError?: unknown;
+  }> {
+    if (
+      !opts?.skipArtifactMigration &&
+      this.chatRecordingService?.hasWriteOwnership()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    const oldDir = opts?.skipProcessChdir
+      ? this.cwd
+      : fs.realpathSync(process.cwd());
+    const targetPath = path.resolve(newDir);
+    const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
+    if (!fs.statSync(targetPath).isDirectory()) {
+      throw new Error(`Path is not a directory: ${targetPath}`);
+    }
+    const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
+      expected,
+      this.explicitIncludeDirectories,
+    );
+
+    if (!opts?.skipProcessChdir) {
+      process.chdir(targetPath);
+      const actualCwd = fs.realpathSync(process.cwd());
+      if (actualCwd !== expected) {
+        process.chdir(oldDir);
+        throw new Error(
+          `Changed directory to ${actualCwd}, expected ${expected}.`,
+        );
+      }
+    } else {
+      // ACP path: validate realpath matches expected without calling
+      // process.chdir — guards against TOCTOU swaps between the trust
+      // check and the config state update.
+      const actualCanonical = fs.realpathSync(targetPath);
+      if (actualCanonical !== expected) {
+        throw new Error(
+          `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
+        );
+      }
+    }
+
+    const oldStorage = this.storage;
+    if (!opts?.skipArtifactMigration) {
+      const newStorage = new Storage(expected, this.sessionRuntimeBaseDir);
+      await this.prepareSessionArtifactMigration(
+        oldStorage,
+        newStorage,
+        oldDir,
+        opts,
+      );
+      this.storage = newStorage;
+      this.chatRecordingService?.resetStoragePaths();
+    }
+
+    this.backgroundTaskRegistry.disposeResidentAgents();
+    this.targetDir = expected;
+    this.cwd = expected;
+    resetPreloadedContentGenerator(this.contentGenerator);
+    await this.refreshCurrentRuntimeStatus(expected);
+    this.workspaceContext.applyRootDirectories(workspaceDirectories);
+    this.fileDiscoveryService = null;
+    this.sessionService = undefined;
+    this.fileHistoryService = undefined;
+    this.getFileReadCache().clear();
+
+    let memoryRefreshError: unknown;
+    try {
+      await this.refreshHierarchicalMemory();
+    } catch (error) {
+      memoryRefreshError = error;
+    }
+
+    let mcpRefreshError: unknown;
+    try {
+      await this.waitForMcpReady();
+      await this.refreshMcpServers();
+    } catch (error) {
+      mcpRefreshError = error;
+    }
+
+    return {
+      ...(memoryRefreshError !== undefined && { memoryRefreshError }),
+      ...(mcpRefreshError !== undefined && { mcpRefreshError }),
+    };
   }
 
   /**
@@ -2530,20 +5295,142 @@ export class Config {
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(options?: {
+    shutdownTelemetry?: boolean;
+    skipSessionWriter?: boolean;
+    strictResourceCleanup?: boolean;
+  }): Promise<void> {
+    this.shutdownRequested = true;
+    this.settingsWatcher?.stopWatching();
+    const closeWriter = () =>
+      this.closeSessionWriter().catch((error) => {
+        this.debugLogger.error(
+          'Failed to release session writer lease:',
+          error,
+        );
+      });
+    const earlyWriterClose =
+      !options?.skipSessionWriter &&
+      this.initializationPromise !== undefined &&
+      !this.initializationSucceeded
+        ? closeWriter()
+        : undefined;
+
     try {
+      if (!options?.skipSessionWriter && !earlyWriterClose) {
+        try {
+          this.chatRecordingService?.finalize();
+          await this.chatRecordingService?.flush();
+        } catch {
+          // Best-effort — don't block shutdown
+        }
+      }
+
+      try {
+        await this.shutdownResources(options?.strictResourceCleanup === true);
+      } catch (error) {
+        if (options?.strictResourceCleanup) throw error;
+      }
+    } finally {
+      if (!options?.skipSessionWriter) {
+        await (earlyWriterClose ?? closeWriter());
+      }
+      this.chatRecordingFailureListeners.clear();
+      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
+    }
+  }
+
+  private async shutdownResources(
+    waitForInitialization: boolean,
+  ): Promise<void> {
+    if (waitForInitialization) {
+      try {
+        await this.initializationPromise;
+      } catch {
+        // Partial initialization still needs resource cleanup.
+      }
+    } else if (this.initializationPromise && !this.initializationSettled) {
+      this.scheduleResourceShutdownAfterInitialization();
+      return;
+    }
+    return this.runResourceShutdown();
+  }
+
+  private scheduleResourceShutdownAfterInitialization(): void {
+    if (
+      this.resourceShutdownAfterInitializationScheduled ||
+      !this.initializationPromise
+    ) {
+      return;
+    }
+    this.resourceShutdownAfterInitializationScheduled = true;
+    void this.initializationPromise
+      .then(
+        () => this.runResourceShutdown(),
+        () => this.runResourceShutdown(),
+      )
+      .catch((error) => {
+        this.debugLogger.error(
+          'Deferred Config resource cleanup failed:',
+          error,
+        );
+      });
+  }
+
+  private runResourceShutdown(): Promise<void> {
+    if (this.resourceShutdownPromise) {
+      return this.resourceShutdownPromise;
+    }
+    const shutdown = this.shutdownResourcesOnce();
+    this.resourceShutdownPromise = shutdown;
+    const clear = () => {
+      if (this.resourceShutdownPromise === shutdown) {
+        this.resourceShutdownPromise = undefined;
+      }
+    };
+    void shutdown.then(clear, clear);
+    return shutdown;
+  }
+
+  private async shutdownResourcesOnce(): Promise<void> {
+    try {
+      this.clearSessionRestoreProjection();
+      // Drop this session's project-dir registry entry. It is registered during
+      // initialization, so it is released here whenever that step completed —
+      // in daemon mode, where one process serves many sessions, an unreleased
+      // entry per session is a leak that grows for the life of the process.
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
+      // Drop this session's model registry entry. It is registered at
+      // construction (publishModelEnv), so it is released on every shutdown —
+      // same daemon-mode leak rationale as the project dir above.
+      unregisterSessionModel(this.sessionId);
+
+      if (Object.hasOwn(this, 'goalRuntime')) {
+        this.rejectGoalRestoreActivation?.(
+          new GoalPersistenceUnavailableError('Goal runtime disposed'),
+        );
+        this.goalRestoreActivation = undefined;
+        this.rejectGoalRestoreActivation = undefined;
+        this.goalTurnHostUnbind?.();
+        this.goalTurnHostUnbind = undefined;
+        // Shutting down before the writer arrived: nothing will ever run
+        // the deferred restore, so settle it rather than strand awaiters.
+        this.settlePendingGoalRestore(
+          new GoalPersistenceUnavailableError(
+            'Config shut down before the session writer became available',
+          ),
+        );
+        this.goalRuntime?.dispose();
+      }
+
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
-      }
-
-      // Finalize the current session's metadata before cleanup, then drain
-      // the async write queue so no records are lost on exit.
-      try {
-        this.chatRecordingService?.finalize();
-        await this.chatRecordingService?.flush();
-      } catch {
-        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();
@@ -2555,20 +5442,22 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
     } catch (error) {
-      // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
-    } finally {
-      if (isTelemetrySdkInitialized()) {
-        await shutdownTelemetry();
-      }
+      throw error;
     }
   }
 
   getPromptRegistry(): PromptRegistry {
     return this.promptRegistry;
+  }
+
+  getResourceRegistry(): ResourceRegistry {
+    return this.resourceRegistry;
   }
 
   getDebugMode(): boolean {
@@ -2584,7 +5473,14 @@ export class Config {
   }
 
   getAppendSystemPrompt(): string | undefined {
-    return this.appendSystemPrompt;
+    const parts = [this.appendSystemPrompt, this.liveAppendSystemPrompt].filter(
+      (part): part is string => Boolean(part?.trim()),
+    );
+    return parts.length > 0 ? parts.join('\n\n') : undefined;
+  }
+
+  setLiveAppendSystemPrompt(prompt: string | undefined): void {
+    this.liveAppendSystemPrompt = prompt;
   }
 
   /** @deprecated Use getPermissionsAllow() instead. */
@@ -2600,8 +5496,8 @@ export class Config {
    *
    * This merges all sources so that PermissionManager receives a single,
    * authoritative list:
-   *   - settings.permissions.allow  (persistent rules from all scopes)
-   *   - allowedTools param  (SDK / argv auto-approve list)
+   *   - settings.permissions.allow (persistent rules from all scopes)
+   *   - allowedTools param (SDK / argv auto-approve list)
    *
    * Note: coreTools is intentionally excluded here — it has whitelist semantics
    * (only listed tools are registered), not auto-approve semantics. It is
@@ -2630,8 +5526,8 @@ export class Config {
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
-   *   - settings.permissions.deny  (persistent rules from all scopes)
-   *   - excludeTools param  (SDK / argv blocklist)
+   *   - settings.permissions.deny (persistent rules from all scopes)
+   *   - excludeTools param (SDK / argv blocklist)
    *
    * CLI callers pre-merge argv.excludeTools into permissionsDeny.
    */
@@ -2672,14 +5568,85 @@ export class Config {
   }
 
   /**
+   * Returns skill discovery levels excluded through
+   * `settings.skills.disabledLevels`.
+   */
+  getDisabledSkillLevels(): ReadonlySet<SkillLevel> {
+    return this.disabledSkillLevels;
+  }
+
+  /**
+   * Returns additional skill directories from `settings.skills.directories`.
+   * Paths are raw (unexpanded); consumers must handle `~` expansion
+   * (see `SkillManager.getSkillsBaseDirs`).
+   */
+  getCustomSkillDirs(): readonly string[] {
+    return this.customSkillDirs;
+  }
+
+  /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics: the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * Deferred-tool names that should be visible from session start.
+   * Sourced from `settings.tools.visible`.
+   *
+   * These tools bypass `shouldDefer` in `getFunctionDeclarations()`
+   * and are excluded from `getDeferredToolSummary()` so they appear
+   * as first-class tools to the model.
+   */
+  getVisibleTools(): ReadonlySet<string> {
+    return this.visibleTools;
+  }
+
+  /**
+   * Percentage of the context window used as the session-start budget for
+   * preloading deferred tools. See
+   * {@link ConfigParameters.toolSearchThreshold}.
+   */
+  getToolSearchThreshold(): number {
+    return this.toolSearchThreshold;
+  }
+
+  /**
+   * Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {
@@ -2690,8 +5657,62 @@ export class Config {
     return this.mcpServerCommand;
   }
 
-  getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    let mcpServers = { ...(this.mcpServers || {}) };
+  /**
+   * optional workspace-shared MCP transport pool
+   * injected by the daemon-mode `QwenAgent`. When set, the wrapping
+   * `ToolRegistry` threads it into `McpClientManager`, which delegates
+   * non-SDK MCP server discovery to the pool instead of spawning its
+   * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
+   * this `undefined` and the manager keeps its previous behavior.
+   *
+   * Eagerly instantiated by `QwenAgent` (per Q6 resolved); the
+   * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
+   * until the first `acquire()` from a session.
+   */
+  private mcpTransportPool?: import('../tools/mcp-transport-pool.js').McpTransportPool;
+
+  setMcpTransportPool(
+    pool: import('../tools/mcp-transport-pool.js').McpTransportPool | undefined,
+  ): void {
+    this.mcpTransportPool = pool;
+  }
+
+  getMcpTransportPool():
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
+    return this.mcpTransportPool;
+  }
+
+  /**
+   * T2.8: return the raw settings-layer MCP servers map (without the
+   * runtime overlay or extension contributions). Used by
+   * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
+   * settings (a runtime entry whose name collides with a pre-existing
+   * settings entry).
+   */
+  getSettingsMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.mcpServers;
+  }
+
+  /**
+   * Session-injected + `--mcp-config` ("top-tier") servers captured at boot, so
+   * the hot-reload subscriber can re-assemble the effective MCP map exactly the
+   * way boot did. See sub-task 3 and `assembleMcpServers`.
+   */
+  getTopTierMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.topTierMcpServers;
+  }
+
+  /**
+   * The merged MCP server map (settings + extensions + runtime overlay) WITHOUT
+   * any admission filtering. `getMcpServers()` is this map with the
+   * `allowedMcpServers` filter applied; the unfiltered form is what tells us a
+   * server is "configured" regardless of allow-list / excluded / pending gating
+   * (used to classify why a server is unavailable — see
+   * {@link getMcpServerUnavailableReason}).
+   */
+  private getMergedMcpServers(): Record<string, MCPServerConfig> {
+    const mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
       Object.entries(extension.config.mcpServers || {}).forEach(
@@ -2705,10 +5726,31 @@ export class Config {
       );
     }
 
+    // T2.8 — runtime layer wins over settings + extensions (shadow semantics)
+    for (const [name, cfg] of this.runtimeMcpServers) {
+      mcpServers[name] = cfg;
+    }
+
+    return mcpServers;
+  }
+
+  getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
+    // project `.mcp.json`) — not the caller's own explicit, per-invocation
+    // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
+    // `--mcp-config`) is that explicit request, so it survives safe mode;
+    // everything `getMergedMcpServers()` would otherwise fold in does not.
+    // Still runs through the `allowedMcpServers` filter below like any other
+    // source — safe mode isn't an exemption from a session's own
+    // `--allowed-mcp-server-names` upper bound (Copilot review, PR #7827).
+    let mcpServers = this.isSafeMode()
+      ? { ...this.topTierMcpServers }
+      : this.getMergedMcpServers();
+
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
-          this.allowedMcpServers?.includes(key),
+          matchesAnyServerPattern(key, this.allowedMcpServers),
         ),
       );
     }
@@ -2728,8 +5770,56 @@ export class Config {
     this.excludedMcpServers = excluded;
   }
 
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
+  }
+
   isMcpServerDisabled(serverName: string): boolean {
-    return this.excludedMcpServers?.includes(serverName) ?? false;
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return true;
+    // Extension-bundled servers can be disabled individually via extension
+    // preferences. Only the extension that actually contributed the server is
+    // consulted, so a same-named server from another source (e.g. a shadowing
+    // user config) is never affected. The owner lookup mirrors the
+    // getMcpServers() merge (user/project config wins, then first active
+    // extension) without rebuilding the merged map — this predicate runs per
+    // server in discovery loops and on every resource read.
+    if (this.mcpServers?.[serverName]) return false;
+    for (const extension of this.getActiveExtensions()) {
+      if (extension.config.mcpServers?.[serverName]) {
+        return (
+          this.extensionManager
+            ?.getDisabledMcpServers(extension.config.name)
+            .includes(serverName) ?? false
+        );
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True for a project-scoped (`.mcp.json`) server that the user has not
+   * approved (pending or rejected). The discovery layer skips these BEFORE any
+   * stdio spawn / transport / health check, so inspecting an untrusted
+   * `.mcp.json` has no side effects. See issue #4615.
+   */
+  isMcpServerPendingApproval(serverName: string): boolean {
+    return this.pendingMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * Drop a project server from the pending-approval set after the user approves
+   * it mid-session (via the startup dialog), so a subsequent
+   * `discoverToolsForServer` connects it instead of skipping it. See issue
+   * #4615. No-op for servers that were never pending.
+   */
+  approveMcpServerForSession(serverName: string): void {
+    if (!this.pendingMcpServers) {
+      return;
+    }
+    this.pendingMcpServers = this.pendingMcpServers.filter(
+      (name) => name !== serverName,
+    );
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
@@ -2737,6 +5827,257 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Replace the settings-layer MCP server map at runtime (hot-reload).
+   * Unlike {@link addMcpServers}, this bypasses the `initialized` guard and
+   * REPLACES (not merges) so removals take effect. The runtime overlay
+   * ({@link addRuntimeMcpServer}) and extension contributions are unaffected —
+   * {@link getMcpServers} still layers them on top. See sub-task 3.
+   */
+  setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    this.mcpServers = servers;
+  }
+
+  /**
+   * Replace the allow-list of MCP server names at runtime (hot-reload). When
+   * set, {@link getMcpServers} only yields servers whose name is in this list.
+   * `allowedMcpServers` is consulted as a filter inside `getMcpServers()`, so
+   * without this setter an allow-list edit would silently require a restart.
+   */
+  setAllowedMcpServers(allowed: string[] | undefined): void {
+    this.allowedMcpServers = allowed;
+  }
+
+  getAllowedMcpServers(): string[] | undefined {
+    return this.allowedMcpServers;
+  }
+
+  /**
+   * The startup `--allowed-mcp-server-names` upper bound (the CLI flag only),
+   * or undefined if the flag was not passed. The hot-reload recompute caps the
+   * settings-derived allow-list to this so a runtime settings edit can narrow
+   * MCP admission but never widen it beyond what the launch flag permitted.
+   */
+  getCliAllowedMcpServerNames(): string[] | undefined {
+    return this.cliAllowedMcpServerNames;
+  }
+
+  /**
+   * Replace the pending-approval set of gated MCP server names at runtime
+   * (hot-reload). The discovery layer skips these BEFORE any connection side
+   * effect, so a hot-reload must recompute them (#4615) lest it connect a
+   * newly-added but unapproved `.mcp.json`/workspace server.
+   */
+  setPendingMcpServers(pending: string[] | undefined): void {
+    this.pendingMcpServers = pending;
+  }
+
+  /**
+   * Snapshot of the three connection-admission lists consulted by discovery,
+   * used by the hot-reload subscriber as the pre-image to diff against. Paired
+   * with {@link setExcludedMcpServers} / {@link setAllowedMcpServers} /
+   * {@link setPendingMcpServers}.
+   */
+  getMcpGating(): {
+    excluded?: string[];
+    allowed?: string[];
+    pending?: string[];
+  } {
+    return {
+      excluded: this.excludedMcpServers,
+      allowed: this.allowedMcpServers,
+      pending: this.pendingMcpServers,
+    };
+  }
+
+  /**
+   * Names of MCP servers removed from config during this session by a runtime
+   * reconcile and not since re-added. "Removed" means gone from the merged map
+   * (settings + extensions + runtime), NOT merely filtered out by an admission
+   * gate — a server that is still configured but excluded / not-allowed /
+   * pending is reported via {@link getMcpServerUnavailableReason} instead.
+   * Consumed by the tool-not-found path.
+   */
+  getRecentlyRemovedMcpServers(): string[] {
+    return [...this.recentlyRemovedMcpServers];
+  }
+
+  /** All configured MCP server names (merged, before admission gating). */
+  getMcpServerNames(): string[] {
+    return Object.keys(this.getMergedMcpServers());
+  }
+
+  /**
+   * Why a given MCP server is currently unavailable (its tools aren't usable),
+   * or `undefined` if it is configured and admitted (so a missing tool is a
+   * genuine "not found" / disconnected, not an admission decision). Lets the
+   * tool-not-found path explain the right recovery action. Covers every
+   * admission gate:
+   * - `removed`: deleted from config this session (see
+   *   {@link getRecentlyRemovedMcpServers}).
+   * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+   * - `excluded`: in the `mcp.excluded` list.
+   * - `pending_approval`: a gated server awaiting approval (#4615).
+   */
+  getMcpServerUnavailableReason(
+    serverName: string,
+  ): McpServerUnavailableReason | undefined {
+    if (this.recentlyRemovedMcpServers.has(serverName)) return 'removed';
+    if (!(serverName in this.getMergedMcpServers())) return undefined;
+    if (
+      this.allowedMcpServers &&
+      !matchesAnyServerPattern(serverName, this.allowedMcpServers)
+    ) {
+      return 'not_allowed';
+    }
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return 'excluded';
+    if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
+    return undefined;
+  }
+
+  /**
+   * Apply a new settings-layer MCP map and incrementally reconcile live
+   * connections (connect added, disconnect removed, restart changed; unchanged
+   * servers untouched). Safe no-op before {@link initialize}. A shared
+   * "reconcile in progress" guard serializes against a concurrent caller (e.g.
+   * `/reload`): a request arriving mid-flight is coalesced into a single
+   * follow-up pass so the latest config always wins. See sub-task 3.
+   */
+  async reinitializeMcpServers(
+    servers: Record<string, MCPServerConfig> | undefined,
+  ): Promise<void> {
+    this.debugLogger.debug(
+      `[mcp-hot-reload] reinitializeMcpServers: servers=[${Object.keys(
+        servers ?? {},
+      ).join(
+        ', ',
+      )}] initialized=${this.initialized} inProgress=${this.mcpReconcileInProgress}`,
+    );
+
+    // Track which servers were DELETED from config this session (gone from the
+    // merged map), so the tool-not-found path can say "removed this session"
+    // vs an admission-gate reason. The merged map is independent of the
+    // admission gates (allowed/excluded/pending), so the diff is unaffected by
+    // the gating setters the hot-reload caller applied just before this — no
+    // pre-gating snapshot needed. Re-added names self-heal.
+    const prevConfigured = new Set(Object.keys(this.getMergedMcpServers()));
+    this.setMcpServers(servers);
+    const nextConfigured = new Set(Object.keys(this.getMergedMcpServers()));
+    for (const name of nextConfigured) {
+      this.recentlyRemovedMcpServers.delete(name);
+    }
+    for (const name of prevConfigured) {
+      if (!nextConfigured.has(name)) {
+        this.recentlyRemovedMcpServers.add(name);
+      }
+    }
+    await this.refreshMcpServers();
+  }
+
+  private async refreshMcpServers(): Promise<void> {
+    if (!this.initialized) {
+      // No tool registry yet — boot-time discovery will pick up the new map.
+      this.debugLogger.debug(
+        '[mcp-hot-reload] not initialized yet — deferring to boot-time discovery (no-op)',
+      );
+      return;
+    }
+
+    if (this.mcpReconcileInProgress) {
+      // Coalesce: a pass is already running. Mark that the desired state
+      // advanced so its drain loop runs again with the latest config, and
+      // await that in-flight pass — NOT a resolved promise — so this caller
+      // does not proceed before its coalesced change is actually reconciled.
+      this.mcpReconcilePending = true;
+      this.debugLogger.debug(
+        '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
+      );
+      return this.mcpReconcilePromise ?? Promise.resolve();
+    }
+    this.mcpReconcileInProgress = true;
+    const registry = this.getToolRegistry();
+    // Assign before the first await so a coalesced caller can await this pass.
+    const runReconcile = (async () => {
+      try {
+        this.debugLogger.debug(
+          '[mcp-hot-reload] running incremental reconcile (pass 1)',
+        );
+        await registry
+          .getMcpClientManager()
+          .discoverAllMcpToolsIncremental(this);
+        // The pool path returns an in-flight promise, so re-run after any
+        // coalesced change to ensure the latest effective config is applied.
+        let pass = 1;
+        while (this.mcpReconcilePending) {
+          this.mcpReconcilePending = false;
+          pass += 1;
+          this.debugLogger.debug(
+            `[mcp-hot-reload] running coalesced incremental reconcile (pass ${pass})`,
+          );
+          await registry
+            .getMcpClientManager()
+            .discoverAllMcpToolsIncremental(this);
+        }
+        this.debugLogger.debug(
+          `[mcp-hot-reload] reconcile complete after ${pass} pass(es); live servers=[${Object.keys(
+            this.getMcpServers() ?? {},
+          ).join(', ')}]`,
+        );
+      } catch (err) {
+        this.debugLogger.error(
+          `[mcp-hot-reload] reconcile failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+        throw err;
+      } finally {
+        this.mcpReconcileInProgress = false;
+        // A failed pass must not leak a pending drain into the next reconcile.
+        this.mcpReconcilePending = false;
+        this.mcpReconcilePromise = undefined;
+      }
+    })();
+    this.mcpReconcilePromise = runReconcile;
+    // Propagate failure to this caller and every coalesced caller.
+    await runReconcile;
+  }
+
+  /**
+   * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
+   * touch `this.mcpServers` (settings layer) and does not enforce the
+   * `initialized` guard — the whole point is post-init mutation from the
+   * daemon surface. `getMcpServers()` will overlay these entries on top
+   * of the settings layer (Task 5).
+   */
+  addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    this.runtimeMcpServers.set(name, config);
+  }
+
+  /**
+   * Snapshot the runtime-only MCP servers added via `addRuntimeMcpServer`.
+   * Returns a shallow copy so callers can't mutate the private map.
+   *
+   * Reverse tool channel (issue #5626): a per-session Config built by
+   * `newSessionConfig` is independent from the bootstrap/workspace Config and
+   * never re-reads runtime additions (they live outside the settings layer
+   * `loadCliConfig` reloads). The daemon uses this getter to propagate the
+   * bootstrap Config's runtime MCP servers into a freshly created session
+   * Config so a session created AFTER a client MCP server was registered still
+   * discovers the client-hosted tools. Empty when nothing was runtime-added,
+   * so the inheritance step is a no-op in the common case.
+   */
+  getRuntimeMcpServers(): Record<string, MCPServerConfig> {
+    return Object.fromEntries(this.runtimeMcpServers);
+  }
+
+  /**
+   * Remove a runtime-only MCP server previously added via
+   * `addRuntimeMcpServer`. Returns `true` if the entry existed and was
+   * removed, `false` otherwise.
+   */
+  removeRuntimeMcpServer(name: string): boolean {
+    return this.runtimeMcpServers.delete(name);
   }
 
   isLspEnabled(): boolean {
@@ -2764,7 +6105,7 @@ export class Config {
 
     if (this.lspClient) {
       return {
-        ...this.createLspStatusSnapshot(true),
+        ...this.createLspStatusSnapshot(true, this.lspInitializationError),
         statusUnavailable: true,
       };
     }
@@ -2805,8 +6146,36 @@ export class Config {
     if (this.initialized) {
       throw new Error('Cannot set LSP status after initialization');
     }
+    this.setRuntimeLspInitializationError(error);
+  }
+
+  private setRuntimeLspInitializationError(
+    error: Error | string | undefined,
+  ): void {
     this.lspInitializationError =
       error instanceof Error ? error.message : error;
+  }
+
+  async reinitializeLsp(): Promise<LspServiceReinitializeResult | undefined> {
+    if (!this.isLspEnabled() || !this.lspClient?.reinitialize) {
+      return undefined;
+    }
+    try {
+      const result = await this.lspClient.reinitialize();
+      if (result.reconcile.failed.length > 0) {
+        this.setRuntimeLspInitializationError(
+          `LSP reload partially failed: ${result.reconcile.failed.join(', ')}`,
+        );
+      } else {
+        this.setRuntimeLspInitializationError(undefined);
+      }
+      return result;
+    } catch (error) {
+      this.setRuntimeLspInitializationError(
+        error instanceof Error ? error : String(error),
+      );
+      throw error;
+    }
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -2832,8 +6201,29 @@ export class Config {
     return this.userMemory;
   }
 
+  getStaticSystemPrefix(): string | undefined {
+    return this.staticSystemPrefix;
+  }
+
+  setStaticSystemPrefix(prefix: string | undefined): void {
+    this.staticSystemPrefix = prefix;
+  }
+
+  /**
+   * The managed auto-memory section of the system prompt (volatile layer).
+   * Empty when managed memory is unavailable. Callers assembling a system
+   * prompt must append this after all stable/context content.
+   */
+  getAutoMemoryPrompt(): string {
+    return this.autoMemoryPrompt;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
+  }
+
+  setOutputLanguageFilePath(filePath: string): void {
+    this.outputLanguageFilePath = filePath;
   }
 
   setUserMemory(newUserMemory: string): void {
@@ -2846,6 +6236,15 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  /** Display paths of the currently loaded context (memory) files. */
+  getContextFilePaths(): string[] {
+    return this.loadedContextFilePaths;
+  }
+
+  setContextFilePaths(paths: string[]): void {
+    this.loadedContextFilePaths = paths;
   }
 
   getArenaManager(): ArenaManager | null {
@@ -2873,6 +6272,57 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  // ─── Team Manager ──────────────────────────────────────────
+
+  getTeamManager(): TeamManager | null {
+    return this.teamManager;
+  }
+
+  setTeamManager(manager: TeamManager | null): void {
+    this.teamManager = manager;
+    for (const cb of this.teamManagerChangeCallbacks) {
+      cb(manager);
+    }
+  }
+
+  /**
+   * Register a callback invoked whenever the team manager changes.
+   * Pass `null` to unsubscribe a previously registered callback.
+   * Multiple subscribers are supported.
+   */
+  onTeamManagerChange(
+    cb: ((manager: TeamManager | null) => void) | null,
+    previous?: (manager: TeamManager | null) => void,
+  ): void {
+    if (previous) {
+      this.teamManagerChangeCallbacks.delete(previous);
+    }
+    if (cb) {
+      this.teamManagerChangeCallbacks.add(cb);
+    }
+  }
+
+  getTeamContext(): TeamContext | null {
+    return this.teamContext;
+  }
+
+  setTeamContext(ctx: TeamContext | null): void {
+    this.teamContext = ctx;
+  }
+
+  /**
+   * Clean up Team runtime — stops all teammates and clears state.
+   */
+  async cleanupTeamRuntime(): Promise<void> {
+    const manager = this.teamManager;
+    if (!manager) {
+      return;
+    }
+    await manager.cleanup();
+    this.setTeamManager(null);
+    this.setTeamContext(null);
   }
 
   /**
@@ -2942,7 +6392,52 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
-  setApprovalMode(mode: ApprovalMode): void {
+  getApprovalModeRevision(): number {
+    return this.approvalModeRevision;
+  }
+
+  private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeEventState',
+      ) &&
+      Object.prototype.hasOwnProperty.call(this, 'approvalMode')
+    ) {
+      const inheritedEvent = this.manualPlanExitNoticeEventState;
+      this.manualPlanExitNoticeEventState = inheritedEvent
+        ? { ...inheritedEvent }
+        : { version: 0, kind: 'clear' };
+    }
+    return this.manualPlanExitNoticeEventState;
+  }
+
+  private getOwnManualPlanExitNoticeCursorState(): ManualPlanExitNoticeCursorState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeCursorState',
+      )
+    ) {
+      this.manualPlanExitNoticeCursorState = { seenVersion: 0 };
+    }
+    return this.manualPlanExitNoticeCursorState;
+  }
+
+  setApprovalMode(
+    mode: ApprovalMode,
+    options?: {
+      /** @deprecated Model origin no longer changes plan-exit approval. */
+      enteredByModel?: boolean;
+      /**
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
+       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
+       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
+       * was never told about, and queues a one-shot system reminder.
+       */
+      fromApprovedPlanExit?: boolean;
+    },
+  ): void {
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -2951,15 +6446,6 @@ export class Config {
       throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
-    }
-    // Track the mode before entering plan mode so it can be restored later
-    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
-      this.prePlanMode = this.approvalMode;
-    } else if (
-      mode !== ApprovalMode.PLAN &&
-      this.approvalMode === ApprovalMode.PLAN
-    ) {
-      this.prePlanMode = undefined;
     }
     // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
     // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
@@ -2976,11 +6462,78 @@ export class Config {
         this.permissionManager.restoreDangerousRules();
       }
     }
+    // Update all mode bookkeeping only after fallible transition work has
+    // succeeded, so callers never observe a partially applied mode change.
+    let noticeEvent =
+      Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    if (!Object.prototype.hasOwnProperty.call(this, 'approvalMode')) {
+      noticeEvent = { ...noticeEvent };
+      this.manualPlanExitNoticeEventState = noticeEvent;
+    }
+    if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = fromMode;
+      noticeEvent.version++;
+      noticeEvent.kind = 'clear';
+    } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
+      this.prePlanMode = undefined;
+      noticeEvent.version++;
+      noticeEvent.kind = options?.fromApprovedPlanExit
+        ? 'clear'
+        : 'manual-exit';
+    }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (fromMode !== mode) {
+      this.approvalModeRevision++;
+    }
+  }
+
+  /**
+   * Claims the latest manual plan-exit notice for this conversation.
+   */
+  takePendingManualPlanExitNotice(): ManualPlanExitNotice | undefined {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (event.version <= cursor.seenVersion) {
+      return undefined;
+    }
+
+    cursor.seenVersion = event.version;
+    if (
+      event.kind !== 'manual-exit' ||
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      return undefined;
+    }
+
+    return {
+      version: event.version,
+      currentMode: this.approvalMode,
+    };
+  }
+
+  restorePendingManualPlanExitNotice(version: number): void {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (
+      event.version === version &&
+      event.kind === 'manual-exit' &&
+      this.approvalMode !== ApprovalMode.PLAN &&
+      cursor.seenVersion === version
+    ) {
+      cursor.seenVersion = Math.max(0, version - 1);
+    }
+  }
+
+  consumePendingManualPlanExitNotice(): boolean {
+    return (
+      Config.prototype.takePendingManualPlanExitNotice.call(this) !== undefined
+    );
   }
 
   /**
@@ -3147,16 +6700,32 @@ export class Config {
     return this.accessibility;
   }
 
+  getShowResponseTokensPerSecond(): boolean {
+    return this.showResponseTokensPerSecond;
+  }
+
   getTelemetryEnabled(): boolean {
     return this.telemetrySettings.enabled ?? false;
+  }
+
+  isTelemetryInitializationDeferred(): boolean {
+    return this.telemetryInitializationDeferred;
   }
 
   getTelemetryLogPromptsEnabled(): boolean {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
+  getTelemetryUserId(): string | undefined {
+    return this.telemetrySettings.userId;
+  }
+
   getTelemetryIncludeSensitiveSpanAttributes(): boolean {
     return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
+  }
+
+  getTelemetrySensitiveSpanAttributeMaxLength(): number {
+    return this.telemetrySettings.sensitiveSpanAttributeMaxLength;
   }
 
   getTelemetryOtlpEndpoint(): string | undefined {
@@ -3216,6 +6785,122 @@ export class Config {
     return this.geminiClient;
   }
 
+  private getOwnActiveTodoReminders(): Map<string, string> {
+    if (!Object.prototype.hasOwnProperty.call(this, 'activeTodoReminders')) {
+      this.activeTodoReminders = new Map();
+    }
+    return this.activeTodoReminders;
+  }
+
+  private getOwnActiveTodoWorkChainOwners(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoWorkChainOwners')
+    ) {
+      this.activeTodoWorkChainOwners = new Map();
+    }
+    return this.activeTodoWorkChainOwners;
+  }
+
+  private getOwnActiveTodoReminderTurns(): Map<string, number> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoReminderTurns')
+    ) {
+      this.activeTodoReminderTurns = new Map();
+    }
+    return this.activeTodoReminderTurns;
+  }
+
+  getActiveTodoWorkChainOwner(
+    promptId: string,
+    fallbackOwner = promptId,
+  ): string {
+    return (
+      this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? fallbackOwner
+    );
+  }
+
+  getActiveTodoReminder(promptId: string): string | undefined {
+    return this.getOwnActiveTodoReminders().get(
+      this.getActiveTodoWorkChainOwner(promptId),
+    );
+  }
+
+  /**
+   * Reads the reminder for injection, re-issuing it only every
+   * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
+   * chat history permanently, so per-turn injection would grow the context
+   * linearly with tool turns. `force` is for turn-start injections (retry /
+   * related automatic turns), which always need the context and reset the
+   * cadence.
+   */
+  takeActiveTodoReminder(promptId: string, force = false): string | undefined {
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    const reminder = this.getOwnActiveTodoReminders().get(owner);
+    if (!reminder) return undefined;
+    const turns = this.getOwnActiveTodoReminderTurns();
+    const elapsed = (turns.get(owner) ?? 0) + 1;
+    if (!force && elapsed < ACTIVE_TODO_REMINDER_REFRESH_TURNS) {
+      turns.set(owner, elapsed);
+      return undefined;
+    }
+    turns.set(owner, 0);
+    return reminder;
+  }
+
+  setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    if (reminder) {
+      reminders.set(owner, reminder);
+      // The todo_write result itself just presented the full state.
+      this.getOwnActiveTodoReminderTurns().set(owner, 0);
+    } else {
+      reminders.delete(owner);
+      this.getOwnActiveTodoReminderTurns().delete(owner);
+    }
+  }
+
+  startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    if (!continuedFrom) {
+      reminders.clear();
+      owners.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
+      owners.set(promptId, promptId);
+      return;
+    }
+
+    const owner = this.getActiveTodoWorkChainOwner(continuedFrom);
+    for (const reminderOwner of reminders.keys()) {
+      if (reminderOwner !== owner) reminders.delete(reminderOwner);
+    }
+    owners.clear();
+    owners.set(promptId, owner);
+  }
+
+  startAutomaticActiveTodoWorkChain(
+    promptId: string,
+    continuedFrom?: string,
+  ): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = continuedFrom
+      ? this.getActiveTodoWorkChainOwner(continuedFrom)
+      : promptId;
+    owners.set(promptId, owner);
+    if (owner === promptId) reminders.delete(owner);
+  }
+
+  endAutomaticActiveTodoWorkChain(promptId: string): void {
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    owners.delete(promptId);
+    if (![...owners.values()].includes(owner)) {
+      this.getOwnActiveTodoReminders().delete(owner);
+    }
+  }
+
   /**
    * Session-scoped memory pressure monitor. Child Configs created with
    * `Object.create(parent)` inherit the parent's monitor through the prototype
@@ -3245,23 +6930,162 @@ export class Config {
 
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
-      this.cronScheduler = new CronScheduler();
+      this.cronScheduler = new CronScheduler(
+        this.getProjectRoot(),
+        this.getCronRecurringMaxAgeDays() * 24 * 60 * 60 * 1000,
+      );
     }
     return this.cronScheduler;
   }
 
+  /**
+   * Days a recurring cron job lives before auto-expiring; `Infinity`
+   * means no expiry. Resolved once at construction (see
+   * `resolveCronRecurringMaxAgeDays`) so mid-session env changes cannot
+   * make the tool description, tool output, and scheduler disagree.
+   */
+  getCronRecurringMaxAgeDays(): number {
+    return this.cronRecurringMaxAgeDays;
+  }
+
   isCronEnabled(): boolean {
-    // Cron is experimental and opt-in: enabled via settings or env var
-    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
   }
 
-  isForkSubagentEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
-    return this.forkSubagentEnabled;
+  isAgentTeamEnabled(): boolean {
+    // Agent team is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
+    return this.agentTeamEnabled;
   }
+
+  isArtifactEnabled(): boolean {
+    // Publishing writes outside the project and opens a browser, so it is
+    // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
+    // hard-disables both artifact tools; QWEN_CODE_ENABLE_ARTIFACT remains as
+    // a compatibility override for old configs that explicitly disabled them.
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
+    if (this.sdkMode) return false;
+    if (!this.interactive) return false;
+    if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
+    return this.artifactEnabled;
+  }
+
+  isRecordArtifactEnabled(): boolean {
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
+    if (this.sdkMode) return false;
+    if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
+    return this.artifactEnabled;
+  }
+
+  getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
+    return this.artifactPublisher;
+  }
+
+  getArtifactHostConfig(): ArtifactHostConfig | undefined {
+    return this.artifactHost;
+  }
+
+  getArtifactOssConfig(): ArtifactOssConfig | undefined {
+    return this.artifactOss;
+  }
+
+  resolveImageGenerationModel(
+    setting: string | undefined,
+  ): ImageGenerationConfig | undefined {
+    const parsedSetting = parseVisionModelSetting(setting);
+    if (!parsedSetting) return undefined;
+
+    let selector;
+    try {
+      selector = resolveModelId(parsedSetting.selector);
+    } catch {
+      return undefined;
+    }
+    if (!selector) return undefined;
+
+    const routeMatches = this.getAllConfiguredModels().filter(
+      (model) =>
+        model.imageOnly === true &&
+        !model.fastOnly &&
+        !model.voiceOnly &&
+        model.id === selector.modelId &&
+        (!selector.authType || model.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || model.baseUrl === parsedSetting.baseUrl),
+    );
+    if (routeMatches.length !== 1) return undefined;
+
+    const match = routeMatches[0]!;
+    const apiKeyEnv = match.envKey?.trim();
+    const configuredBaseUrl = match.registryBaseUrl?.trim();
+    if (!apiKeyEnv || !configuredBaseUrl) return undefined;
+
+    const baseUrl = normalizeImageGenerationBaseUrl(
+      parsedSetting.baseUrl ?? configuredBaseUrl,
+    );
+    if (!baseUrl) return undefined;
+
+    return {
+      model: match.id,
+      baseUrl,
+      apiKeyEnv,
+    };
+  }
+
+  getImageGenerationConfig(): ImageGenerationConfig | undefined {
+    if (this.bareMode || this.safeMode) return undefined;
+    return this.resolveImageGenerationModel(this.imageModel);
+  }
+
+  isImageGenerationEnabled(): boolean {
+    return this.getImageGenerationConfig() !== undefined;
+  }
+
+  shouldAutoOpenArtifact(): boolean {
+    if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
+    return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
+  }
+
+  isWorkflowsEnabled(): boolean {
+    // Workflows are experimental and opt-in: enabled via settings or env var
+    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+    return this.workflowsEnabled;
+  }
+
+  setWorkflowsEnabled(enabled: boolean): void {
+    this.workflowsEnabled = enabled;
+  }
+
+  /**
+   * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
+   * `Workflow` tool suppresses the one-time banner that announces the
+   * `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` env knob. The registry-side
+   * `shouldShowUsageWarning()` latch is still session-scoped, so even
+   * when this returns `false` the banner fires at most once per
+   * process.
+   */
+  getSkipWorkflowUsageWarning(): boolean {
+    return this.skipWorkflowUsageWarning;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
+  }
+
+  /**
+   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
+   * to leave cua-driver's built-in default (1568) in place. Resolved together
+   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
+   * the driver connects (see `resolveMaxImageDimension`).
+   */
+  getComputerUseMaxImageDimension(): number | undefined {
+    return this.computerUseMaxImageDimension;
+  }
+
+  getComputerUseIdleTimeoutMs(): number | undefined {
+    return this.computerUseIdleTimeoutMs;
   }
 
   /**
@@ -3299,6 +7123,7 @@ export class Config {
     return {
       respectGitIgnore: this.fileFiltering.respectGitIgnore,
       respectQwenIgnore: this.fileFiltering.respectQwenIgnore,
+      customIgnoreFiles: [...this.fileFiltering.customIgnoreFiles],
     };
   }
 
@@ -3317,21 +7142,36 @@ export class Config {
     return [];
   }
 
-  getCheckpointingEnabled(): boolean {
-    return this.checkpointing;
-  }
-
   getFileCheckpointingEnabled(): boolean {
     return this.fileCheckpointingEnabled;
   }
 
+  enableFileCheckpointing(): void {
+    this.fileCheckpointingEnabled = true;
+    this.fileHistoryService = undefined;
+  }
+
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
-      this.fileHistoryService = new FileHistoryService(
+      const service = new FileHistoryService(
         this.sessionId,
         this.fileCheckpointingEnabled,
         this.cwd,
+        (snapshot) => {
+          if (this.fileHistoryService !== service) return;
+          this.getChatRecordingService()?.recordFileHistorySnapshot(snapshot);
+        },
       );
+      this.fileHistoryService = service;
+      const snapshots = this.sessionData?.fileHistorySnapshots;
+      if (snapshots?.length && service.isEnabled()) {
+        service.restoreFromSnapshots(snapshots);
+        void service.validateRestoredSnapshots().catch((e) => {
+          this.debugLogger.error(
+            `FileHistory: validateRestoredSnapshots failed: ${e}`,
+          );
+        });
+      }
     }
     return this.fileHistoryService;
   }
@@ -3350,7 +7190,10 @@ export class Config {
 
   getFileService(): FileDiscoveryService {
     if (!this.fileDiscoveryService) {
-      this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
+      this.fileDiscoveryService = new FileDiscoveryService(
+        this.targetDir,
+        this.fileFiltering.customIgnoreFiles,
+      );
     }
     return this.fileDiscoveryService;
   }
@@ -3373,6 +7216,10 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
+  isSessionWriterLeaseEnabled(): boolean {
+    return this.sessionWriterLeaseEnabled;
+  }
+
   getListExtensions(): boolean {
     return this.listExtensions;
   }
@@ -3391,7 +7238,7 @@ export class Config {
 
   /**
    * Fast-path check: returns true only when hooks are enabled AND there are
-   * registered hooks for the given event name.  Callers can use this to skip
+   * registered hooks for the given event name. Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
   hasHooksForEvent(eventName: string, sessionId?: string): boolean {
@@ -3407,7 +7254,7 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
-    return this.disableAllHooks || this.getBareMode();
+    return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
   getStopHookBlockingCap(): number {
@@ -3415,15 +7262,101 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
+    return (
+      this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
+    );
+  }
+
+  /**
+   * Whether the git-shared team memory tier is active. Opt-in: off unless the
+   * `memory.enableTeamMemory` setting is on. `QWEN_CODE_MEMORY_TEAM` overrides
+   * for tests / power users ('0' forces off, '1' forces on).
+   */
+  getTeamMemoryEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemory;
+  }
+
+  /**
+   * Whether the daemon/session should auto-sync team memory with the git
+   * remote (pull + commit + push). Resolves the `memory.enableTeamMemorySync`
+   * setting, with env `QWEN_CODE_MEMORY_TEAM_SYNC` ('0'/'1') as an override.
+   * Off by default since it mutates the repo and pushes. Inert in bare mode.
+   */
+  getTeamMemorySyncEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemorySync;
+  }
+
+  isManagedMemoryAvailable(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
-    return this.enableManagedAutoDream && !this.getBareMode();
+    return (
+      this.enableManagedAutoDream && !this.getBareMode() && !this.isSafeMode()
+    );
   }
 
   getAutoSkillEnabled(): boolean {
-    return this.enableAutoSkill && !this.getBareMode();
+    return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+  }
+
+  /**
+   * Toggle auto-skill for the running session. The startup value is copied from
+   * settings, so persisting a settings change alone would not take effect until
+   * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
+   * live, so flipping this stops (or resumes) reviews immediately.
+   *
+   * @remarks `getAutoSkillEnabled()` additionally gates on bare/safe mode, so
+   * it can still return false after `setAutoSkillEnabled(true)`.
+   */
+  setAutoSkillEnabled(enabled: boolean): void {
+    this.enableAutoSkill = enabled;
+  }
+
+  getAutoSkillConfirmEnabled(): boolean {
+    return this.autoSkillConfirm && !this.getBareMode();
+  }
+
+  /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Resolves the `memory.agentTimeoutMinutes`
+   * setting. Unset → each agent's built-in default; 0 → no time limit.
+   */
+  getMemoryAgentTimeoutMinutes(): number | undefined {
+    return this.memoryAgentTimeoutMinutes;
+  }
+
+  /**
+   * Max turns for background memory agents. Resolves the
+   * `memory.agentMaxTurns` setting. Unset means each agent's built-in default;
+   * 0 disables the turn limit.
+   */
+  getMemoryAgentMaxTurns(): number | undefined {
+    return this.memoryAgentMaxTurns;
+  }
+
+  getPreventSystemSleepEnabled(): boolean {
+    return this.preventSystemSleep && !this.isSafeMode();
   }
 
   /**
@@ -3458,7 +7391,7 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Only return project hooks if workspace is trusted
@@ -3476,7 +7409,7 @@ export class Config {
    * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Prefer new userHooks field, fall back to hooks for backward compatibility
@@ -3496,12 +7429,6 @@ export class Config {
     } else {
       return extensions;
     }
-  }
-
-  private getExplicitExtensionNames(): string[] {
-    return (this.overrideExtensions ?? []).filter(
-      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
-    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -3527,7 +7454,7 @@ export class Config {
 
     if (this.allowedMcpServers) {
       Object.entries(mcpServers).forEach(([key, server]) => {
-        const isAllowed = this.allowedMcpServers?.includes(key);
+        const isAllowed = matchesAnyServerPattern(key, this.allowedMcpServers);
         if (!isAllowed) {
           blockedMcpServers.push({
             name: key,
@@ -3568,7 +7495,19 @@ export class Config {
    * If empty, all URLs are allowed (subject to SSRF protection).
    */
   getAllowedHttpHookUrls(): string[] {
-    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
+    return this.getBareMode() || this.isSafeMode()
+      ? []
+      : this.allowedHttpHookUrls;
+  }
+
+  /**
+   * Returns whether HTTP hooks may target private/link-local IP ranges.
+   * Only settable from trusted settings scopes (User/System/SystemDefaults).
+   */
+  getAllowPrivateNetworkHooks(): boolean {
+    return this.getBareMode() || this.isSafeMode()
+      ? false
+      : this.allowPrivateNetworkHooks;
   }
 
   isTrustedFolder(): boolean {
@@ -3666,8 +7605,25 @@ export class Config {
     return this.chatCompression;
   }
 
+  getAutoCompactThreshold(): number | undefined {
+    const threshold = this.autoCompactThreshold;
+    if (typeof threshold === 'number' && threshold > 0 && threshold <= 1) {
+      return threshold;
+    }
+    return undefined;
+  }
+
   isInteractive(): boolean {
     return this.interactive;
+  }
+
+  async getTerminalImageRenderSupport(): Promise<TerminalImageRenderSupport> {
+    return this.terminalImageRenderSupportProvider
+      ? this.terminalImageRenderSupportProvider()
+      : {
+          available: false,
+          reason: 'No terminal image renderer is configured.',
+        };
   }
 
   getUseRipgrep(): boolean {
@@ -3697,7 +7653,13 @@ export class Config {
       terminalHeight:
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
-      pager: config.pager ?? this.shellExecutionConfig.pager,
+      // pager: undefined is a valid explicit clear; ?? would preserve the old value.
+      pager: Object.prototype.hasOwnProperty.call(config, 'pager')
+        ? config.pager
+        : this.shellExecutionConfig.pager,
+      maxBufferedOutputBytes:
+        config.maxBufferedOutputBytes ??
+        this.shellExecutionConfig.maxBufferedOutputBytes,
     };
   }
   getScreenReader(): boolean {
@@ -3708,12 +7670,42 @@ export class Config {
     return this.skipLoopDetection;
   }
 
+  /**
+   * Effective per-turn tool-call cap. A configured value <= 0 disables the
+   * cap and is returned as Infinity so callers can compare unconditionally
+   * (mirrors getTruncateToolOutputThreshold).
+   */
+  getMaxToolCallsPerTurn(): number {
+    if (this.maxToolCallsPerTurn <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return this.maxToolCallsPerTurn;
+  }
+
+  /**
+   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
+   * default). An explicit value is treated as a hard cap (the released
+   * contract); the default is treated adaptively (see
+   * LoopDetectionService.checkTurnToolCallCap).
+   */
+  isMaxToolCallsPerTurnExplicit(): boolean {
+    return this.maxToolCallsPerTurnExplicit;
+  }
+
   getSkipStartupContext(): boolean {
     return this.skipStartupContext;
   }
 
   getBareMode(): boolean {
     return this.bareMode;
+  }
+
+  /**
+   * Safe mode disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   */
+  isSafeMode(): boolean {
+    return this.safeMode;
   }
 
   getTruncateToolOutputThreshold(): number {
@@ -3724,6 +7716,10 @@ export class Config {
     return this.truncateToolOutputThreshold;
   }
 
+  isTruncateToolOutputThresholdExplicit(): boolean {
+    return this.truncateToolOutputThresholdExplicit;
+  }
+
   getTruncateToolOutputLines(): number {
     if (this.truncateToolOutputLines <= 0) {
       return Number.POSITIVE_INFINITY;
@@ -3732,16 +7728,43 @@ export class Config {
     return this.truncateToolOutputLines;
   }
 
-  getOutputFormat(): OutputFormat {
-    return this.outputFormat;
+  /**
+   * Configured default timeout (ms) for foreground shell commands, or
+   * `undefined` when unset. The shell tool applies the precedence
+   * per-call timeout > this setting > its built-in default, so returning
+   * `undefined` here preserves the built-in fallback.
+   */
+  getShellDefaultTimeoutMs(): number | undefined {
+    return this.shellDefaultTimeoutMs;
   }
 
-  async getGitService(): Promise<GitService> {
-    if (!this.gitService) {
-      this.gitService = new GitService(this.targetDir, this.storage);
-      await this.gitService.initialize();
+  /**
+   * Configured interval (ms) between silent-command heartbeats, or
+   * `undefined` when unset (the shell tool falls back to its built-in
+   * default). 0 disables heartbeats.
+   */
+  getShellHeartbeatIntervalMs(): number | undefined {
+    return this.shellHeartbeatIntervalMs;
+  }
+
+  getToolOutputBatchBudget(): number {
+    if (this.toolOutputBatchBudget <= 0) {
+      return Number.POSITIVE_INFINITY;
     }
-    return this.gitService;
+
+    return this.toolOutputBatchBudget;
+  }
+
+  trackToolResultBytes(n: number): void {
+    this.toolResultBudget.bytesWritten += n;
+  }
+
+  getToolResultBytesWritten(): number {
+    return this.toolResultBudget.bytesWritten;
+  }
+
+  getOutputFormat(): OutputFormat {
+    return this.outputFormat;
   }
 
   /**
@@ -3752,9 +7775,246 @@ export class Config {
       return undefined;
     }
     if (!this.chatRecordingService) {
-      this.chatRecordingService = new ChatRecordingService(this);
+      this.chatRecordingService = this.createChatRecordingService();
     }
     return this.chatRecordingService;
+  }
+
+  getGoalRuntime(): GoalRuntime {
+    if (
+      !Object.hasOwn(this, 'goalRuntime') ||
+      !this.chatRecordingEnabled ||
+      !this.chatRecordingService ||
+      !this.goalRuntime
+    ) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    return this.goalRuntime;
+  }
+
+  getGoalRuntimeReady(): Promise<GoalRuntime> {
+    const runtime = this.getGoalRuntime();
+    if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
+      return Promise.reject(new GoalPersistenceUnavailableError());
+    }
+    return this.goalRuntimeReady.then(() => runtime);
+  }
+
+  getGoalRuntimePrepared(): Promise<GoalRuntime> {
+    const runtime = this.getGoalRuntime();
+    if (!this.sessionRestoreRuntime) return this.getGoalRuntimeReady();
+    return runtime.getPreparedRestore().then(() => runtime);
+  }
+
+  async rebaseGoalRuntimeFromActiveTranscript(): Promise<void> {
+    const runtime = this.getGoalRuntime();
+    const recordingService = this.chatRecordingService;
+    if (!recordingService) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const records = await recordingService.readActiveTranscriptChain();
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    runtime.dispose();
+    this.initializeGoalRuntime(records);
+    await this.goalRuntimeReady;
+  }
+
+  bindGoalTurnHost(host: GoalTurnHost): () => void {
+    if (!Object.hasOwn(this, 'goalRuntime')) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const generation = this.goalTurnHostGeneration + 1;
+    this.goalTurnHostGeneration = generation;
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHost = host;
+    this.goalTurnHostUnbind = this.goalRuntime?.bindHost(host);
+
+    return () => {
+      if (
+        this.goalTurnHostGeneration !== generation ||
+        this.goalTurnHost !== host
+      ) {
+        return;
+      }
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalTurnHost = undefined;
+    };
+  }
+
+  onChatRecordingFailure(listener: ChatRecordingFailureListener): () => void {
+    this.chatRecordingFailureListeners.add(listener);
+    return () => {
+      this.chatRecordingFailureListeners.delete(listener);
+    };
+  }
+
+  private createChatRecordingService(): ChatRecordingService {
+    return new ChatRecordingService(
+      this,
+      (event) => {
+        this.notifyChatRecordingFailure(event);
+      },
+      this.sessionWriterLeaseEnabled,
+      this.sessionRestoreRuntime?.recording,
+    );
+  }
+
+  private initializeGoalRuntime(
+    records?: readonly GoalRecoveryRecord[],
+    restoreRuntime?: SessionRuntimeResumeState,
+  ): void {
+    this.rejectGoalRestoreActivation?.(
+      new GoalPersistenceUnavailableError('Goal runtime replaced'),
+    );
+    this.goalRestoreActivation = undefined;
+    this.rejectGoalRestoreActivation = undefined;
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    // A runtime built here supersedes any restore still waiting on the
+    // writer: its records belong to the outgoing session.
+    this.settlePendingGoalRestore(
+      new GoalPersistenceUnavailableError(
+        'Goal runtime was replaced before the session writer became available',
+      ),
+    );
+    if (!this.chatRecordingService) {
+      this.goalRuntime = undefined;
+      this.goalRuntimeReady = undefined;
+      return;
+    }
+    const recorder = this.chatRecordingService;
+    const runtime = createGoalRuntime({
+      journal: recorder,
+      evidenceSource: recorder,
+      verifier: createGoalVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this),
+    });
+    this.goalRuntime = runtime;
+    if (this.goalTurnHost) {
+      this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
+    }
+    // Under a session-writer lease the recorder starts `inactive` and
+    // rejects every write until `activateChatRecording()` hands it the
+    // lease. Restoring now would push the legacy-migration journal write
+    // straight into that guard, and `restore()` latches the resulting
+    // failure as `recoveryError` for the life of the runtime — the
+    // migrated goal is dropped and goal persistence is bricked for the
+    // whole resumed session. Wait for the writer instead.
+    if (restoreRuntime) {
+      const preparation = runtime.prepareRestore(
+        records ?? [],
+        restoreRuntime.goalCheckpointWindow,
+      );
+      let resolveActivation!: () => void;
+      let rejectActivation!: (reason?: unknown) => void;
+      const activation = new Promise<void>((resolve, reject) => {
+        resolveActivation = resolve;
+        rejectActivation = reject;
+      });
+      this.rejectGoalRestoreActivation = rejectActivation;
+      this.goalRestoreActivation = () => {
+        const started = runtime.activateRestoredWork();
+        void started.then(resolveActivation, rejectActivation);
+        return started;
+      };
+      this.goalRuntimeReady = Promise.all([preparation, activation]).then(
+        () => runtime,
+      );
+    } else if (
+      this.sessionWriterLeaseEnabled &&
+      !recorder.hasWriteOwnership()
+    ) {
+      const ready = new Promise<GoalRuntime>((resolve, reject) => {
+        this.pendingGoalRestore = { runtime, resolve, reject };
+      });
+      this.goalRuntimeReady = ready;
+    } else {
+      this.goalRuntimeReady = runtime
+        .restore(records ?? [])
+        .then(() => runtime);
+    }
+    void this.goalRuntimeReady.catch(() => undefined);
+  }
+
+  /**
+   * Run the restore that {@link initializeGoalRuntime} deferred because the
+   * session writer was not yet accepting writes.
+   *
+   * Called once `activateChatRecording()` has handed the recorder its lease.
+   * Deliberately re-reads the records from `sessionData`: activation
+   * replaces it with the authoritative transcript loaded under the lease, so
+   * the deferred restore sees newer records than the constructor did.
+   */
+  private startPendingGoalRestore(): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    if (pending.runtime !== this.goalRuntime) {
+      pending.reject(
+        new GoalPersistenceUnavailableError(
+          'Goal runtime was replaced before the session writer became available',
+        ),
+      );
+      return;
+    }
+    void pending.runtime
+      .restore(this.sessionData?.conversation.messages ?? [])
+      .then(
+        () => pending.resolve(pending.runtime),
+        (error: unknown) => pending.reject(error),
+      );
+  }
+
+  /**
+   * Fail a deferred restore that can never run — the writer never became
+   * available, or the runtime it belonged to was replaced. Without this the
+   * promise behind {@link getGoalRuntimeReady} would stay pending forever
+   * and every awaiting caller would hang rather than see the failure.
+   */
+  private settlePendingGoalRestore(error: unknown): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    pending.reject(error);
+  }
+
+  private setSessionRestoreProjection(
+    projection: SessionRestoreProjection | undefined,
+  ): void {
+    this.pendingSessionRestoreProjection = projection;
+    this.sessionRestoreRuntime = projection?.runtime;
+    this.restoredFileHistory = false;
+  }
+
+  private clearSessionRestoreProjection(): void {
+    this.pendingSessionRestoreProjection = undefined;
+    this.sessionRestoreRuntime = undefined;
+    this.restoredFileHistory = false;
+    this.rejectGoalRestoreActivation?.(
+      new GoalPersistenceUnavailableError('Session restore was abandoned'),
+    );
+    this.goalRestoreActivation = undefined;
+    this.rejectGoalRestoreActivation = undefined;
+  }
+
+  private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
+    for (const listener of [...this.chatRecordingFailureListeners]) {
+      try {
+        const notification = listener(event);
+        if (notification) {
+          void notification.catch((error) => {
+            this.debugLogger.debug(
+              'Chat recording failure listener rejected:',
+              error,
+            );
+          });
+        }
+      } catch (error) {
+        this.debugLogger.debug('Chat recording failure listener threw:', error);
+      }
+    }
   }
 
   /**
@@ -3772,12 +8032,117 @@ export class Config {
     return path.join(projectDir, 'chats', safeFilename);
   }
 
+  async assertCanStartTurn(): Promise<void> {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      await this.chatRecordingService.assertCanStartTurn();
+    }
+  }
+
+  hasSessionWriteOwnership(): boolean {
+    return (
+      this.pendingSessionWriterLease !== undefined ||
+      this.chatRecordingService?.hasWriteOwnership() === true
+    );
+  }
+
+  setSessionWriterReclaimPolicy(policy: 'local' | 'never'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterReclaimPolicy = policy;
+  }
+
+  setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterTakeoverPolicy = policy;
+  }
+
+  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
+      this.sessionWriterHandoffRequested = true;
+    }
+    this.sessionWriterShutdownRequested = true;
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
+    this.startPendingSessionWriterRelease();
+    this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
+    return this.sessionWriterClosePromise;
+  }
+
+  private async closeSessionWriterOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    const activation = this.sessionWriterActivationPromise;
+    try {
+      await activation;
+    } catch (error) {
+      if (!(error instanceof SessionWriterShutdownError)) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.chatRecordingService?.close({
+        handoff: this.sessionWriterHandoffRequested,
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+    const pendingLease = activation
+      ? undefined
+      : this.pendingSessionWriterLease;
+    if (pendingLease) {
+      try {
+        await this.startPendingSessionWriterRelease(pendingLease);
+        if (
+          this.pendingSessionWriterLease === pendingLease &&
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+      } catch (error) {
+        if (
+          error instanceof SessionWriterLostError ||
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Session writer shutdown failed');
+    }
+  }
+
+  private startPendingSessionWriterRelease(
+    lease = this.pendingSessionWriterLease,
+  ): Promise<void> | undefined {
+    if (!lease) return undefined;
+    const existing = this.pendingSessionWriterRelease;
+    if (existing?.lease === lease) return existing.promise;
+    const promise = lease.release();
+    this.pendingSessionWriterRelease = { lease, promise };
+    void promise.catch(() => undefined);
+    return promise;
+  }
+
+  getSessionRuntimeBaseDir(): string {
+    return this.sessionRuntimeBaseDir;
+  }
+
   /**
    * Gets or creates a SessionService for managing chat sessions.
    */
   getSessionService(): SessionService {
     if (!this.sessionService) {
-      this.sessionService = new SessionService(this.targetDir);
+      this.sessionService = new SessionService(this.storage.getProjectRoot(), {
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+      });
     }
     return this.sessionService;
   }
@@ -3810,9 +8175,36 @@ export class Config {
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
   ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
-    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
-      sessionId,
-    );
+    if (sessionId !== this.getSessionId()) {
+      this.debugLogger.warn(
+        `Refusing to restore background agents for non-current session ${sessionId}.`,
+      );
+      return [];
+    }
+    const service = this.getBackgroundAgentResumeService();
+    let recovered: ReadonlyArray<
+      import('../agents/background-tasks.js').AgentTask
+    >;
+    try {
+      recovered = await service.loadPausedBackgroundAgents(sessionId);
+    } catch (error) {
+      this.debugLogger.warn(
+        `Background agent restore failed for session ${sessionId}; continuing without restored agents.`,
+        error,
+      );
+      return [];
+    }
+    if (recovered.length > 0 && !this.getBareMode()) {
+      this.pendingRecoveredAgentsNotice =
+        service.buildRecoveredBackgroundAgentsModelNotice(recovered.length);
+    }
+    return recovered;
+  }
+
+  consumePendingRecoveredAgentsNotice(): string | null {
+    const notice = this.pendingRecoveredAgentsNotice;
+    this.pendingRecoveredAgentsNotice = null;
+    return notice;
   }
 
   async resumeBackgroundAgent(
@@ -3820,6 +8212,16 @@ export class Config {
     initialMessage?: string,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  async reviveCompletedBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
+    return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
       agentId,
       initialMessage,
     );
@@ -3833,6 +8235,10 @@ export class Config {
 
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  getWorkflowRunRegistry(): WorkflowRunRegistry {
+    return this.workflowRunRegistry;
   }
 
   /**
@@ -3892,8 +8298,8 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that SkillTool can merge these into
-   * its tool description.
+   * CommandService after initialisation so that the startup snapshot and
+   * per-turn drain can include these in the `<available_skills>` listing.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
@@ -3938,8 +8344,37 @@ export class Config {
     return this.modelInvocableCommandsExecutor;
   }
 
+  /**
+   * Records skill keys that were announced inline on a tool result by
+   * `coreToolScheduler` (e.g. path-activated conditional skills). The
+   * client's `drainSkillAndCommandReminders` consumes these to mark them as
+   * announced and avoid a duplicate announcement in the same turn's tail
+   * reminder. Keys use the `"skill:<name>"` format matching
+   * `GeminiClient.skillEntryKey`.
+   */
+  addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
+    for (const k of keys) {
+      this.pendingInlineAnnouncedSkillKeys.add(k);
+    }
+  }
+
+  /**
+   * Returns and clears the set of skill keys announced inline since the last
+   * consumption. Idempotent — a second call returns an empty set until new
+   * keys are added.
+   */
+  consumeInlineAnnouncedSkillKeys(): Set<string> {
+    const result = this.pendingInlineAnnouncedSkillKeys;
+    this.pendingInlineAnnouncedSkillKeys = new Set();
+    return result;
+  }
+
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
+  }
+
+  getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    return this.toolInvocationGuard;
   }
 
   /**
@@ -3954,6 +8389,35 @@ export class Config {
       ) => Promise<void>)
     | undefined {
     return this.onPersistPermissionRuleCallback;
+  }
+
+  private async registerImageGenerationTool(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (
+      !this.isImageGenerationEnabled() ||
+      registry.getAllToolNames().includes(ToolNames.IMAGE_GEN)
+    ) {
+      return;
+    }
+    let enabled = true;
+    try {
+      enabled = this.permissionManager
+        ? await this.permissionManager.isToolEnabled(ToolNames.IMAGE_GEN)
+        : true;
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.IMAGE_GEN}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (!enabled) return;
+
+    registry.registerFactory(ToolNames.IMAGE_GEN, async () => {
+      const { ImageGenTool } = await import('../tools/image-gen.js');
+      return new ImageGenTool(this);
+    });
   }
 
   async createToolRegistry(
@@ -4023,6 +8487,18 @@ export class Config {
       });
     };
 
+    const registerGoalWorkerTools = async (): Promise<void> => {
+      if (options?.forSubAgent) return;
+      await registerLazy(ToolNames.GET_GOAL, async () => {
+        const { GetGoalTool } = await import('../goals/goal-tools.js');
+        return new GetGoalTool(this);
+      });
+      await registerLazy(ToolNames.UPDATE_GOAL, async () => {
+        const { UpdateGoalTool } = await import('../goals/goal-tools.js');
+        return new UpdateGoalTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -4040,6 +8516,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
@@ -4048,13 +8525,24 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);
     });
+    await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
+      const { ReadMcpResourceTool } = await import(
+        '../tools/read-mcp-resource.js'
+      );
+      return new ReadMcpResourceTool(this);
+    });
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.LIST_AGENTS, async () => {
+      const { ListAgentsTool } = await import('../tools/list-agents.js');
+      return new ListAgentsTool(this);
     });
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');
@@ -4076,16 +8564,22 @@ export class Config {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
     });
+    await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
+      const { ZoomImageTool } = await import('../tools/zoom-image.js');
+      return new ZoomImageTool(this);
+    });
 
     // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
+      recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
         useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }
+      recordStartupEvent('config_initialize_ripgrep_probe_end');
       if (useRipgrep) {
         await registerLazy(ToolNames.GREP, async () => {
           const { RipGrepTool } = await import('../tools/ripGrep.js');
@@ -4106,6 +8600,8 @@ export class Config {
         });
       }
     } else {
+      recordStartupEvent('config_initialize_ripgrep_probe_start');
+      recordStartupEvent('config_initialize_ripgrep_probe_end');
       await registerLazy(ToolNames.GREP, async () => {
         const { GrepTool } = await import('../tools/grep.js');
         return new GrepTool(this);
@@ -4136,16 +8632,25 @@ export class Config {
       const { TodoWriteTool } = await import('../tools/todoWrite.js');
       return new TodoWriteTool(this);
     });
-    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } = await import(
-        '../tools/askUserQuestion.js'
-      );
-      return new AskUserQuestionTool(this);
-    });
-    if (!this.sdkMode) {
+    const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
+    if (supportsUserInteraction) {
+      await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+        const { AskUserQuestionTool } = await import(
+          '../tools/askUserQuestion.js'
+        );
+        return new AskUserQuestionTool(this);
+      });
+    }
+    if (!this.sdkMode && (supportsUserInteraction || options?.forSubAgent)) {
       await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
+      });
+    }
+    if (!this.sdkMode && supportsUserInteraction) {
+      await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
+        const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
+        return new EnterPlanModeTool(this);
       });
     }
     await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
@@ -4160,9 +8665,56 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
-    await registerLazy(ToolNames.WORKFLOW, async () => {
-      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
-      return new WorkflowTool(this);
+    if (
+      resolveInteractionMode(this) === 'interactive' &&
+      !this.sdkMode &&
+      !this.getScreenReader() &&
+      !options?.forSubAgent
+    ) {
+      await registerLazy(ToolNames.DISPLAY_IMAGE, async () => {
+        const { DisplayImageTool } = await import('../tools/display-image.js');
+        return new DisplayImageTool(this);
+      });
+    }
+    // WebSearch is opt-in: it registers only when explicitly enabled AND the
+    // configured search model resolves to a usable DashScope entry. A failed
+    // gate surfaces a one-time startup notice instead of a silently missing
+    // tool. Nothing is imported unless the feature is enabled.
+    if (this.webSearchSettings?.enabled) {
+      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+      const gate = evaluateWebSearchGate(this);
+      if (gate.ok) {
+        await registerLazy(ToolNames.WEB_SEARCH, async () => {
+          const { WebSearchTool } = await import('../tools/web-search.js');
+          return new WebSearchTool(this);
+        });
+      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+        this.webSearchNoticeEmitted = true;
+        this.warnings.push(gate.notice);
+      }
+    }
+    await this.registerImageGenerationTool(registry);
+    if (this.isArtifactEnabled()) {
+      await registerLazy(ToolNames.ARTIFACT, async () => {
+        const { ArtifactTool } = await import(
+          '../tools/artifact/artifact-tool.js'
+        );
+        return new ArtifactTool(this);
+      });
+    }
+    if (this.isRecordArtifactEnabled()) {
+      await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
+        const { RecordArtifactTool } = await import(
+          '../tools/record-artifact.js'
+        );
+        return new RecordArtifactTool(this);
+      });
+    }
+    await registerLazy(ToolNames.WORKFLOW_RUN, async () => {
+      const { WorkflowRunTool } = await import(
+        '../tools/workflow-run/workflowRun.js'
+      );
+      return new WorkflowRunTool(this);
     });
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
@@ -4192,6 +8744,64 @@ export class Config {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
       });
+      // Reuses the cron scheduler's session-only one-shot path, so it is
+      // gated on the same flag as the cron tools.
+      await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
+        const { LoopWakeupTool } = await import('../tools/loop-wakeup.js');
+        return new LoopWakeupTool(this);
+      });
+    }
+
+    // create_sub_session: spawn a fresh top-level sub-session and run a prompt
+    // in it. Only functional under `qwen serve` (needs the bridge, wired as a
+    // spawner by the ACP session); the tool's execute() reports a clear
+    // daemon-only error otherwise. Registered unconditionally so the message is
+    // available rather than the tool silently missing.
+    await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+      const { CreateSubSessionTool } = await import(
+        '../tools/create-sub-session.js'
+      );
+      return new CreateSubSessionTool(this);
+    });
+
+    // Register team collaboration tools (experimental). The team-specific
+    // tools (team_create/team_delete/task_create/task_update/task_list)
+    // are gated on this flag.
+    if (this.isAgentTeamEnabled()) {
+      await registerLazy(ToolNames.TEAM_CREATE, async () => {
+        const { TeamCreateTool } = await import('../tools/team-create.js');
+        return new TeamCreateTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_DELETE, async () => {
+        const { TeamDeleteTool } = await import('../tools/team-delete.js');
+        return new TeamDeleteTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_PLAN_APPROVAL, async () => {
+        const { TeamPlanApprovalTool } = await import(
+          '../tools/team-plan-approval.js'
+        );
+        return new TeamPlanApprovalTool(this);
+      });
+      await registerLazy(ToolNames.TASK_CREATE, async () => {
+        const { TaskCreateTool } = await import('../tools/task-create.js');
+        return new TaskCreateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_UPDATE, async () => {
+        const { TaskUpdateTool } = await import('../tools/task-update.js');
+        return new TaskUpdateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_LIST, async () => {
+        const { TaskListTool } = await import('../tools/task-list.js');
+        return new TaskListTool(this);
+      });
+    }
+
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
+      });
     }
 
     // Register computer-use tools unless disabled. All 9 are deferred —
@@ -4215,7 +8825,7 @@ export class Config {
       return new MonitorTool(this);
     });
 
-    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // apply any pending MCP
     // budget-event callback BEFORE `discoverAllTools` (legacy blocking
     // mode runs MCP discovery synchronously in there) and BEFORE the
     // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
@@ -4227,7 +8837,7 @@ export class Config {
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
       }
-      // PR 14b fix (codex round 6): clear after consumption so a
+      // clear after consumption so a
       // subsequent `createToolRegistry` call (e.g. subagent override
       // via `createApprovalModeOverride` /
       // `buildSubagentContextOverride`) doesn't re-apply the parent
@@ -4253,7 +8863,7 @@ export class Config {
   }
 
   /**
-   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * register the MCP guardrail
    * push-event callback. Acceptable to call at any point in the
    * Config lifecycle — before, during, or after `initialize()`.
    *
@@ -4291,5 +8901,22 @@ export class Config {
     }
     // Pre-init path: stash for `createToolRegistry` to consume.
     this.pendingMcpBudgetCallback = cb;
+  }
+
+  private subSessionSpawner?: SubSessionSpawner;
+
+  /**
+   * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
+   * the daemon/ACP session layer (which routes it to the bridge over
+   * `extMethod`); left unset in interactive TUI / headless — the tool then
+   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   */
+  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+    this.subSessionSpawner = spawner;
+  }
+
+  /** The injected sub-session spawner, or undefined outside daemon mode. */
+  getSubSessionSpawner(): SubSessionSpawner | undefined {
+    return this.subSessionSpawner;
   }
 }

@@ -21,6 +21,7 @@ import { StreamRouter, type StreamPoster } from './streamRouter.js';
 import { extractAgentText } from './streamFrame.js';
 import { runHeartbeatLoop } from '../heartbeat.js';
 import { heartbeatIntervalMsOf } from '../heartbeat.js';
+import type { CursorStore } from '../cursorStore.js';
 
 /**
  * The injected inbound transport. The runner only needs "start the gateway and

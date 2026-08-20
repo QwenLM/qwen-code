@@ -1,0 +1,949 @@
+{
+  "version": "2026-03-07",
+  "allowedBashPatterns": [
+    {
+      "pattern": "^ls\\b",
+      "comment": "List directory contents"
+    },
+    {
+      "pattern": "^ll\\b",
+      "comment": "Long listing (ls -l alias)"
+    },
+    {
+      "pattern": "^la\\b",
+      "comment": "List all including hidden (ls -la alias)"
+    },
+    {
+      "pattern": "^tree\\b",
+      "comment": "Display directory tree structure"
+    },
+    {
+      "pattern": "^file\\b",
+      "comment": "Determine file type"
+    },
+    {
+      "pattern": "^stat\\b",
+      "comment": "Display file status and metadata"
+    },
+    {
+      "pattern": "^du\\b",
+      "comment": "Estimate file/directory disk usage"
+    },
+    {
+      "pattern": "^df\\b",
+      "comment": "Report filesystem disk space usage"
+    },
+    {
+      "pattern": "^wc\\b",
+      "comment": "Count lines, words, bytes in files"
+    },
+    {
+      "pattern": "^nl\\b",
+      "comment": "Add line numbers to text output"
+    },
+    {
+      "pattern": "^head\\b",
+      "comment": "Output first part of files"
+    },
+    {
+      "pattern": "^tail\\b",
+      "comment": "Output last part of files"
+    },
+    {
+      "pattern": "^cat\\b",
+      "comment": "Concatenate and display file contents"
+    },
+    {
+      "pattern": "^less\\b",
+      "comment": "View file contents with paging"
+    },
+    {
+      "pattern": "^more\\b",
+      "comment": "View file contents with paging"
+    },
+    {
+      "pattern": "^bat\\b",
+      "comment": "Cat clone with syntax highlighting"
+    },
+    {
+      "pattern": "^markitdown\\b",
+      "comment": "Convert documents to Markdown (read-only)"
+    },
+    {
+      "pattern": "^pdf-tool\\s+(extract|info)\\b",
+      "comment": "PDF read operations: extract text/pages, view info"
+    },
+    {
+      "pattern": "^xlsx-tool\\s+(read|info|export)\\b",
+      "comment": "Excel read operations: read cells, view info, export"
+    },
+    {
+      "pattern": "^doc-diff\\b",
+      "comment": "Document comparison (read-only)"
+    },
+    {
+      "pattern": "^img-tool\\s+info\\b",
+      "comment": "Image read operations: view metadata/info"
+    },
+    {
+      "pattern": "^docx-tool\\s+(info|extract)\\b",
+      "comment": "Word read operations: view info, extract text"
+    },
+    {
+      "pattern": "^pptx-tool\\s+(info|extract)\\b",
+      "comment": "PowerPoint read operations: view info, extract text"
+    },
+    {
+      "pattern": "^ical-tool\\s+(read|filter)\\b",
+      "comment": "Calendar read operations: read events, filter by date"
+    },
+    {
+      "pattern": "^(pdf-tool|xlsx-tool|img-tool|docx-tool|pptx-tool|ical-tool)\\s*$",
+      "comment": "CLI tools: bare invocation (prints help)"
+    },
+    {
+      "pattern": "^craft-agent\\s+label\\s+(list|get|auto-rule-list|auto-rule-validate)\\b",
+      "comment": "craft-agent label read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s+source\\s+(list|get|validate|test|auth-help)\\b",
+      "comment": "craft-agent source read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s+skill\\s+(list|get|validate|where)\\b",
+      "comment": "craft-agent skill read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s+automation\\s+(list|get|validate|history|last-executed|test|lint)\\b",
+      "comment": "craft-agent automation read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s+permission\\s+(list|get|validate)\\b",
+      "comment": "craft-agent permission read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s+theme\\s+(get|validate|list-presets|get-preset)\\b",
+      "comment": "craft-agent theme read-only operations"
+    },
+    {
+      "pattern": "^craft-agent\\s*$",
+      "comment": "craft-agent bare invocation (prints help)"
+    },
+    {
+      "pattern": "^craft-agent\\s+(label|source|skill|automation|permission|theme)\\s*$",
+      "comment": "craft-agent entity help"
+    },
+    {
+      "pattern": "^craft-agent\\s+(label|source|skill|automation|permission|theme)\\s+--help\\b",
+      "comment": "craft-agent entity help flags"
+    },
+    {
+      "pattern": "^craft-agent\\s+--(help|version|discover)\\b",
+      "comment": "craft-agent global flags"
+    },
+    {
+      "pattern": "^find\\b",
+      "comment": "Search for files in directory hierarchy"
+    },
+    {
+      "pattern": "^locate\\b",
+      "comment": "Find files by name using database"
+    },
+    {
+      "pattern": "^which\\b",
+      "comment": "Locate a command"
+    },
+    {
+      "pattern": "^whereis\\b",
+      "comment": "Locate binary, source, manual for command"
+    },
+    {
+      "pattern": "^type\\b",
+      "comment": "Display information about command type"
+    },
+    {
+      "pattern": "^grep\\b",
+      "comment": "Search file contents with patterns"
+    },
+    {
+      "pattern": "^rg\\b",
+      "comment": "Ripgrep - fast recursive search"
+    },
+    {
+      "pattern": "^ag\\b",
+      "comment": "The Silver Searcher - fast code search"
+    },
+    {
+      "pattern": "^ack\\b",
+      "comment": "Ack - grep-like tool for programmers"
+    },
+    {
+      "pattern": "^fd\\b",
+      "comment": "Fast and user-friendly find alternative"
+    },
+    {
+      "pattern": "^fzf\\b",
+      "comment": "Fuzzy finder for files and commands"
+    },
+    {
+      "pattern": "^git\\s+((-[A-Za-z]|--[a-z][-a-z]*)(\\s+[^\\s-][^\\s]*)?\\s+)*(status|log|diff|show|branch|tag|remote|stash\\s+list|describe|rev-parse|config\\s+--get|config\\s+-l|ls-files|ls-tree|shortlog|blame|annotate|reflog|cherry|whatchanged|ls-remote|history)\\b",
+      "comment": "Git read-only operations (supports flags like -C, --no-pager before subcommand)"
+    },
+    {
+      "pattern": "^gh\\s+(pr|issue|repo|release|run|workflow|gist|project)\\s+(view|list|status|diff|checks|comments)\\b",
+      "comment": "GitHub CLI read operations: view PRs, issues, releases"
+    },
+    {
+      "pattern": "^gh\\s+api\\b.*--method\\s+GET\\b",
+      "comment": "GitHub API with explicit GET method"
+    },
+    {
+      "pattern": "^gh\\s+api\\b(?!.*--method)",
+      "comment": "GitHub API without method (defaults to GET)"
+    },
+    {
+      "pattern": "^gh\\s+auth\\s+status\\b",
+      "comment": "Check GitHub authentication status"
+    },
+    {
+      "pattern": "^gh\\s+config\\s+(get|list)\\b",
+      "comment": "Read GitHub CLI configuration"
+    },
+    {
+      "pattern": "^npm\\s+(ls|list|view|info|show|outdated|audit|search|explain|why|config\\s+get|config\\s+list)\\b",
+      "comment": "npm read operations: list packages, view info, check outdated"
+    },
+    {
+      "pattern": "^yarn\\s+(list|info|why|outdated|audit)\\b",
+      "comment": "Yarn read operations: list packages, check outdated"
+    },
+    {
+      "pattern": "^pnpm\\s+(list|ls|why|outdated|audit)\\b",
+      "comment": "pnpm read operations: list packages, check outdated"
+    },
+    {
+      "pattern": "^bun\\s+(pm\\s+ls)\\b",
+      "comment": "Bun package manager list"
+    },
+    {
+      "pattern": "^bun\\s+run\\s+browser-tool\\b",
+      "comment": "Browser-tool helper CLI (templates/help)"
+    },
+    {
+      "pattern": "^bun\\s+run\\s+typecheck\\b$",
+      "comment": "Project typecheck script (read-only quality gate)"
+    },
+    {
+      "pattern": "^bun\\s+run\\s+typecheck:all\\b$",
+      "comment": "Monorepo typecheck script (read-only quality gate)"
+    },
+    {
+      "pattern": "^bunx\\s+tsc\\b.*--noEmit\\b",
+      "comment": "TypeScript compiler check without emitting artifacts"
+    },
+    {
+      "pattern": "^tsc\\b.*--noEmit\\b",
+      "comment": "TypeScript compiler check without emitting artifacts"
+    },
+    {
+      "pattern": "^npm\\s+run\\s+typecheck\\b$",
+      "comment": "npm typecheck script (read-only quality gate)"
+    },
+    {
+      "pattern": "^yarn\\s+typecheck\\b$",
+      "comment": "yarn typecheck script (read-only quality gate)"
+    },
+    {
+      "pattern": "^pnpm\\s+typecheck\\b$",
+      "comment": "pnpm typecheck script (read-only quality gate)"
+    },
+    {
+      "pattern": "^pip\\s+(list|show|freeze|check)\\b",
+      "comment": "pip read operations: list packages, show info"
+    },
+    {
+      "pattern": "^pip3\\s+(list|show|freeze|check)\\b",
+      "comment": "pip3 read operations: list packages, show info"
+    },
+    {
+      "pattern": "^cargo\\s+(tree|metadata|pkgid|verify-project)\\b",
+      "comment": "Cargo read operations: dependency tree, metadata"
+    },
+    {
+      "pattern": "^go\\s+(list|mod\\s+graph|mod\\s+why|version)\\b",
+      "comment": "Go read operations: list modules, dependency graph"
+    },
+    {
+      "pattern": "^composer\\s+(show|info|outdated|licenses)\\b",
+      "comment": "Composer read operations: show packages, licenses"
+    },
+    {
+      "pattern": "^gem\\s+(list|info|dependency|environment)\\b",
+      "comment": "RubyGems read operations: list gems, show info"
+    },
+    {
+      "pattern": "^bundle\\s+(list|info|outdated)\\b",
+      "comment": "Bundler read operations: list gems, check outdated"
+    },
+    {
+      "pattern": "^cd\\b",
+      "comment": "Change directory (affects shell session only)"
+    },
+    {
+      "pattern": "^pwd\\b",
+      "comment": "Print current working directory"
+    },
+    {
+      "pattern": "^whoami\\b",
+      "comment": "Print current username"
+    },
+    {
+      "pattern": "^id\\b",
+      "comment": "Print user and group IDs"
+    },
+    {
+      "pattern": "^groups\\b",
+      "comment": "Print group memberships"
+    },
+    {
+      "pattern": "^uname\\b",
+      "comment": "Print system information"
+    },
+    {
+      "pattern": "^hostname\\b",
+      "comment": "Print system hostname"
+    },
+    {
+      "pattern": "^date\\b",
+      "comment": "Print current date and time"
+    },
+    {
+      "pattern": "^uptime\\b",
+      "comment": "Print system uptime and load"
+    },
+    {
+      "pattern": "^env$",
+      "comment": "Print all environment variables (bare command only, not env <cmd>)"
+    },
+    {
+      "pattern": "^printenv\\b",
+      "comment": "Print environment variables"
+    },
+    {
+      "pattern": "^echo\\b",
+      "comment": "Print text to stdout (read-only; redirects/substitution still blocked)"
+    },
+    {
+      "pattern": "^ps\\b",
+      "comment": "List running processes"
+    },
+    {
+      "pattern": "^top\\s+-[lb]",
+      "comment": "Process viewer in batch/list mode only"
+    },
+    {
+      "pattern": "^htop\\b",
+      "comment": "Interactive process viewer"
+    },
+    {
+      "pattern": "^free\\b",
+      "comment": "Display memory usage"
+    },
+    {
+      "pattern": "^vmstat\\b",
+      "comment": "Virtual memory statistics"
+    },
+    {
+      "pattern": "^iostat\\b",
+      "comment": "I/O statistics"
+    },
+    {
+      "pattern": "^lscpu\\b",
+      "comment": "Display CPU architecture information"
+    },
+    {
+      "pattern": "^lsmem\\b",
+      "comment": "Display memory information"
+    },
+    {
+      "pattern": "^lsblk\\b",
+      "comment": "List block devices"
+    },
+    {
+      "pattern": "^lsusb\\b",
+      "comment": "List USB devices"
+    },
+    {
+      "pattern": "^lspci\\b",
+      "comment": "List PCI devices"
+    },
+    {
+      "pattern": "^docker\\s+(ps|images|logs|inspect|stats|top|port|diff|history|version|info|system\\s+info|system\\s+df|network\\s+ls|network\\s+inspect|volume\\s+ls|volume\\s+inspect|container\\s+ls|image\\s+ls)\\b",
+      "comment": "Docker read operations: list containers, images, logs, inspect"
+    },
+    {
+      "pattern": "^docker-compose\\s+(ps|logs|config|images|top|version)\\b",
+      "comment": "Docker Compose read operations: list services, view logs"
+    },
+    {
+      "pattern": "^docker\\s+compose\\s+(ps|logs|config|images|top|version)\\b",
+      "comment": "Docker Compose (v2) read operations"
+    },
+    {
+      "pattern": "^kubectl\\s+(get|describe|logs|top|explain|api-resources|api-versions|cluster-info|config\\s+view|config\\s+get-contexts|version)\\b",
+      "comment": "Kubernetes read operations: get resources, describe, view logs"
+    },
+    {
+      "pattern": "^sed\\s+-n\\b",
+      "comment": "sed in print-only mode (no editing)"
+    },
+    {
+      "pattern": "^sort\\b",
+      "comment": "Sort lines of text files"
+    },
+    {
+      "pattern": "^uniq\\b",
+      "comment": "Report or filter repeated lines"
+    },
+    {
+      "pattern": "^cut\\b",
+      "comment": "Remove sections from lines"
+    },
+    {
+      "pattern": "^tr\\b",
+      "comment": "Translate or delete characters"
+    },
+    {
+      "pattern": "^column\\b",
+      "comment": "Columnate lists"
+    },
+    {
+      "pattern": "^(?:gawk|mawk|nawk|awk)\\b",
+      "comment": "Awk text processing (dangerous execution forms are blocked by validator)"
+    },
+    {
+      "pattern": "^jq\\b",
+      "comment": "JSON processor"
+    },
+    {
+      "pattern": "^yq\\b",
+      "comment": "YAML processor"
+    },
+    {
+      "pattern": "^xq\\b",
+      "comment": "XML processor (via yq)"
+    },
+    {
+      "pattern": "^xmllint\\b",
+      "comment": "XML linter and formatter"
+    },
+    {
+      "pattern": "^json_pp\\b",
+      "comment": "JSON pretty printer"
+    },
+    {
+      "pattern": "^python\\s+-m\\s+json\\.tool\\b",
+      "comment": "Python JSON formatter"
+    },
+    {
+      "pattern": "^ping\\b",
+      "comment": "Send ICMP echo requests"
+    },
+    {
+      "pattern": "^traceroute\\b",
+      "comment": "Trace packet route to host"
+    },
+    {
+      "pattern": "^tracepath\\b",
+      "comment": "Trace path to host"
+    },
+    {
+      "pattern": "^mtr\\b",
+      "comment": "Network diagnostic tool"
+    },
+    {
+      "pattern": "^dig\\b",
+      "comment": "DNS lookup utility"
+    },
+    {
+      "pattern": "^nslookup\\b",
+      "comment": "Query DNS servers"
+    },
+    {
+      "pattern": "^host\\b",
+      "comment": "DNS lookup utility"
+    },
+    {
+      "pattern": "^netstat\\b",
+      "comment": "Network statistics"
+    },
+    {
+      "pattern": "^ss\\b",
+      "comment": "Socket statistics"
+    },
+    {
+      "pattern": "^ip\\s+(addr|link|route|neigh)\\s*(show)?\\b",
+      "comment": "IP address/link/route information"
+    },
+    {
+      "pattern": "^ifconfig\\b",
+      "comment": "Network interface configuration (read)"
+    },
+    {
+      "pattern": "^node\\s+(--version|-v)\\b",
+      "comment": "Node.js version"
+    },
+    {
+      "pattern": "^npm\\s+(--version|-v)\\b",
+      "comment": "npm version"
+    },
+    {
+      "pattern": "^yarn\\s+(--version|-v)\\b",
+      "comment": "Yarn version"
+    },
+    {
+      "pattern": "^pnpm\\s+(--version|-v)\\b",
+      "comment": "pnpm version"
+    },
+    {
+      "pattern": "^bun\\s+(--version|-v)\\b",
+      "comment": "Bun version"
+    },
+    {
+      "pattern": "^python\\s+(--version|-V)\\b",
+      "comment": "Python version"
+    },
+    {
+      "pattern": "^python3\\s+(--version|-V)\\b",
+      "comment": "Python 3 version"
+    },
+    {
+      "pattern": "^ruby\\s+(--version|-v)\\b",
+      "comment": "Ruby version"
+    },
+    {
+      "pattern": "^go\\s+version\\b",
+      "comment": "Go version"
+    },
+    {
+      "pattern": "^rustc\\s+(--version|-V)\\b",
+      "comment": "Rust compiler version"
+    },
+    {
+      "pattern": "^cargo\\s+(--version|-V)\\b",
+      "comment": "Cargo version"
+    },
+    {
+      "pattern": "^java\\s+(-version|--version)\\b",
+      "comment": "Java version"
+    },
+    {
+      "pattern": "^dotnet\\s+--version\\b",
+      "comment": ".NET version"
+    },
+    {
+      "pattern": "^php\\s+(--version|-v)\\b",
+      "comment": "PHP version"
+    },
+    {
+      "pattern": "^perl\\s+(--version|-v)\\b",
+      "comment": "Perl version"
+    },
+    {
+      "pattern": "^man\\b",
+      "comment": "Display manual pages"
+    },
+    {
+      "pattern": "--help\\b",
+      "comment": "Display command help"
+    },
+    {
+      "pattern": "-h\\b$",
+      "comment": "Display command help (short flag)"
+    },
+    {
+      "pattern": "^Get-ChildItem\\b",
+      "comment": "PowerShell: List directory contents (dir/ls equivalent)"
+    },
+    {
+      "pattern": "^Get-Content\\b",
+      "comment": "PowerShell: Read file contents (cat equivalent)"
+    },
+    {
+      "pattern": "^Get-Item\\b",
+      "comment": "PowerShell: Get file/directory item properties"
+    },
+    {
+      "pattern": "^Get-ItemProperty\\b",
+      "comment": "PowerShell: Get item properties"
+    },
+    {
+      "pattern": "^Get-Location\\b",
+      "comment": "PowerShell: Print current directory (pwd equivalent)"
+    },
+    {
+      "pattern": "^Get-Process\\b",
+      "comment": "PowerShell: List running processes"
+    },
+    {
+      "pattern": "^Get-Service\\b",
+      "comment": "PowerShell: List services"
+    },
+    {
+      "pattern": "^Get-Command\\b",
+      "comment": "PowerShell: List available commands"
+    },
+    {
+      "pattern": "^Get-Help\\b",
+      "comment": "PowerShell: Display command help"
+    },
+    {
+      "pattern": "^Get-Module\\b",
+      "comment": "PowerShell: List loaded modules"
+    },
+    {
+      "pattern": "^Get-Variable\\b",
+      "comment": "PowerShell: List variables"
+    },
+    {
+      "pattern": "^Get-Alias\\b",
+      "comment": "PowerShell: List command aliases"
+    },
+    {
+      "pattern": "^Get-Host\\b",
+      "comment": "PowerShell: Get host information"
+    },
+    {
+      "pattern": "^Get-Date\\b",
+      "comment": "PowerShell: Get current date/time"
+    },
+    {
+      "pattern": "^Get-Culture\\b",
+      "comment": "PowerShell: Get culture settings"
+    },
+    {
+      "pattern": "^Get-ComputerInfo\\b",
+      "comment": "PowerShell: Get system information"
+    },
+    {
+      "pattern": "^Get-PSDrive\\b",
+      "comment": "PowerShell: List drives"
+    },
+    {
+      "pattern": "^Get-History\\b",
+      "comment": "PowerShell: Get command history"
+    },
+    {
+      "pattern": "^Get-EventLog\\b",
+      "comment": "PowerShell: Read event logs"
+    },
+    {
+      "pattern": "^Get-WinEvent\\b",
+      "comment": "PowerShell: Read Windows events"
+    },
+    {
+      "pattern": "^Get-Acl\\b",
+      "comment": "PowerShell: Get access control list"
+    },
+    {
+      "pattern": "^Get-NetAdapter\\b",
+      "comment": "PowerShell: List network adapters"
+    },
+    {
+      "pattern": "^Get-NetIPAddress\\b",
+      "comment": "PowerShell: Get IP addresses"
+    },
+    {
+      "pattern": "^Get-NetRoute\\b",
+      "comment": "PowerShell: Get routing table"
+    },
+    {
+      "pattern": "^Get-DnsClientServerAddress\\b",
+      "comment": "PowerShell: Get DNS server addresses"
+    },
+    {
+      "pattern": "^Get-Disk\\b",
+      "comment": "PowerShell: List disks"
+    },
+    {
+      "pattern": "^Get-Volume\\b",
+      "comment": "PowerShell: List volumes"
+    },
+    {
+      "pattern": "^Get-Partition\\b",
+      "comment": "PowerShell: List disk partitions"
+    },
+    {
+      "pattern": "^Get-Package\\b",
+      "comment": "PowerShell: List installed packages"
+    },
+    {
+      "pattern": "^Get-InstalledModule\\b",
+      "comment": "PowerShell: List installed PowerShell modules"
+    },
+    {
+      "pattern": "^Test-Path\\b",
+      "comment": "PowerShell: Test if path exists"
+    },
+    {
+      "pattern": "^Test-Connection\\b",
+      "comment": "PowerShell: Ping equivalent"
+    },
+    {
+      "pattern": "^Test-NetConnection\\b",
+      "comment": "PowerShell: Test network connectivity"
+    },
+    {
+      "pattern": "^Resolve-Path\\b",
+      "comment": "PowerShell: Resolve path to full path"
+    },
+    {
+      "pattern": "^Split-Path\\b",
+      "comment": "PowerShell: Split path into components"
+    },
+    {
+      "pattern": "^Join-Path\\b",
+      "comment": "PowerShell: Join path components"
+    },
+    {
+      "pattern": "^Measure-Object\\b",
+      "comment": "PowerShell: Measure/count objects"
+    },
+    {
+      "pattern": "^Measure-Command\\b",
+      "comment": "PowerShell: Measure execution time"
+    },
+    {
+      "pattern": "^Compare-Object\\b",
+      "comment": "PowerShell: Compare two objects"
+    },
+    {
+      "pattern": "^Select-Object\\b",
+      "comment": "PowerShell: Select object properties"
+    },
+    {
+      "pattern": "^Sort-Object\\b",
+      "comment": "PowerShell: Sort objects"
+    },
+    {
+      "pattern": "^Group-Object\\b",
+      "comment": "PowerShell: Group objects by property"
+    },
+    {
+      "pattern": "^Where-Object\\b",
+      "comment": "PowerShell: Filter objects"
+    },
+    {
+      "pattern": "^ForEach-Object\\b",
+      "comment": "PowerShell: Iterate over objects"
+    },
+    {
+      "pattern": "^Format-List\\b",
+      "comment": "PowerShell: Format output as list"
+    },
+    {
+      "pattern": "^Format-Table\\b",
+      "comment": "PowerShell: Format output as table"
+    },
+    {
+      "pattern": "^Format-Wide\\b",
+      "comment": "PowerShell: Format output as wide table"
+    },
+    {
+      "pattern": "^ConvertTo-Json\\b",
+      "comment": "PowerShell: Convert to JSON"
+    },
+    {
+      "pattern": "^ConvertFrom-Json\\b",
+      "comment": "PowerShell: Parse JSON"
+    },
+    {
+      "pattern": "^ConvertTo-Csv\\b",
+      "comment": "PowerShell: Convert to CSV"
+    },
+    {
+      "pattern": "^ConvertFrom-Csv\\b",
+      "comment": "PowerShell: Parse CSV"
+    },
+    {
+      "pattern": "^ConvertTo-Xml\\b",
+      "comment": "PowerShell: Convert to XML"
+    },
+    {
+      "pattern": "^Select-String\\b",
+      "comment": "PowerShell: Search strings in files (grep equivalent)"
+    },
+    {
+      "pattern": "^Find-Module\\b",
+      "comment": "PowerShell: Search for modules in gallery"
+    },
+    {
+      "pattern": "^Find-Package\\b",
+      "comment": "PowerShell: Search for packages"
+    },
+    {
+      "pattern": "^\\$PSVersionTable\\b",
+      "comment": "PowerShell: Version information variable"
+    },
+    {
+      "pattern": "^\\$env:",
+      "comment": "PowerShell: Environment variable access"
+    },
+    {
+      "pattern": "^\\$PWD\\b",
+      "comment": "PowerShell: Current directory variable"
+    },
+    {
+      "pattern": "^\\$HOME\\b",
+      "comment": "PowerShell: Home directory variable"
+    },
+    {
+      "pattern": "^\\$Host\\b",
+      "comment": "PowerShell: Host information variable"
+    },
+    {
+      "pattern": "^dir\\b",
+      "comment": "PowerShell/CMD: List directory (Get-ChildItem alias)"
+    },
+    {
+      "pattern": "^gci\\b",
+      "comment": "PowerShell: Get-ChildItem alias"
+    },
+    {
+      "pattern": "^gc\\b",
+      "comment": "PowerShell: Get-Content alias"
+    },
+    {
+      "pattern": "^gps\\b",
+      "comment": "PowerShell: Get-Process alias"
+    },
+    {
+      "pattern": "^gsv\\b",
+      "comment": "PowerShell: Get-Service alias"
+    },
+    {
+      "pattern": "^gcm\\b",
+      "comment": "PowerShell: Get-Command alias"
+    }
+  ],
+  "blockedCommandHints": [
+    {
+      "command": "printf",
+      "reason": "printf is not in the default Explore-mode read-only allowlist.",
+      "context": "Explore mode keeps a narrow command surface so harmless-looking shell forms do not accidentally expand capability.",
+      "tryInstead": [
+        "Use `echo` for simple separators and labels.",
+        "Switch to Ask mode for this command.",
+        "Allowlist printf in permissions.json if your workspace wants it in Explore mode."
+      ],
+      "example": "echo '--- files ---'"
+    },
+    {
+      "command": "sed",
+      "reason": "Only print-only sed is allowed in Explore mode by default.",
+      "context": "Default safe pattern is `^sed\\s+-n\\b` (inspection, not in-place transformation).",
+      "whenNotMatching": "^sed\\s+-n\\b",
+      "tryInstead": [
+        "Use `sed -n ...` for read-only inspection.",
+        "Switch to Ask mode for transform commands."
+      ],
+      "example": "sed -n '1,80p' file.txt"
+    },
+    {
+      "command": "awk",
+      "reason": "awk is blocked when the command appears to execute external commands.",
+      "context": "Forms like `system(...)`, command-pipe `getline`, or `print | \"cmd\"` can run arbitrary processes.",
+      "tryInstead": [
+        "Use awk without execution primitives for read-only text extraction.",
+        "Switch to Ask mode for advanced scripts."
+      ]
+    },
+    {
+      "command": "gawk",
+      "reason": "gawk is blocked when the command appears to execute external commands.",
+      "context": "Forms like `system(...)`, command-pipe `getline`, or `print | \"cmd\"` can run arbitrary processes."
+    },
+    {
+      "command": "mawk",
+      "reason": "mawk is blocked when the command appears to execute external commands.",
+      "context": "Forms like `system(...)`, command-pipe `getline`, or `print | \"cmd\"` can run arbitrary processes."
+    },
+    {
+      "command": "nawk",
+      "reason": "nawk is blocked when the command appears to execute external commands.",
+      "context": "Forms like `system(...)`, command-pipe `getline`, or `print | \"cmd\"` can run arbitrary processes."
+    },
+    {
+      "command": "xargs",
+      "reason": "xargs is not allowlisted in Explore mode because it can execute arbitrary commands from input.",
+      "tryInstead": [
+        "Use dedicated read-only commands directly.",
+        "Switch to Ask mode when command execution from piped input is necessary."
+      ]
+    }
+  ],
+  "allowedMcpPatterns": [
+    {
+      "pattern": "search",
+      "comment": "Search operations across MCP sources"
+    },
+    {
+      "pattern": "list",
+      "comment": "Generic list operations"
+    },
+    {
+      "pattern": "get",
+      "comment": "Generic get/read operations"
+    },
+    {
+      "pattern": "read",
+      "comment": "Generic read operations"
+    },
+    {
+      "pattern": "info",
+      "comment": "Information/metadata retrieval"
+    },
+    {
+      "pattern": "describe",
+      "comment": "Describe resources"
+    },
+    {
+      "pattern": "show",
+      "comment": "Show resource details"
+    },
+    {
+      "pattern": "view",
+      "comment": "View resource contents"
+    },
+    {
+      "pattern": "find",
+      "comment": "Find/locate resources"
+    },
+    {
+      "pattern": "query",
+      "comment": "Query operations"
+    },
+    {
+      "pattern": "count",
+      "comment": "Count resources"
+    },
+    {
+      "pattern": "exists",
+      "comment": "Check existence"
+    },
+    {
+      "pattern": "status",
+      "comment": "Status checks"
+    },
+    {
+      "pattern": "inspect",
+      "comment": "Inspect resource details"
+    },
+    {
+      "pattern": "fetch",
+      "comment": "Fetch/retrieve data"
+    }
+  ],
+  "allowedApiEndpoints": [],
+  "allowedWritePaths": []
+}

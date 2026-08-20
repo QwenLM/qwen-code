@@ -15,8 +15,6 @@ import type {
   PromptResult,
   DaemonSessionContextStatus,
   PermissionResponse,
-  RewindSessionRequest,
-  DaemonRewindResult,
   DaemonSessionSupportedCommandsStatus,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -25,6 +23,10 @@ import type {
   DaemonCapabilities,
   DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import type {
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
+} from '@qwen-code/sdk/daemon';
 
 /** Result of spawning a new daemon bound to a workspace. */
 export interface PooledDaemonSpawn {
@@ -35,7 +37,7 @@ export interface PooledDaemonSpawn {
 
 /**
  * The session-routing surface of `DaemonClient` that the gateway's routes
- * actually call through `deps.daemon` — exactly the 14 methods, signatures
+ * actually call through `deps.daemon` — exactly the 15 methods, signatures
  * copied verbatim from `DaemonClient` (packages/sdk-typescript/src/daemon/
  * DaemonClient.ts) so a real `DaemonClient` structurally satisfies this
  * interface with zero changes. `DaemonPool` is the other implementation: a
@@ -51,7 +53,7 @@ export interface SessionDaemon {
     clientId?: string,
   ): Promise<PromptResult>;
   capabilities(): Promise<DaemonCapabilities>;
-  endSession(sessionId: string, clientId?: string): Promise<void>;
+  closeSession(sessionId: string, clientId?: string): Promise<void>;
   subscribeEvents(
     sessionId: string,
     opts?: SubscribeOptions,
@@ -73,9 +75,12 @@ export interface SessionDaemon {
   ): Promise<DaemonSessionSupportedCommandsStatus>;
   rewindSession(
     sessionId: string,
-    req: RewindSessionRequest,
-    clientId?: string,
+    promptId: string,
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult>;
+  getRewindSnapshots(
+    sessionId: string,
+  ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]>;
   setSessionApprovalMode(
     sessionId: string,
@@ -492,21 +497,27 @@ export class DaemonPool implements SessionDaemon {
     );
   }
 
-  async endSession(sessionId: string, clientId?: string): Promise<void> {
-    await this.daemonForSession(sessionId).endSession(sessionId, clientId);
+  async closeSession(sessionId: string, clientId?: string): Promise<void> {
+    await this.daemonForSession(sessionId).closeSession(sessionId, clientId);
     this.removeSession(sessionId);
   }
 
   async rewindSession(
     sessionId: string,
-    req: RewindSessionRequest,
-    clientId?: string,
+    promptId: string,
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return this.daemonForSession(sessionId).rewindSession(
       sessionId,
-      req,
-      clientId,
+      promptId,
+      opts,
     );
+  }
+
+  async getRewindSnapshots(
+    sessionId: string,
+  ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }> {
+    return this.daemonForSession(sessionId).getRewindSnapshots(sessionId);
   }
 
   async sessionSupportedCommands(

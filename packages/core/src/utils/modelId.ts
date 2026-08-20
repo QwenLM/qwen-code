@@ -41,6 +41,11 @@ type ModelIdSelector =
 
 const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
 
+export {
+  RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix,
+} from './runtimeModelPrefix.js';
+
 /**
  * Resolve a model selector to the concrete model ID a caller should use.
  *

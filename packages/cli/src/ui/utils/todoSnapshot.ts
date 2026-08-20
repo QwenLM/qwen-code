@@ -28,6 +28,9 @@ type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
 export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
 const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
+const STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM = 12;
+const STICKY_TODO_VP_MIN_VISIBLE_ITEMS = 2;
+const STICKY_TODO_VP_MAX_VISIBLE_ITEMS = 4;
 
 const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   in_progress: 0,
@@ -117,6 +120,23 @@ function isRecentHistoryTodoSnapshot(
   return historyItemsAfterSnapshot < MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY;
 }
 
+/**
+ * Returns true when a user message exists after the given index, meaning the
+ * todo snapshot belongs to a previous turn.  The sticky panel should not
+ * resurface stale todos from an earlier turn when the user starts a new one.
+ */
+function hasUserMessageAfter(
+  items: readonly HistoryLikeItem[],
+  afterIndex: number,
+): boolean {
+  for (let i = afterIndex + 1; i < items.length; i++) {
+    if (items[i].type === 'user') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function getStickyTodos(
   history: readonly HistoryItem[],
   pendingHistoryItems: readonly HistoryItemWithoutId[],
@@ -137,6 +157,12 @@ export function getStickyTodos(
   // reliable per-item viewport API. Treat very recent TodoWrite snapshots as
   // still visible so the footer does not duplicate the inline result.
   if (isRecentHistoryTodoSnapshot(historySnapshot.itemIndex, history.length)) {
+    return null;
+  }
+
+  // If a new user message appeared after the todo snapshot, the snapshot
+  // belongs to a previous turn.  Do not resurface stale todos.
+  if (hasUserMessageAfter(history, historySnapshot.itemIndex)) {
     return null;
   }
 
@@ -203,4 +229,34 @@ export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
   return clampStickyTodoVisibleItems(
     terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM,
   );
+}
+
+// VP mode uses a tighter per-item row budget (12 rows/item vs 5) so the
+// panel leaves more room for the conversation. Clamped to [2, 4] so very
+// short terminals still show a useful panel and very tall ones don't
+// over-allocate.
+function getStickyTodoVpCap(terminalHeight: number): number {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return STICKY_TODO_VP_MIN_VISIBLE_ITEMS;
+  }
+  return Math.max(
+    STICKY_TODO_VP_MIN_VISIBLE_ITEMS,
+    Math.min(
+      STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
+      Math.floor(terminalHeight / STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM),
+    ),
+  );
+}
+
+// Single source of truth for the sticky-todo cap across render + layout-key
+// sites. VP mode uses a height-aware tighter cap; other modes use the
+// height-derived default.
+export function getStickyTodoMaxVisibleItemsForMode(
+  terminalHeight: number,
+  useTerminalBuffer: boolean,
+): number {
+  const base = getStickyTodoMaxVisibleItems(terminalHeight);
+  return useTerminalBuffer
+    ? Math.min(getStickyTodoVpCap(terminalHeight), base)
+    : base;
 }

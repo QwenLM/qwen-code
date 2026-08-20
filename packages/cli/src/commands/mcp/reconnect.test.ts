@@ -7,11 +7,16 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { reconnectCommand } from './reconnect.js';
 import { loadSettings } from '../../config/settings.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { Config, ExtensionManager } from '@qwen-code/qwen-code-core';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockProcessExit = vi.hoisted(() => vi.fn());
+const mockGetPendingGatedMcpServers = vi.hoisted(() => vi.fn());
+const mockAssembleMcpServers = vi.hoisted(() => vi.fn());
+const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
@@ -22,8 +27,16 @@ vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn(),
 }));
 
+vi.mock('../../config/mcpServers.js', () => ({
+  assembleMcpServers: mockAssembleMcpServers,
+}));
+
 vi.mock('../../config/trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi.fn().mockReturnValue(true),
+  isWorkspaceTrusted: mockIsWorkspaceTrusted,
+}));
+
+vi.mock('../../config/mcpApprovals.js', () => ({
+  getPendingGatedMcpServers: mockGetPendingGatedMcpServers,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -34,6 +47,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 const mockedLoadSettings = loadSettings as vi.Mock;
+const mockedAssembleMcpServers = assembleMcpServers as vi.Mock;
+const mockedIsWorkspaceTrusted = isWorkspaceTrusted as vi.Mock;
 const MockedConfig = Config as vi.Mock;
 const MockedExtensionManager = ExtensionManager as vi.Mock;
 
@@ -73,6 +88,12 @@ describe('mcp reconnect command', () => {
 
     MockedConfig.mockImplementation(() => mockConfig);
     MockedExtensionManager.mockImplementation(() => mockExtensionManager);
+    mockGetPendingGatedMcpServers.mockReturnValue([]);
+    mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
 
     Object.defineProperty(process, 'exit', {
       value: mockProcessExit,
@@ -107,6 +128,84 @@ describe('mcp reconnect command', () => {
       );
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Successfully reconnected to server "test-server".',
+      );
+    });
+
+    it('passes pending gated servers to the reconnect config', async () => {
+      const mcpServers = {
+        approved: { command: '/path/to/server' },
+        pending: { command: '/path/to/pending', scope: 'workspace' },
+      };
+      mockedLoadSettings.mockReturnValue({
+        merged: { mcpServers },
+      });
+      mockGetPendingGatedMcpServers.mockReturnValue(['pending']);
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'approved', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mcpServers,
+          pendingMcpServers: ['pending'],
+        }),
+      );
+      expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
+        'approved',
+      );
+    });
+
+    it('passes explicit untrusted workspace state to the extension manager', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedExtensionManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isWorkspaceTrusted: false,
+        }),
+      );
+    });
+
+    it('reconnects project servers from assembled MCP config', async () => {
+      const settingsServers = {
+        user: { command: '/path/to/user' },
+      };
+      const assembledServers = {
+        user: { command: '/path/to/user' },
+        project: { command: '/path/to/project', scope: 'project' },
+      };
+      mockedLoadSettings.mockReturnValue({
+        merged: { mcpServers: settingsServers },
+      });
+      mockedAssembleMcpServers.mockReturnValue(assembledServers);
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'project', all: false });
+
+      expect(mockedAssembleMcpServers).toHaveBeenCalledWith(
+        settingsServers,
+        process.cwd(),
+      );
+      expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
+        'project',
       );
     });
 

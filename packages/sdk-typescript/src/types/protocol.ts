@@ -269,6 +269,15 @@ export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
 }
 
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
+}
+
 export interface CLIControlPermissionRequest {
   subtype: 'can_use_tool';
   tool_name: string;
@@ -348,6 +357,11 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, MCPServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -391,8 +405,23 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
@@ -401,7 +430,10 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlSetEffortRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -592,9 +624,13 @@ export enum ControlRequestType {
   // SystemController requests
   INITIALIZE = 'initialize',
   INTERRUPT = 'interrupt',
+  CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
+  SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
+  GET_AVAILABLE_MODELS = 'get_available_models',
+  GET_USAGE_INFO = 'get_usage_info',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

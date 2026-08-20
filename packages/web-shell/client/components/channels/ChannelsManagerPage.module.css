@@ -1,0 +1,393 @@
+.page {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  margin: -16px -20px 0;
+}
+
+.pageHeader {
+  display: flex;
+  min-height: 46px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-block-end: 1px solid var(--border);
+}
+
+.backButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: var(--muted-foreground);
+}
+
+.title {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  outline: none;
+}
+
+.pageBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 24px;
+  padding: 20px 24px 32px;
+}
+
+.intro {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.count {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.toolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspacePicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspacePickerLabel {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.workspacePickerTrigger {
+  width: 220px;
+  min-height: 34px;
+  background: var(--background);
+}
+
+.refreshButton {
+  min-height: 34px;
+}
+
+.loadingState {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sectionHeader {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sectionTitle {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.sectionDescription {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.emptyState {
+  min-height: 140px;
+  border: 0;
+  background: transparent;
+}
+
+.channelGrid {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.channelCard {
+  min-width: 0;
+  border-radius: 12px;
+  background: var(--background);
+}
+
+.channelHeader {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px 4px;
+}
+
+.channelIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.channelIdentityCopy {
+  min-width: 0;
+}
+
+.channelNameRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.channelName {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channelMeta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-block-start: 2px;
+  font-size: 11px;
+}
+
+.runtimeBadge {
+  height: 19px;
+  padding-inline: 7px;
+  font-size: 10px;
+}
+
+.runtimeBadge[data-runtime-state='connected'] {
+  background: var(--success-bg);
+  color: var(--success-color);
+}
+
+.cardActionGroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.errorAlert [data-slot='alert-description'] {
+  overflow-wrap: anywhere;
+}
+
+.channelFooter {
+  min-height: 58px;
+  padding: 11px 14px;
+  border-block-start: 1px solid var(--border);
+}
+
+.startupControl {
+  display: flex;
+  width: 100%;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.startupCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.startupLabel {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.startupDescription {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.platformSection {
+  padding-block-start: 4px;
+}
+
+.platformGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platformCard {
+  display: flex;
+  min-width: 0;
+  min-height: 66px;
+  cursor: pointer;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  transition: background-color 150ms ease;
+}
+
+.platformCard:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+.platformCard:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.platformCard:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.platformMark {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.platformCopy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.platformName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platformHint {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.platformAction {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.platformAction svg {
+  width: 14px;
+  height: 14px;
+}
+
+@container panel-body (max-width: 760px) {
+  .platformGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container panel-body (max-width: 620px) {
+  .pageBody {
+    padding-inline: 20px;
+  }
+
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .toolbarActions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .workspacePicker {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .workspacePickerTrigger {
+    width: 100%;
+  }
+
+  .channelHeader {
+    display: flex;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .cardActionGroup {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .platformGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .platformCard {
+    transition-duration: 0.01ms !important;
+  }
+}

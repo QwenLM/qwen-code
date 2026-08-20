@@ -6,7 +6,6 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { detectLineEnding } from '../services/fileSystemService.js';
@@ -25,7 +24,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -58,6 +57,7 @@ import type {
 } from './modifiable-tool.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 
 const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
@@ -402,6 +402,15 @@ async function checkPriorNotebookRead(
     });
   }
 
+  if (status.state === 'unverifiable') {
+    return rejectNotebookPriorRead(notebookPath, 'unverifiable-cache-entry', {
+      ok: false,
+      type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      rawMessage: `Notebook ${notebookPath} is on a filesystem that does not provide a verifiable inode identity (ino=0), so NotebookEdit cannot safely confirm a prior read. Use a different mechanism to edit this notebook.`,
+      displayMessage: `cannot verify prior read of ${notebookPath}; use a different mechanism to edit it.`,
+    });
+  }
+
   return rejectNotebookPriorRead(notebookPath, `cache-${status.state}`, {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
@@ -445,13 +454,12 @@ class NotebookEditInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const prepared = await this.prepareEdit(abortSignal);
     const fileName = path.basename(this.params.notebook_path);
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
       prepared.originalContent,
       prepared.updatedContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -576,6 +584,25 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
     }
 
+    // Scan the serialized notebook that will hit disk: a notebook under
+    // .qwen/team-memory/ could otherwise carry credentials past the guard
+    // that write-file.ts/edit.ts enforce. Block before any disk side effects.
+    const teamMemoryError = checkTeamMemorySecrets(
+      this.params.notebook_path,
+      prepared.updatedContent,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
     try {
       try {
         await this.config
@@ -604,6 +631,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: this.params.notebook_path,
         content: prepared.updatedContent,
+        toolWriteOrigin: 'notebook_edit',
         _meta: {
           bom: prepared.bom,
           encoding: prepared.encoding,
@@ -640,13 +668,12 @@ class NotebookEditInvocation extends BaseToolInvocation<
       }
 
       const fileName = path.basename(this.params.notebook_path);
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         prepared.originalContent,
         prepared.updatedContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       );
       const diffStat = getDiffStat(
         fileName,
@@ -794,7 +821,22 @@ export class NotebookEditTool
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.notebook_path)) {
-      return `File path '${params.notebook_path}' is ignored by .qwenignore pattern(s).`;
+      return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.notebook_path)} pattern(s).`;
+    }
+
+    // Scan the cell source at validate time too — for parity with edit/write-file
+    // — so a team-memory write carrying a secret is rejected before scheduling.
+    // execute() still scans the full serialized notebook, which catches secrets
+    // split across cells that this single-cell check cannot.
+    if (typeof params.new_source === 'string') {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.notebook_path,
+        params.new_source,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        return teamMemoryError;
+      }
     }
 
     return null;

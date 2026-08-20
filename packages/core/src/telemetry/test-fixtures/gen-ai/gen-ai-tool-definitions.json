@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "FunctionToolDefinition": {
+      "additionalProperties": true,
+      "description": "Represents a tool definition in the form of a function.",
+      "properties": {
+        "type": {
+          "const": "function",
+          "description": "The type of the tool.",
+          "title": "Type",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name of the tool.",
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The description of the tool. Since this attribute could be large, it's NOT RECOMMENDED to be populated by default. Instrumentations MAY provide a way to enable populating this property.",
+          "title": "Description"
+        },
+        "parameters": {
+          "anyOf": [
+            {
+              "$ref": "http://json-schema.org/draft-07/schema#"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "JSON Schema document describing the parameters accepted by the tool. The value MUST conform to JSON Schema draft-07. Since this attribute could be large, it's NOT RECOMMENDED to be populated by default. Instrumentations MAY provide a way to enable populating this property.",
+          "title": "Parameters"
+        }
+      },
+      "required": ["type", "name"],
+      "title": "FunctionToolDefinition",
+      "type": "object"
+    },
+    "GenericToolDefinition": {
+      "additionalProperties": true,
+      "description": "Represents a tool definition in any form.",
+      "properties": {
+        "type": {
+          "description": "The type of the tool.",
+          "title": "Type",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name of the tool.",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": ["type", "name"],
+      "title": "GenericToolDefinition",
+      "type": "object"
+    }
+  },
+  "description": "Represents the list of tool definitions available to the GenAI agent or model.",
+  "items": {
+    "anyOf": [
+      {
+        "$ref": "#/$defs/FunctionToolDefinition"
+      },
+      {
+        "$ref": "#/$defs/GenericToolDefinition"
+      }
+    ]
+  },
+  "title": "ToolDefinitions",
+  "type": "array"
+}

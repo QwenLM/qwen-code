@@ -6,13 +6,13 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { simpleGit } from 'simple-git';
 import {
   AGENT_WORKTREE_SLUG_PATTERN,
   GitWorktreeService,
   worktreeBranchForSlug,
 } from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { loadSimpleGit } from '../utils/load-simple-git.js';
 
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
 
@@ -155,6 +155,7 @@ export async function cleanupStaleAgentWorktrees(
 
 async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
   try {
+    const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);
     // `git status --porcelain --untracked-files=no` lists every tracked
     // change (staged, unstaged, conflicted — `UU` lines) and skips the

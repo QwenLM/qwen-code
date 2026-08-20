@@ -1,0 +1,28 @@
+{
+  "name": "provider-context-local-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Copyable local REST adapter for the External Context Provider Extension Profile v1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run clean && esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/main.js",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist/main.js",
+    "qwen-extension.json",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.4.5",
+    "undici": "^7.28.0",
+    "zod": "^3.25.0"
+  }
+}

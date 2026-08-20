@@ -10,18 +10,18 @@ The status line shows session-aware information — model name, token usage, git
 ```
 Single-line status (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line
 └─────────────────────────────────────────────────────────────────┘
 
 Multi-line status (up to 2 lines — 2 rows):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line 1
 │  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 └─────────────────────────────────────────────────────────────────┘
 
 Multi-line status + non-default mode (3 rows max):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line 1
 │  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 │  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
@@ -73,12 +73,12 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field                  | Type       | Required | Description                                                                                                |
-| ---------------------- | ---------- | -------- | ---------------------------------------------------------------------------------------------------------- |
-| `type`                 | `"preset"` | Yes      | Must be `"preset"`                                                                                         |
-| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `\|` as the separator. |
-| `useThemeColors`       | boolean    | No       | Apply the active `/theme` color to the status line text. Defaults to `true`.                               |
-| `hideContextIndicator` | boolean    | No       | Hide the built-in context usage indicator in the footer right section. Defaults to `false`.                |
+| Field                  | Type       | Required | Description                                                                                                                                                                                                                                  |
+| ---------------------- | ---------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                 | `"preset"` | Yes      | Must be `"preset"`                                                                                                                                                                                                                           |
+| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `\|` as the separator.                                                                                                                                   |
+| `useThemeColors`       | boolean    | No       | Apply the active `/theme` color to the status line text. Defaults to `true`.                                                                                                                                                                 |
+| `hideContextIndicator` | boolean    | No       | Hide the built-in context usage indicator in the footer right section. When unset, it is hidden automatically if `items` contains `context-used` or `context-remaining`, so context usage is not shown twice. Set `false` to always show it. |
 
 ### Available preset items
 
@@ -88,8 +88,8 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | `model`                |         | Current model name without reasoning level                         |
 | `git-branch`           | Yes     | Current Git branch name (hidden when not in a git repo)            |
 | `context-remaining`    | Yes     | Percentage of context window remaining (e.g. `Context 65.7% left`) |
-| `total-input-tokens`   |         | Total input tokens used in session (e.g. `30.0k in`)               |
-| `total-output-tokens`  |         | Total output tokens used in session (e.g. `5.0k out`)              |
+| `total-input-tokens`   |         | Cumulative input tokens used in session (e.g. `30.0k total in`)    |
+| `total-output-tokens`  |         | Cumulative output tokens used in session (e.g. `5.0k total out`)   |
 | `current-dir`          | Yes     | Current working directory                                          |
 | `project-name`         |         | Project name (basename of working directory)                       |
 | `pull-request-number`  |         | Open PR number for the current branch (requires `gh` CLI)          |
@@ -102,6 +102,8 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | `session-id`           |         | Current session identifier                                         |
 
 Items marked **Default** are pre-selected when you first open the `/statusline` dialog.
+
+`total-input-tokens` and `total-output-tokens` are session totals. They add up token usage across turns, so input tokens can grow quickly because each new model request includes the current conversation context again. Use `used-tokens` when you want the current prompt size instead of cumulative session spend.
 
 ### Example output
 
@@ -167,13 +169,13 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field                  | Type        | Required | Description                                                                                                                       |
-| ---------------------- | ----------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                 | `"command"` | Yes      | Must be `"command"`                                                                                                               |
-| `command`              | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines).                                           |
-| `refreshInterval`      | number      | No       | Re-run the command every N seconds (minimum 1). Useful for data that changes without an Agent state event (clock, quota, uptime). |
-| `respectUserColors`    | boolean     | No       | Preserve ANSI color codes in command output instead of applying dimmed footer styling. Defaults to `false`.                       |
-| `hideContextIndicator` | boolean     | No       | Hide the built-in context usage indicator in the footer right section. Defaults to `false`.                                       |
+| Field                  | Type        | Required | Description                                                                                                                                                                                                              |
+| ---------------------- | ----------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                 | `"command"` | Yes      | Must be `"command"`                                                                                                                                                                                                      |
+| `command`              | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines).                                                                                                                                  |
+| `refreshInterval`      | number      | No       | Re-run the command every N seconds (minimum 1). Useful for data that changes without an Agent state event (clock, quota, uptime).                                                                                        |
+| `respectUserColors`    | boolean     | No       | Preserve ANSI color codes in command output instead of applying dimmed footer styling. Defaults to `false`.                                                                                                              |
+| `hideContextIndicator` | boolean     | No       | Hide the built-in context usage indicator in the footer right section. Defaults to `false` — command output is not inspected for context information, so set it explicitly if your command already prints context usage. |
 
 ### JSON input
 

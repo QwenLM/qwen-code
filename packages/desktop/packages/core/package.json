@@ -1,0 +1,20 @@
+{
+  "name": "@craft-agent/core",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "description": "Core types, storage, and agent logic for Qwen Code",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types/index.ts",
+    "./utils": "./src/utils/index.ts"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^11.0.0"
+  }
+}

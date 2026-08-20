@@ -7,7 +7,7 @@
 /**
  * Event-bus for the daemon's per-session NDJSON stream.
  *
- * Design notes (from issue #3803 §04 / threat-model):
+ * Design notes (from the threat-model):
  *   - Each event carries a monotonic `id` (per session) so the SSE
  *     `Last-Event-ID` reconnect protocol can pick up where the client left
  *     off. Backed by a bounded ring of recent events for replay.
@@ -18,6 +18,48 @@
  *   - The bus is push-based; consumers iterate the returned AsyncIterable.
  *     Aborting the supplied AbortSignal closes the iterator promptly.
  */
+
+import { randomUUID } from 'node:crypto';
+
+export interface SessionReplaySnapshot {
+  compactedTurns: BridgeEvent[];
+  liveJournal: BridgeEvent[];
+  lastEventId: number;
+  /**
+   * Present (and `true`) once the compaction engine threw during
+   * `ingest`/`seedReplayEvents` for this bus. The snapshot may be
+   * silently missing events from that point on; consumers should
+   * prefer a full transcript reload over trusting it.
+   */
+  degraded?: true;
+}
+
+export type LiveReplayMode = 'full' | 'summary';
+
+export interface CompactionEngine {
+  /**
+   * `byteLength` is the serialized size the bus already computed for the
+   * event (publish's eager sizing gate) so implementations that track
+   * byte budgets don't have to re-stringify. Optional — seeding paths
+   * and older callers may omit it and implementations self-compute.
+   */
+  ingest(event: BridgeEvent, byteLength?: number): void;
+  seedReplayEvents(events: BridgeEvent[]): void;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
+  close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
+}
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -38,6 +80,15 @@ export interface BridgeEvent {
   /** Frame payload — opaque JSON. */
   data: unknown;
   /**
+   * Identifier of the admitted prompt that produced this event, when the
+   * event belongs to a specific turn.
+   */
+  promptId?: string;
+  /**
+   * Envelope metadata shared by SSE and load/replay responses.
+   */
+  _meta?: Record<string, unknown>;
+  /**
    * Identifier of the client that triggered the event, when known. Used by
    * fan-out consumers to suppress echoes of their own actions.
    */
@@ -51,6 +102,13 @@ export interface SubscribeOptions {
    * are replayed before live events flow.
    */
   lastEventId?: number;
+  /**
+   * Bus epoch token the consumer's `lastEventId` was minted under. When
+   * provided and it doesn't match this bus's `epoch`, the cursor belongs
+   * to a dead epoch (daemon restart rebuilt the bus) and a full resync is
+   * forced regardless of the numeric heuristic below.
+   */
+  epoch?: string;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**
@@ -58,9 +116,77 @@ export interface SubscribeOptions {
    * with a final `client_evicted` event. Defaults to 256.
    */
   maxQueued?: number;
+  /**
+   * Receives low-frequency, per-subscriber queue diagnostics. Return `true`
+   * after emitting the human-facing diagnostic; `false` (or a throw) keeps the
+   * EventBus legacy stderr fallback.
+   */
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
+}
+
+export interface EventBusSlowClientWarningData {
+  queueSize: number;
+  maxQueued: number;
+  lastEventId: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  threshold: QueueWarningThreshold;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export interface EventBusClientEvictedData {
+  reason: 'queue_overflow' | 'queue_bytes_overflow';
+  droppedAfter: number;
+  queueSize: number;
+  maxQueued: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  eventBytes?: number;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export type EventBusSubscriberDiagnostic =
+  | {
+      type: 'slow_client_warning';
+      data: EventBusSlowClientWarningData;
+    }
+  | {
+      type: 'client_evicted';
+      data: EventBusClientEvictedData;
+    };
+
+export interface EventBusOptions {
+  maxQueuedBytes?: number;
+  /**
+   * Total serialized-byte budget for the `Last-Event-ID` replay burst a
+   * single `subscribe()` may force-push (DAEMON-011). Replay frames bypass
+   * the per-subscriber live caps by design (dropping them would break the
+   * resume contract), so without this bound a reconnect against a large
+   * ring materializes the whole backlog into the queue at once — up to
+   * `maxSubscribers` times under concurrent reconnects. When the budget
+   * runs out mid-replay the remaining frames are dropped and the consumer
+   * gets a `state_resync_required` (`reason: 'replay_budget_exceeded'`)
+   * telling it to recover via `loadSession`. NOT named `maxReplayBytes`:
+   * that name is taken by the compaction engine's compacted-window budget
+   * and both appear in the same `createSessionEventBus` construction.
+   */
+  replayBudgetBytes?: number;
+  /**
+   * Invoked once, on the FIRST compaction failure (`ingest` /
+   * `seedReplayEvents` throw). The bus itself doesn't know its session,
+   * so the creator injects context-aware diagnostics here. Subsequent
+   * failures only keep the degraded flag set, silently.
+   */
+  onCompactionError?: (err: unknown) => void;
 }
 
 const DEFAULT_MAX_QUEUED = 256;
+export const DEFAULT_MAX_QUEUED_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
 /**
  * Default replay-ring depth per session. Sized for a 5-second
  * reconnect window over a chatty turn — a single long-running prompt
@@ -68,19 +194,19 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set in #3803 §02 for chatty Stage 1
+ * 8000 matches the target set for chatty Stage 1
  * sessions, with ~30–60× headroom over a typical-but-busy turn at
  * the cost of a few hundred KB of RAM per session. Operators can
  * override per-daemon via `qwen serve --event-ring-size <n>`.
  */
 export const DEFAULT_RING_SIZE = 8000;
 /**
- * Fraction of `maxQueued` at which a `slow_client_warning` synthetic
- * frame is force-pushed to the at-risk subscriber. The warning fires
- * ONCE per overflow episode (tracked via `sub.warned`); the queue
- * must drain below `WARN_RESET_RATIO * maxQueued` before another
- * warning can fire — small hysteresis prevents flap-near-threshold
- * spam when a subscriber oscillates around 75% full.
+ * Fraction of the frame and byte caps at which a `slow_client_warning`
+ * synthetic frame is force-pushed to the at-risk subscriber. The warning
+ * fires ONCE per overflow episode (tracked via `sub.warned`); the queue
+ * must drain below `WARN_RESET_RATIO` for both caps before another warning
+ * can fire — small hysteresis prevents flap-near-threshold spam when a
+ * subscriber oscillates around 75% full.
  */
 const WARN_THRESHOLD_RATIO = 0.75;
 /** See `WARN_THRESHOLD_RATIO` doc. */
@@ -92,9 +218,81 @@ const WARN_RESET_RATIO = 0.375;
  * session from being opened thousands of times by an attacker to amplify
  * each `publish()` (which is O(N) over subscribers) into a CPU/memory
  * DoS. Daemon's HTTP listener also wants `server.maxConnections`
- * configured at the listener level — see `runQwenServe.ts`.
+ * configured at the listener level — see `run-qwen-serve.ts`.
  */
 const DEFAULT_MAX_SUBSCRIBERS = 64;
+
+function getServerTimestamp(meta: Record<string, unknown> | undefined): number {
+  const existing = meta?.['serverTimestamp'];
+  return typeof existing === 'number' && Number.isFinite(existing)
+    ? existing
+    : Date.now();
+}
+
+function normalizeMaxQueuedBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_QUEUED_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('maxQueuedBytes must be a positive safe integer');
+  }
+  return value;
+}
+
+function normalizeReplayBudgetBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REPLAY_BUDGET_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('replayBudgetBytes must be a positive safe integer');
+  }
+  return value;
+}
+
+export function serializedBridgeEventByteLength(
+  event: BridgeEvent,
+): number | undefined {
+  try {
+    const serialized = JSON.stringify(event);
+    // `undefined` (a bare non-JSON value) and throws (BigInt, circular
+    // references) both mean the event cannot survive the SSE wire —
+    // report that to the caller instead of pretending it weighs 0 bytes
+    // (which let unserializable events bypass every byte cap and then
+    // fail at send time — DAEMON-011).
+    if (serialized === undefined) return undefined;
+    return Buffer.byteLength(serialized, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+export function logEventSizingFailed(type: string): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus event sizing failed ${JSON.stringify({ type })}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
+function logSubscriberEvicted(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus subscriber evicted ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
+export type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
+
+function logSlowClientWarning(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus slow_client_warning ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
 
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
@@ -112,6 +310,12 @@ interface InternalSub {
   warnThreshold: number;
   /** Pre-computed `WARN_RESET_RATIO * maxQueued` — see `warnThreshold`. */
   warnResetThreshold: number;
+  /** Serialized-byte backlog cap for live entries. */
+  maxQueuedBytes: number;
+  /** Pre-computed `WARN_THRESHOLD_RATIO * maxQueuedBytes`. */
+  warnBytesThreshold: number;
+  /** Pre-computed `WARN_RESET_RATIO * maxQueuedBytes`. */
+  warnBytesResetThreshold: number;
   /**
    * True once `slow_client_warning` has been force-pushed to this
    * subscriber in the current overflow episode. Cleared when the queue
@@ -119,8 +323,11 @@ interface InternalSub {
    * that recovers and then lags again gets a fresh warning.
    */
   warned: boolean;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
   /**
-   * BmJT1: cleanup hook for the eviction path (overflow → close queue
+   * Note: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
    * in `subscribe()` would stay attached against the consumer's
    * AbortSignal — and the consumer is by definition stalled (that's
@@ -130,6 +337,17 @@ interface InternalSub {
    * The eviction path calls this to break that retention.
    */
   dispose: () => void;
+}
+
+function subscriberDiagnosticHandled(
+  sub: InternalSub,
+  diagnostic: EventBusSubscriberDiagnostic,
+): boolean {
+  try {
+    return sub.onSubscriberDiagnostic?.(diagnostic) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -147,7 +365,7 @@ export class SubscriberLimitExceededError extends Error {
   }
 }
 
-// FIXME(stage-1.5, chiga0 finding 2):
+// FIXME(stage-1.5):
 // `EventBus` is currently private to the SSE route handler. Stage 1.5
 // should lift it to a top-level building block (likely
 // `packages/event-bus`) so other agent-exposing surfaces
@@ -159,14 +377,78 @@ export class SubscriberLimitExceededError extends Error {
 // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export class EventBus {
   private nextId = 1;
+  /**
+   * Identity token for this bus instance. Regenerated on every construction
+   * (daemon restart / bus rebuild), never persisted — a cursor minted under
+   * a different epoch is provably stale no matter its numeric value.
+   */
+  readonly epoch: string = randomUUID();
+  private compactionDegraded = false;
+  private readonly onCompactionError?: (err: unknown) => void;
   private readonly ring: BridgeEvent[] = [];
   private readonly subs = new Set<InternalSub>();
+  private readonly maxQueuedBytes: number;
+  private readonly replayBudgetBytes: number;
   private closed = false;
 
   constructor(
     private readonly ringSize: number = DEFAULT_RING_SIZE,
     private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
-  ) {}
+    private readonly compactionEngine?: CompactionEngine,
+    opts: EventBusOptions = {},
+  ) {
+    this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
+    this.replayBudgetBytes = normalizeReplayBudgetBytes(opts.replayBudgetBytes);
+    this.onCompactionError = opts.onCompactionError;
+  }
+
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
+    if (snapshot && this.compactionDegraded) {
+      return { ...snapshot, degraded: true };
+    }
+    return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
+  }
+
+  private markCompactionDegraded(err: unknown): void {
+    if (this.compactionDegraded) return;
+    this.compactionDegraded = true;
+    try {
+      this.onCompactionError?.(err);
+    } catch {
+      // Diagnostics callback must not break publish()'s never-throws
+      // contract.
+    }
+  }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
   get lastEventId(): number {
@@ -178,12 +460,49 @@ export class EventBus {
     return this.subs.size;
   }
 
+  seedReplayEvents(
+    inputs: Array<Omit<BridgeEvent, 'id' | 'v'>>,
+  ): BridgeEvent[] {
+    if (this.closed) return [];
+    if (inputs.length === 0) return [];
+
+    const events: BridgeEvent[] = [];
+    for (const input of inputs) {
+      const existingMeta = input._meta;
+      const event: BridgeEvent = {
+        id: this.nextId++,
+        v: EVENT_SCHEMA_VERSION,
+        ...input,
+        _meta: {
+          ...(existingMeta ?? {}),
+          serverTimestamp: getServerTimestamp(existingMeta),
+        },
+      };
+      events.push(event);
+    }
+    try {
+      this.compactionEngine?.seedReplayEvents(events);
+    } catch (err) {
+      // CompactionEngine is best-effort; mirror publish()'s never-throws
+      // contract for bulk replay seeding. Mark the snapshot degraded so
+      // consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
+    }
+
+    // Seeded replay frames intentionally do not enter the reconnect ring. A
+    // partially retained ring would no longer be a contiguous suffix of all ids
+    // this bus produced, so clear it and let subscribe() surface resync for
+    // stale cursors.
+    this.ring.length = 0;
+    return events;
+  }
+
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
    * (with `id` + `v` assigned) on success, or `undefined` when the
    * bus is closed.
    *
-   * **Never throws** (BX9_p contract). Closing the bus mid-publish
+   * **Never throws** (never-throws contract). Closing the bus mid-publish
    * is the only abnormal path and is handled as a return-undefined
    * no-op; subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
@@ -205,26 +524,59 @@ export class EventBus {
     // straightforward; nobody can observe a frame nobody can subscribe
     // to anyway.
     if (this.closed) return undefined;
+    const existingMeta = input._meta;
     const event: BridgeEvent = {
-      id: this.nextId++,
+      // Read WITHOUT incrementing: a rejected event must not burn an id —
+      // other subscribers would see a sequence gap (3 → 5) that resume
+      // logic misreads as ring eviction. `nextId` advances only after the
+      // event has passed the serializability gate below.
+      id: this.nextId,
       v: EVENT_SCHEMA_VERSION,
       ...input,
+      _meta: {
+        ...(existingMeta ?? {}),
+        serverTimestamp: getServerTimestamp(existingMeta),
+      },
     };
+    // Eager sizing doubles as the serializability gate (DAEMON-011): an
+    // event JSON.stringify cannot represent would bypass every byte cap
+    // at weight 0 and then fail at SSE send time anyway. Reject it here —
+    // no ring entry, no compaction ingest, no fanout — so "in the ring"
+    // implies "serializable" for the replay and journal byte accounting.
+    // The SSE route stringifies every delivered frame regardless, so this
+    // only moves that cost earlier (once per publish, memoized for all
+    // subscribers).
+    const eventBytes = serializedBridgeEventByteLength(event);
+    if (eventBytes === undefined) {
+      logEventSizingFailed(event.type);
+      return undefined;
+    }
+    this.nextId += 1;
     this.ring.push(event);
+    try {
+      this.compactionEngine?.ingest(event, eventBytes);
+    } catch (err) {
+      // CompactionEngine is best-effort; a throw must not break the
+      // publish() never-throws contract (never-throws). Mark the snapshot
+      // degraded so consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
+    }
     // Eviction-by-shift is O(n) once the ring is full. At the current
-    // default `ringSize=8000` (#3803 §02) the per-publish shift work
+    // default `ringSize=8000` (the target) the per-publish shift work
     // measures in low milliseconds on chatty sessions — still well
     // below per-frame latency budgets. A circular-buffer refactor
     // would push it to O(1) but adds index bookkeeping; deferred until
     // profiling actually flags it, or the operator bumps
     // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
+    const getEventBytes = () => eventBytes;
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      if (!sub.queue.push(event)) {
+      const pushResult = sub.queue.push(event, getEventBytes);
+      if (!pushResult.ok) {
         sub.evicted = true;
         // Synthetic terminal frame: NO `id` field. Otherwise it would
         // burn a slot in the per-session monotonic sequence (`nextId++`)
@@ -235,16 +587,38 @@ export class EventBus {
         // `BridgeEvent.id` doc-comment. Same pattern as `stream_error`
         // in server.ts; `formatSseFrame` omits the `id:` line when
         // `id` is absent.
+        const evictionData = {
+          reason: pushResult.reason,
+          droppedAfter: event.id as number,
+          queueSize: pushResult.liveSize,
+          maxQueued: sub.maxQueued,
+          queuedBytes: pushResult.liveBytes,
+          maxQueuedBytes: sub.maxQueuedBytes,
+          ...(pushResult.reason === 'queue_bytes_overflow'
+            ? { eventBytes: pushResult.eventBytes }
+            : {}),
+        };
+        const evictionDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'client_evicted',
+          data: {
+            ...evictionData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, evictionDiagnostic)) {
+          logSubscriberEvicted(evictionData);
+        }
         const evictionFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',
-          data: { reason: 'queue_overflow', droppedAfter: event.id },
+          data: evictionData,
         };
         // Force-push the eviction frame; close immediately after so the
         // consumer iterator unwinds with a final synthetic event.
         sub.queue.forcePush(evictionFrame);
         sub.queue.close();
-        // BmJT1: dispose the subscription cleanly. `sub.dispose()`
+        // Note: dispose the subscription cleanly. `sub.dispose()`
         // both removes from `this.subs` AND detaches the
         // AbortSignal listener that `subscribe()` registered. Pre-
         // fix the eviction path only did `this.subs.delete(sub)`,
@@ -284,26 +658,53 @@ export class EventBus {
       // integer compare per subscriber (after the `!warned`
       // short-circuit collapses warm-state checks to a single
       // boolean read).
-      const liveSize = sub.queue.size;
-      if (!sub.warned && liveSize >= sub.warnThreshold) {
+      const liveSize = pushResult.liveSize;
+      const liveBytes = pushResult.liveBytes;
+      if (
+        sub.warned &&
+        liveSize <= sub.warnResetThreshold &&
+        liveBytes <= sub.warnBytesResetThreshold
+      ) {
+        sub.warned = false;
+      }
+      const frameThresholdReached = liveSize >= sub.warnThreshold;
+      const byteThresholdReached = liveBytes >= sub.warnBytesThreshold;
+      if (!sub.warned && (frameThresholdReached || byteThresholdReached)) {
         sub.warned = true;
+        const threshold: QueueWarningThreshold =
+          frameThresholdReached && byteThresholdReached
+            ? 'frames_and_bytes'
+            : byteThresholdReached
+              ? 'bytes'
+              : 'frames';
+        const warningData = {
+          queueSize: liveSize,
+          maxQueued: sub.maxQueued,
+          // `event.id` is always defined here — the just-published
+          // `event` is constructed at the top of `publish()` with
+          // `id: this.nextId++`. No `??` fallback needed.
+          lastEventId: event.id as number,
+          queuedBytes: liveBytes,
+          maxQueuedBytes: sub.maxQueuedBytes,
+          threshold,
+        };
+        const warningDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'slow_client_warning',
+          data: {
+            ...warningData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, warningDiagnostic)) {
+          logSlowClientWarning(warningData);
+        }
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'slow_client_warning',
-          data: {
-            queueSize: liveSize,
-            maxQueued: sub.maxQueued,
-            // `event.id` is always defined here — the just-published
-            // `event` is constructed at the top of `publish()` with
-            // `id: this.nextId++`. No `??` fallback needed.
-            lastEventId: event.id as number,
-          },
+          data: warningData,
         };
         sub.queue.forcePush(warningFrame);
-      } else if (sub.warned && liveSize <= sub.warnResetThreshold) {
-        // Hysteresis: subscriber recovered well below the warn line,
-        // re-arm so a future lag spike produces a fresh warning.
-        sub.warned = false;
       }
     }
     return event;
@@ -339,7 +740,10 @@ export class EventBus {
       throw new SubscriberLimitExceededError(this.maxSubscribers);
     }
     const maxQueued = opts.maxQueued ?? DEFAULT_MAX_QUEUED;
-    const queue = new BoundedAsyncQueue<BridgeEvent>(maxQueued);
+    const queue = new BoundedAsyncQueue<BridgeEvent>(
+      maxQueued,
+      this.maxQueuedBytes,
+    );
 
     // `dispose` is assigned below (mutable so the closure can reference
     // `sub.dispose`); placeholder no-op covers the brief window between
@@ -351,28 +755,205 @@ export class EventBus {
       maxQueued,
       warnThreshold: WARN_THRESHOLD_RATIO * maxQueued,
       warnResetThreshold: WARN_RESET_RATIO * maxQueued,
+      maxQueuedBytes: this.maxQueuedBytes,
+      warnBytesThreshold: WARN_THRESHOLD_RATIO * this.maxQueuedBytes,
+      warnBytesResetThreshold: WARN_RESET_RATIO * this.maxQueuedBytes,
       warned: false,
+      onSubscriberDiagnostic: opts.onSubscriberDiagnostic,
       dispose: () => {},
     };
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
+      // Detect ring eviction on resume
+      // (ring eviction detection): if the earliest event still in the ring has
+      // `id > lastEventId + 1`, then events between `lastEventId + 1`
+      // and `earliestInRing - 1` were evicted before the consumer
+      // reconnected — the consumer's reducer has a gap it doesn't
+      // know about. Pre-fix the resume silently succeeded ("you
+      // caught up!") even though the SDK reducer's state was now
+      // diverged from the daemon's truth.
+      //
+      // Emit `state_resync_required` as an id-less synthetic frame
+      // (no `id` — same no-burn pattern as `client_evicted`, so it
+      // doesn't occupy a slot in the per-session monotonic sequence
+      // other subscribers observe). **Unlike `client_evicted`, the
+      // stream stays OPEN after this frame** — the resync frame is
+      // emitted FIRST (before replay), and replay + live frames
+      // continue flowing afterward. The SDK reducer treats this as
+      // "your state is stale; call loadSession before applying any
+      // further deltas" — see `awaitingResync` flag in the SDK
+      // reducer. The prior wording was corrected to note
+      // that called this "TERMINAL" — that's misleading for oncall;
+      // `client_evicted` is genuinely terminal (closes stream),
+      // `state_resync_required` is recovery-oriented (keeps stream
+      // open).
+      //
+      // Replay continues after the resync frame (per design): the
+      // SDK reducer will auto-skip delta application until
+      // loadSession clears the flag, but the frames stay on the
+      // wire so SDK has the option to compute a "what you missed"
+      // diff later. This is network-friendly (no extra reconnect).
+      // Epoch-reset detection (epoch-reset detection).
+      // `this.nextId` is the next id this bus will assign, so the bus has
+      // only ever emitted ids `< nextId` THIS epoch. A consumer presenting
+      // `lastEventId >= nextId` therefore saw an id this epoch never
+      // produced — the only way that happens is a previous bus epoch
+      // (daemon restart / EventBus rebuild resets `nextId` to 1 and clears
+      // the ring). The `ring_evicted` check below is structurally blind to
+      // this: after a restart the ring is empty (`earliestInRing ===
+      // undefined`), so it is skipped and the consumer would otherwise get
+      // a bare `replay_complete{replayedCount:0}` — a false "you're caught
+      // up" while its accumulated reducer state is stale data from the dead
+      // epoch. Emit `state_resync_required` (reason `epoch_reset`) first.
+      //
+      // The numeric heuristic alone is defeated once the new epoch's event
+      // count catches up with the stale cursor. When the consumer also
+      // presents the epoch token it minted the cursor under, a mismatch
+      // forces the same resync deterministically (DAEMON-001); `detail`
+      // lets operators tell the two triggers apart.
+      const epochMismatch =
+        opts.epoch !== undefined && opts.epoch !== this.epoch;
+      const epochReset = epochMismatch || opts.lastEventId >= this.nextId;
+      if (epochReset) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            ...(epochMismatch ? { detail: 'epoch_mismatch' } : {}),
+            lastDeliveredId: opts.lastEventId,
+            // Ring is typically empty right after a restart; fall back to
+            // `nextId` (the first id this epoch will assign) so the field
+            // stays meaningful ("fresh sequence starts here").
+            earliestAvailableId: this.ring[0]?.id ?? this.nextId,
+          },
+        });
+      } else {
+        const earliestInRing = this.ring[0]?.id;
+        if (
+          earliestInRing === undefined &&
+          opts.lastEventId < this.nextId - 1
+        ) {
+          queue.forcePush({
+            v: EVENT_SCHEMA_VERSION,
+            type: 'state_resync_required',
+            data: {
+              reason: 'seeded_replay_not_in_ring',
+              lastDeliveredId: opts.lastEventId,
+              earliestAvailableId: this.nextId,
+            },
+          });
+        } else if (
+          earliestInRing !== undefined &&
+          earliestInRing > opts.lastEventId + 1
+        ) {
+          queue.forcePush({
+            v: EVENT_SCHEMA_VERSION,
+            type: 'state_resync_required',
+            data: {
+              reason: 'ring_evicted',
+              lastDeliveredId: opts.lastEventId,
+              earliestAvailableId: earliestInRing,
+            },
+          });
+        }
+      }
+      // After an epoch reset the consumer's cursor belongs to a dead epoch,
+      // so every current-epoch event is "new" to it. Filtering replay by the
+      // stale `lastEventId` (e.g. 50) would drop the fresh low-id events
+      // (1,2,3…) entirely. Replay the whole current ring in that case.
+      const replayFrom = epochReset ? 0 : opts.lastEventId;
       // Force-push replay frames so they bypass the per-subscriber size
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the
       // `Last-Event-ID` resume contract (the consumer would think they
-      // caught up). If the gap really is enormous, the queue will be
-      // primed with a long backlog the consumer drains at its own pace.
+      // caught up). The bypass is still bounded: `replayBudgetBytes` caps
+      // the total serialized bytes one replay burst may materialize
+      // (DAEMON-011) — past it the remaining frames are dropped and the
+      // consumer is told to recover via loadSession (resync frame below).
+      let replayedCount = 0;
+      let lastReplayedId: number | undefined;
+      let replayBytes = 0;
+      let budgetExceededAtId: number | undefined;
       for (const e of this.ring) {
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
         // undefined here — but the type system can't see that since
         // BridgeEvent.id is optional for synthetic terminal frames.
         // Guard explicitly to keep narrow typing without runtime cost.
-        if (e.id !== undefined && e.id > opts.lastEventId) {
+        if (e.id !== undefined && e.id > replayFrom) {
+          if (budgetExceededAtId !== undefined) continue;
+          // Ring events passed publish's serializability gate, so sizing
+          // cannot fail here; `?? 0` keeps the accounting total-ordered
+          // if it ever does. Sized lazily per frame — replay is a
+          // low-frequency path.
+          replayBytes += serializedBridgeEventByteLength(e) ?? 0;
+          if (replayBytes > this.replayBudgetBytes && replayedCount > 0) {
+            budgetExceededAtId = e.id;
+            continue;
+          }
           queue.forcePush(e);
+          replayedCount += 1;
+          lastReplayedId = e.id;
         }
       }
+      // Budget exhausted mid-replay: the frames already pushed are the
+      // contiguous prefix from `replayFrom + 1`, so the consumer applied
+      // them safely — but everything past `budgetExceededAtId` was
+      // dropped. Tell the consumer its accumulated state is no longer
+      // trustworthy (recover via loadSession), exactly like the
+      // ring-eviction path. `replayedCount > 0` above guarantees at least
+      // one frame always fits so a single event larger than the budget
+      // still resumes (parity with the live byte cap's first-item rule).
+      if (budgetExceededAtId !== undefined) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'replay_budget_exceeded',
+            lastDeliveredId: lastReplayedId ?? opts.lastEventId,
+            earliestAvailableId: budgetExceededAtId,
+          },
+        });
+      }
+      // Emit a `replay_complete` sentinel so consumers can deterministically
+      // drop catch-up indicators. Fires both when replay actually
+      // delivered frames AND when there was nothing to replay (so the
+      // consumer always sees the transition from "catching up" to
+      // "live"). Synthetic frame — no `id` so it doesn't burn a slot in
+      // the per-session sequence (same pattern as `client_evicted` /
+      // `state_resync_required`).
+      //
+      // Without this sentinel, a consumer attaching via Last-Event-ID
+      // has no positive signal that replay drained — they have to
+      // heuristically time out the spinner. The state_resync_required
+      // path already has its own frame (above); the success path
+      // needed parity.
+      //
+      // `replayedCount` is the actual number of frames force-pushed,
+      // counted in the loop above — NOT `lastId - opts.lastEventId`,
+      // which would over-count when the ring has holes (state_resync
+      // path leaves a gap before the ring's earliest id).
+      queue.forcePush({
+        v: EVENT_SCHEMA_VERSION,
+        type: 'replay_complete',
+        data: {
+          // Note: `lastReplayedEventId`
+          // is the canonical wire name — the old `lastEventId` collided
+          // semantically with the SSE protocol's `Last-Event-ID` (envelope
+          // `id`) in raw daemon traces. Emit both: `lastReplayedEventId`
+          // for current SDKs and `lastEventId` as a deprecated alias so
+          // pre-rename consumers keep working (additive, non-breaking).
+          ...(lastReplayedId !== undefined
+            ? {
+                lastReplayedEventId: lastReplayedId,
+                lastEventId: lastReplayedId,
+              }
+            : {}),
+          replayedCount,
+        },
+      });
     }
 
     let disposed = false;
@@ -430,8 +1011,21 @@ export class EventBus {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const sub of this.subs) sub.queue.close();
+    for (const sub of this.subs) {
+      sub.queue.close();
+      // Dispose, not just close: `dispose()` also detaches the
+      // AbortSignal listener that `subscribe()` registered. Without it a
+      // subscriber that never started iterating kept its abort listener
+      // (and the queue + sub closures it captures) alive for as long as
+      // the caller's signal, long after the bus was gone — the same
+      // retention bug the eviction path fixed (see publish()) showing up
+      // on the close() path (DAEMON-010). Dispose is idempotent, and
+      // mutating `this.subs` mid-iteration is safe for Sets when only
+      // deleting the current element.
+      sub.dispose();
+    }
     this.subs.clear();
+    this.compactionEngine?.close();
   }
 }
 
@@ -446,15 +1040,15 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
 }
 
 /**
- * Promise-based bounded queue. `push` returns false (instead of blocking or
- * throwing) when full so callers can decide how to react — the EventBus uses
- * that signal to evict slow subscribers.
+ * Promise-based bounded queue. `push` returns a rejection result (instead of
+ * blocking or throwing) when full so callers can decide how to react — the
+ * EventBus uses that signal to evict slow subscribers.
  *
- * The cap (`maxSize`) applies only to LIVE items pushed via `push()`. Items
- * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe,
- * the terminal `client_evicted` frame, and the mid-stream
+ * The caps (`maxSize` and `maxBytes`) apply only to LIVE items pushed via
+ * `push()`. Items inserted via `forcePush()` (the `Last-Event-ID` replay
+ * path on subscribe, the terminal `client_evicted` frame, and the mid-stream
  * `slow_client_warning` frame) carry a `forced` tag per entry and never
- * count toward the cap. Without this split, a reconnect with a large
+ * count toward either cap. Without this split, a reconnect with a large
  * backlog would force-push ~ringSize entries into `buf`, push `buf.length`
  * past `maxSize`, and the very next live publish would evict the
  * just-resumed subscriber — defeating the resume contract.
@@ -471,9 +1065,30 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
  */
 interface BoundedQueueEntry<T> {
   value: T;
-  /** True for replay / eviction / slow_client_warning frames (don't count toward cap). */
+  /** True for replay / eviction / slow_client_warning frames (don't count toward caps). */
   forced: boolean;
+  bytes: number;
 }
+
+type PushResult =
+  | {
+      ok: true;
+      liveSize: number;
+      liveBytes: number;
+    }
+  | {
+      ok: false;
+      reason: 'queue_overflow';
+      liveSize: number;
+      liveBytes: number;
+    }
+  | {
+      ok: false;
+      reason: 'queue_bytes_overflow';
+      liveSize: number;
+      liveBytes: number;
+      eventBytes: number;
+    };
 
 class BoundedAsyncQueue<T> {
   private readonly buf: Array<BoundedQueueEntry<T>> = [];
@@ -488,8 +1103,12 @@ class BoundedAsyncQueue<T> {
    * no matter where in the queue the forced entries are.
    */
   private liveCount = 0;
+  private liveBytes = 0;
 
-  constructor(private readonly maxSize: number) {}
+  constructor(
+    private readonly maxSize: number,
+    private readonly maxBytes: number,
+  ) {}
 
   /**
    * Number of LIVE (non-force-pushed) items currently waiting in the
@@ -500,19 +1119,55 @@ class BoundedAsyncQueue<T> {
     return this.liveCount;
   }
 
-  /** Returns true if accepted, false if dropped due to overflow. */
-  push(value: T): boolean {
-    if (this.closed) return false;
+  get bytes(): number {
+    return this.liveBytes;
+  }
+
+  push(value: T, getBytes: () => number): PushResult {
+    if (this.closed) {
+      return {
+        ok: false,
+        reason: 'queue_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
+    }
     const r = this.resolvers.shift();
     if (r) {
       r({ value, done: false });
-      return true;
+      return {
+        ok: true,
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
     }
     // Cap is on the LIVE backlog only.
-    if (this.liveCount >= this.maxSize) return false;
-    this.buf.push({ value, forced: false });
+    if (this.liveCount >= this.maxSize) {
+      return {
+        ok: false,
+        reason: 'queue_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
+    }
+    const bytes = getBytes();
+    if (this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes) {
+      return {
+        ok: false,
+        reason: 'queue_bytes_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+        eventBytes: bytes,
+      };
+    }
+    this.buf.push({ value, forced: false, bytes });
     this.liveCount += 1;
-    return true;
+    this.liveBytes += bytes;
+    return {
+      ok: true,
+      liveSize: this.liveCount,
+      liveBytes: this.liveBytes,
+    };
   }
 
   /** Bypasses the size cap. Used for replay frames, eviction terminal,
@@ -524,7 +1179,7 @@ class BoundedAsyncQueue<T> {
       r({ value, done: false });
       return;
     }
-    this.buf.push({ value, forced: true });
+    this.buf.push({ value, forced: true, bytes: 0 });
   }
 
   /**
@@ -549,6 +1204,7 @@ class BoundedAsyncQueue<T> {
       // closed sentinel immediately.
       this.buf.length = 0;
       this.liveCount = 0;
+      this.liveBytes = 0;
     }
     while (this.resolvers.length > 0) {
       this.resolvers.shift()!({
@@ -564,7 +1220,10 @@ class BoundedAsyncQueue<T> {
     // never pushes undefined today, but the queue is generic.
     if (this.buf.length > 0) {
       const entry = this.buf.shift() as BoundedQueueEntry<T>;
-      if (!entry.forced) this.liveCount -= 1;
+      if (!entry.forced) {
+        this.liveCount -= 1;
+        this.liveBytes -= entry.bytes;
+      }
       return Promise.resolve({ value: entry.value, done: false });
     }
     if (this.closed) {

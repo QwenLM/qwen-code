@@ -274,6 +274,36 @@ describe('checkI18n', () => {
     );
   });
 
+  it('allows the AUTO mode entry notice semantic key in en.js while preserving mismatch errors', async () => {
+    const { localesDir, sourceDir } = makeFixture();
+    writeLocale(localesDir, 'en', {
+      'auto_mode.entry_notice': 'Auto mode enabled.',
+      OrdinaryMismatch: 'Different English copy',
+    });
+    writeLocale(localesDir, 'fr', {
+      'auto_mode.entry_notice': 'Mode auto activé.',
+      OrdinaryMismatch: 'Texte français',
+    });
+    writeSource(
+      sourceDir,
+      "t('auto_mode.entry_notice');\nt('OrdinaryMismatch');\n",
+    );
+
+    const result = await checkI18n({
+      localesDir,
+      sourceDir,
+      supportedLanguages: languages('en', 'fr'),
+      mustTranslateKeys: ['auto_mode.entry_notice'],
+    });
+
+    expect(result.errors).not.toContain(
+      'Key-value mismatch in en.js: "auto_mode.entry_notice" !== "Auto mode enabled."',
+    );
+    expect(result.errors).toContain(
+      'Key-value mismatch in en.js: "OrdinaryMismatch" !== "Different English copy"',
+    );
+  });
+
   it('writes unused locale-only keys only when requested', async () => {
     const { root, localesDir, sourceDir } = makeFixture();
     writeLocale(localesDir, 'en', {

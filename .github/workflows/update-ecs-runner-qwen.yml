@@ -1,0 +1,90 @@
+name: 'Update ECS Runner Qwen'
+
+on:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/update-ecs-runner-qwen.yml']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional. Empty means latest from npm.'
+        required: false
+        default: ''
+        type: 'string'
+  repository_dispatch:
+    types: ['npm-published']
+
+permissions:
+  contents: 'read'
+
+jobs:
+  update:
+    name: 'Update Qwen on ${{ matrix.runner }}'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    strategy:
+      matrix:
+        runner: ['ecs-update-sg', 'ecs-update-64c', 'ecs-update-hk-1', 'ecs-update-hk-2']
+      fail-fast: false
+    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    concurrency:
+      group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        env:
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
+        run: |-
+          set -euo pipefail
+          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
+          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
+            specifier='@qwen-code/qwen-code@latest'
+          fi
+          version="$(npm view "${specifier}" version | tail -n 1)" || true
+          if [[ -z "${version}" ]]; then
+            echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved qwen version: ${version}"
+
+      - name: 'Update qwen'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          # The runner service resolves the system-wide qwen binary. Do not
+          # carry a runner user's custom npm prefix into the sudo install.
+          (
+            cd "${RUNNER_TEMP:?}"
+            # All runner processes of a region share one machine, so another
+            # job's concurrent `npm install -g` can race npm's rename of the
+            # package dir (ENOTEMPTY). Clear trash left by crashed installs
+            # and retry through the seconds-long race window.
+            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            for attempt in 1 2 3; do
+              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+                exit 0
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "::warning::npm install attempt ${attempt} failed; retrying"
+                sleep $((attempt * 10))
+              else
+                echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"
+              fi
+            done
+            exit 1
+          )
+
+      - name: 'Verify version'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          qwen_path="$(command -v qwen)"
+          actual="$("${qwen_path}" --version)"
+          echo "qwen path: ${qwen_path}"
+          echo "qwen version: ${actual}"
+          test "${actual}" = "${VERSION}"

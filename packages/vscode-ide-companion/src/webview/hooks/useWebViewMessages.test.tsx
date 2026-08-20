@@ -233,6 +233,42 @@ describe('useWebViewMessages', () => {
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
   });
 
+  it('ignores background streamEnd while a tagged request is active', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'streamStart',
+            data: { requestId: 'req-1', timestamp: 123 },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'streamEnd',
+            data: {
+              reason: 'end_turn',
+              source: 'background_notification',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.endStreaming).not.toHaveBeenCalled();
+    expect(
+      rendered.handlers.messageHandling.clearThinking,
+    ).not.toHaveBeenCalled();
+  });
+
   it('drops transcript state from the edited user turn onward', () => {
     const rendered = renderHookHarness();
     root = rendered.root;
@@ -557,5 +593,77 @@ describe('useWebViewMessages', () => {
     expect(rendered.setInsightReportPath).toHaveBeenCalledWith(
       '/tmp/insight-report.html',
     );
+  });
+
+  it('inserts resolved image attachments as raw absolute references', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    const input = document.createElement('div');
+    (
+      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
+    ).current = input;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'fileAttached',
+            data: {
+              id: 'file-1',
+              type: 'file',
+              name: 'screen shot.png',
+              value: 'C:\\Users\\Me\\Pictures\\screen shot.png',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.fileContext.addFileReference).toHaveBeenCalledWith(
+      'screen shot.png',
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+    );
+    expect(rendered.handlers.fileContext.addFileReference).toHaveBeenCalledWith(
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+    );
+    expect(input.textContent).toBe(
+      '@C:\\Users\\Me\\Pictures\\screen shot.png ',
+    );
+    expect(rendered.handlers.setInputText).toHaveBeenCalledWith(
+      '@C:\\Users\\Me\\Pictures\\screen shot.png ',
+    );
+  });
+
+  it('keeps non-image attachments as file-name references', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    const input = document.createElement('div');
+    (
+      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
+    ).current = input;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'fileAttached',
+            data: {
+              id: 'file-1',
+              type: 'file',
+              name: 'notes.txt',
+              value: 'C:\\Users\\Me\\Documents\\notes.txt',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(input.textContent).toBe('@notes.txt ');
+    expect(rendered.handlers.setInputText).toHaveBeenCalledWith('@notes.txt ');
   });
 });

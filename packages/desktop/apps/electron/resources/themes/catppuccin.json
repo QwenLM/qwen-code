@@ -1,0 +1,26 @@
+{
+  "name": "Catppuccin",
+  "description": "Soothing pastel theme",
+  "author": "Catppuccin Org",
+  "license": "MIT",
+  "source": "https://github.com/catppuccin/catppuccin",
+  "supportedModes": ["light", "dark"],
+  "shikiTheme": {
+    "light": "catppuccin-latte",
+    "dark": "catppuccin-mocha"
+  },
+  "background": "#eff1f5",
+  "foreground": "#4c4f69",
+  "accent": "#8839ef",
+  "info": "#df8e1d",
+  "success": "#40a02b",
+  "destructive": "#d20f39",
+  "dark": {
+    "background": "#1e1e2e",
+    "foreground": "#cdd6f4",
+    "accent": "#cba6f7",
+    "info": "#fab387",
+    "success": "#a6e3a1",
+    "destructive": "#f38ba8"
+  }
+}

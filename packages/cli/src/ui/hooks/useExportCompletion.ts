@@ -228,7 +228,6 @@ export function useExportCompletion(
       if (
         cyclingActiveRef.current &&
         parsedFormat !== null &&
-        !key.ctrl &&
         !key.meta &&
         !key.paste &&
         (isCompletionUpKey || isCompletionDownKey || isCompletionTabKey)

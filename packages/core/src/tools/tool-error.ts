@@ -14,6 +14,8 @@ export enum ToolErrorType {
   UNHANDLED_EXCEPTION = 'unhandled_exception',
   TOOL_NOT_REGISTERED = 'tool_not_registered',
   EXECUTION_FAILED = 'execution_failed',
+  // A tool call exceeded the per-tool execution timeout and was aborted.
+  EXECUTION_TIMEOUT = 'execution_timeout',
   // Try to execute a tool that is excluded due to the approval mode
   EXECUTION_DENIED = 'execution_denied',
 
@@ -119,6 +121,12 @@ export enum ToolErrorType {
   WEB_FETCH_FALLBACK_FAILED = 'web_fetch_fallback_failed',
   WEB_FETCH_PROCESSING_ERROR = 'web_fetch_processing_error',
 
+  // WebSearch-specific Errors
+  WEB_SEARCH_RATE_LIMITED = 'web_search_rate_limited',
+  WEB_SEARCH_BACKEND_FAILED = 'web_search_backend_failed',
+  WEB_SEARCH_NO_RESULTS = 'web_search_no_results',
+  WEB_SEARCH_NO_SEARCH_PERFORMED = 'web_search_no_search_performed',
+
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',
 
@@ -131,4 +139,33 @@ export enum ToolErrorType {
   // SendMessage-specific Errors
   SEND_MESSAGE_NOT_FOUND = 'send_message_not_found',
   SEND_MESSAGE_NOT_RUNNING = 'send_message_not_running',
+}
+
+/**
+ * Error thrown by `getConfirmationDetails()` when it needs to surface
+ * a structured `ToolErrorType` to the scheduler instead of letting
+ * the throw collapse into a generic `UNHANDLED_EXCEPTION`. Originally
+ * introduced for prior-read enforcement
+ * but now also carries other content-derived `calculateEdit` errors
+ * — `EDIT_NO_OCCURRENCE_FOUND`, `EDIT_EXPECTED_OCCURRENCE_MISMATCH`,
+ * `EDIT_NO_CHANGE`, `ATTEMPT_TO_CREATE_EXISTING_FILE` — through the
+ * confirmation path so they keep their proper error code instead of
+ * being reported as "unhandled exception".
+ *
+ * Caught by `coreToolScheduler` via the `errorType` instance field.
+ *
+ * Naming note: kept generic (`StructuredToolError`) rather than
+ * `PriorReadEnforcementError` so the name matches the broader set of
+ * `ToolErrorType` values it actually carries — an oncall engineer
+ * seeing this in a log paired with `edit_no_occurrence_found` should
+ * not have to wonder what prior-read has to do with it.
+ */
+export class StructuredToolError extends Error {
+  override readonly name = 'StructuredToolError';
+  constructor(
+    message: string,
+    readonly errorType: ToolErrorType,
+  ) {
+    super(message);
+  }
 }

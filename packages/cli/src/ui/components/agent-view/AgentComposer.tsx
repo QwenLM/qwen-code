@@ -104,7 +104,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   useKeypress(
     (key) => {
-      const isShiftTab = key.shift && key.name === 'tab';
+      const isShiftTab = key.shift && key.name === 'tab' && !key.ctrl;
       const isWindowsTab =
         process.platform === 'win32' &&
         key.name === 'tab' &&
@@ -133,10 +133,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     preferredEditor,
   });
 
-  // Sync agent buffer text to context so AgentTabBar can guard tab switching
+  // Sync the active agent buffer text to context.
   useEffect(() => {
     setAgentInputBufferText(buffer.text);
-    return () => setAgentInputBufferText('');
   }, [buffer.text, setAgentInputBufferText]);
 
   // When agent input is not active (agent running, completed, etc.),

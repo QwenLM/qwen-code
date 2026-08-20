@@ -1,12 +1,16 @@
 # TUI Daemon Adapter Draft
 
-## Goal
+> **Deprecated**: this document describes the early `DaemonTuiAdapter` spike. The legacy adapter still exists in `packages/cli/src/ui/daemon/`, but the reusable direction is now the SDK shared UI transcript layer. For the current architecture, see [`../daemon/14-cli-tui-adapter.md`](../daemon/14-cli-tui-adapter.md).
+
+---
+
+## Goal (historical)
 
 Add a flag-gated TUI transport that talks to `qwen serve` through
 `DaemonSessionClient` instead of creating an in-process `Config` + agent
 runtime.
 
-This is a dogfood path for Mode B client migration. It must not replace the
+This is an internal validation path for Mode B client migration. It must not replace the
 default TUI path until output sinks, typed daemon events, session-scoped
 permission, and lifecycle diagnostics are stable.
 

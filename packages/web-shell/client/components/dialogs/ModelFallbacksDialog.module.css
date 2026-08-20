@@ -1,0 +1,121 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hint {
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.empty {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  padding: 8px 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--secondary);
+  color: var(--foreground);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:hover:not(:disabled):not([aria-disabled='true']) {
+  border-color: var(--agent-blue-500);
+}
+
+.row:disabled,
+.row[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rowSelected {
+  border-color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, var(--secondary));
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: #fff;
+}
+
+.rowSelected .badge {
+  background: var(--agent-blue-500);
+  border-color: var(--agent-blue-500);
+}
+
+.label {
+  word-break: break-all;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.count {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cancel,
+.confirm {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+
+.cancel {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.confirm {
+  background: var(--agent-blue-500);
+  border-color: var(--agent-blue-500);
+  color: #fff;
+}
+
+.row:focus-visible,
+.cancel:focus-visible,
+.confirm:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}

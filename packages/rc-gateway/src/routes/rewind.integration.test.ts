@@ -83,7 +83,20 @@ describe('rewind integration', () => {
         { id: 2, type: 'session_update', data: { text: 'two' } },
       ],
       workspaceCwd: CWD,
-      rewindResult: { targetTurnIndex: 1, apiTruncateIndex: 4 },
+      // The daemon is promptId-keyed post-merge: the gateway maps toTurn 1
+      // onto the snapshot whose turnIndex is 1 and rewinds to its promptId.
+      rewindResult: {
+        rewound: true,
+        targetTurnIndex: 1,
+        filesChanged: [],
+        filesFailed: [],
+      },
+      rewindSnapshots: [0, 1, 2].map((i) => ({
+        promptId: `${SESSION_ID}########${i}`,
+        turnIndex: i,
+        timestamp: `2026-01-01T00:00:0${i}.000Z`,
+        diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+      })),
     });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
 
@@ -190,6 +203,13 @@ describe('rewind integration', () => {
     };
     expect(rewindBody.toTurn).toBe(1);
     expect(rewindBody.truncatedEventId).toBe(EXPECTED_TRUNCATED_EVENT_ID);
+
+    // The real SDK client rewound to the promptId of the snapshot whose
+    // turnIndex is 1 — the toTurn→promptId mapping happened end to end, not
+    // by passing the raw turn number upstream.
+    expect(stub.lastRewindBody).toMatchObject({
+      promptId: `${SESSION_ID}########1`,
+    });
 
     // 3. Exactly one session_rewound marker exists in the WAL (the rewind
     //    route itself is wired with `deps.walDir`, unlike the events route).

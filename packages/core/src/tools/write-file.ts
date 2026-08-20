@@ -6,12 +6,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
+  ToolArtifact,
+  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -34,7 +36,7 @@ import {
 import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
@@ -51,8 +53,33 @@ import {
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  ARTIFACT_TITLE_MAX_LENGTH,
+  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+  hasControlCharacter,
+  hasUnsafeDisplayPayload,
+} from './record-artifact.js';
+import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
+const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.csv', 'file'],
+  ['.htm', 'html'],
+  ['.html', 'html'],
+  ['.ipynb', 'notebook'],
+  ['.jpeg', 'image'],
+  ['.jpg', 'image'],
+  ['.pdf', 'pdf'],
+  ['.png', 'image'],
+  ['.svg', 'image'],
+  ['.webp', 'image'],
+  ['.xlsx', 'file'],
+]);
+
+type WorkspaceToolArtifact = ToolArtifact & {
+  storage: 'workspace';
+  workspacePath: string;
+};
 
 /**
  * Parameters for the WriteFile tool
@@ -103,12 +130,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Write operations always need user confirmation, except for managed
-   * auto-memory files which are written autonomously by the model.
+   * Write operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — writes default to 'ask'. (In AUTO_EDIT/YOLO the
+   * user has globally opted into auto-approval; team writes still surface in the
+   * git diff for review before commit.)
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
+    }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -218,13 +253,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     );
     const fileName = path.basename(this.params.file_path);
 
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      this.params.content, // Content after potential correction
+      originalContent,
+      this.params.content,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -254,6 +288,24 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let detectedEncoding: string | undefined;
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      file_path,
+      content,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      // Must carry `error` so the framework treats the blocked write as a
+      // failure (retry/telemetry), not a silent success. Mirrors edit.ts.
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
 
     // Prior-read enforcement runs BEFORE we read the existing file:
     //  - rejecting a write should not first slurp the entire file
@@ -460,6 +512,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: file_path,
         content,
+        toolWriteOrigin: 'write_file',
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
@@ -484,8 +537,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // pre-write placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will re-stat
       // and either see fresh content or treat the entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         const postWriteStats = fs.statSync(file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
       } catch {
         // Non-fatal: leaving a stale entry is preferable to failing
@@ -499,13 +554,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // However, if it was unreadable, currentContentForDiff will be empty.
       const currentContentForDiff = originalContent;
 
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         currentContentForDiff,
         content,
         'Original',
         'Written',
-        DEFAULT_DIFF_OPTIONS,
       );
 
       const originallyProposedContent = ai_proposed_content || content;
@@ -524,6 +578,16 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       if (modified_by_user) {
         llmSuccessMessageParts.push(
           `User modified the \`content\` to be: ${content}`,
+        );
+      }
+      const artifact = buildWorkspaceArtifactMetadata(
+        this.config,
+        file_path,
+        postWriteSizeBytes,
+      );
+      if (artifact) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
         );
       }
 
@@ -559,6 +623,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       // Capture detailed error information for debugging
@@ -585,10 +650,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         if (this.config.getDebugMode() && error.stack) {
           debugLogger.debug('Write file error stack:', error.stack);
         }
-      } else if (error instanceof Error) {
-        errorMsg = `Error writing to file: ${error.message}`;
       } else {
-        errorMsg = `Error writing to file: ${String(error)}`;
+        errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
       }
 
       return {
@@ -604,6 +667,104 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
+ * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
+ * the daemon's `GET /file` route resolves the `workspacePath` this produces.
+ * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
+ */
+export function buildRecordArtifactReminder(
+  config: Config,
+  filePath: string,
+): string | null {
+  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
+}
+
+function formatRecordArtifactReminder(workspacePath: string): string {
+  return (
+    `This file was automatically recorded as a workspace artifact with ` +
+    `workspacePath "${workspacePath}". No extra artifact registration step ` +
+    `is needed.`
+  );
+}
+
+export function buildWorkspaceArtifactMetadata(
+  config: Config,
+  filePath: string,
+  sizeBytes?: number,
+): WorkspaceToolArtifact | null {
+  const recorded = resolveRecordedWorkspaceFile(config, filePath);
+  if (!recorded) {
+    return null;
+  }
+  const title = path.basename(recorded.filePath);
+  // The daemon store rejects titles and paths that are too long, carry control
+  // characters, or contain markup; skip the artifact rather than tell the model
+  // it was recorded when it will be dropped.
+  if (
+    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
+    hasControlCharacter(title) ||
+    hasUnsafeDisplayPayload(title) ||
+    recorded.workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
+    hasControlCharacter(recorded.workspacePath) ||
+    hasUnsafeDisplayPayload(recorded.workspacePath)
+  ) {
+    debugLogger.debug('workspace artifact skipped (safety checks)', {
+      path: filePath,
+    });
+    return null;
+  }
+  return {
+    title,
+    kind: inferWorkspaceArtifactKind(recorded.filePath),
+    storage: 'workspace',
+    workspacePath: recorded.workspacePath,
+    mimeType:
+      getSpecificMimeType(recorded.filePath) ??
+      (recorded.filePath.toLowerCase().endsWith('.ipynb')
+        ? 'application/x-ipynb+json'
+        : undefined),
+    sizeBytes,
+  };
+}
+
+function resolveRecordedWorkspaceFile(
+  config: Config,
+  filePath: string,
+): { filePath: string; workspacePath: string } | null {
+  if (!config.isRecordArtifactEnabled()) {
+    return null;
+  }
+  let resolvedFile = filePath;
+  let resolvedRoot = config.getTargetDir();
+  try {
+    resolvedFile = fs.realpathSync(filePath);
+    resolvedRoot = fs.realpathSync(resolvedRoot);
+  } catch {
+    // Keep the lexical path when the file or root cannot be realpath'd yet.
+  }
+  if (
+    !ARTIFACT_KIND_BY_EXTENSION.has(path.extname(resolvedFile).toLowerCase())
+  ) {
+    return null;
+  }
+  const workspacePath = toCanonicalWorkspaceArtifactPath(
+    resolvedFile,
+    resolvedRoot,
+  );
+  if (!workspacePath) {
+    return null;
+  }
+  return { filePath: resolvedFile, workspacePath };
+}
+
+function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
+  return (
+    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
+    'file'
+  );
+}
+
+/**
  * Implementation of the WriteFile tool logic
  */
 export class WriteFileTool
@@ -616,7 +777,7 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
+      `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
@@ -662,9 +823,18 @@ The user has the ability to modify \`content\`. If modified, this will be stated
         }
       }
     } catch (statError: unknown) {
-      return `Error accessing path properties for validation: ${filePath}. Reason: ${
-        statError instanceof Error ? statError.message : String(statError)
-      }`;
+      return `Error accessing path properties for validation: ${filePath}. Reason: ${getErrorMessage(
+        statError,
+      )}`;
+    }
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      filePath,
+      params.content ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;

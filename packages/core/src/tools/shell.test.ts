@@ -15,18 +15,43 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
+  isSignalTermination: (signal: number | NodeJS.Signals | null) =>
+    signal !== null && signal !== 0,
+  getShellAbortReasonKind: (reason: unknown) =>
+    typeof reason === 'object' &&
+    reason !== null &&
+    'kind' in reason &&
+    reason.kind === 'background'
+      ? 'background'
+      : 'cancel',
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
 }));
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
-import { ShellTool, type ShellToolInvocation } from './shell.js';
+import {
+  ShellTool,
+  type ShellToolInvocation,
+  type ShellToolParams,
+} from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
-import { type Config } from '../config/config.js';
+import { ApprovalMode, type Config } from '../config/config.js';
+import {
+  ToolConfirmationOutcome,
+  type ToolInvocation,
+  type ToolResult,
+} from './tools.js';
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
@@ -34,6 +59,7 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import path from 'node:path';
 import { ToolErrorType } from './tool-error.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
@@ -58,9 +84,38 @@ describe('ShellTool', () => {
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
   let resolveExecutionPromise: (result: ShellExecutionResult) => void;
+  let mockFileSystemService: {
+    readTextFile: ReturnType<typeof vi.fn>;
+    writeTextFile: ReturnType<typeof vi.fn>;
+  };
+  let mockFileHistoryService: {
+    trackEdit: ReturnType<typeof vi.fn>;
+  };
+  let mockFileReadCache: {
+    check: ReturnType<typeof vi.fn>;
+    recordWrite: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    mockFileSystemService = {
+      readTextFile: vi.fn(),
+      writeTextFile: vi.fn().mockResolvedValue({}),
+    };
+    mockFileHistoryService = {
+      trackEdit: vi.fn().mockResolvedValue(undefined),
+    };
+    mockFileReadCache = {
+      check: vi.fn().mockReturnValue({
+        state: 'fresh',
+        entry: {
+          lastReadAt: Date.now(),
+          lastReadCacheable: true,
+        },
+      }),
+      recordWrite: vi.fn(),
+    };
 
     mockConfig = {
       getCoreTools: vi.fn().mockReturnValue([]),
@@ -80,16 +135,25 @@ describe('ShellTool', () => {
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
+      isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
+      getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      getFileReadCache: vi.fn().mockReturnValue(mockFileReadCache),
+      getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      isInteractive: vi.fn().mockReturnValue(true),
       getGitCoAuthor: vi.fn().mockReturnValue({
         commit: true,
         pr: true,
         name: 'Qwen-Coder',
         email: 'qwen-coder@alibabacloud.com',
       }),
+      setApprovalMode: vi.fn(),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getShellDefaultTimeoutMs: vi.fn().mockReturnValue(undefined),
+      getShellHeartbeatIntervalMs: vi.fn().mockReturnValue(undefined),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
@@ -102,10 +166,36 @@ describe('ShellTool', () => {
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+    vi.mocked(fs.lstatSync).mockReturnValue({
+      isSymbolicLink: () => false,
+    } as fs.Stats);
+    vi.mocked(fs.statSync).mockReturnValue({
+      dev: 1,
+      ino: 2,
+      isDirectory: () => false,
+      isFile: () => true,
+    } as fs.Stats);
+    vi.mocked(fs.promises.stat).mockResolvedValue({
+      dev: 1,
+      ino: 2,
+      isDirectory: () => false,
+      isFile: () => true,
+      mtimeMs: 1,
+      size: 4,
+    } as fs.Stats);
     vi.mocked(fs.createWriteStream).mockReturnValue({
       write: vi.fn(),
       end: vi.fn(),
       on: vi.fn(),
+      // Both settle paths (promote + executeBackground) wait for the
+      // stream flush via `once('finish', ...)` before transitioning
+      // the registry. Default impl: immediately invoke the handler so
+      // tests don't hang waiting for an event the mocked stream never
+      // emits naturally. Ordering-sensitive tests install their own
+      // deferred stream via `mockReturnValueOnce`.
+      once: vi.fn((event: string, handler: () => void) => {
+        if (event === 'finish') handler();
+      }),
     } as unknown as fs.WriteStream);
 
     vi.mocked(os.platform).mockReturnValue('linux');
@@ -160,6 +250,84 @@ describe('ShellTool', () => {
       ).toThrow('Command cannot be empty.');
     });
 
+    it('should mention the intentional sleep escape hatch when blocking sleep', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5',
+        is_background: false,
+      });
+
+      expect(error).toContain('intentional-sleep:');
+    });
+
+    it('should explain rejected intentional sleep comments', async () => {
+      const shortReasonError = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait',
+        is_background: false,
+      });
+      const overCapError = shellTool.validateToolParams({
+        command:
+          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(shortReasonError).toContain('reason is too short');
+      expect(shortReasonError).not.toContain('add a trailing comment like');
+      expect(overCapError).toContain('foreground sleeps over 10 minutes');
+      expect(overCapError).not.toContain('add a trailing comment like');
+    });
+
+    it('should allow sleep with a valid intentional sleep comment', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(error).toBeNull();
+    });
+
+    it('should reject broad kill commands that can terminate qwen-code', async () => {
+      for (const command of [
+        'taskkill /F /IM node.exe',
+        'killall node',
+        'pkill -f qwen-code',
+      ]) {
+        expect(() =>
+          shellTool.build({
+            command,
+            is_background: false,
+          }),
+        ).toThrow(
+          'Blocked: this command may terminate the running qwen-code process',
+        );
+      }
+    });
+
+    it('should allow targeted process kills', async () => {
+      expect(
+        shellTool.validateToolParams({
+          command: 'taskkill /PID 1234 /F',
+          is_background: false,
+        }),
+      ).toBeNull();
+      expect(
+        shellTool.validateToolParams({
+          command: 'kill 1234',
+          is_background: false,
+        }),
+      ).toBeNull();
+    });
+
+    it('should guide model to split and use intentional-sleep for sleep chains', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 && echo ok',
+        is_background: false,
+      });
+
+      expect(error).toContain('Split into two calls');
+      expect(error).toContain('intentional-sleep:');
+      expect(error).toContain('reason');
+    });
+
     it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({
@@ -182,6 +350,29 @@ describe('ShellTool', () => {
         }),
       ).toThrow(
         "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should reject sibling-prefix directories outside the workspace', async () => {
+      const workspaceContext = createMockWorkspaceContext('/test/dir', [
+        '/tmp/project',
+      ]);
+      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        workspaceContext,
+      );
+
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/tmp/project-other',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
+      );
+      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+        '/tmp/project-other',
       );
     });
 
@@ -307,6 +498,651 @@ describe('ShellTool', () => {
       };
       resolveExecutionPromise(fullResult);
     };
+
+    describe('simulated sed edit', () => {
+      const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
+
+      const confirmSedEdit = async (
+        invocation: ToolInvocation<ShellToolParams, ToolResult>,
+      ) => {
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      };
+
+      it('renders a qualifying sed -i command as an edit confirmation', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        expect(details.filePath).toBe(expectedSedFilePath);
+        expect(details.originalContent).toBe('foo\n');
+        expect(details.newContent).toBe('bar\n');
+        expect(details.hideModify).toBe(true);
+        expect(details.fileDiff).toContain('-foo');
+        expect(details.fileDiff).toContain('+bar');
+      });
+
+      it('falls back to shell execution when sed has no prepared preview', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/g' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+      });
+
+      it('applies a qualifying sed -i command without spawning a shell after preview', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/g' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+          'executing simulated sed edit',
+          { command: "sed -i 's/foo/bar/g' file.txt" },
+        );
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(
+          expectedSedFilePath,
+        );
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
+          path: expectedSedFilePath,
+          content: 'bar bar\n',
+          toolWriteOrigin: 'shell_sed_edit',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('does not write when a simulated sed edit makes no changes', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/bar/baz/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it.each([
+        {
+          code: 'ENOENT',
+          type: ToolErrorType.FILE_NOT_FOUND,
+        },
+        {
+          code: 'EACCES',
+          type: ToolErrorType.READ_CONTENT_FAILURE,
+        },
+      ])('maps sed execute read error $code', async ({ code, type }) => {
+        mockFileSystemService.readTextFile
+          .mockResolvedValueOnce({
+            content: 'foo\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          })
+          .mockRejectedValueOnce(Object.assign(new Error(code), { code }));
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.error?.type).toBe(type);
+      });
+
+      it.each([
+        {
+          code: 'EACCES',
+          type: ToolErrorType.PERMISSION_DENIED,
+        },
+        {
+          code: 'ENOSPC',
+          type: ToolErrorType.NO_SPACE_LEFT,
+        },
+        {
+          code: 'EISDIR',
+          type: ToolErrorType.TARGET_IS_DIRECTORY,
+        },
+      ])('maps sed write error $code', async ({ code, type }) => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        mockFileSystemService.writeTextFile.mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(result.error?.type).toBe(type);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'sed edit write failed after file history backup was recorded',
+          ),
+        );
+      });
+
+      it('continues applying a simulated sed edit when file history tracking fails', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        mockFileHistoryService.trackEdit.mockRejectedValue(
+          new Error('backup failed'),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('file history trackEdit failed for sed edit'),
+        );
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
+          path: expectedSedFilePath,
+          content: 'bar\n',
+          toolWriteOrigin: 'shell_sed_edit',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('logs non-fatal sed attribution and read-cache failures', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        ).mockImplementation(() => {
+          throw new Error('attribution failed');
+        });
+        vi.mocked(fs.statSync).mockReturnValue({} as fs.Stats);
+        mockFileReadCache.recordWrite.mockImplementation(() => {
+          throw new Error('cache failed');
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalled();
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'commit attribution recordEdit failed for sed edit',
+          ),
+        );
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'file read cache recordWrite failed for sed edit',
+          ),
+        );
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('applies confirmed inline modifications to a simulated sed edit', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        const recordEditSpy = vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+          newContent: 'baz\n',
+        });
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(recordEditSpy).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
+          path: expectedSedFilePath,
+          content: 'baz\n',
+          toolWriteOrigin: 'shell_sed_edit',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('does not write when sed execution is cancelled after reading', async () => {
+        const abortController = new AbortController();
+        mockFileSystemService.readTextFile
+          .mockResolvedValueOnce({
+            content: 'foo\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          })
+          .mockImplementationOnce(async () => {
+            abortController.abort();
+            return {
+              content: 'foo\n',
+              _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+            };
+          });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details = await invocation.getConfirmationDetails(
+          abortController.signal,
+        );
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+        const result = await invocation.execute(abortController.signal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.llmContent).toContain('Command was cancelled');
+      });
+
+      it('awaits an in-flight sed write after cancellation starts', async () => {
+        const abortController = new AbortController();
+        let resolveWrite!: () => void;
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        mockFileSystemService.writeTextFile.mockReturnValue(
+          new Promise((resolve) => {
+            resolveWrite = () => resolve({});
+          }),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+
+        const resultPromise = invocation.execute(abortController.signal);
+        await vi.waitFor(() =>
+          expect(mockFileSystemService.writeTextFile).toHaveBeenCalled(),
+        );
+
+        let settled = false;
+        void resultPromise.then(() => {
+          settled = true;
+        });
+        abortController.abort();
+        await Promise.resolve();
+
+        expect(settled).toBe(false);
+
+        resolveWrite();
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
+      it('rejects simulated sed edits when the file was not read first', async () => {
+        mockFileReadCache.check.mockReturnValue({ state: 'unknown' });
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        await expect(
+          invocation.getConfirmationDetails(mockAbortSignal),
+        ).rejects.toMatchObject({
+          errorType: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('reports timeout when a prepared sed edit times out before execution', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+          timeout: 5000,
+        });
+        await confirmSedEdit(invocation);
+
+        const originalAbortSignal = globalThis.AbortSignal;
+        const mockTimeoutSignal = {
+          aborted: true,
+          reason: { name: 'TimeoutError' },
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        vi.stubGlobal('AbortSignal', {
+          ...originalAbortSignal,
+          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
+          any: vi.fn().mockReturnValue(mockTimeoutSignal),
+        });
+
+        try {
+          const result = await invocation.execute(mockAbortSignal);
+
+          expect(mockShellExecutionService).not.toHaveBeenCalled();
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+          expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+          expect(result.llmContent).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
+          expect(result.returnDisplay).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
+          expect(result.error).toEqual({
+            message: 'Command timed out after 5000ms before it could complete.',
+            type: ToolErrorType.EXECUTION_TIMEOUT,
+          });
+        } finally {
+          vi.stubGlobal('AbortSignal', originalAbortSignal);
+        }
+      });
+
+      it('switches approval mode when sed edit confirmation proceeds always', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        await details.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+
+        expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+          ApprovalMode.AUTO_EDIT,
+        );
+      });
+
+      it('falls back to shell execution for sed backup suffixes', async () => {
+        const invocation = shellTool.build({
+          command: "sed -i.bak 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('falls back to shell execution for background sed commands', async () => {
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: true,
+        });
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          "sed -i 's/foo/bar/' file.txt",
+          '/test/dir',
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          expect.objectContaining({}),
+          { streamStdout: true },
+        );
+        expect(result.llmContent).toContain('Background shell started.');
+        expect(result.llmContent).toContain('id: bg_');
+      });
+
+      it('falls back to shell execution when sed preview cannot read the file', async () => {
+        mockFileSystemService.readTextFile.mockRejectedValue(
+          new Error('not text'),
+        );
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        if (details.type !== 'exec') {
+          throw new Error('expected exec confirmation');
+        }
+        expect(details.warnings).toContain(
+          'Sed edit preview unavailable; showing raw shell command confirmation.',
+        );
+        expect(mockFileSystemService.readTextFile).toHaveBeenCalledTimes(1);
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('falls back to shell execution when the sed target is a symlink', async () => {
+        vi.mocked(fs.lstatSync).mockReturnValue({
+          isSymbolicLink: () => true,
+        } as fs.Stats);
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+      });
+
+      it('falls back to shell execution for env-prefixed shell wrappers', async () => {
+        const invocation = shellTool.build({
+          command: 'LC_ALL=C bash -c "sed -i \'s/foo/bar/\' file.txt"',
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('falls back to shell execution for env-prefixed unwrapped sed commands', async () => {
+        const invocation = shellTool.build({
+          command: `bash -c "LC_ALL=C sed -i 's/foo/bar/' file.txt"`,
+          directory: '/test/dir',
+          is_background: false,
+        });
+
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        const resultPromise = invocation.execute(mockAbortSignal);
+
+        expect(details.type).toBe('exec');
+        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+        expect(mockShellExecutionService).toHaveBeenCalled();
+
+        resolveShellExecution({ output: 'done' });
+        const result = await resultPromise;
+
+        expect(result.llmContent).toContain('Output: done');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
+      it('rejects when the file changed after the sed edit confirmation', async () => {
+        mockFileSystemService.readTextFile
+          .mockResolvedValueOnce({
+            content: 'foo\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          })
+          .mockResolvedValueOnce({
+            content: 'baz\n',
+            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+          });
+
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        const details =
+          await invocation.getConfirmationDetails(mockAbortSignal);
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+        const result = await invocation.execute(mockAbortSignal);
+
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      });
+    });
 
     it('runs background commands as managed pool entries (no & / pgrep wrap)', async () => {
       const registry = mockConfig.getBackgroundShellRegistry();
@@ -435,6 +1271,245 @@ describe('ShellTool', () => {
       expect(registry.complete).not.toHaveBeenCalled();
     });
 
+    describe('background settle waits for the output stream flush', () => {
+      // `stream.end()` is asynchronous — pending writes can still be in
+      // the libuv queue when it returns. Transitioning the registry
+      // before the stream's 'finish' event lets consumers observe a
+      // terminal status (and the status sidecar report it) while the
+      // trailing output bytes are not yet on disk. These tests pin the
+      // ordering with a stream whose events fire only when the test
+      // says so.
+      const makeDeferredStream = () => {
+        const handlers = new Map<string, Array<() => void>>();
+        return {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+          }),
+          emit: (event: string) => {
+            const list = handlers.get(event) ?? [];
+            handlers.set(event, []);
+            for (const h of list) h();
+          },
+        };
+      };
+
+      const startBackgroundAndExit = async (
+        deferred: { end: Mock },
+        { expectFlushRequested = true } = {},
+      ): Promise<{ shellId: string }> => {
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          deferred as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'true',
+          is_background: true,
+        });
+        await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        // Flush the .then() microtask attached to resultPromise.
+        await new Promise((r) => setImmediate(r));
+        if (expectFlushRequested) {
+          // The stream has been asked to flush…
+          expect(deferred.end).toHaveBeenCalledTimes(1);
+        }
+        return { shellId: entry.shellId };
+      };
+
+      it('holds the registry transition until the stream finish event', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // …but the registry must NOT transition before the flush
+        // completes — this is the truncated-log window.
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+
+        // Exactly once: the still-armed 'error' listener firing later
+        // must not re-transition. (A second 'finish' emit would be
+        // vacuous — `once` semantics already drained its handler.)
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      it('still transitions when the stream errors instead of finishing', async () => {
+        // A dead stream (EIO / ENOSPC racing `.end()`) must not strand
+        // the entry as running — the flush is best-effort, the
+        // transition is mandatory.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('transitions after the flush timeout when the stream never settles', async () => {
+        // Wedged fd whose 'finish'/'error' never fire (e.g. stuck
+        // mid-flush on an unresponsive filesystem): the 10s timer is
+        // the backstop. Fake only the timer functions so the
+        // setImmediate-based microtask flush in the helper stays real.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          const { shellId } = await startBackgroundAndExit(deferred);
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+
+          // The finish landing after the timeout must not double-fire.
+          deferred.emit('finish');
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('settles immediately when the stream was already destroyed by a write error', async () => {
+        // fs.WriteStream has autoDestroy — an earlier EIO/ENOSPC write
+        // error destroys the stream long before the child exits. On a
+        // destroyed writable `.end()` is a silent no-op and neither
+        // 'finish' nor 'error' will ever fire, so waiting would stall
+        // the transition (and every /tasks or sidecar reader) for the
+        // full flush timeout with nothing left to flush.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), destroyed: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        // The dead stream is not asked to flush at all.
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('settles immediately when the stream has already finished flushing', async () => {
+        // writableFinished means every byte reached the fd and 'finish'
+        // already fired — nothing left to wait for. (The guard must NOT
+        // use writableEnded: that flag is already true mid-flush, which
+        // is exactly the window these tests exist to protect.)
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), writableFinished: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('still waits when the stream has ended but not yet finished flushing', async () => {
+        // writableEnded flips true the moment `.end()` is called while
+        // bytes can still sit in the libuv queue — writableFinished
+        // only turns true with 'finish'. The short-circuit must NOT
+        // fire in this state: settling here is exactly the truncation
+        // window the flush wait exists to prevent.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = {
+          ...makeDeferredStream(),
+          writableEnded: true,
+          writableFinished: false,
+        };
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // Mid-flush: the transition is still held…
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // …until the flush actually completes.
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('disarms the flush timer when stream.end() throws synchronously', async () => {
+        // The catch path settles immediately — but it must also clear
+        // the already-armed timer, or 10s later it fires and logs a
+        // misleading flush-timeout warning for a shell that settled
+        // long ago.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          deferred.end.mockImplementation(() => {
+            throw new Error('EBADF: bad file descriptor, close');
+          });
+          const { shellId } = await startBackgroundAndExit(deferred);
+
+          // Settled via the catch path, immediately.
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('closing output stream on settle threw'),
+          );
+
+          // The timer must be gone: advancing past the timeout fires
+          // nothing and logs nothing.
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+            expect.stringContaining('flush timed out'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
     it('rejects a bare trailing & in managed background mode', async () => {
       expect(() =>
         shellTool.build({
@@ -469,6 +1544,15 @@ describe('ShellTool', () => {
         'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
       expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps pre-existing comment trimming behavior for managed background validation', async () => {
+      const invocation = shellTool.build({
+        command: 'echo ok # note\nsleep 5 &',
+        is_background: true,
+      });
+
+      expect(invocation).toBeDefined();
     });
 
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
@@ -752,6 +1836,230 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
+    });
+
+    describe('Silent-command heartbeat', () => {
+      let updateOutputMock: Mock;
+      beforeEach(() => {
+        vi.useFakeTimers({
+          toFake: [
+            'Date',
+            'performance',
+            'setTimeout',
+            'clearTimeout',
+            'setInterval',
+            'clearInterval',
+          ],
+        });
+        updateOutputMock = vi.fn();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const heartbeats = () =>
+        updateOutputMock.mock.calls
+          .map(([arg]) => arg)
+          .filter(
+            (arg) =>
+              typeof arg === 'object' &&
+              arg !== null &&
+              (arg as { type?: string }).type === 'shell_progress',
+          );
+
+      const settle = async () => {
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+      };
+
+      it('emits a heartbeat per silent interval with elapsed and effective timeout', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // Let execute() reach the post-spawn heartbeat setup.
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(2);
+
+        const [first, second] = heartbeats() as Array<Record<string, unknown>>;
+        expect(first).toMatchObject({
+          type: 'shell_progress',
+          elapsedMs: 10_000,
+          timeoutMs: 120_000,
+        });
+        // No output yet → no lastOutputAgeMs, no stats.
+        expect(first).not.toHaveProperty('lastOutputAgeMs');
+        expect(first).not.toHaveProperty('totalLines');
+        expect(first).not.toHaveProperty('totalBytes');
+        expect(second['elapsedMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('stays silent while output keeps the display fresh', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        for (let i = 0; i < 4; i++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          mockShellOutputCallback({ type: 'data', chunk: `line ${i}` });
+        }
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('reports lastOutputAgeMs once output has been seen', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'starting...' });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)!['lastOutputAgeMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('is disabled by heartbeatIntervalMs: 0', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(0);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('honours a configured interval', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(5_000);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+      });
+
+      it('stops on abort before the process settles', async () => {
+        const abortController = new AbortController();
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(
+          abortController.signal,
+          updateOutputMock,
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        abortController.abort();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: null,
+          signal: 15,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('stops once the command settles', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+      });
+
+      it('carries output stats on the AnsiOutput path', async () => {
+        const invocation = shellTool.build({
+          command: 'ansi-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
+          [
+            {
+              text: 'hello',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              inverse: false,
+              fg: '',
+              bg: '',
+            },
+          ],
+        ];
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)).toMatchObject({
+          totalLines: 1,
+          totalBytes: 5,
+        });
+
+        await settle();
+        await promise;
+      });
     });
 
     describe('Streaming to `updateOutput`', () => {
@@ -1082,15 +2390,398 @@ describe('ShellTool', () => {
         expect(updateOutputMock).toHaveBeenCalledOnce();
       });
 
+      it('should warn shortly before a foreground command times out', async () => {
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('about to time out'),
+        );
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('Ctrl+B'),
+        );
+
+        mockShellOutputCallback({ type: 'data', chunk: 'still running' });
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('still running'),
+        );
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('Ctrl+B'),
+        );
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('still running'),
+          output: 'still running',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should append the foreground timeout warning to ANSI output', async () => {
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'ansi-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
+          [
+            {
+              text: 'still running',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              inverse: false,
+              fg: '',
+              bg: '',
+            },
+          ],
+        ];
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        const warningFrame = updateOutputMock.mock.calls.at(-1)?.[0] as {
+          ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
+        };
+        const warningToken = warningFrame.ansiOutput.at(-1)?.[0];
+        expect(warningToken).toMatchObject({
+          text: expect.stringContaining('about to time out'),
+          bold: true,
+          fg: '#ff5555',
+        });
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('still running'),
+          output: 'still running',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should not show the Ctrl+B warning when promotion is ambiguous', async () => {
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'ambiguous-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => false,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should suppress a stale Ctrl+B warning if promotion becomes ambiguous before the timer fires', async () => {
+        let canPromote = true;
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'stale-warning-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => canPromote,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(4_999);
+        canPromote = false;
+        await vi.advanceTimersByTimeAsync(1);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('schedules the warning against the real timeout clock', async () => {
+        mockShellExecutionService.mockImplementationOnce(
+          (_cmd, _cwd, callback) => {
+            mockShellOutputCallback = callback;
+            vi.advanceTimersByTime(6_000);
+            return {
+              pid: 12345,
+              result: new Promise((resolve) => {
+                resolveExecutionPromise = resolve;
+              }),
+            };
+          },
+        );
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'slow-spawn',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('about to time out'),
+        );
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should not show the Ctrl+B warning outside interactive mode', async () => {
+        const interactiveMock = mockConfig as unknown as {
+          isInteractive: Mock;
+        };
+        interactiveMock.isInteractive.mockReturnValue(false);
+        const invocation = shellTool.build({
+          command: 'headless-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          vi.fn(),
+          () => true,
+        );
+        await Promise.resolve();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should not show the Ctrl+B warning when no promote callback is wired', async () => {
+        const invocation = shellTool.build({
+          command: 'direct-core-build',
+          is_background: false,
+          timeout: 20_000,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await Promise.resolve();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should cancel the near-timeout warning when the command completes early', async () => {
+        const invocation = shellTool.build({
+          command: 'quick-cmd',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          vi.fn(),
+          () => true,
+        );
+        await Promise.resolve();
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+      });
+
+      it('should not arm the near-timeout warning after an abort that happens before the shell handle is ready', async () => {
+        const ac = new AbortController();
+        const setPromoteAbortController = vi.fn();
+        let resolveShellHandle: (handle: {
+          pid: number;
+          result: Promise<ShellExecutionResult>;
+        }) => void;
+        mockShellExecutionService.mockImplementationOnce(
+          (_cmd, _cwd, callback) => {
+            mockShellOutputCallback = callback;
+            return new Promise((resolve) => {
+              resolveShellHandle = resolve;
+            });
+          },
+        );
+        const invocation = shellTool.build({
+          command: 'slow-spawn',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          ac.signal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+
+        ac.abort();
+        resolveShellHandle!({
+          pid: 12345,
+          result: new Promise((resolve) => {
+            resolveExecutionPromise = resolve;
+          }),
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('partial'),
+          output: 'partial',
+          exitCode: null,
+          signal: 15,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
       it('should clean up a pending trailing flush if execute() rejects', async () => {
         // ShellExecutionService.execute() can throw before resolving
         // (e.g. PTY dynamic import failure). The tool must propagate the
         // error AND ensure no scheduled timer survives to fire a late
         // updateOutput call after the caller has already seen the error.
-        // (No chunks can arrive before execute() resolves, so the timer
-        // is never actually scheduled in this path. The contract we
-        // verify here is that the abort listener is torn down — which we
-        // observe indirectly via "no late update on subsequent abort".)
+        // No chunks can arrive before execute() resolves, and the
+        // near-timeout warning is not armed until a foreground handle exists.
         const ac = new AbortController();
         mockShellExecutionService.mockImplementationOnce(() => {
           throw new Error('pty-import-failed');
@@ -1099,6 +2790,7 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({
           command: 'pty-cmd',
           is_background: false,
+          timeout: 20_000,
         });
 
         await expect(
@@ -1108,7 +2800,7 @@ describe('ShellTool', () => {
         // After rejection, aborting must not crash and must not produce
         // any updateOutput calls (no listener leak).
         ac.abort();
-        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
+        await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
       });
 
@@ -1168,6 +2860,388 @@ describe('ShellTool', () => {
         });
         await promise;
       });
+    });
+
+    it('reports a foreground non-zero exit as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'failing-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'failed output',
+        exitCode: 3,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.returnDisplay).toContain('failed output');
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Exit Code: 3'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.error?.message).toContain('failed output');
+    });
+
+    it('reports a foreground signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.returnDisplay).toContain(
+        'Command terminated by signal: 15',
+      );
+    });
+
+    it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-cleanup-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'completed',
+        exitCode: 0,
+        signal: 0,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Output: completed');
+    });
+
+    it('reports a PTY signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 0,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+    });
+
+    it('does not report a user-cancelled signal as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'cancelled-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: true,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Command was cancelled');
+    });
+
+    it.each([
+      'grep pattern file',
+      'rg pattern file',
+      'diff before after',
+      'test -f missing',
+      '[ -f missing ]',
+      '[[ -f missing ]]',
+      '"C:\\\\tools\\\\grep.exe" pattern file',
+    ])('does not report exit 1 from %s as a tool error', async (command) => {
+      const invocation = shellTool.build({
+        command,
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'negative result',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'ps aux | grep missing-process',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('reports exit 1 from find as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'find missing-directory',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'find: missing-directory: No such file or directory',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('does not exempt exit 1 from a mixed compound command', async () => {
+      const invocation = shellTool.build({
+        command: 'false && ps aux | grep pattern',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('reports exit 2 from an allowlisted command as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'grep pattern file',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'grep failed',
+        exitCode: 2,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    describe('output truncation threshold', () => {
+      it('keeps the 30k Shell default when no threshold is configured', () => {
+        expect(shellTool.maxOutputChars).toBe(30_000);
+      });
+
+      it.each([25_000, 10_000, 100_000, Number.POSITIVE_INFINITY])(
+        'exposes the explicit threshold %s to the scheduler',
+        (threshold) => {
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            threshold,
+          );
+
+          expect(shellTool.maxOutputChars).toBe(threshold);
+        },
+      );
+
+      it('passes the 30k Shell default to output truncation', async () => {
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({ threshold: 30_000 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('keeps 40k model-facing output when the explicit threshold is 100k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          100_000,
+        );
+        const output = 'x'.repeat(40_000);
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output, exitCode: 0 });
+
+        const result = await promise;
+
+        expect(result.llmContent).toContain(output);
+        expect(result.llmContent).not.toContain(
+          'Tool output was too large and has been truncated',
+        );
+        expect(result.persistedOutputFiles).toBeUndefined();
+      });
+
+      it('passes an explicit low threshold to output truncation', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          10_000,
+        );
+        const outputFile = '/tmp/qwen-temp/shell-output.txt';
+        const truncatedContent =
+          'Tool output was too large and has been truncated.';
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({ content: truncatedContent, outputFile });
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(15_000), exitCode: 0 });
+
+          const result = await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 10_000,
+              previewChars: 4000,
+              lines: Number.POSITIVE_INFINITY,
+            }),
+          );
+          expect(result.llmContent).toContain(truncatedContent);
+          expect(result.persistedOutputFiles).toEqual([outputFile]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('limits the preview budget to an explicit threshold below 4k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          1000,
+        );
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(5000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 1000,
+              previewChars: 1000,
+            }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('retains shell truncation without an artifact and records the persistence decision', async () => {
+      const originalOutput = 'A'.repeat(30_001);
+      const shortenedContent =
+        'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
+      const truncationModule = await import('../utils/truncation.js');
+      const spy = vi
+        .spyOn(truncationModule, 'truncateToolOutput')
+        .mockResolvedValue({ content: shortenedContent });
+
+      try {
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output: originalOutput, exitCode: 0 });
+        const result = await promise;
+
+        expect(result.llmContent).toContain(shortenedContent);
+        expect(result.llmContent).not.toContain(originalOutput);
+        expect(result.persistedOutputFiles).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     describe('long-running foreground hint', () => {
@@ -1314,6 +3388,7 @@ describe('ShellTool', () => {
         } as unknown as AbortSignal;
         const mockCombinedSignal = {
           aborted: true,
+          reason: new DOMException('timed out', 'TimeoutError'),
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
         } as unknown as AbortSignal;
@@ -1342,6 +3417,7 @@ describe('ShellTool', () => {
           expect(result.llmContent).toContain(
             'Command timed out after 60000ms',
           );
+          expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
           expect(result.llmContent).not.toContain('foreground command ran for');
         } finally {
           // Restore even if assertions throw, otherwise globalThis.AbortSignal
@@ -1378,6 +3454,23 @@ describe('ShellTool', () => {
         // Falls through to the normal result formatter (non-aborted).
         expect(result.llmContent).toContain('Signal: 15');
         expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('appends the hint when PTY reports a clean exit with signal 0', async () => {
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({
+          output: 'hi',
+          exitCode: 0,
+          signal: 0,
+          aborted: false,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 60s');
       });
 
       it('off-by-one: omits the hint at threshold − 1ms', async () => {
@@ -1446,9 +3539,55 @@ describe('ShellTool', () => {
           );
           const hintIdx = content.indexOf('foreground command ran for');
           expect(hintIdx).toBeGreaterThan(truncIdx);
+          expect(result.persistedOutputFiles).toEqual([
+            '/tmp/qwen-temp/shell_mocked.output',
+          ]);
         } finally {
           // Restore even if assertions throw — otherwise the
           // truncateToolOutput spy leaks into subsequent tests.
+          spy.mockRestore();
+        }
+      });
+
+      it('truncates shell output char-only so the line cap cannot undercut the char budget', async () => {
+        // Regression (C2): the in-tool truncateToolOutput call omitted `lines`,
+        // so it fell back to the config line cap (default 1000). Many-short-line
+        // output (find /, ls -R) then got line-truncated while the 30k char
+        // budget still had room — contradicting the per-tool char-only contract.
+        // Pin that shell declares lines: Infinity.
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+            outputFile: undefined,
+          }));
+        try {
+          const invocation = shellTool.build({
+            command: 'find /',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(1_000);
+          resolveShellExecution({
+            output: 'short line\n'.repeat(50),
+            exitCode: 0,
+          });
+          const result = await promise;
+
+          // Shell must pass lines: Infinity so the global line cap can't
+          // undercut its effective Shell char budget.
+          expect(spy).toHaveBeenCalledWith(
+            expect.anything(),
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              lines: Number.POSITIVE_INFINITY,
+              previewChars: 4000,
+            }),
+          );
+          expect(result.persistedOutputFiles).toBeUndefined();
+        } finally {
           spy.mockRestore();
         }
       });
@@ -1471,6 +3610,107 @@ describe('ShellTool', () => {
         resolveShellExecution({ output: 'all green', exitCode: 0 });
         const result = await promise;
         expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      describe('foreground timeout resolution (issue #5838)', () => {
+        // Precedence: per-call `timeout` param > `tools.shell.defaultTimeoutMs`
+        // setting > built-in DEFAULT_FOREGROUND_TIMEOUT_MS (120000). The
+        // resolved value is what `AbortSignal.timeout(...)` is armed with, so
+        // spying on that call pins the chosen timeout without waiting for it
+        // to fire.
+        const timeoutCfg = () =>
+          mockConfig as unknown as { getShellDefaultTimeoutMs: Mock };
+
+        it('uses the per-call timeout param over the configured default', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+              timeout: 60_000,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('falls back to the configured default when no per-call timeout is given', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            expect(timeoutSpy).toHaveBeenCalledWith(300_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('falls back to the built-in default when neither param nor setting is present', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(undefined);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            // DEFAULT_FOREGROUND_TIMEOUT_MS
+            expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('disables the timeout when the configured default is 0', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            // effectiveTimeout === 0 is falsy, so no timeout signal is armed.
+            expect(timeoutSpy).not.toHaveBeenCalled();
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('does not emit the spurious long-run hint when the timeout is disabled (0)', async () => {
+          // Regression guard: with the timeout disabled there is no
+          // "half the timeout" threshold. `longRunThresholdFor(0)` would
+          // return its 1000ms floor and fire the auto-bg hint on every
+          // foreground command running longer than ~1s. The disabled case
+          // must suppress the hint entirely.
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
+          const invocation = shellTool.build({
+            command: 'dev-server.sh',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          // Well past the 1000ms floor that would otherwise trip the hint.
+          await vi.advanceTimersByTimeAsync(120_000);
+          resolveShellExecution({ output: 'listening', exitCode: 0 });
+          const result = await promise;
+          expect(result.llmContent).not.toContain('foreground command ran for');
+          expect(result.llmContent).not.toContain('is_background: true');
+        });
       });
 
       it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {
@@ -1632,6 +3872,25 @@ describe('ShellTool', () => {
         // the background path's own llmContent doesn't, so this guards
         // against the hint leaking in via a shared code path.
         expect(result.llmContent).not.toContain('is_background: true');
+      });
+
+      it('teaches status-file liveness checking in the launch message', async () => {
+        // #7626: with only "read the output file" guidance, the model's
+        // sole liveness heuristic becomes "empty file = dead process" —
+        // wrong for block-buffering children (Python/ML jobs) whose
+        // output file stays at 0 bytes for their whole run, which led
+        // to duplicate relaunches of still-running processes.
+        const invocation = shellTool.build({
+          command: 'python train.py',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const text = String(result.llmContent);
+        expect(text).toContain('status file: ');
+        expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
+        expect(text).toContain('Do NOT infer liveness from the output file');
+        expect(text).toContain('block-buffer');
+        expect(text).toContain('python -u');
       });
     });
 
@@ -3624,6 +5883,17 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(
           `task_stop({ task_id: '${entry.shellId}'`,
         );
+        // #7626: the promoted path must teach the same status-file
+        // liveness heuristic as executeBackground — including the
+        // actionable unbuffering hint, so the two copies cannot drift.
+        expect(result.llmContent).toContain(
+          `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
+        );
+        expect(result.llmContent).toContain(
+          'Do NOT infer liveness from the output file',
+        );
+        expect(result.llmContent).toContain('python -u');
+        expect(result.llmContent).toContain('stdbuf -oL');
         expect(result.returnDisplay).toContain(
           `Promoted to background: ${entry.shellId}`,
         );
@@ -3982,9 +6252,10 @@ describe('ShellTool', () => {
         );
       });
 
-      it('natural child exit transitions the registry entry to "completed" (exitCode 0)', async () => {
+      it('clean PTY exit transitions the registry entry to "completed" (exitCode 0, signal 0)', async () => {
         // Pin the PR-2.5 settle path: after promote, when the
-        // service's post-promote exit listener fires with exitCode=0,
+        // service's post-promote exit listener fires with exitCode=0 and
+        // node-pty's clean-exit signal=0,
         // `registry.complete(shellId, 0, ...)` is called and the
         // stream closes.
         const writeStreamMock = {
@@ -4029,7 +6300,7 @@ describe('ShellTool', () => {
           postPromote?: {
             onSettle?: (info: {
               exitCode: number | null;
-              signal: number | null;
+              signal: number | NodeJS.Signals | null;
               error?: Error;
               endTime: number;
             }) => void;
@@ -4038,7 +6309,7 @@ describe('ShellTool', () => {
         expect(opts?.postPromote?.onSettle).toBeDefined();
         opts.postPromote!.onSettle!({
           exitCode: 0,
-          signal: null,
+          signal: 0,
           endTime: 1700000000000,
         });
 
@@ -4075,7 +6346,7 @@ describe('ShellTool', () => {
             postPromote: {
               onSettle: (info: {
                 exitCode: number | null;
-                signal: number | null;
+                signal: number | NodeJS.Signals | null;
                 error?: Error;
                 endTime: number;
               }) => void;
@@ -4100,6 +6371,14 @@ describe('ShellTool', () => {
           2,
         );
 
+        // node-pty can preserve exitCode 0 alongside a non-zero signal.
+        onSettle({ exitCode: 0, signal: 15, endTime: 2.5 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal 15',
+          2.5,
+        );
+
         // Spawn-side error → fail with err.message.
         onSettle({
           exitCode: null,
@@ -4108,6 +6387,100 @@ describe('ShellTool', () => {
           endTime: 3,
         });
         expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+      });
+
+      it('treats a child-process signal string as a failed settle', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33334,
+        });
+        await promise;
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | NodeJS.Signals | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        onSettle({ exitCode: null, signal: 'SIGTERM', endTime: 3.5 });
+
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal SIGTERM',
+          3.5,
+        );
+      });
+
+      it('keeps a task_stop cancellation from being reclassified as a signal failure', async () => {
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const invocation = shellTool.build({
+            command: 'sleep 1',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 12345,
+          });
+          await promise;
+
+          const serviceCall = mockShellExecutionService.mock.calls[0];
+          const onSettle = (
+            serviceCall[6] as {
+              postPromote: {
+                onSettle: (info: {
+                  exitCode: number | null;
+                  signal: number | NodeJS.Signals | null;
+                  error?: Error;
+                  endTime: number;
+                }) => void;
+              };
+            }
+          ).postPromote.onSettle;
+          const entry = (registry.register as Mock).mock.calls[0][0];
+
+          // `task_stop` aborts the fresh registry controller before the
+          // child reports its SIGTERM/SIGKILL settle event.
+          entry.abortController.abort();
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+          onSettle({ exitCode: 0, signal: 15, endTime: 4 });
+
+          expect(registry.cancel).toHaveBeenCalledWith(entry.shellId, 4);
+          expect(registry.fail).not.toHaveBeenCalled();
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
       });
 
       it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
@@ -5319,7 +7692,7 @@ describe('ShellTool', () => {
       expect(calledSignal).not.toBe(mockAbortSignal);
     });
 
-    it('should handle timeout vs user cancellation correctly', async () => {
+    it('keeps the first timeout after a later user cancellation', async () => {
       const userAbortController = new AbortController();
       const invocation = shellTool.build({
         command: 'long-running-command',
@@ -5336,6 +7709,7 @@ describe('ShellTool', () => {
 
       const mockCombinedSignal = {
         aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       } as unknown as AbortSignal;
@@ -5348,6 +7722,7 @@ describe('ShellTool', () => {
       });
 
       const promise = invocation.execute(userAbortController.signal);
+      userAbortController.abort();
 
       resolveExecutionPromise({
         rawOutput: Buffer.from('partial output'),
@@ -5360,15 +7735,165 @@ describe('ShellTool', () => {
         executionMethod: 'child_process',
       });
 
-      const result = await promise;
-
-      // Restore original AbortSignal
-      vi.stubGlobal('AbortSignal', originalAbortSignal);
+      let result;
+      try {
+        result = await promise;
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
 
       expect(result.llmContent).toContain('Command timed out after 5000ms');
       expect(result.llmContent).toContain(
         'Below is the output before it timed out',
       );
+      expect(result.returnDisplay).toContain(
+        'Command timed out after 5000ms before it could complete.',
+      );
+      expect(result.returnDisplay).toContain('partial output');
+      expect(result.error).toEqual({
+        message: 'Command timed out after 5000ms before it could complete.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+    });
+
+    it('returns a structured timeout when the command produced no output', async () => {
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(new AbortController().signal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+
+        expect(result.llmContent).toContain(
+          'There was no output before it timed out.',
+        );
+        expect(result.returnDisplay).toContain(
+          'There was no output before it timed out.',
+        );
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
+    });
+
+    it('keeps truncated timeout detail out of the operational error summary', async () => {
+      const truncationModule = await import('../utils/truncation.js');
+      const truncationSpy = vi
+        .spyOn(truncationModule, 'truncateToolOutput')
+        .mockResolvedValue({
+          content:
+            'Tool output was too large and has been truncated.\n' +
+            'Full output saved to: /tmp/tool-output.txt',
+          outputFile: '/tmp/tool-output.txt',
+        });
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(new AbortController().signal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('x'.repeat(40_000)),
+          output: 'x'.repeat(40_000),
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+
+        expect(result.llmContent).toContain('/tmp/tool-output.txt');
+        expect(result.returnDisplay).toContain('/tmp/tool-output.txt');
+        expect(result.error).toEqual({
+          message: 'Command timed out after 5000ms before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        });
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+        truncationSpy.mockRestore();
+      }
+    });
+
+    it('keeps the first user cancellation after a later timeout', async () => {
+      const userAbortController = new AbortController();
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('cancelled', 'AbortError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue({ aborted: true }),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(userAbortController.signal);
+        userAbortController.abort();
+        resolveExecutionPromise({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('cancelled by user');
+        expect(result.error).toBeUndefined();
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
     });
 
     it('should use default timeout behavior when timeout is not specified', async () => {
@@ -5514,7 +8039,8 @@ describe('detectBlockedSleepPattern', () => {
 
   it('blocks sleep followed by a top-level shell comment', () => {
     // Shell ignores trailing comments, so these are equivalent to
-    // standalone foreground sleeps and must not bypass the guard.
+    // standalone foreground sleeps unless they use the explicit
+    // intentional-sleep escape hatch.
     expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
       'standalone sleep 5',
     );
@@ -5525,6 +8051,69 @@ describe('detectBlockedSleepPattern', () => {
       'standalone sleep 2s',
     );
     expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('allows standalone sleep with an intentional sleep comment', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 2s # intentional-sleep: deliberate rate limit backoff',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10m # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+  });
+
+  it('requires a meaningful intentional sleep reason', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep:')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 1234567'),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 12345678'),
+    ).toBeNull();
+  });
+
+  it('blocks intentional sleep comments above the duration cap', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBe('standalone sleep 601s');
+  });
+
+  it('does not allow intentional sleep comments on leading sleep chains', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('does not allow intentional sleep comments to hide newline commands', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('preserves commands after a shell comment newline', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # wait\necho ok')).toBe(
       'sleep 5 followed by: echo ok',
     );
   });

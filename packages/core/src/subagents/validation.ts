@@ -24,13 +24,11 @@ export class SubagentValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // Validate name
     const nameValidation = this.validateName(config.name);
     if (!nameValidation.isValid) {
       errors.push(...nameValidation.errors);
     }
 
-    // Validate description
     if (!config.description || config.description.trim().length === 0) {
       errors.push('Description is required and cannot be empty');
     } else if (config.description.length > 1000) {
@@ -39,14 +37,12 @@ export class SubagentValidator {
       );
     }
 
-    // Validate system prompt
     const promptValidation = this.validateSystemPrompt(config.systemPrompt);
     if (!promptValidation.isValid) {
       errors.push(...promptValidation.errors);
     }
     warnings.push(...promptValidation.warnings);
 
-    // Validate tools if specified
     if (config.tools) {
       const toolsValidation = this.validateTools(config.tools);
       if (!toolsValidation.isValid) {
@@ -55,7 +51,6 @@ export class SubagentValidator {
       warnings.push(...toolsValidation.warnings);
     }
 
-    // Validate disallowedTools if specified
     if (config.disallowedTools && config.disallowedTools.length > 0) {
       const disallowedValidation = this.validateTools(config.disallowedTools);
       if (!disallowedValidation.isValid) {
@@ -64,7 +59,6 @@ export class SubagentValidator {
       warnings.push(...disallowedValidation.warnings);
     }
 
-    // Validate model selector if specified
     if (config.model) {
       const modelValidation = this.validateModel(config.model);
       if (!modelValidation.isValid) {
@@ -73,7 +67,6 @@ export class SubagentValidator {
       warnings.push(...modelValidation.warnings);
     }
 
-    // Validate run config if specified
     if (config.runConfig) {
       const runValidation = this.validateRunConfig(config.runConfig);
       if (!runValidation.isValid) {
@@ -107,7 +100,6 @@ export class SubagentValidator {
 
     const trimmedName = name.trim();
 
-    // Check length constraints
     if (trimmedName.length < 2) {
       errors.push('Name must be at least 2 characters long');
     }
@@ -116,7 +108,6 @@ export class SubagentValidator {
       errors.push('Name must be 50 characters or less');
     }
 
-    // Check valid characters (Unicode letters/numbers, hyphens, underscores)
     const validNameRegex = /^[\p{L}\p{N}_-]+$/u;
     if (!validNameRegex.test(trimmedName)) {
       errors.push(
@@ -124,7 +115,6 @@ export class SubagentValidator {
       );
     }
 
-    // Check that it doesn't start or end with special characters
     if (trimmedName.startsWith('-') || trimmedName.startsWith('_')) {
       errors.push('Name cannot start with a hyphen or underscore');
     }
@@ -151,7 +141,7 @@ export class SubagentValidator {
       errors.push(`"${trimmedName}" is a reserved name and cannot be used`);
     }
 
-    // Warnings for naming conventions (only for names that have case distinctions)
+    // Only warn about naming conventions for names that contain case distinctions
     if (
       trimmedName !== trimmedName.toLowerCase() &&
       /[a-zA-Z]/.test(trimmedName)
@@ -189,12 +179,10 @@ export class SubagentValidator {
 
     const trimmedPrompt = prompt.trim();
 
-    // Check minimum length for meaningful prompts
     if (trimmedPrompt.length < 10) {
       errors.push('System prompt must be at least 10 characters long');
     }
 
-    // Warn for very long prompts
     if (trimmedPrompt.length > 10000) {
       warnings.push(
         'System prompt is quite long (>10,000 characters), consider shortening',
@@ -230,13 +218,11 @@ export class SubagentValidator {
       return { isValid: true, errors, warnings };
     }
 
-    // Check for duplicates
     const uniqueTools = new Set(tools);
     if (uniqueTools.size !== tools.length) {
       warnings.push('Duplicate tool names found in tools array');
     }
 
-    // Validate each tool name
     for (const tool of tools) {
       if (typeof tool !== 'string') {
         errors.push(`Tool name must be a string, got: ${typeof tool}`);

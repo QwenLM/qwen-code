@@ -11,9 +11,10 @@ import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
-import { createRewindRoute } from './rewind.js';
+import { createRewindRoute, type RewindDaemon } from './rewind.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { SessionWal, decodeSegment } from '../wal.js';
 import { PromptQueue } from './promptQueue.js';
@@ -30,21 +31,63 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
+/**
+ * Build the daemon-side rewind snapshot list for a transcript of `turnCount`
+ * user turns. The daemon keeps one snapshot per user turn (turnIndex 0..N-1);
+ * the tip (turnIndex N) has none. `promptId` mirrors the daemon's real
+ * convention of keying a snapshot by the prompt id that produced it.
+ */
+function makeSnapshots(turnCount: number): DaemonRewindSnapshotInfo[] {
+  const out: DaemonRewindSnapshotInfo[] = [];
+  for (let i = 0; i < turnCount; i++) {
+    out.push({
+      promptId: `${SESSION_ID}########${i}`,
+      turnIndex: i,
+      timestamp: `2026-01-01T00:00:0${i}.000Z`,
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    });
+  }
+  return out;
+}
+
+/**
+ * Fake `RewindDaemon` (the `getRewindSnapshots` + `rewindSession` pair the
+ * route consumes). Records every `rewindSession` call's `(id, promptId)` and
+ * counts `getRewindSnapshots` invocations so tests can assert which promptId
+ * the route mapped `toTurn` onto, or that the daemon was never touched.
+ */
 function fakeDaemon(
-  rewindSession: (
-    id: string,
-    req: { toTurn: number },
-  ) => Promise<{ targetTurnIndex: number; apiTruncateIndex: number }>,
+  opts: {
+    snapshots?: DaemonRewindSnapshotInfo[];
+    /** Override the rewindSession body/throw; defaults to a clean success. */
+    rewind?: (id: string, promptId: string) => Promise<unknown> | unknown;
+  } = {},
 ) {
-  const calls: Array<{ id: string; toTurn: number }> = [];
-  return {
-    calls,
-    daemon: {
-      rewindSession: async (id: string, req: { toTurn: number }) => {
-        calls.push({ id, toTurn: req.toTurn });
-        return rewindSession(id, req);
-      },
+  const rewindCalls: Array<{ id: string; promptId: string }> = [];
+  let snapshotCalls = 0;
+  const snapshots = opts.snapshots ?? [];
+  const daemon: RewindDaemon = {
+    getRewindSnapshots: async (_id: string) => {
+      snapshotCalls += 1;
+      return { snapshots };
     },
+    rewindSession: async (id: string, promptId: string) => {
+      rewindCalls.push({ id, promptId });
+      if (opts.rewind) return await opts.rewind(id, promptId);
+      return {
+        rewound: true,
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+      };
+    },
+  };
+  return {
+    rewindCalls,
+    get snapshotCalls() {
+      return snapshotCalls;
+    },
+    daemon,
   };
 }
 
@@ -81,12 +124,7 @@ async function writeTranscript(userTurns: number): Promise<void> {
 }
 
 interface MountOpts {
-  daemon: {
-    rewindSession: (
-      id: string,
-      req: { toTurn: number },
-    ) => Promise<{ targetTurnIndex: number; apiTruncateIndex: number }>;
-  };
+  daemon: RewindDaemon;
   audit?: AuditRecorder;
   bus?: OwnerEventBus;
   walDir?: string;
@@ -103,7 +141,7 @@ async function mount(opts: MountOpts): Promise<string> {
   });
   app.post(
     '/session/:id/rewind',
-    createRewindRoute(opts.daemon as never, async () => CWD, {
+    createRewindRoute(opts.daemon, async () => CWD, {
       audit: opts.audit,
       bus: opts.bus,
       walDir: opts.walDir,
@@ -149,10 +187,9 @@ afterEach(async () => {
 describe('POST /session/:id/rewind', () => {
   it('happy path: 202 with toTurn + truncatedEventId, one WAL marker, one audit row', async () => {
     await writeTranscript(3);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 7,
-    }));
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+    });
     const audit = fakeAudit();
     const bus = new OwnerEventBus();
     const seen: OwnerEvent[] = [];
@@ -168,6 +205,13 @@ describe('POST /session/:id/rewind', () => {
     };
     expect(body.toTurn).toBe(1);
     expect(body.truncatedEventId).toBe(2); // turn 1 boundary = record index 2
+
+    // The route mapped toTurn 1 onto the daemon snapshot whose turnIndex is
+    // 1 and rewound to THAT snapshot's promptId (never the toTurn itself —
+    // the daemon is promptId-keyed post-merge).
+    expect(rewindCalls).toEqual([
+      { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
+    ]);
 
     expect(audit.calls).toHaveLength(1);
     expect(audit.calls[0]).toMatchObject({
@@ -208,10 +252,9 @@ describe('POST /session/:id/rewind', () => {
 
   it('409 rewind_in_progress when the prompt queue slot is held', async () => {
     await writeTranscript(2);
-    const { daemon, calls } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon, rewindCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+    });
     const queue = new PromptQueue();
     const release = await queue.acquire(SESSION_ID, 60_000); // hold the slot
     const url = await mount({ daemon, queue });
@@ -219,42 +262,47 @@ describe('POST /session/:id/rewind', () => {
     const res = await postRewind(url, { toTurn: 0 });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'rewind_in_progress' });
-    // The daemon must never be touched while a prompt holds the slot.
-    expect(calls).toHaveLength(0);
+    // The daemon must never be touched while a prompt holds the slot —
+    // neither the snapshots lookup nor the rewind itself.
+    expect(rewindCalls).toHaveLength(0);
+    expect(snapshotCalls).toBe(0);
     release();
   });
 
   it('400 invalid_turn for a negative toTurn; daemon never called', async () => {
     await writeTranscript(1);
-    const { daemon, calls } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(1),
+    });
     const url = await mount({ daemon });
 
     const res = await postRewind(url, { toTurn: -1 });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ code: 'invalid_turn' });
-    expect(calls).toHaveLength(0);
+    expect(rewindCalls).toHaveLength(0);
   });
 
   it('409 rewind_not_applicable when toTurn is beyond the last turn', async () => {
     await writeTranscript(1);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(1),
+    });
     const url = await mount({ daemon });
 
     const res = await postRewind(url, { toTurn: 9 });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
+    // Rejected by the resolver before the daemon is ever consulted.
+    expect(rewindCalls).toHaveLength(0);
   });
 
   it('saga rollback: daemon failure yields 502, no WAL marker, no audit', async () => {
     await writeTranscript(2);
-    const { daemon } = fakeDaemon(async () => {
-      throw new Error('daemon exploded');
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      rewind: () => {
+        throw new Error('daemon exploded');
+      },
     });
     const audit = fakeAudit();
     const walDir = join(runtimeBase, 'wal');
@@ -274,8 +322,11 @@ describe('POST /session/:id/rewind', () => {
     await writeTranscript(2);
     const audit = fakeAudit();
     const walDir = join(runtimeBase, 'wal');
-    const { daemon } = fakeDaemon(async () => {
-      throw Object.assign(new Error('rewind_in_progress'), { status: 409 });
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      rewind: () => {
+        throw Object.assign(new Error('rewind_in_progress'), { status: 409 });
+      },
     });
     const url = await mount({ daemon, audit, walDir });
 
@@ -291,8 +342,11 @@ describe('POST /session/:id/rewind', () => {
 
   it('maps a non-409 daemon HTTP error (e.g. 500) to 502 daemon_unavailable', async () => {
     await writeTranscript(2);
-    const { daemon } = fakeDaemon(async () => {
-      throw Object.assign(new Error('boom'), { status: 500 });
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      rewind: () => {
+        throw Object.assign(new Error('boom'), { status: 500 });
+      },
     });
     const url = await mount({ daemon });
 
@@ -303,10 +357,7 @@ describe('POST /session/:id/rewind', () => {
 
   it('marker retry: a single WAL append failure is retried and the marker persists (202)', async () => {
     await writeTranscript(2);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(2) });
     const audit = fakeAudit();
     const walDir = join(runtimeBase, 'wal');
     const url = await mount({ daemon, audit, walDir });
@@ -331,10 +382,9 @@ describe('POST /session/:id/rewind', () => {
 
   it('marker retry exhausted: two WAL append failures yield 500 rewind_marker_failed, no audit, no marker', async () => {
     await writeTranscript(2);
-    const { daemon, calls } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+    });
     const audit = fakeAudit();
     const walDir = join(runtimeBase, 'wal');
     const url = await mount({ daemon, audit, walDir });
@@ -353,7 +403,7 @@ describe('POST /session/:id/rewind', () => {
     expect(await res.json()).toMatchObject({ code: 'rewind_marker_failed' });
     expect(spy).toHaveBeenCalledTimes(2);
     // The daemon already rewound — that call happened exactly once.
-    expect(calls).toHaveLength(1);
+    expect(rewindCalls).toHaveLength(1);
     // Atomicity: marker absent → audit MUST also be absent.
     expect(audit.calls).toHaveLength(0);
     // Divergence was logged loudly.
@@ -368,10 +418,7 @@ describe('POST /session/:id/rewind', () => {
 
   it('close() failure after a durable append still records audit + publishes + 202, marker persists', async () => {
     await writeTranscript(2);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(2) });
     const audit = fakeAudit();
     const bus = new OwnerEventBus();
     const seen: OwnerEvent[] = [];
@@ -425,10 +472,7 @@ describe('POST /session/:id/rewind', () => {
 
   it('multi-client fan-out: two subscribers both observe the marker', async () => {
     await writeTranscript(2);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(2) });
     const bus = new OwnerEventBus();
     const seenA: OwnerEvent[] = [];
     const seenB: OwnerEvent[] = [];
@@ -448,10 +492,7 @@ describe('POST /session/:id/rewind', () => {
 
   it('releases the queue slot after completion so a subsequent prompt can acquire it', async () => {
     await writeTranscript(1);
-    const { daemon } = fakeDaemon(async (_id, req) => ({
-      targetTurnIndex: req.toTurn,
-      apiTruncateIndex: 0,
-    }));
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(1) });
     const queue = new PromptQueue();
     const url = await mount({ daemon, queue });
 
@@ -462,5 +503,70 @@ describe('POST /session/:id/rewind', () => {
     // the deadline and reject with QueueTimeoutError.
     const release = await queue.acquire(SESSION_ID, 1000);
     release();
+  });
+
+  it('tip (toTurn === addressableTurnCount): daemon NOT called, still 202 + marker + audit', async () => {
+    await writeTranscript(3); // 3 user turns → tip is toTurn 3
+    // Defensive: if the route ever (incorrectly) reached the daemon, the
+    // rewind would throw and we'd get 502, not 202. The call counters below
+    // also prove the daemon was never touched.
+    const { daemon, rewindCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+      rewind: () => {
+        throw new Error('daemon must not be called for a tip rewind');
+      },
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 3 });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as {
+      toTurn: number;
+      truncatedEventId: number;
+    };
+    expect(body.toTurn).toBe(3);
+    expect(body.truncatedEventId).toBe(6); // tip → whole transcript (3 turns × 2 records)
+
+    // A tip rewind truncates nothing: the daemon (snapshots + rewind) is
+    // NEVER called — only the gateway-side marker is recorded.
+    expect(rewindCalls).toHaveLength(0);
+    expect(snapshotCalls).toBe(0);
+
+    // The marker + audit are still written (preserves the pre-merge no-op
+    // behavior for a tip rewind).
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'session_rewound',
+      detail: { toTurn: 3, truncatedEventId: 6 },
+    });
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(1);
+    wal.close();
+  });
+
+  it('409 rewind_not_applicable when a non-tip toTurn has no matching daemon snapshot (views diverged)', async () => {
+    await writeTranscript(3); // 3 user turns → toTurn 1 is a valid non-tip boundary
+    // The daemon's snapshot list is missing the turnIndex 1 snapshot (e.g. the
+    // daemon was already rewound from the TUI and no longer supports that
+    // boundary). The resolver accepted toTurn 1, but the daemon cannot honor it.
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(3).filter((s) => s.turnIndex !== 1),
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
+    // The snapshots lookup ran (to find the missing snapshot) but the rewind
+    // itself never fired — and nothing was persisted.
+    expect(rewindCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(0);
+    wal.close();
   });
 });

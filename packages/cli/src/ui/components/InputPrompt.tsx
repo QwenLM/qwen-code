@@ -14,15 +14,19 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { logicalPosToOffset } from './shared/text-buffer.js';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { StreamingState } from '../types.js';
 import {
   ApprovalMode,
   type Config,
@@ -40,10 +44,14 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
+import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -53,10 +61,37 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
+import {
+  isLiveAgentPanelVisibleEntry,
+  LIVE_AGENT_PANEL_MAX_ROWS,
+  getLiveAgentPanelVpMaxRows,
+} from './background-view/liveAgentPanelVisibility.js';
+import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
 import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
+import {
+  useVoiceInput,
+  type VoiceTranscriber,
+} from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
+import {
+  assertVoiceBaseUrlNetworkAllowed,
+  isKeytermEcho,
+  isStreamingVoiceModel,
+  resolveVoiceStreamConfig,
+  transcribeVoiceAudio,
+} from '../voice/voice-transcriber.js';
+import { refineVoiceTranscript } from '../voice/voice-refine.js';
+import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js';
+import { openVoiceStream } from '../voice/voice-stream-session.js';
+import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
+import { VoiceIndicator } from './VoiceIndicator.js';
+import {
+  clearPromptStash,
+  savePromptStash,
+} from '../../services/prompt-stash.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -67,11 +102,80 @@ export interface Attachment {
   filename: string; // Filename only (for display)
 }
 
+const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/**
+ * Classify a pasted blob as image-file-path(s).
+ *
+ * Some terminals and clipboard helpers handle an image paste by injecting the
+ * saved file path as text (optionally prefixed with `@`, shell-escaped, or
+ * space/newline-separated for multiple files) instead of routing through our
+ * own Ctrl+V handler. Recognizing those lets Cmd+V (terminal-driven) converge
+ * on the same attachment UX as Ctrl+V. Mirrors Claude Code's usePasteHandler:
+ * split on newlines and on spaces that precede an absolute path (spaces inside
+ * a path are shell-escaped), then normalize each token.
+ *
+ * @returns `imagePaths` (normalized tokens with an image extension) and
+ *   `allImages` (true only when every token is such a path), so the caller can
+ *   promote a pure image-path paste without swallowing mixed text.
+ */
+export function classifyPastedImagePaths(pasted: string): {
+  imagePaths: string[];
+  allImages: boolean;
+} {
+  const tokens = pasted
+    .split(/ (?=@?\/|@?[A-Za-z]:\\)/)
+    .flatMap((part) => part.split('\n'))
+    .map((token) => token.trim())
+    .filter(Boolean);
+  const imagePaths: string[] = [];
+  let allImages = tokens.length > 0;
+  for (const token of tokens) {
+    const normalized = token
+      .replace(/^@/, '') // strip the `@` reference prefix
+      .replace(/^["']|["']$/g, '') // strip surrounding quotes
+      .replace(/\\ /g, ' '); // unescape shell-escaped spaces
+    if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
+      imagePaths.push(normalized);
+    } else {
+      allImages = false;
+    }
+  }
+  return { imagePaths, allImages };
+}
+
 const debugLogger = createDebugLogger('INPUT_PROMPT');
+
+export function expandPendingPastePlaceholders(
+  value: string,
+  pendingPastes: ReadonlyMap<string, string>,
+): string {
+  if (pendingPastes.size === 0) {
+    return value;
+  }
+  const placeholders = Array.from(pendingPastes.keys()).sort(
+    (a, b) => b.length - a.length,
+  );
+  const escapedPlaceholders = placeholders.map((placeholderValue) =>
+    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  );
+  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
+  return value.replace(
+    placeholderRegex,
+    (matchedPlaceholder) =>
+      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
+  );
+}
 
 export interface InputPromptProps {
   buffer: TextBuffer;
-  onSubmit: (value: string) => void;
+  onSubmit: (
+    value: string,
+    options?: {
+      deferUntilIdle?: boolean;
+      submittedPrompt?: string;
+    },
+  ) => void;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -110,6 +214,7 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
+  clipboardUnavailableShownRef?: React.MutableRefObject<boolean>;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -143,10 +248,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   isEmbeddedShellFocused,
   promptSuggestion,
   onPromptSuggestionDismiss,
+  clipboardUnavailableShownRef: sessionClipboardUnavailableShownRef,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const settings = useSettings();
+  // Mouse interactions (suggestion list + click-to-position cursor) are enabled
+  // in alternate-screen mode (see RowMouseController's coordinate assumptions).
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const mouseInteractionsEnabled =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -162,14 +275,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setLivePanelSelectedIndex,
     enterDetailFromPanel: enterBgDetailFromPanel,
     setSelectedIndex: setBgSelectedIndex,
+    setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
-  // Includes terminal entries — the pill stays open so users can reopen
-  // the dialog to inspect final state after the last agent finishes.
-  const hasBgAgents = bgEntries.length > 0;
-  const bgAgentCount = useMemo(
-    () => bgEntries.filter((e) => e.kind === 'agent').length,
-    [bgEntries],
+  // panelDisplayOrder + the maxRows tail-window mirror LiveAgentPanel's
+  // rendered rows exactly (oldest-first, nested agents grouped under
+  // their parent, windowed to the last LIVE_AGENT_PANEL_MAX_ROWS) so
+  // `livePanelSelectedIndex - 1` indexes the same agent the user sees
+  // highlighted. Filtering alone (snapshot order, newest-first, unsliced)
+  // opened the wrong agent's detail on Enter.
+  // Window by the same cap the panel actually renders (VP mode uses a
+  // height-aware cap via getLiveAgentPanelVpMaxRows in DefaultAppLayout)
+  // so the keyboard selection can't address a row that is scrolled off.
+  const liveAgentPanelMaxRows = uiState.useTerminalBuffer
+    ? getLiveAgentPanelVpMaxRows(uiState.terminalHeight)
+    : LIVE_AGENT_PANEL_MAX_ROWS;
+  const getVisibleBgAgents = useCallback(
+    () =>
+      panelDisplayOrder(
+        bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+      ).slice(-liveAgentPanelMaxRows),
+    [bgEntries, liveAgentPanelMaxRows],
   );
   const hasActiveToolConfirmation = useMemo(
     () =>
@@ -194,6 +320,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAttachmentMode, setIsAttachmentMode] = useState(false);
   const [selectedAttachmentIndex, setSelectedAttachmentIndex] = useState(-1);
+  const localClipboardUnavailableShownRef = useRef(false);
+  const clipboardUnavailableShownRef =
+    sessionClipboardUnavailableShownRef ?? localClipboardUnavailableShownRef;
   // Large paste placeholder handling
   const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
     new Map(),
@@ -253,6 +382,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   );
   const showCompletionSuggestions =
     completion.showSuggestions && !isHistoryRestoredText;
+  const categoryTabsVisible =
+    !exportCompletion.suggestionDisplayProps &&
+    !commandSearchActive &&
+    !reverseSearchActive &&
+    !isAttachmentMode &&
+    (completion.availableCategories?.length ?? 0) > 2;
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -289,7 +424,129 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     isFocused: isShellFocused,
   });
 
+  const rawVoiceModel = settings.merged.voiceModel;
+  const voiceModel =
+    typeof rawVoiceModel === 'string' && rawVoiceModel.trim().length > 0
+      ? rawVoiceModel.trim()
+      : undefined;
+  const voiceEnabled =
+    settings.merged.general?.voice?.enabled === true && Boolean(voiceModel);
+  const voiceMode =
+    settings.merged.general?.voice?.mode === 'tap' ? 'tap' : 'hold';
+  // handleSubmitAndClear is defined below; bridge with a ref so tap-mode voice
+  // can submit the prompt once the transcript is inserted.
+  const voiceSubmitRef = useRef<(text: string) => void>(() => {});
+  const transcribeVoice = useCallback<VoiceTranscriber>(
+    (audio, { voiceModel }) =>
+      transcribeVoiceAudio(audio, { config, settings, voiceModel }),
+    [config, settings],
+  );
+  // Refine the transcript with the fast model before inserting. On by default,
+  // but skipped when the user opted out or no fast model is configured.
+  const voiceRefineEnabled =
+    settings.merged.general?.voice?.refineTranscript !== false &&
+    config.getFastModel() != null;
+  const refineVoice = useCallback(
+    (raw: string, signal: AbortSignal) =>
+      refineVoiceTranscript(config, raw, signal),
+    [config],
+  );
+  const voiceMicWarnedStatusRef = useRef<string | null>(null);
+  const voiceRecorderRef = useRef<ReturnType<
+    typeof createVoiceRecorder
+  > | null>(null);
+  const getVoiceRecorder = useCallback(() => {
+    voiceRecorderRef.current ??= createVoiceRecorder();
+    return voiceRecorderRef.current;
+  }, []);
+  const warmupVoice = useCallback(() => {
+    const recorder = getVoiceRecorder();
+    void Promise.resolve(recorder.warmup?.()).catch(() => {});
+    void Promise.resolve(recorder.microphoneStatus?.())
+      .then((status) => {
+        if (voiceMicWarnedStatusRef.current === status) {
+          return;
+        }
+        if (status === 'denied') {
+          voiceMicWarnedStatusRef.current = status;
+          uiState.historyManager?.addItem(
+            {
+              type: 'error',
+              text: t(
+                'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+              ),
+            },
+            Date.now(),
+          );
+        } else if (status === 'prompt') {
+          // notDetermined: macOS raises the permission dialog on first capture,
+          // so that first recording can come back empty. Tell the user once
+          // instead of letting it look like a silent no-op.
+          voiceMicWarnedStatusRef.current = status;
+          uiState.historyManager?.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
+              ),
+            },
+            Date.now(),
+          );
+        }
+      })
+      .catch(() => {});
+  }, [getVoiceRecorder, uiState.historyManager]);
+  const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
+  const openVoiceStreamSession = useCallback(
+    (callbacks: {
+      onInterim: (text: string) => void;
+      onError?: (error: Error) => void;
+    }) => {
+      if (!voiceModel) {
+        return Promise.reject(new Error('No voice model selected.'));
+      }
+      const streamConfig = resolveVoiceStreamConfig({
+        config,
+        settings,
+        voiceModel,
+      });
+      return assertVoiceBaseUrlNetworkAllowed(streamConfig)
+        .then(() =>
+          openVoiceStreamWithRetry(() =>
+            streamConfig.transport === 'qwen-asr-realtime'
+              ? openQwenAsrRealtimeStream(streamConfig, callbacks)
+              : openVoiceStream(streamConfig, callbacks),
+          ),
+        )
+        .then((session) => ({
+          ...session,
+          finish: async () => {
+            const transcript = await session.finish();
+            return isKeytermEcho(transcript, streamConfig.keytermsContext)
+              ? ''
+              : transcript;
+          },
+        }));
+    },
+    [config, settings, voiceModel],
+  );
+  const voiceInput = useVoiceInput({
+    enabled: voiceEnabled,
+    mode: voiceMode,
+    voiceModel,
+    buffer,
+    addItem: uiState.historyManager?.addItem,
+    createRecorder: getVoiceRecorder,
+    transcribe: transcribeVoice,
+    refine: voiceRefineEnabled ? refineVoice : undefined,
+    onSubmit: (text) => voiceSubmitRef.current(text),
+    warmup: warmupVoice,
+    streaming: voiceStreaming,
+    openStream: voiceStreaming ? openVoiceStreamSession : undefined,
+  });
+
   const resetCompletionState = completion.resetCompletionState;
+  const dismissCompletion = completion.dismissCompletion;
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
@@ -298,6 +555,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const showCursor =
     focus && isShellFocused && !isEmbeddedShellFocused && !agentTabBarFocused;
 
+  const targetDir = config.getTargetDir();
   const resetEscapeState = useCallback(() => {
     if (escapeTimerRef.current) {
       clearTimeout(escapeTimerRef.current);
@@ -352,23 +610,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const resetHistoryNavRef = useRef<() => void>(() => {});
 
   const handleSubmitAndClear = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, deferUntilIdle = false) => {
       exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
+      const submittedPrompt = submittedValue;
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
-        const placeholders = Array.from(pendingPastes.keys()).sort(
-          (a, b) => b.length - a.length,
-        );
-        const escapedPlaceholders = placeholders.map((placeholderValue) =>
-          placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-        );
-        const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-        finalValue = finalValue.replace(
-          placeholderRegex,
-          (matchedPlaceholder) =>
-            pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-        );
+        finalValue = expandPendingPastePlaceholders(finalValue, pendingPastes);
         setPendingPastes(new Map());
         activePlaceholderIds.current.clear();
       }
@@ -387,14 +635,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
-      onSubmit(finalValue);
+      clearPromptStash(targetDir);
+      onSubmit(finalValue, { deferUntilIdle, submittedPrompt });
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
       resetHistoryNavRef.current();
 
-      // Dismiss follow-up suggestion after submit
+      // Dismiss follow-up suggestion after submit. `followup.dismiss()` only
+      // resets the controller; `onPromptSuggestionDismiss` also clears the
+      // persisted `promptSuggestion` prop so the placeholder doesn't leak a
+      // stale suggestion after synchronous commands (e.g. /clear, /help) that
+      // never trigger the streaming-transition effect in AppContainer.
       followup.dismiss();
+      onPromptSuggestionDismiss?.();
 
       // Clear attachments after submit
       setAttachments([]);
@@ -414,24 +668,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       resetReverseSearchCompletionState,
       attachments,
       config,
+      targetDir,
       pendingPastes,
       followup,
+      onPromptSuggestionDismiss,
     ],
   );
 
+  // Tap-mode voice dictation submits the prompt after the transcript lands.
+  voiceSubmitRef.current = (text) => handleSubmitAndClear(text);
+
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
+      uiActions.invalidateSubmittedPromptProvenance();
       buffer.setText(newText);
       setHistoryRestoredText(newText);
     },
-    [buffer],
+    [buffer, uiActions],
   );
 
   const inputHistory = useInputHistory({
     userMessages,
     onSubmit: handleSubmitAndClear,
-    // History navigation (Ctrl+P/N) now always works since completion navigation
-    // only uses arrow keys. Only disable in shell mode.
+    // History navigation still owns Ctrl+P/N when the completion menu is not
+    // handling them. Only disable in shell mode.
     isActive: !shellModeActive,
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
@@ -475,32 +735,100 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     resetCommandSearchCompletionState,
   ]);
 
-  // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async (validated = false) => {
-    try {
-      const hasImage = validated || (await clipboardHasImage());
-      if (hasImage) {
-        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
-        if (imagePath) {
-          // Clean up old images
-          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
-            // Ignore cleanup errors
-          });
+  const reportClipboardUnavailable = useCallback(() => {
+    if (clipboardUnavailableShownRef.current) {
+      return;
+    }
+    clipboardUnavailableShownRef.current = true;
+    uiState.historyManager?.addItem(
+      {
+        type: 'error',
+        text: t(
+          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        ),
+      },
+      Date.now(),
+    );
+  }, [clipboardUnavailableShownRef, uiState.historyManager]);
 
-          // Add as attachment instead of inserting @reference into text
-          const filename = path.basename(imagePath);
-          const newAttachment: Attachment = {
-            id: String(Date.now()),
-            path: imagePath,
-            filename,
-          };
-          setAttachments((prev) => [...prev, newAttachment]);
+  // Handle clipboard image pasting with Ctrl+V
+  const handleClipboardImage = useCallback(
+    async (validated = false) => {
+      try {
+        const hasImage =
+          validated || (await clipboardHasImage(reportClipboardUnavailable));
+        if (hasImage) {
+          const imagePath = await saveClipboardImage(
+            Storage.getGlobalTempDir(),
+          );
+          if (imagePath) {
+            // Clean up old images
+            cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+              // Ignore cleanup errors
+            });
+
+            // Add as attachment instead of inserting @reference into text
+            const filename = path.basename(imagePath);
+            const newAttachment: Attachment = {
+              id: String(Date.now()),
+              path: imagePath,
+              filename,
+            };
+            setAttachments((prev) => [...prev, newAttachment]);
+          }
+        }
+      } catch (error) {
+        debugLogger.error('Error handling clipboard image:', error);
+      }
+    },
+    [reportClipboardUnavailable],
+  );
+
+  // Promote a paste that is purely image-file path(s) (e.g. a terminal/clipboard
+  // helper that injects `@<path>` text on Cmd+V) into attachment chips, so the
+  // interaction matches Ctrl+V. Each source image is copied into the global temp
+  // dir (the same place Ctrl+V saves to) so it resolves under the workspace
+  // boundary on submit regardless of where it originally lived. If none of the
+  // candidate paths resolve, the original text is inserted unchanged.
+  const promotePastedImagePaths = useCallback(
+    async (imagePaths: string[], originalPasted: string) => {
+      const cwd = config.getTargetDir();
+      const clipboardDir = path.join(Storage.getGlobalTempDir(), 'clipboard');
+      const attachments: Attachment[] = [];
+      for (const imagePath of imagePaths) {
+        const sourcePath = path.isAbsolute(imagePath)
+          ? imagePath
+          : path.resolve(cwd, imagePath);
+        try {
+          const stats = await fs.stat(sourcePath);
+          if (!stats.isFile()) continue;
+          await fs.mkdir(clipboardDir, { recursive: true });
+          const destPath = path.join(
+            clipboardDir,
+            `clipboard-${Date.now()}-${attachments.length}${path.extname(sourcePath)}`,
+          );
+          await fs.copyFile(sourcePath, destPath);
+          attachments.push({
+            id: `${Date.now()}-${attachments.length}`,
+            path: destPath,
+            filename: path.basename(destPath),
+          });
+        } catch {
+          // Source missing or copy failed — skip this token.
         }
       }
-    } catch (error) {
-      debugLogger.error('Error handling clipboard image:', error);
-    }
-  }, []);
+      if (attachments.length > 0) {
+        cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+          // Ignore cleanup errors
+        });
+        setAttachments((prev) => [...prev, ...attachments]);
+      } else {
+        // Looked like image paths but none resolved — keep the original as text.
+        buffer.insert(originalPasted, { paste: false });
+      }
+    },
+    [config, buffer],
+  );
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
@@ -516,8 +844,71 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     });
   }, []);
 
+  // Down from an empty composer (bottom edge, history exhausted), in visual
+  // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
+  // Arena) → background-tasks pill (if bg entries) → stay put. Always
+  // consumes the key. When both an Arena tab bar and the pill are shown,
+  // ↓ stops at the tab bar; AgentTabBar's own ↓ then descends into the pill.
+  const descendFromComposer = useCallback((): boolean => {
+    if (getVisibleBgAgents().length > 0) {
+      setLivePanelFocused(true);
+    } else if (hasAgents) {
+      setAgentTabBarFocused(true);
+    } else if (bgEntries.length > 0) {
+      // No live-agent panel and no Arena tab bar to descend into, but the
+      // background-tasks pill IS shown (e.g. a workflow run with no live
+      // sub-agents) — focus it so ↓ still reaches the dialog. Without this
+      // branch a workflow-only session can never open the BackgroundTasksDialog
+      // (and thus never reach the per-run detail view or the save action).
+      setBgPillFocused(true);
+    }
+    return true;
+  }, [
+    getVisibleBgAgents,
+    hasAgents,
+    bgEntries,
+    setLivePanelFocused,
+    setAgentTabBarFocused,
+    setBgPillFocused,
+  ]);
+
+  // Single source of truth for "is there a suggestion the user can accept right
+  // now": the live followup suggestion if visible, otherwise the persisted
+  // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
+  // accept, the typing-dismiss guards, and the placeholder all derive from this
+  // so they can never drift apart.
+  const availableSuggestion: string | null =
+    followup.state.isVisible || promptSuggestion
+      ? (followup.state.suggestion ?? promptSuggestion ?? null)
+      : null;
+
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // When the Background tasks dialog is open, swallow every key so
+      // nothing reaches the composer buffer — the dialog's own keypress
+      // handler owns selection, open/close, and stop actions. Keep this ahead
+      // of active voice handling so modal UI remains the key owner.
+      if (bgDialogOpen) {
+        return true;
+      }
+
+      // Handle feedback dialog keyboard interactions before global voice
+      // handling so modal UI gets first chance to consume the key.
+      if (uiState.isFeedbackDialogOpen) {
+        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
+        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
+          return true;
+        } else {
+          // For any other key, close feedback dialog temporarily and continue with normal processing
+          uiActions.temporaryCloseFeedbackDialog();
+          // Continue processing the key for normal input handling
+        }
+      }
+
+      if (voiceInput.status !== 'idle') {
+        return voiceInput.handleKeypress(key);
+      }
+
       // When the Arena tab bar or background pill has focus, block
       // non-printable keys so arrow keys and shortcuts don't interfere.
       // Printable characters fall through to BaseTextInput's default
@@ -527,10 +918,32 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Enter opens dialog for selected agent, Esc/↑-at-top returns
       // focus to composer. Printable chars type through (auto-unfocus).
       if (livePanelFocused) {
+        const visibleBgAgents = getVisibleBgAgents();
+        if (visibleBgAgents.length === 0) {
+          setLivePanelFocused(false);
+          if (
+            key.sequence &&
+            key.sequence.length === 1 &&
+            !key.ctrl &&
+            !key.meta
+          ) {
+            return false;
+          }
+          return descendFromComposer();
+        }
         if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
+          const maxIdx = visibleBgAgents.length; // 0=main, 1..N=agents
           if (livePanelSelectedIndex < maxIdx) {
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          } else if (hasAgents) {
+            // Bottom of the panel → descend to the tab bar below it
+            // (only rendered when Arena agents exist).
+            setLivePanelFocused(false);
+            setAgentTabBarFocused(true);
+          } else {
+            // No tab bar below → release focus back to the composer instead
+            // of silently consuming the key.
+            setLivePanelFocused(false);
           }
           return true;
         }
@@ -547,8 +960,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             setLivePanelFocused(false);
           } else {
             const agentIdx = livePanelSelectedIndex - 1;
-            if (agentIdx < bgAgentCount) {
-              setBgSelectedIndex(agentIdx);
+            const entry = visibleBgAgents[agentIdx];
+            const entryIdx = entry
+              ? bgEntries.findIndex(
+                  (e) => e.kind === 'agent' && e.agentId === entry.agentId,
+                )
+              : -1;
+            if (entryIdx >= 0) {
+              setBgSelectedIndex(entryIdx);
               enterBgDetailFromPanel();
             }
             setLivePanelFocused(false);
@@ -583,16 +1002,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true; // consume non-printable keys
       }
 
-      // When the Background tasks dialog is open, swallow every key so
-      // nothing reaches the composer buffer — the dialog's own keypress
-      // handler owns selection, open/close, and stop actions. Unlike
-      // the tab bar we do NOT let printable chars type through, because
-      // the dialog doesn't auto-close on printable input and users
-      // would leak text into the hidden composer.
-      if (bgDialogOpen) {
-        return true;
-      }
-
       // TODO(jacobr): this special case is likely not needed anymore.
       // We should probably stop supporting paste if the InputPrompt is not
       // focused.
@@ -603,7 +1012,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (key.paste) {
         // Dismiss follow-up suggestion when user starts typing/pasting
-        if (buffer.text.length === 0 && followup.state.isVisible) {
+        if (buffer.text.length === 0 && availableSuggestion) {
           followup.dismiss();
           onPromptSuggestionDismiss?.();
         }
@@ -628,8 +1037,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const lineCount = pasted.split('\n').length;
 
         // Ensure we never accidentally interpret paste as regular input.
+        const pastedImagePaths = classifyPastedImagePaths(pasted);
+        if (key.clipboardImageUnavailable) {
+          reportClipboardUnavailable();
+        }
         if (key.pasteImage) {
           handleClipboardImage(true);
+        } else if (
+          pastedImagePaths.allImages &&
+          pastedImagePaths.imagePaths.length > 0
+        ) {
+          // Pasted text is purely image path(s) — promote to attachment chips
+          // so Cmd+V (terminal-injected path) matches the Ctrl+V experience.
+          void promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
         } else if (
           charCount > LARGE_PASTE_CHAR_THRESHOLD ||
           lineCount > LARGE_PASTE_LINE_THRESHOLD
@@ -649,20 +1069,53 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      if (keyMatchers[Command.SHOW_MORE_LINES](key) && buffer.text.length > 0) {
+        const textToStash = expandPendingPastePlaceholders(
+          buffer.text,
+          pendingPastes,
+        );
+        const saved = savePromptStash(targetDir, textToStash);
+        uiState.historyManager?.addItem(
+          {
+            type: saved ? 'info' : 'error',
+            text: saved
+              ? t('Prompt stashed. It will be restored next time.')
+              : t('Failed to stash prompt.'),
+          },
+          Date.now(),
+        );
+        return true;
+      }
+
+      // The visible category tabs own the bare arrows, including in Vim mode.
+      // All other states fall through to their existing input owner.
+      if (showCompletionSuggestions && categoryTabsVisible) {
+        if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
+          completion.switchCategory(1);
+          setExpandedSuggestionIndex(-1);
+          return true;
+        }
+        if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
+          completion.switchCategory(-1);
+          setExpandedSuggestionIndex(-1);
+          return true;
+        }
+      }
+
       if (vimHandleInput && vimHandleInput(key)) {
         return true;
       }
 
-      // Handle feedback dialog keyboard interactions when dialog is open
-      if (uiState.isFeedbackDialogOpen) {
-        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
-        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
-          return true;
-        } else {
-          // For any other key, close feedback dialog temporarily and continue with normal processing
-          uiActions.temporaryCloseFeedbackDialog();
-          // Continue processing the key for normal input handling
-        }
+      if (
+        !shellModeActive &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        !showCompletionSuggestions &&
+        !isAttachmentMode &&
+        buffer.text.length === 0 &&
+        voiceInput.handleKeypress(key)
+      ) {
+        return true;
       }
 
       // Helper: pop all queued messages into the input buffer,
@@ -768,8 +1221,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
-        // Pop queued messages into input on ESC (before double-ESC clear)
-        if (!isAttachmentMode && uiState.messageQueue.length > 0) {
+        // Pop queued messages into input on ESC (before double-ESC clear).
+        // Skip when the agent is actively responding: popQueueIntoInput()
+        // fills the shared buffer (a live getter over stateRef.current, not
+        // React state), which makes AppContainer's broadcast ESC handler -
+        // which runs AFTER this one because child useEffects subscribe to
+        // KeypressContext first and useKeypress memoizes on [] - take its
+        // "input has content -> double-press to clear" branch instead of the
+        // cancel-work branch. This guard breaks that chain. #8201.
+        //
+        // Relies on one invariant: buffer.text reads through to
+        // stateRef.current synchronously. Subscription order does not gate the
+        // cancel: the Responding pop guard skips the pop in either order (and
+        // BaseTextInput re-subscribes after AppContainer after any remount of
+        // InputPrompt, e.g. a tool-confirmation round trip). Break the buffer
+        // invariant and the single-ESC cancel regresses with a fully green
+        // suite (no integration test covers this hop yet - the two harnesses
+        // mock each other's side).
+        // Only Responding is gated (matching AppContainer's cancel branch).
+        // WaitingForConfirmation needs no handling here: Composer unmounts
+        // InputPrompt whenever isInputActive is false (isInputActiveForState
+        // admits only Idle/Responding), so this branch never runs during a
+        // tool confirmation.
+        if (
+          !isAttachmentMode &&
+          uiState.messageQueue.length > 0 &&
+          uiState.streamingState !== StreamingState.Responding
+        ) {
           if (popQueueIntoInput()) {
             resetEscapeState();
             return true;
@@ -777,7 +1255,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // returned false (queue already cleared) — fall through
         }
 
-        // Handle double ESC for clearing input
+        // Handle double ESC for clearing input. Note: while Responding this
+        // clear composes with AppContainer's broadcast ESC handler - in the
+        // initial subscription order this handler empties the buffer first and
+        // AppContainer's cancel branch fires on the SAME keypress; after any
+        // remount of InputPrompt (e.g. a tool-confirmation round trip)
+        // AppContainer runs first, so the cancel lands on the next press
+        // instead. #8201.
         if (escPressCount === 0) {
           if (buffer.text === '') {
             return true;
@@ -862,6 +1346,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
           }
           if (keyMatchers[Command.ACCEPT_SUGGESTION_REVERSE_SEARCH](key)) {
+            uiActions.invalidateSubmittedPromptProvenance();
             sc.handleAutocomplete(activeSuggestionIndex);
             resetState();
             setActive(false);
@@ -874,6 +1359,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             showSuggestions && activeSuggestionIndex > -1
               ? suggestions[activeSuggestionIndex].value
               : buffer.text;
+          if (showSuggestions && activeSuggestionIndex > -1) {
+            uiActions.invalidateSubmittedPromptProvenance();
+          }
           handleSubmitAndClear(textToSubmit);
           resetState();
           setActive(false);
@@ -919,7 +1407,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       };
 
       // If the command is a perfect match, pressing enter should execute it.
-      if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+      // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
+      // intercepting Shift+Enter as submit when the user wants a newline.
+      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
@@ -944,10 +1434,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('tab');
+        // Use the normal accept path. When the followup controller has no live
+        // suggestion (e.g. after type-then-delete), `fallbackText` carries the
+        // still-available placeholder text so telemetry is logged either way.
+        followup.accept('tab', { fallbackText: promptSuggestion ?? undefined });
+        // Clear the persisted `promptSuggestion` prop too, otherwise it survives
+        // the accept and reappears as a ghost placeholder once the buffer is
+        // cleared without submitting (e.g. Ctrl+U).
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -957,10 +1453,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
-        followup.state.suggestion
+        availableSuggestion
       ) {
-        followup.accept('right');
+        followup.accept('right', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
+        onPromptSuggestionDismiss?.();
         return true;
       }
 
@@ -1001,6 +1499,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
+          // On Enter for @folder paths, dismiss the completion so the
+          // dropdown stays closed. Folder paths don't append a trailing
+          // space by design, so the @ completion pattern re-matches and
+          // re-shows the dropdown. Gate on AT mode + isDirectory to avoid
+          // suppressing slash-command sub-suggestions.
+          if (
+            key.name === 'return' &&
+            accepted?.isDirectory &&
+            completion.completionMode === CompletionMode.AT
+          ) {
+            dismissCompletion();
+          }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
           // matches BOTH Tab and Enter (see keyBindings.ts and the
           // identical caveat at lines 861-862). Without the
@@ -1146,15 +1656,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
         // Handle arrow-up/down for history on single-line or at edges
         if (
@@ -1187,47 +1689,46 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks
-          // dialog (if any bg agents) → otherwise stay put.
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
       } else {
         // Shell History Navigation
         if (keyMatchers[Command.NAVIGATION_UP](key)) {
           const prevCommand = shellHistory.getPreviousCommand();
-          if (prevCommand !== null) buffer.setText(prevCommand);
+          if (prevCommand !== null) {
+            uiActions.invalidateSubmittedPromptProvenance();
+            buffer.setText(prevCommand);
+          }
           return true;
         }
         if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
           const nextCommand = shellHistory.getNextCommand();
-          if (nextCommand !== null) buffer.setText(nextCommand);
+          if (nextCommand !== null) {
+            uiActions.invalidateSubmittedPromptProvenance();
+            buffer.setText(nextCommand);
+          }
           return true;
         }
       }
 
+      if (keyMatchers[Command.QUEUE_MESSAGE](key)) {
+        if (buffer.text.trim()) {
+          handleSubmitAndClear(buffer.text, true);
+        }
+        return true;
+      }
+
       if (keyMatchers[Command.SUBMIT](key)) {
-        // Accept and submit prompt suggestion on Enter when input is truly empty
-        if (
-          buffer.text.length === 0 &&
-          followup.state.isVisible &&
-          followup.state.suggestion
-        ) {
-          const text = followup.state.suggestion;
-          // Skip onAccept (buffer.insert) — we pass the text directly to
-          // handleSubmitAndClear which clears the buffer synchronously.
-          // Without skipOnAccept the microtask in accept() would re-insert
-          // the suggestion into the buffer after it was already cleared.
-          followup.accept('enter', { skipOnAccept: true });
-          handleSubmitAndClear(text);
+        // When buffer is empty and a suggestion is available, Enter fills the
+        // buffer instead of submitting — matching Tab/Right-arrow behavior.
+        // This prevents accidental execution of destructive slash commands
+        // (/clear, /quit) and aligns with Claude Code's design: suggestion
+        // acceptance requires explicit Tab or arrow-key action.
+        if (buffer.text.length === 0 && availableSuggestion) {
+          followup.accept('enter', {
+            fallbackText: promptSuggestion ?? undefined,
+          });
+          onPromptSuggestionDismiss?.();
           return true;
         }
         if (buffer.text.trim()) {
@@ -1320,7 +1821,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Dismiss follow-up suggestion only on printable character input
       if (
         buffer.text.length === 0 &&
-        followup.state.isVisible &&
+        availableSuggestion &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -1361,7 +1862,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      reportClipboardUnavailable,
+      promotePastedImagePaths,
       resetCompletionState,
+      dismissCompletion,
       escPressCount,
       showEscapePrompt,
       resetEscapeState,
@@ -1389,21 +1893,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
-      hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
       livePanelFocused,
       livePanelSelectedIndex,
-      bgAgentCount,
+      bgEntries,
+      getVisibleBgAgents,
+      descendFromComposer,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
+      availableSuggestion,
       onPromptSuggestionDismiss,
+      promptSuggestion,
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
+      categoryTabsVisible,
+      voiceInput,
+      targetDir,
     ],
   );
 
@@ -1453,7 +1963,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               cursorVisualColAbsolute - segStart + 1,
             );
             const highlighted = showCursorOpt
-              ? chalk.inverse(charToHighlight)
+              ? renderSoftwareCursor(charToHighlight)
               : charToHighlight;
             display =
               cpSlice(seg.text, 0, cursorVisualColAbsolute - segStart) +
@@ -1481,7 +1991,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
           if (ghostText.showCursorBeforeText) {
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(' ')}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(' ')}</Text>,
             );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
@@ -1489,11 +1999,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               </Text>,
             );
           } else {
-            // First ghost char: inverted (as cursor). Rest: dimmed gray.
+            // First ghost char: software cursor. Rest: dimmed gray.
             const firstChar = ghostText.text[0]!;
             const rest = ghostText.text.slice(firstChar.length);
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(firstChar)}</Text>,
             );
             if (rest.length > 0) {
               renderedLine.push(
@@ -1508,7 +2018,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
           renderedLine.push(
             <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-              {showCursorOpt ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
+              {showCursorOpt ? renderSoftwareCursor(' ') + '\u200B' : ' \u200B'}
             </Text>,
           );
         }
@@ -1543,6 +2053,90 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? activeCompletion.showSuggestions
       : false);
 
+  // Mouse hover/select must target the SAME completion source that builds
+  // suggestionDisplayProps. For reverse/command search, selecting also resets
+  // that controller and exits search mode, mirroring keyboard acceptance.
+  // Export completion has no index-based handler, so mouse selection is left
+  // disabled for it (handlers are undefined when its suggestions are shown).
+  const suggestionsFromExport =
+    shouldUseExportSuggestions && !!exportCompletion.suggestionDisplayProps;
+  const handleSuggestionHover = useCallback(
+    (index: number) => {
+      if (commandSearchActive) {
+        commandSearchCompletion.setActiveSuggestionIndex(index);
+      } else if (reverseSearchActive) {
+        reverseSearchCompletion.setActiveSuggestionIndex(index);
+      } else {
+        completion.setActiveSuggestionIndex(index);
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+    ],
+  );
+  const handleSuggestionSelect = useCallback(
+    (index: number) => {
+      if (commandSearchActive || reverseSearchActive) {
+        const isCommandSearch = commandSearchActive;
+        const sc = isCommandSearch
+          ? commandSearchCompletion
+          : reverseSearchCompletion;
+        uiActions.invalidateSubmittedPromptProvenance();
+        sc.handleAutocomplete(index);
+        sc.resetCompletionState();
+        (isCommandSearch ? setCommandSearchActive : setReverseSearchActive)(
+          false,
+        );
+      } else {
+        // Mirror the keyboard accept path (acceptActiveCompletionSuggestion +
+        // the ACCEPT_SUGGESTION handler) so a click behaves like Enter on the
+        // highlighted suggestion. Capture the suggestion BEFORE
+        // handleAutocomplete mutates the buffer/suggestions.
+        const accepted =
+          index >= 0 && index < completion.suggestions.length
+            ? completion.suggestions[index]
+            : undefined;
+        completion.handleAutocomplete(index);
+        exportCompletion.navigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        // For @folder paths, dismiss the completion so the dropdown stays
+        // closed (folder paths append no trailing space, so the @ pattern
+        // would otherwise re-match and re-open it).
+        if (
+          accepted?.isDirectory &&
+          completion.completionMode === CompletionMode.AT
+        ) {
+          dismissCompletion();
+        }
+        // A click is an explicit accept (the mouse equivalent of Enter, never
+        // Tab), so honor submitOnAccept unconditionally — clicking a leaf
+        // command like `/skills` submits it and opens the dialog in one click,
+        // matching the keyboard behavior.
+        if (accepted?.submitOnAccept) {
+          handleSubmitAndClear(`/${accepted.value}`);
+        }
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+      exportCompletion,
+      dismissCompletion,
+      handleSubmitAndClear,
+      setExpandedSuggestionIndex,
+      setCommandSearchActive,
+      setReverseSearchActive,
+      uiActions,
+    ],
+  );
+
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
   // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
@@ -1553,9 +2147,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
   // matches, Tab is not consumed — so the bare `reverseSearchActive` /
   // `commandSearchActive` flags are intentionally NOT included here.
+  // Mirror exactly when the Tab/Right/Enter handlers actually consume the key:
+  // the buffer must be empty and a suggestion must be available (either from the
+  // followup controller or the `promptSuggestion` prop after type-then-delete).
+  // Tying this to `buffer.text.length === 0` — the same gate the handlers use —
+  // keeps Windows Tab approval-mode cycling correct: as soon as the user types,
+  // this drops to false; deleting back to empty restores it.
   const hasTabConsumer =
     shouldShowSuggestions ||
-    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    (buffer.text.length === 0 && Boolean(availableSuggestion)) ||
     Boolean(completion.midInputGhostText?.acceptText);
 
   // Narrow signal — autocomplete dropdown only. Composer hides Footer /
@@ -1606,6 +2206,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? (statusColor ?? theme.border.focused)
       : theme.border.default;
 
+  const voiceStatusLabel =
+    voiceInput.status === 'recording'
+      ? t('Voice: recording')
+      : voiceInput.status === 'transcribing'
+        ? t('Voice: transcribing')
+        : voiceInput.status === 'refining'
+          ? t('Voice: refining')
+          : undefined;
+
   const prefixNode = (
     <Text
       color={statusColor ?? theme.text.accent}
@@ -1636,7 +2245,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       : 2 // "! " = 2 chars
     : commandSearchActive
       ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : 2; // "> " or "* " = 2 chars
+      : approvalMode === ApprovalMode.YOLO
+        ? 2 // "* " = 2 chars
+        : 2; // "> " = 2 chars
 
   return (
     <>
@@ -1657,22 +2268,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           ))}
         </Box>
       )}
+      <VoiceIndicator
+        status={voiceInput.status}
+        interimText={voiceInput.interimText}
+        audioLevel={voiceInput.audioLevel}
+      />
       <BaseTextInput
         buffer={buffer}
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={
-          followup.state.isVisible && followup.state.suggestion
-            ? followup.state.suggestion
-            : placeholder
-        }
+        placeholder={availableSuggestion ?? placeholder}
         prefix={prefixNode}
         prefixWidth={prefixWidth}
         borderColor={borderColor}
-        topRightLabel={uiState.sessionName || undefined}
+        topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
+        mouseEnabled={mouseInteractionsEnabled}
       />
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
@@ -1691,6 +2304,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 : 'reverse'
             }
             expandedIndex={expandedSuggestionIndex}
+            mouseEnabled={mouseInteractionsEnabled}
+            activeCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : completion.activeCategory
+            }
+            availableCategories={
+              categoryTabsVisible ? completion.availableCategories : undefined
+            }
+            onHoverIndex={
+              suggestionsFromExport ? undefined : handleSuggestionHover
+            }
+            onSelectIndex={
+              suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
           />
         </Box>
       )}

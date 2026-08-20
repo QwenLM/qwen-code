@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./client/*"]
+    },
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["client/**/*.ts", "client/**/*.tsx"],
+  "exclude": [
+    "client/**/*.test.ts",
+    "client/**/*.test.tsx",
+    "client/e2e/**",
+    "client/test/**",
+    "node_modules",
+    "dist"
+  ]
+}

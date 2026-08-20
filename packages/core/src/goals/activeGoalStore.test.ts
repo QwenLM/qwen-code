@@ -76,4 +76,13 @@ describe('activeGoalStore', () => {
     ).toBe(false);
     expect(activeGoalEquals(makeGoal(), undefined)).toBe(false);
   });
+
+  it('ignores deferred evaluation bookkeeping when comparing snapshots', () => {
+    expect(
+      activeGoalEquals(
+        makeGoal({ deferredEvaluations: 1 }),
+        makeGoal({ deferredEvaluations: 2 }),
+      ),
+    ).toBe(true);
+  });
 });

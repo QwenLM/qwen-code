@@ -40,7 +40,7 @@ export abstract class BaseTokenStorage implements TokenStorage {
       return false;
     }
     const bufferMs = 5 * 60 * 1000;
-    return Date.now() > credentials.token.expiresAt - bufferMs;
+    return Date.now() + bufferMs >= credentials.token.expiresAt;
   }
 
   protected sanitizeServerName(serverName: string): string {

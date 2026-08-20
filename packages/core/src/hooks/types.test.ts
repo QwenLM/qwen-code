@@ -8,7 +8,10 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
   createHookOutput,
+  DefaultHookOutput,
   UserPromptExpansionHookOutput,
+  HookEventName,
+  isToolArtifactLike,
 } from './types.js';
 
 describe('UserPromptSubmit getAdditionalContext', () => {
@@ -100,5 +103,81 @@ describe('UserPromptExpansionHookOutput.getAdditionalContext', () => {
     expect(result).toBe(
       'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 2),
     );
+  });
+});
+
+describe('terminalSequence on HookOutput', () => {
+  it('DefaultHookOutput preserves terminalSequence', () => {
+    const output = new DefaultHookOutput({
+      terminalSequence: '\x07',
+    });
+    expect(output.terminalSequence).toBe('\x07');
+  });
+
+  it('terminalSequence does not affect blocking decision', () => {
+    const output = new DefaultHookOutput({
+      terminalSequence: '\x1b]9;hello\x07',
+      decision: 'allow',
+    });
+    expect(output.isBlockingDecision()).toBe(false);
+    expect(output.shouldStopExecution()).toBe(false);
+  });
+
+  it('createHookOutput preserves terminalSequence for all event types', () => {
+    const events = [
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.Notification,
+      HookEventName.Stop,
+      HookEventName.PermissionRequest,
+    ];
+    for (const eventName of events) {
+      const output = createHookOutput(eventName, {
+        terminalSequence: '\x07',
+      });
+      expect(output.terminalSequence).toBe('\x07');
+    }
+  });
+
+  it('terminalSequence defaults to undefined', () => {
+    const output = new DefaultHookOutput({});
+    expect(output.terminalSequence).toBeUndefined();
+  });
+});
+
+describe('isToolArtifactLike', () => {
+  it('accepts primitive metadata values', () => {
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { label: 'daily', score: 1, pinned: true, optional: null },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects nested and non-finite metadata values', () => {
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { hints: { display: 'card' } },
+      }),
+    ).toBe(false);
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { score: Number.NaN },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects artifact sizes the daemon store would drop', () => {
+    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        isToolArtifactLike({
+          title: 'Report',
+          sizeBytes,
+        }),
+      ).toBe(false);
+    }
   });
 });

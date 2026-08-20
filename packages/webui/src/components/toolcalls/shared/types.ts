@@ -35,7 +35,12 @@ export interface ToolCallLocation {
 /**
  * Tool call status type
  */
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type ToolCallStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 export type AgentExecutionStatus =
   | 'running'
@@ -52,6 +57,7 @@ export type AgentToolCallStatus =
 export interface AgentExecutionSummary {
   totalToolCalls: number;
   totalTokens: number;
+  outputTokens?: number;
   totalDurationMs: number;
   successfulToolCalls?: number;
   failedToolCalls?: number;
@@ -92,6 +98,15 @@ export interface ToolCallData {
   content?: ToolCallContent[];
   locations?: ToolCallLocation[];
   timestamp?: number;
+  /**
+   * Optional markdown summary projection of the tool's preview (file
+   * diff, MCP invocation, tabular, etc.) — populated by
+   * `daemonTranscriptToUnifiedMessages` when
+   * `enrichToolDetailsWithPreview: true`. Renderers can show it
+   * alongside `rawOutput` (which is now preserved verbatim, addressing
+   * a code review).
+   */
+  previewMarkdown?: string;
 }
 
 /**

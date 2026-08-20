@@ -8,7 +8,12 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  buildSessionRecoveryPlanFromApiHistory,
+  SendMessageType,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+} from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -33,11 +38,18 @@ import {
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
 import type { LoadedSettings } from '../config/settings.js';
-import { runNonInteractive } from '../nonInteractiveCli.js';
+import {
+  runNonInteractive,
+  TurnInterruptedError,
+} from '../nonInteractiveCli.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import {
+  settleChatRecording,
+  subscribeToHeadlessChatRecordingFailures,
+} from '../utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -61,7 +73,10 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  private abortController: AbortController;
+  private pendingContinueTurn: boolean = false;
+  private continueTurnInProgress: boolean = false;
+  private readonly sessionAbortController: AbortController;
+  private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
   private promptIdCounter: number = 0;
@@ -79,6 +94,7 @@ class Session {
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
   private settings: LoadedSettings;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -94,13 +110,17 @@ class Session {
     this.config = config;
     this.settings = settings;
     this.sessionId = config.getSessionId();
-    this.abortController = new AbortController();
+    this.sessionAbortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
 
     this.inputReader = new StreamJsonInputReader();
     this.outputAdapter = new StreamJsonOutputAdapter(
       config,
       config.getIncludePartialMessages(),
+    );
+    this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
+      config,
+      this.outputAdapter,
     );
 
     this.setupSignalHandlers();
@@ -139,6 +159,10 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // gemini.tsx has already emitted warnings known before stream-json
+      // initialization starts. Keep that snapshot so only warnings produced
+      // by the deferred initialize() call are written here.
+      const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
       // the non-stream-json branch in `gemini.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
@@ -150,6 +174,11 @@ class Session {
       profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
       profileCheckpoint('config_initialize_end');
+      for (const warning of this.config.getWarnings()) {
+        if (emittedWarnings.has(warning)) continue;
+        emittedWarnings.add(warning);
+        process.stderr.write(`${warning}\n`);
+      }
       // Stream-json sessions feed prompts straight to the model after init.
       // Under progressive MCP availability `initialize()` returns before
       // MCP servers settle, so we must explicitly await discovery here —
@@ -195,8 +224,12 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
+      }
+      if (meta.status === 'running' && typeof registry.get === 'function') {
+        const entry = registry.get(meta.monitorId);
+        if (!entry || entry.status !== 'running') return;
       }
       this.enqueueMonitorNotification({
         displayText,
@@ -218,7 +251,7 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setRegisterCallback((entry) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
       this.enqueueMonitorStarted({
@@ -272,10 +305,12 @@ class Session {
       config: this.config,
       streamJson: this.outputAdapter,
       sessionId: this.sessionId,
-      abortSignal: this.abortController.signal,
+      abortSignal: this.sessionAbortController.signal,
+      getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
+      onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -443,68 +478,220 @@ class Session {
     await this.waitForInitialization();
 
     const promptId = this.getNextPromptId();
+    const turnAbortController = this.startTurn();
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
-        abortController: this.abortController,
+        abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
+        recoverableCancellation: true,
       });
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
+    } finally {
+      this.finishTurn(turnAbortController);
     }
   }
 
-  private async processMonitorNotification(
-    notification: MonitorQueueItem,
+  /**
+   * Handle a continue_last_turn control request: classify the last turn
+   * from chat history and, when it was interrupted, schedule a
+   * continuation turn on the work queue. Returns the control reply
+   * payload; the continuation itself runs serialized with user messages.
+   */
+  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
+    await this.waitForInitialization();
+
+    if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: session is shutting down',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: gemini client is not ready',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const chat = geminiClient.getChat();
+    const historyTail =
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory: historyTail,
+    });
+    debugLogger.info('[Session] requestContinueLastTurn recovery', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    if (!recoveryPlan.continuation) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: no interrupted turn',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
+    if (this.pendingContinueTurn || this.continueTurnInProgress) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: continuation already pending',
+        { kind: recoveryPlan.kind },
+      );
+      return { accepted: false, interruption };
+    }
+
+    this.pendingContinueTurn = true;
+    this.ensureProcessingStarted();
+    debugLogger.info('[Session] continue_last_turn accepted', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    return { accepted: true, interruption };
+  }
+
+  /**
+   * Run a scheduled continuation turn. The authoritative interruption
+   * re-detection happens inside runNonInteractive (history may have moved
+   * since the request was accepted); a turn that became clean by then is
+   * a no-op result message.
+   */
+  private async processContinueTurn(): Promise<void> {
+    this.continueTurnInProgress = true;
+    let resultAlreadyEmitted = false;
+    let turnAbortController: AbortController | null = null;
+    try {
+      await this.waitForInitialization();
+
+      const promptId = this.getNextPromptId();
+      turnAbortController = this.startTurn();
+      await runNonInteractive(this.config, this.settings, '', promptId, {
+        abortController: turnAbortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        continueInterrupted: true,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+        recoverableCancellation: true,
+        onResultEmitted: () => {
+          resultAlreadyEmitted = true;
+        },
+      });
+    } catch (error) {
+      debugLogger.error('[Session] Continue turn execution error:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (resultAlreadyEmitted) {
+        // A result was already flushed before the failure, so we can't emit a
+        // terminal error result without breaking the one-result contract.
+        // Surface a structured diagnostic instead of a silent stop so SDK
+        // consumers still see that the continuation failed mid-stream.
+        this.outputAdapter.emitSystemMessage('continue_turn_failed', {
+          error: message,
+        });
+        return;
+      }
+      throw new Error(`Continue turn failed: ${message}`, { cause: error });
+    } finally {
+      if (turnAbortController) {
+        this.finishTurn(turnAbortController);
+      }
+      this.continueTurnInProgress = false;
+    }
+  }
+
+  private async processMonitorNotificationBatch(
+    batch: MonitorQueueItem[],
   ): Promise<void> {
     await this.waitForInitialization();
 
-    this.outputAdapter.emitUserMessage([{ text: notification.displayText }]);
-    this.outputAdapter.emitSystemMessage(
-      'task_notification',
-      notification.sdkNotification,
-    );
+    batch = batch.filter((item) => {
+      if (item.sdkNotification.status !== 'running') {
+        return true;
+      }
+      return (
+        this.config.getMonitorRegistry().get(item.sdkNotification.task_id)
+          ?.status !== 'cancelled'
+      );
+    });
+    if (batch.length === 0) {
+      return;
+    }
+
+    for (const item of batch) {
+      this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
+      this.outputAdapter.emitSystemMessage(
+        'task_notification',
+        item.sdkNotification,
+      );
+    }
+
+    const combinedModelText = batch.map((n) => n.modelText).join('\n\n');
+    const combinedDisplayText = batch.map((n) => n.displayText).join('; ');
 
     const promptId = this.getNextPromptId();
-    await runNonInteractive(
-      this.config,
-      this.settings,
-      notification.modelText,
-      promptId,
-      {
-        abortController: this.abortController,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-        sendMessageType: SendMessageType.Notification,
-        notificationDisplayText: notification.displayText,
-        captureMonitorNotifications: false,
-        captureMonitorRegistrations: false,
-      },
-    );
+    const turnAbortController = this.startTurn();
+    try {
+      await runNonInteractive(
+        this.config,
+        this.settings,
+        combinedModelText,
+        promptId,
+        {
+          abortController: turnAbortController,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+          sendMessageType: SendMessageType.Notification,
+          notificationDisplayText: combinedDisplayText,
+          captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
+          recoverableCancellation: true,
+        },
+      );
+    } finally {
+      this.finishTurn(turnAbortController);
+    }
   }
 
   private async processPendingWork(): Promise<void> {
-    if (this.isShuttingDown || this.abortController.signal.aborted) {
+    if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
       return;
     }
 
     while (
-      (this.userMessageQueue.length > 0 ||
+      (this.pendingContinueTurn ||
+        this.userMessageQueue.length > 0 ||
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
-      !this.abortController.signal.aborted
+      !this.sessionAbortController.signal.aborted
     ) {
+      if (this.pendingContinueTurn) {
+        this.pendingContinueTurn = false;
+        try {
+          await this.processContinueTurn();
+        } catch (error) {
+          debugLogger.error('[Session] Error processing continue turn:', error);
+          await this.emitErrorResult(error);
+        }
+        continue;
+      }
+
       if (this.userMessageQueue.length > 0) {
         const userMessage = this.userMessageQueue.shift()!;
         try {
           await this.processUserMessage(userMessage);
         } catch (error) {
           debugLogger.error('[Session] Error processing user message:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -515,18 +702,18 @@ class Session {
         continue;
       }
 
-      const notification = this.monitorQueue.shift();
-      if (!notification) {
+      if (this.monitorQueue.length === 0) {
         continue;
       }
+      const batch = this.monitorQueue.splice(0);
       try {
-        await this.processMonitorNotification(notification);
+        await this.processMonitorNotificationBatch(batch);
       } catch (error) {
         debugLogger.error(
-          '[Session] Error processing monitor notification:',
+          '[Session] Error processing monitor notification batch:',
           error,
         );
-        this.emitErrorResult(error);
+        await this.emitErrorResult(error);
       }
     }
   }
@@ -554,23 +741,25 @@ class Session {
     this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        (this.userMessageQueue.length > 0 ||
+        (this.pendingContinueTurn ||
+          this.userMessageQueue.length > 0 ||
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
-        !this.abortController.signal.aborted
+        !this.sessionAbortController.signal.aborted
       ) {
         this.ensureProcessingStarted();
       }
     });
   }
 
-  private emitErrorResult(
+  private async emitErrorResult(
     error: unknown,
     numTurns: number = 0,
     durationMs: number = 0,
     apiDurationMs: number = 0,
-  ): void {
+  ): Promise<void> {
+    await settleChatRecording(this.config, { finalize: false });
     const message = error instanceof Error ? error.message : String(error);
     this.outputAdapter.emitResult({
       isError: true,
@@ -584,16 +773,34 @@ class Session {
 
   private handleInterrupt(): void {
     debugLogger.info('[Session] Interrupt requested');
-    this.abortController.abort();
-    // Do not create a new AbortController to prevent listener leaks.
-    // Subsequent queries will check signal.aborted and fail immediately.
+    this.activeTurnAbortController?.abort(new TurnInterruptedError());
+  }
+
+  private startTurn(): AbortController {
+    const controller = new AbortController();
+    if (this.sessionAbortController.signal.aborted) {
+      controller.abort(this.sessionAbortController.signal.reason);
+    }
+    this.activeTurnAbortController = controller;
+    return controller;
+  }
+
+  private finishTurn(controller: AbortController): void {
+    if (this.activeTurnAbortController === controller) {
+      this.activeTurnAbortController = null;
+    }
+  }
+
+  private abortSession(): void {
+    this.activeTurnAbortController?.abort();
+    this.sessionAbortController.abort();
   }
 
   private setupSignalHandlers(): void {
     this.shutdownHandler = () => {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
-      this.abortController.abort();
+      this.abortSession();
     };
 
     process.on('SIGINT', this.shutdownHandler);
@@ -634,12 +841,24 @@ class Session {
         debugLogger.error('[Session] Error in user message processing:', error);
       }
     }
+
+    // 4. A continuation accepted before shutdown may never have run: the work
+    // loop's `!isShuttingDown` guard skips it once shutdown begins, so an SDK
+    // consumer that received `{ accepted: true }` would wait forever. Emit a
+    // terminal error result so it learns the continuation was abandoned.
+    if (this.pendingContinueTurn) {
+      this.pendingContinueTurn = false;
+      await this.emitErrorResult(
+        new Error('Continuation abandoned: session shut down before it ran'),
+      );
+    }
   }
 
   private async shutdown(): Promise<void> {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
+    this.abortSession();
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
 
@@ -670,6 +889,7 @@ class Session {
   }
 
   private finishShutdown(): void {
+    this.abortSession();
     this.dispatcher?.shutdown();
     this.cleanupSignalHandlers();
   }
@@ -701,6 +921,10 @@ class Session {
     }
   }
 
+  dispose(): void {
+    this.unsubscribeRecordingFailure();
+  }
+
   /**
    * Main message processing loop
    *
@@ -727,7 +951,7 @@ class Session {
 
       try {
         for await (const message of this.inputReader.read()) {
-          if (this.abortController.signal.aborted) {
+          if (this.sessionAbortController.signal.aborted) {
             break;
           }
 
@@ -843,5 +1067,10 @@ export async function runNonInteractiveStreamJson(
   }
 
   const manager = new Session(config, initialPrompt, settings);
-  await manager.run();
+  try {
+    await manager.run();
+  } finally {
+    await settleChatRecording(config, { finalize: true });
+    manager.dispose();
+  }
 }

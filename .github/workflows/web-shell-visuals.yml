@@ -1,0 +1,313 @@
+name: 'Web-shell Visuals'
+
+# For PRs that touch the web-shell UI, render its screenshots (light + dark)
+# against BOTH the PR base (`main`) and the PR head, diff them, and stitch a
+# "main | this PR" composite for the views that CHANGED (plus short flow
+# recordings). The images are handed to the companion
+# `web-shell-visuals-publish.yml` (workflow_run), which posts them inline on the
+# PR. A PR with no visual impact composites nothing → "no visual change".
+#
+# Security model: this workflow BUILDS AND RENDERS untrusted PR code, so it runs
+# on the `pull_request` trigger (fork PRs get a read-only token and NO secrets),
+# on an ephemeral hosted runner, with `contents: read` and no secrets of its
+# own. It produces only image/video bytes as an artifact. The privileged step
+# that needs a write token — pushing the images and commenting on the PR — lives
+# in the separate workflow_run workflow that never checks out PR code.
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'release/**'
+    # Matches the /tmux flow's web-shell surface: only the client UI, so
+    # doc/config-only PRs don't trigger a full build + render.
+    paths:
+      - 'packages/web-shell/client/**'
+      - 'packages/web-shell/package.json'
+      - 'packages/web-shell/vite.config.ts'
+      - 'packages/web-shell/playwright.visuals.config.ts'
+      # The visuals dev server aliases the shared web UI library into the
+      # rendered bundle (see the `resolve.alias` block in
+      # packages/web-shell/vite.config.ts), so a change to its components/hooks
+      # must also refresh the preview.
+      - 'packages/webui/src/**'
+      # NOTE: packages/sdk-typescript/src/** is deliberately NOT a trigger.
+      # It is aliased in too, but the visuals render against a *mock* daemon, so
+      # the SDK's transport/client layer is stubbed at the network boundary and
+      # its changes don't alter the canned scenarios — e.g. #6911 only added a
+      # DaemonClient data-layer method yet still re-posted identical screenshots
+      # on a pure-backend PR. The web-shell client imports no runtime code from
+      # the SDK root and only type-imports DaemonClient, so leaving the SDK out
+      # avoids spamming backend PRs. If an SDK-only, render-shaping change ever
+      # needs a preview, add the specific file (e.g. daemon/events.ts) here
+      # rather than the whole tree.
+      # The capture pipeline itself, so a workflow-only change is exercised.
+      - '.github/workflows/web-shell-visuals.yml'
+      # The before/after compositor, so a compose-only change is exercised.
+      - '.github/scripts/web-shell-visuals-compose.mjs'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  capture:
+    name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    # ~2x the original: the job now also builds + renders the merge-base arm.
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout PR head'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.head.sha }}'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      - name: 'Install Playwright Chromium'
+        run: 'npx playwright install --with-deps chromium'
+
+      - name: 'Choose web-shell Playwright port'
+        run: |-
+          port="$(node -e "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>{console.log(server.address().port);server.close();});")"
+          echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
+          echo "Using web-shell Playwright port ${port}"
+
+      # continue-on-error: a single failing/timing-out scenario must NOT discard
+      # the whole preview. Playwright writes each PNG/webm as its test passes, so
+      # the captures from the scenarios that DID pass are already on disk; the
+      # steps below (compose/upload) then publish those instead of the job dying
+      # here and the passing shots never being uploaded. The real result is read
+      # from `steps.after_capture.outcome` (which continue-on-error does NOT mask,
+      # unlike `.conclusion`) and shipped to the publisher as render-status.txt,
+      # so the comment says "render incomplete" rather than a misleading
+      # "no changes" when a scenario broke. The job stays green because the
+      # publish workflow only runs on a `success` conclusion; the broken scenario
+      # is surfaced in the comment, not by sinking every other PR author's preview.
+      - name: 'Capture screenshots and flow recordings (after / PR head)'
+        id: 'after_capture'
+        continue-on-error: true
+        env:
+          WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-visuals'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
+
+      # --- Before/after: render the PR's MERGE-BASE too, then keep only CHANGED
+      # views. The merge-base — NOT the base-branch tip — is the correct "before"
+      # for a `head.sha` render: a PR branch behind `main` would otherwise show
+      # other people's already-landed web-shell changes, reversed, as this PR's
+      # diff. The merge-base is trusted history, so this adds no secret exposure
+      # to the untrusted-PR job — it only produces more image bytes. Every base
+      # step is best-effort (continue-on-error): a flaky base build/render
+      # degrades to after-only (each view tagged NEW), never sinking the preview.
+      - name: 'Resolve the merge-base'
+        id: 'mergebase'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_SHA: '${{ github.event.pull_request.base.sha }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          set -euo pipefail
+          # Read token suffices and works for fork PRs. Retry a few times; if it
+          # STILL fails, emit an EMPTY sha so the before render is skipped
+          # entirely (after-only). Falling back to the base-branch tip would
+          # reintroduce the exact reversed-diff bug the merge-base prevents.
+          MB=''
+          for attempt in 1 2 3; do
+            MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+            [ -n "${MB}" ] && break
+            sleep 2
+          done
+          echo "sha=${MB}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${MB}" ]; then
+            echo "before (merge-base) = ${MB}"
+          else
+            echo "::warning::could not resolve the merge-base; skipping the before render (after-only)."
+          fi
+
+      - name: 'Check out the merge-base (before render)'
+        id: 'base_checkout'
+        if: "${{ steps.mergebase.outputs.sha != '' }}"
+        continue-on-error: true
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ steps.mergebase.outputs.sha }}'
+          path: 'base'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Install base dependencies'
+        id: 'base_install'
+        if: "${{ steps.base_checkout.outcome == 'success' }}"
+        continue-on-error: true
+        working-directory: 'base'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      # Run ONLY when the checkout AND install both succeeded. `base/` is nested
+      # under the head checkout, so if the base's own node_modules is absent (a
+      # failed npm ci) the render would resolve Playwright/Vite UP to the head's
+      # node_modules and produce a HYBRID before. A skip here → absent baseline →
+      # after-only. Screenshots only (base flow videos are discarded); `--`
+      # passes the spec through to `playwright test`; browsers are shared.
+      - name: 'Capture before (base) screenshots'
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        working-directory: 'base'
+        continue-on-error: true
+        env:
+          WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts'
+
+      - name: 'Compose before/after and keep only changed views'
+        env:
+          BEFORE_DIR: '${{ runner.temp }}/web-shell-before/screenshots'
+          AFTER_DIR: '${{ runner.temp }}/web-shell-visuals/screenshots'
+          OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
+        run: |-
+          set -euo pipefail
+          # Diff each <view>-<theme>.png against the base render and stitch a
+          # labelled "main | this PR" composite for the views that changed. The
+          # composites REPLACE the raw after-shots as the published screenshots,
+          # reusing the <view>-<theme>.png name the publish step already expects.
+          if node .github/scripts/web-shell-visuals-compose.mjs \
+              "${BEFORE_DIR}" "${AFTER_DIR}" "${OUT_DIR}/composite"; then
+            rm -f "${OUT_DIR}/composite/manifest.json"
+            rm -rf "${OUT_DIR}/screenshots"
+            mv "${OUT_DIR}/composite" "${OUT_DIR}/screenshots"
+            echo "Changed views composited: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
+          else
+            # Degrade rather than sink: leave the raw after-shots in
+            # ${OUT_DIR}/screenshots so the PR still gets a (head-only) preview.
+            echo "::warning::compose failed; publishing raw after-shots without a before/after."
+          fi
+
+      - name: 'Convert flow recordings to inline GIFs'
+        env:
+          OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
+        run: |-
+          set -euo pipefail
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "::warning::ffmpeg not found on the runner; skipping GIF conversion (raw .webm is still uploaded)."
+            exit 0
+          fi
+          mkdir -p "${OUT_DIR}/gifs"
+          shopt -s nullglob
+          converted=0
+          for webm in "${OUT_DIR}"/video/*.webm; do
+            name="$(basename "${webm%.webm}")"
+            gif="${OUT_DIR}/gifs/${name}.gif"
+            # -ss 1 trims the ~1s blank while the page loads. Two-pass palette
+            # (generate + apply) keeps the GIF sharp at a fraction of naive size.
+            if err="$(ffmpeg -y -ss 1 -i "${webm}" \
+              -vf "fps=12,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
+              "${gif}" 2>&1)"; then
+              echo "converted ${name}.webm -> gifs/${name}.gif ($(du -h "${gif}" | cut -f1))"
+              converted=$((converted + 1))
+            else
+              # Surface ffmpeg's own diagnostic (codec/container/filter error)
+              # instead of a bare "failed", so a future breakage is actionable.
+              detail="$(printf '%s' "${err}" | tr '\n' ' ' | tail -c 400)"
+              echo "::warning::ffmpeg failed to convert ${name}.webm; skipping its GIF. ${detail}"
+              rm -f "${gif}"
+            fi
+          done
+          echo "GIFs produced: ${converted}"
+
+      - name: 'Record PR metadata for the publish workflow'
+        env:
+          OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          # The TRUE after-render result. `.outcome` is the pre-continue-on-error
+          # value ('failure' when >=1 scenario failed), unlike `.conclusion` which
+          # the continue-on-error masks to 'success'. The publisher reads this to
+          # decide whether an empty/partial preview means "no visual change" or
+          # "a scenario failed to render" — the two must not look alike.
+          AFTER_OUTCOME: '${{ steps.after_capture.outcome }}'
+        run: |-
+          set -euo pipefail
+          # Ensure both dirs exist so the counts below are robust even when an
+          # upstream step produced none (e.g. no ffmpeg -> no gifs/). (The finds
+          # sit inside `echo "$(...)"`, so a missing dir wouldn't actually trip
+          # set -e — echo masks it — but create them for clarity all the same.)
+          mkdir -p "${OUT_DIR}/screenshots" "${OUT_DIR}/gifs"
+          # Bound artifact contents BEFORE upload: this job ran untrusted PR
+          # code, so drop oversized files and cap the count per directory —
+          # otherwise a hostile spec could bloat the published artifact (which
+          # the privileged publisher downloads) or the retained video artifact.
+          MAX_FILE_BYTES=$((6 * 1024 * 1024))
+          MAX_FILES=40
+          for d in screenshots gifs video; do
+            dir="${OUT_DIR}/${d}"
+            [ -d "${dir}" ] || continue
+            find "${dir}" -maxdepth 1 -type f -size "+${MAX_FILE_BYTES}c" \
+              -printf '::warning::dropping oversized artifact file %p\n' -delete || true
+            find "${dir}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort \
+              | tail -n "+$((MAX_FILES + 1))" \
+              | while IFS= read -r extra; do
+                  echo "::warning::dropping excess artifact file ${d}/${extra}"
+                  rm -f "${dir}/${extra}"
+                done
+          done
+          # PR number for the workflow_run publish job (which validates it).
+          # The head SHA is intentionally NOT shipped in the artifact: the
+          # publish job binds to the authenticated github.event.workflow_run
+          # .head_sha, and an artifact-sourced SHA would be untrusted.
+          printf '%s\n' "${PR_NUMBER}" > "${OUT_DIR}/pr.txt"
+          # Render status for the publisher: 'failure' when >=1 scenario failed
+          # (default to 'failure' if the step somehow reported nothing, so an
+          # unknown state fails safe toward "incomplete" rather than a false
+          # all-clear). Anything other than the literal 'success' is treated as
+          # incomplete on the publish side.
+          printf '%s\n' "${AFTER_OUTCOME:-failure}" > "${OUT_DIR}/render-status.txt"
+          echo "Screenshots: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
+          echo "GIFs: $(find "${OUT_DIR}/gifs" -name '*.gif' | wc -l | tr -d ' ')"
+          echo "After-render outcome: ${AFTER_OUTCOME:-unknown}"
+
+      # The privileged publish workflow downloads THIS artifact, so keep the raw
+      # videos out of it: an untrusted PR could drop a multi-GB file under
+      # video/ and exhaust the publisher's bandwidth/disk/timeout. Screenshots
+      # and GIFs (which the publisher hosts) are size-capped again on that side.
+      - name: 'Upload web-shell visuals artifact (published)'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'web-shell-visuals'
+          path: |-
+            ${{ runner.temp }}/web-shell-visuals/screenshots
+            ${{ runner.temp }}/web-shell-visuals/gifs
+            ${{ runner.temp }}/web-shell-visuals/pr.txt
+            ${{ runner.temp }}/web-shell-visuals/render-status.txt
+          if-no-files-found: 'warn'
+          retention-days: 7
+
+      # Raw recordings live in a SEPARATE artifact the publish workflow never
+      # downloads — they're only the "full-resolution recordings" link target.
+      - name: 'Upload raw flow recordings'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'web-shell-visuals-video'
+          path: '${{ runner.temp }}/web-shell-visuals/video'
+          if-no-files-found: 'ignore'
+          retention-days: 7

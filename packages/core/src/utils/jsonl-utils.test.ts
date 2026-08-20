@@ -20,6 +20,7 @@ import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
   countLines,
+  exists,
   parseLineTolerant,
   read,
   readLines,
@@ -199,6 +200,32 @@ describe('read() / readLines() with malformed lines', () => {
     expect(await read(path.join(tmpRoot, 'does-not-exist.jsonl'))).toEqual([]);
   });
 
+  it('can rethrow non-ENOENT read errors for user-visible callers', async () => {
+    const file = tmpFile('{"a":1}\n');
+    const error = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementationOnce(() => {
+      throw error;
+    });
+
+    try {
+      await expect(read(file, { throwOnNonEnoentError: true })).rejects.toThrow(
+        'permission denied',
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still returns [] for missing files when rethrowing read errors', async () => {
+    await expect(
+      read(path.join(tmpRoot, 'does-not-exist.jsonl'), {
+        throwOnNonEnoentError: true,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('readLines respects the limit when objects come from recovery', async () => {
     // Two clean lines, then a glued pair. Asking for 3 should yield 3.
     const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}{"i":4}\n{"i":5}\n');
@@ -234,6 +261,60 @@ describe('read() / readLines() with malformed lines', () => {
 });
 
 describe('reader resource cleanup', () => {
+  it('propagates the caller abort reason from readLines', async () => {
+    const file = tmpFile(
+      Array.from({ length: 1_000 }, (_, index) => `{"i":${index}}`).join('\n'),
+    );
+    const controller = new AbortController();
+    const reason = new Error('jsonl scan cancelled');
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) =>
+        originalCreateReadStream(...args),
+      );
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1_000, {
+        signal: controller.signal,
+      });
+      expect(spy).toHaveBeenCalledWith(file, { signal: controller.signal });
+
+      controller.abort(reason);
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('observes cancellation while readLines is closing its stream', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n');
+    const controller = new AbortController();
+    const reason = new Error('cancelled during stream cleanup');
+    let capturedStream: fs.ReadStream | undefined;
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
+        const stream = originalCreateReadStream(...args);
+        capturedStream = stream;
+        return stream;
+      });
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1, {
+        signal: controller.signal,
+      });
+      expect(capturedStream).toBeDefined();
+      capturedStream!.once('close', () => controller.abort(reason));
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('closes the file stream after readLines stops at the requested limit', async () => {
     const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
 
@@ -328,6 +409,24 @@ describe('writeLine / writeLineSync / write', () => {
   // branch is never exercised. A regression that dropped that branch would
   // make write() fail with ENOENT only when callers target a brand-new
   // subdirectory.
+  it('write() with an empty array leaves a genuinely empty file', async () => {
+    const file = path.join(
+      tmpRoot,
+      `we-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { v: 1 });
+    expect(exists(file)).toBe(true);
+
+    // Clearing the file must not leave a stray newline behind: a 1-byte file
+    // makes exists() (size > 0) disagree with read() (no records).
+    write(file, []);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe('');
+    expect(fs.statSync(file).size).toBe(0);
+    expect(await read(file)).toEqual([]);
+    expect(exists(file)).toBe(false);
+  });
+
   it('write() creates parent dirs when missing', () => {
     const nested = path.join(tmpRoot, 'a', 'b', 'c', 'file.jsonl');
     write(nested, [{ x: 1 }]);

@@ -29,6 +29,7 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
+  toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
   mockShowInformationMessage,
@@ -96,10 +97,17 @@ const {
       | undefined,
   },
   endTurnCallbackRef: {
-    current: undefined as ((reason?: string) => void) | undefined,
+    current: undefined as
+      | ((reason?: string, source?: string) => void)
+      | undefined,
   },
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
+  },
+  toolCallCallbackRef: {
+    current: undefined as
+      | ((update: Record<string, unknown>) => void)
+      | undefined,
   },
   permissionRequestCallbackRef: {
     current: undefined as ((request: unknown) => Promise<string>) | undefined,
@@ -224,10 +232,14 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         slashCommandNotificationCallbackRef.current = callback;
       },
     );
-    onEndTurn = vi.fn((cb: (reason?: string) => void) => {
+    onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
-    onToolCall = vi.fn();
+    onToolCall = vi.fn(
+      (callback: (update: Record<string, unknown>) => void) => {
+        toolCallCallbackRef.current = callback;
+      },
+    );
     onPlan = vi.fn();
     onPermissionRequest = vi.fn(
       (callback: (request: unknown) => Promise<string>) => {
@@ -257,6 +269,8 @@ vi.mock('../../services/conversationStore.js', () => ({
       id: 'conversation-1',
       messages: [],
     });
+    addMessage = vi.fn().mockResolvedValue(undefined);
+    getCurrentConversationId = vi.fn(() => null);
   },
 }));
 
@@ -351,6 +365,7 @@ import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+import { logger } from '../../utils/logger.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -446,6 +461,7 @@ beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
+  toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
@@ -572,6 +588,25 @@ describe('WebViewProvider.attachToView', () => {
       type: 'copyToClipboardResult',
       data: { requestId: 'copy-1', success: true },
     });
+  });
+
+  it('writes webview log messages through the extension host logger', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    const message = `render failed\n${'x'.repeat(10_000)}`;
+
+    await messageHandler?.({
+      type: 'log',
+      data: { level: 'error', message },
+    });
+
+    expect(error).toHaveBeenCalledWith(
+      '[Webview]',
+      `${message.slice(0, 10_000)}...[truncated]`.replace('\n', '\\n'),
+    );
+    error.mockRestore();
   });
 
   it('reports clipboard copy failures back to the requesting webview', async () => {
@@ -877,6 +912,75 @@ describe('WebViewProvider.attachToView', () => {
         status: 'failed',
       }),
     });
+  });
+
+  it('settles a matching pending permission when the tool call becomes terminal', async () => {
+    const { postMessage } = await setupAttachedProvider();
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    const permissionPromise = agentManager?.permissionRequestCallback?.({
+      options: [
+        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
+      ],
+      toolCall: {
+        toolCallId: 'tool-call-aborted',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'pending',
+      },
+    });
+
+    toolCallCallbackRef.current?.({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'tool-call-aborted',
+      status: 'failed',
+    });
+
+    await expect(permissionPromise).resolves.toBe('cancel');
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionResolved',
+      data: { optionId: 'cancel' },
+    });
+  });
+
+  it('rejects one workflow approval without cancelling the parent prompt', async () => {
+    const { postMessage } = await setupAttachedProvider();
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    const messageHandler = mockMessageHandlerInstances.at(-1);
+    const permissionPromise = agentManager?.permissionRequestCallback?.({
+      options: [
+        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
+      ],
+      toolCall: {
+        toolCallId: 'workflow-approval-1',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'pending',
+        _meta: { workflowApproval: true },
+      },
+    });
+
+    messageHandler?.permissionHandler?.({
+      type: 'permissionResponse',
+      data: { optionId: 'cancel' },
+    });
+
+    await expect(permissionPromise).resolves.toBe('cancel');
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith({
+        type: 'toolCall',
+        data: expect.objectContaining({
+          type: 'tool_call_update',
+          toolCallId: 'workflow-approval-1',
+          status: 'failed',
+        }),
+      });
+    });
+    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'streamEnd' }),
+    );
   });
 
   it('replays available skills to the webview after webviewReady', async () => {
@@ -1556,6 +1660,35 @@ describe('Notification & dot indicator', () => {
     // Second endTurn (final) — should NOT fire another notification
     endTurnCallbackRef.current?.('end_turn');
     expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show idle notification for background notification turns', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn', 'background_notification');
+
+    expect(mockPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: 'streamEnd',
+      data: expect.objectContaining({
+        reason: 'end_turn',
+        source: 'background_notification',
+      }),
+    });
+    expect(mockShowInformationMessage).not.toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
   });
 
   it('does not notify when notifications setting is disabled', async () => {

@@ -16,9 +16,19 @@ import {
 import { ConfigContext } from '../contexts/ConfigContext.js';
 // Mock VimModeContext hook
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: vi.fn(() => ({
+    vimEnabled: false,
+    vimMode: 'NORMAL',
+  })),
+  useVimModeActions: vi.fn(() => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
+  })),
   useVimMode: vi.fn(() => ({
     vimEnabled: false,
     vimMode: 'NORMAL',
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
   })),
 }));
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -26,8 +36,29 @@ import { StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
-  LoadingIndicator: ({ thought }: { thought?: string }) => (
-    <Text>LoadingIndicator{thought ? `: ${thought}` : ''}</Text>
+  LoadingIndicator: ({
+    currentLoadingPhrase,
+    candidatesTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
+    showResponseTokensPerSecond,
+  }: {
+    currentLoadingPhrase?: string;
+    candidatesTokens?: number;
+    taskStartTokens?: number;
+    taskStartStreamingChars?: number;
+    showResponseTokensPerSecond?: boolean;
+  }) => (
+    <Text>
+      LoadingIndicator
+      {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+      {typeof candidatesTokens === 'number' ? `: ${candidatesTokens}` : ''}
+      {typeof taskStartTokens === 'number' ? `: start ${taskStartTokens}` : ''}
+      {typeof taskStartStreamingChars === 'number'
+        ? `: chars ${taskStartStreamingChars}`
+        : ''}
+      {showResponseTokensPerSecond ? ': show t/s' : ''}
+    </Text>
   ),
 }));
 
@@ -93,7 +124,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     commandContext: null,
     shellModeActive: false,
     isFocused: true,
-    thought: '',
+    thought: null,
     currentLoadingPhrase: '',
     elapsedTime: 0,
     ctrlCPressedOnce: false,
@@ -112,6 +143,8 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     nightly: false,
     isTrustedFolder: true,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     pendingGeminiHistoryItems: [],
@@ -135,6 +168,7 @@ const createMockConfig = (overrides = {}) => ({
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
   getAccessibility: vi.fn(() => ({})),
+  getShowResponseTokensPerSecond: vi.fn(() => false),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   ...overrides,
@@ -170,13 +204,9 @@ describe('Composer', () => {
   });
 
   describe('Loading Indicator', () => {
-    it('renders LoadingIndicator with thought when streaming', () => {
+    it('renders LoadingIndicator with phrase when streaming', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
-        thought: {
-          subject: 'Processing',
-          description: 'Processing your request...',
-        },
         currentLoadingPhrase: 'Analyzing',
         elapsedTime: 1500,
       });
@@ -185,22 +215,26 @@ describe('Composer', () => {
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('LoadingIndicator: Analyzing');
     });
 
-    it('renders LoadingIndicator without thought when accessibility disables loading phrases', () => {
+    it('passes the response token rate setting to LoadingIndicator', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
-        thought: { subject: 'Hidden', description: 'Should not show' },
+        currentLoadingPhrase: 'Analyzing',
+        responseCandidateTokens: 550,
+        taskStartTokens: 500,
+        taskStartStreamingChars: 200,
       });
       const config = createMockConfig({
-        getAccessibility: vi.fn(() => ({ disableLoadingPhrases: true })),
+        getShowResponseTokensPerSecond: vi.fn(() => true),
       });
 
       const { lastFrame } = renderComposer(uiState, config);
 
-      const output = lastFrame();
-      expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show');
+      expect(lastFrame()).toContain('LoadingIndicator: Analyzing');
+      expect(lastFrame()).toContain(': 550: start 500: chars 200');
+      expect(lastFrame()).toContain(': show t/s');
     });
 
     // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
@@ -283,20 +317,14 @@ describe('Composer', () => {
       expect(lastFrame()).toContain('LoadingIndicator');
     });
 
-    it('suppresses thought when waiting for confirmation', () => {
+    it('renders LoadingIndicator during WaitingForConfirmation', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.WaitingForConfirmation,
-        thought: {
-          subject: 'Confirmation',
-          description: 'Should not show during confirmation',
-        },
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      const output = lastFrame();
-      expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show during confirmation');
+      expect(lastFrame()).toContain('LoadingIndicator');
     });
   });
 

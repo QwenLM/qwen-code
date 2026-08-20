@@ -15,6 +15,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
+import { childLaunchDepth, runWithAgentContext } from './agent-context.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -57,6 +58,18 @@ export class AgentInteractive {
   private readonly core: AgentCore;
   private readonly queue = new AsyncMessageQueue<string>();
 
+  /**
+   * This agent's nesting depth, captured from the spawner's ambient frame at
+   * construction (0 when spawned from the top-level session). start() and
+   * runLoop() re-enter the agent identity frame pinned at this depth, so
+   * prepareTools()' depth gating and the AgentTool's runtime guards see an
+   * in-process interactive agent (Arena, in-process teammate) as an agent —
+   * not as the top-level session. Pinning (rather than auto-increment)
+   * matters because runLoop() restarts itself from its own finally block and
+   * enqueueMessage() may be called from arbitrary chains.
+   */
+  private readonly agentDepth: number;
+
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private error: string | undefined;
   private lastRoundError: string | undefined;
@@ -78,6 +91,15 @@ export class AgentInteractive {
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
     this.core = core;
+    // Ambient capture: reads the SPAWNER's AsyncLocalStorage frame, so this
+    // is correct only while construction stays on the spawner's await chain
+    // (today: InProcessBackend.spawnAgent, whose entry paths are top-level
+    // gated). A future factory/queue/deferred construction would silently
+    // record depth 0 — the same deferral-loses-frame failure the resume
+    // path solves explicitly by persisting AgentMeta.depth. If construction
+    // ever moves off the spawn chain, thread the depth through
+    // AgentInteractiveConfig instead.
+    this.agentDepth = childLaunchDepth();
     this.setupEventListeners();
   }
 
@@ -85,9 +107,19 @@ export class AgentInteractive {
 
   /**
    * Start the agent. Initializes the chat session, then kicks off
-   * processing if an initialTask is configured.
+   * processing if an initialTask is configured. Runs inside this agent's
+   * identity frame so prepareTools() depth-gates the AgentTool correctly
+   * (see agentDepth).
    */
-  async start(context: ContextState): Promise<void> {
+  start(context: ContextState): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.startInner(context),
+      this.agentDepth,
+    );
+  }
+
+  private async startInner(context: ContextState): Promise<void> {
     this.setStatus(AgentStatus.INITIALIZING);
 
     this.chat = await this.core.createChat(context, {
@@ -112,15 +144,26 @@ export class AgentInteractive {
 
     if (this.config.initialTask) {
       this.queue.enqueue(this.config.initialTask);
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
   /**
    * Run loop: process all pending messages, then settle status.
-   * Exits when the queue is empty or the agent is aborted.
+   * Exits when the queue is empty or the agent is aborted. Runs inside this
+   * agent's identity frame (pinned at agentDepth) so tool bodies — including
+   * a nested `agent` spawn and its depth guard — attribute to this agent
+   * rather than the top-level session.
    */
-  private async runLoop(): Promise<void> {
+  private runLoop(): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.runLoopInner(),
+      this.agentDepth,
+    );
+  }
+
+  private async runLoopInner(): Promise<void> {
     this.processing = true;
     try {
       let message = this.queue.dequeue();
@@ -141,6 +184,22 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive processing failed:', err);
     } finally {
       this.processing = false;
+      // A message enqueued during the synchronous IDLE STATUS_CHANGE
+      // emit (e.g. TeamManager flushing a held message the moment the
+      // agent settles) arrives after the dequeue loop's final empty
+      // check but while `processing` is still true — enqueueMessage
+      // sees the loop as live and won't restart it, stranding the
+      // message in the queue. Re-check here, after the flag flips.
+      // The sync prefix of the restarted loop re-arms `processing`
+      // before any interleaved enqueueMessage can observe it false,
+      // so the two restart paths can't double-run.
+      if (
+        this.queue.size > 0 &&
+        !this.masterAbortController.signal.aborted &&
+        !isTerminalStatus(this.status)
+      ) {
+        this.executionPromise = this.startRunLoop();
+      }
     }
   }
 
@@ -241,6 +300,14 @@ export class AgentInteractive {
     this.masterAbortController.abort();
     this.queue.drain();
     this.core.clearPendingApprovals();
+    // When no run loop is in flight (idle/initializing agent), nothing
+    // will ever observe the aborted signal and settle status — the
+    // agent would sit non-terminal forever and lifecycle gates like
+    // TeamManager's allTeammatesTerminated() would never fire. Settle
+    // it here; a live loop exits via its own aborted check instead.
+    if (!this.processing && !isTerminalStatus(this.status)) {
+      this.setStatus(AgentStatus.CANCELLED);
+    }
   }
 
   // ─── Message Queue ─────────────────────────────────────────
@@ -251,7 +318,7 @@ export class AgentInteractive {
   enqueueMessage(message: string): void {
     this.queue.enqueue(message);
     if (!this.processing) {
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
@@ -340,6 +407,13 @@ export class AgentInteractive {
 
   // ─── Private Helpers ───────────────────────────────────────
 
+  private startRunLoop(): Promise<void> {
+    if (this.config.runInContext) {
+      return this.config.runInContext(() => this.runLoop());
+    }
+    return this.runLoop();
+  }
+
   /**
    * Settle status after the run loop empties.
    * On success → IDLE (agent stays alive for follow-up messages).
@@ -348,6 +422,8 @@ export class AgentInteractive {
   private settleRoundStatus(): void {
     if (this.lastRoundError && !this.roundCancelledByUser) {
       this.setStatus(AgentStatus.FAILED);
+    } else if (this.config.completeOnIdle) {
+      this.setStatus(AgentStatus.COMPLETED);
     } else {
       this.setStatus(AgentStatus.IDLE);
     }
@@ -455,6 +531,11 @@ function terminateModeMessage(
       return { text: 'Agent stopped: time limit reached.', level: 'warning' };
     case AgentTerminateMode.ERROR:
       return { text: 'Agent stopped due to an error.', level: 'error' };
+    case AgentTerminateMode.LOOP_DETECTED:
+      return {
+        text: 'Agent stopped: duplicate tool-call loop detected.',
+        level: 'error',
+      };
     case AgentTerminateMode.CANCELLED:
     case AgentTerminateMode.SHUTDOWN:
       return null;

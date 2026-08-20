@@ -172,6 +172,8 @@ function withSafeGitConfig(args: string[]): string[] {
     'core.fsmonitor=false',
     '-c',
     'core.untrackedCache=false',
+    '-c',
+    'core.quotePath=false',
     ...args,
   ];
 }
@@ -764,21 +766,59 @@ function applyFilters(
   });
 }
 
+/**
+ * Ancestor-directory ignore decisions, memoised per crawl.
+ *
+ * `isUnderIgnoredDirectory` runs once per listed file and re-tests every ancestor
+ * prefix, so sibling files re-ask the same question about the same directories:
+ * on this repository a single crawl asks it 39,139 times about 955 distinct
+ * directories. Each call site builds its own `dirFilter` closure for one crawl,
+ * so keying the memo on that closure scopes it to that crawl and lets it be
+ * collected together with it — no cross-crawl staleness, no invalidation to get
+ * wrong when ignore rules change.
+ */
+const ancestorIgnoreMemo = new WeakMap<
+  (dirPath: string) => boolean,
+  Map<string, boolean>
+>();
+
+function isDirectoryTreeIgnored(
+  dirPath: string,
+  dirFilter: (dirPath: string) => boolean,
+  memo: Map<string, boolean>,
+): boolean {
+  const cached = memo.get(dirPath);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const separator = dirPath.lastIndexOf('/');
+  const ignored =
+    (separator > 0 &&
+      isDirectoryTreeIgnored(dirPath.slice(0, separator), dirFilter, memo)) ||
+    dirFilter(`${dirPath}/`);
+
+  memo.set(dirPath, ignored);
+  return ignored;
+}
+
 function isUnderIgnoredDirectory(
   filePath: string,
   dirFilter: (dirPath: string) => boolean,
 ): boolean {
-  const parts = filePath.split('/');
-  let current = '';
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    current = current ? `${current}/${parts[i]}` : parts[i];
-    if (dirFilter(`${current}/`)) {
-      return true;
-    }
+  const separator = filePath.lastIndexOf('/');
+  // Callers reject absolute and out-of-root paths via isValidIgnorePath().
+  if (separator <= 0) {
+    return false;
   }
 
-  return false;
+  let memo = ancestorIgnoreMemo.get(dirFilter);
+  if (memo === undefined) {
+    memo = new Map();
+    ancestorIgnoreMemo.set(dirFilter, memo);
+  }
+
+  return isDirectoryTreeIgnored(filePath.slice(0, separator), dirFilter, memo);
 }
 
 const YIELD_INTERVAL = 1000;
@@ -1036,7 +1076,12 @@ async function crawlWithGitLsFiles(
 
   // Avoid `-z` with `-t`: record shape for `ls-files -t` + `-z` is not stable across Git
   // versions; newline-delimited output is fine here (index paths cannot contain newlines).
-  const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
+  const trackedArgs = [
+    '--literal-pathspecs',
+    'ls-files',
+    '--cached',
+    '--recurse-submodules',
+  ];
   trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
@@ -1074,6 +1119,16 @@ async function crawlWithGitLsFiles(
 
     const normalizedFile = normalizePath(parsed.filePath);
     if (deletedSet.has(normalizedFile)) {
+      return true;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(path.join(gitRoot, ...normalizedFile.split('/')));
+    } catch {
+      return true;
+    }
+    if (stat.isDirectory()) {
       return true;
     }
 
@@ -1187,8 +1242,62 @@ async function crawlWithGitLsFiles(
   return { success: true, files: limitedResults };
 }
 
-function buildResultsFromFileSet(files: Set<string>): string[] {
+function collectDirectoryRows(options: CrawlOptions): string[] {
+  const relativeToCrawlDir = getPosixRelative(
+    options.cwd,
+    options.crawlDirectory,
+  );
+  const dirFilter = options.ignore.getDirectoryFilter();
+  const rows: string[] = [];
+
+  const visit = (dir: string, relativePath: string, depth: number): void => {
+    const cwdRelative =
+      relativePath === ''
+        ? relativeToCrawlDir
+        : path.posix.join(relativeToCrawlDir, relativePath);
+
+    if (cwdRelative !== '.') {
+      const row = cwdRelative.endsWith('/') ? cwdRelative : `${cwdRelative}/`;
+      if (!isValidIgnorePath(row.slice(0, -1)) || dirFilter(row)) {
+        return;
+      }
+      rows.push(row);
+    }
+
+    if (options.maxDepth !== undefined && depth > options.maxDepth) {
+      return;
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const childRelative = relativePath
+        ? path.posix.join(relativePath, entry.name)
+        : entry.name;
+      visit(path.join(dir, entry.name), childRelative, depth + 1);
+    }
+  };
+
+  visit(options.crawlDirectory, '', 0);
+  return rows;
+}
+
+function buildResultsFromFileSet(
+  files: Set<string>,
+  extraDirectories: string[] = [],
+): string[] {
   const dirSet = new Set<string>();
+  for (const dir of extraDirectories) {
+    dirSet.add(dir);
+  }
   for (const file of files) {
     const parts = file.split('/');
     let current = '';
@@ -1254,7 +1363,10 @@ async function crawlWithRipgrep(
     }
   }
 
-  const results = buildResultsFromFileSet(fileSet);
+  const results = buildResultsFromFileSet(
+    fileSet,
+    collectDirectoryRows(options),
+  );
   const filteredResults = applyFilters(
     results,
     options,

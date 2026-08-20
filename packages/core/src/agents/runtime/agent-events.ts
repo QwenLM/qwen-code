@@ -17,10 +17,18 @@ import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
+  ToolResultBoundaryArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
+
+type WithoutConfirmationCallback<T> = T extends unknown
+  ? Omit<T, 'onConfirm'>
+  : never;
+
+export type AgentConfirmationDetails =
+  WithoutConfirmationCallback<ToolCallConfirmationDetails>;
 
 // ─── Event Types ────────────────────────────────────────────
 
@@ -32,6 +40,7 @@ export type AgentEvent =
   | 'stream_text'
   | 'tool_call'
   | 'tool_result'
+  | 'tool_responses_finalized'
   | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
@@ -49,6 +58,7 @@ export enum AgentEventType {
   STREAM_TEXT = 'stream_text',
   TOOL_CALL = 'tool_call',
   TOOL_RESULT = 'tool_result',
+  TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
@@ -78,14 +88,17 @@ export interface AgentRoundEvent {
 
 export interface AgentRoundTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   thoughtText: string;
+  usageMetadata?: GenerateContentResponseUsageMetadata;
   timestamp: number;
 }
 
 export interface AgentStreamTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   /** Whether this text is reasoning/thinking content (as opposed to regular output) */
@@ -124,7 +137,19 @@ export interface AgentToolResultEvent {
   resultDisplay?: ToolResultDisplay;
   /** Path to the temp file where oversized output was saved. */
   outputFile?: string;
+  boundaryArtifact?: ToolResultBoundaryArtifact;
   durationMs?: number;
+  timestamp: number;
+}
+
+export interface AgentToolResponsesFinalizedEvent {
+  subagentId: string;
+  round: number;
+  responses: Array<{
+    callId: string;
+    responseParts: Part[];
+    durationMs?: number;
+  }>;
   timestamp: number;
 }
 
@@ -152,9 +177,14 @@ export interface AgentApprovalRequestEvent {
   callId: string;
   name: string;
   description: string;
-  confirmationDetails: Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
-    type: ToolCallConfirmationDetails['type'];
-  };
+  /**
+   * Original tool-call arguments. Use this — not `confirmationDetails`
+   * — when forwarding to a permission policy, since
+   * `confirmationDetails` is the UI-rendering shape (e.g. `fileDiff`,
+   * `command`) which differs from the raw tool arguments.
+   */
+  args: Record<string, unknown>;
+  confirmationDetails: AgentConfirmationDetails;
   respond: (
     outcome: ToolConfirmationOutcome,
     payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
@@ -213,6 +243,7 @@ export interface AgentEventMap {
   [AgentEventType.STREAM_TEXT]: AgentStreamTextEvent;
   [AgentEventType.TOOL_CALL]: AgentToolCallEvent;
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
+  [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;

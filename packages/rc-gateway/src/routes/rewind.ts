@@ -15,8 +15,15 @@ import type { PushNotifier } from '../webpush/notifier.js';
 import { SessionWal } from '../wal.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
-/** The daemon surface this route needs: just `rewindSession`. */
-export type RewindDaemon = Pick<DaemonClient, 'rewindSession'>;
+/**
+ * The daemon surface this route needs: `rewindSession` plus
+ * `getRewindSnapshots`, which the route uses to map the gateway's
+ * turn-counted `toTurn` onto the daemon's promptId-keyed rewind target.
+ */
+export type RewindDaemon = Pick<
+  DaemonClient,
+  'rewindSession' | 'getRewindSnapshots'
+>;
 
 /** Fallback queue when a route set is wired without an explicit queue. */
 const defaultQueue = new PromptQueue();
@@ -53,10 +60,18 @@ export interface RewindRouteDeps {
  *  2. Read the parent transcript (`readParentRecords`, same source
  *     routes/fork.ts reads) and resolve `toTurn` via the shared
  *     `resolveTurn`. `invalid_turn` -> 400; `rewind_not_applicable` -> 409.
- *  3. `daemon.rewindSession(id, { toTurn })`. The daemon's own `409`
- *     (rewind_in_progress) is surfaced verbatim as 409; every other failure
- *     (unreachable, 4xx/5xx, network) maps to 502 `daemon_unavailable`. On
- *     ANY failure: no WAL marker, no audit — nothing half-applied.
+ *  3. Map `toTurn` onto the daemon's promptId-keyed rewind: the daemon
+ *     exposes one rewind snapshot per user turn (`getRewindSnapshots`; a
+ *     snapshot's `turnIndex` counts the same user turns the resolver does),
+ *     and `rewindSession(id, promptId)` truncates history before that
+ *     snapshot's turn. `toTurn === addressableTurnCount` is the TIP (no
+ *     truncation): no snapshot exists there, the daemon is NOT called, and
+ *     only the marker below is recorded. For a non-tip turn, a missing
+ *     snapshot means the daemon's view does not support that boundary ->
+ *     409 `rewind_not_applicable`. The daemon's own `409` (session_busy) is
+ *     surfaced verbatim as 409; every other failure (unreachable, 4xx/5xx,
+ *     network) maps to 502 `daemon_unavailable`. On ANY failure: no WAL
+ *     marker, no audit — nothing half-applied.
  *  4. Append `session_rewound` to the session's `SessionWal` at
  *     `(wal.latestId() ?? 0) + 1` (unlike fork, rewind has no caller-supplied
  *     WAL coordinate to derive an id from, so it uses the WAL's own next
@@ -153,13 +168,38 @@ export function createRewindRoute(
           .json({ error: resolved.error, code: resolved.error });
         return;
       }
-      const { targetTurnIndex, truncatedEventId } = resolved;
+      const { targetTurnIndex, addressableTurnCount, truncatedEventId } =
+        resolved;
 
-      // 3. Proxy the daemon's rewind. Any failure aborts the saga cleanly
+      // 3. Map `toTurn` onto the daemon's promptId-keyed rewind and proxy
+      //    it. The daemon's snapshot `turnIndex` counts the same user turns
+      //    the resolver does, so the snapshot with `turnIndex === toTurn`
+      //    is the checkpoint taken when turn toTurn+1 was submitted — the
+      //    state after `toTurn` turns completed. The TIP
+      //    (`toTurn === addressableTurnCount`) has no snapshot: a rewind to
+      //    the tip truncates nothing, so the daemon is NOT called and only
+      //    the marker below is recorded. Any failure aborts the saga cleanly
       //    BEFORE any WAL marker or audit is written. The daemon's own 409
-      //    (rewind_in_progress) is surfaced as 409; everything else -> 502.
+      //    (session_busy) is surfaced as 409; everything else -> 502.
       try {
-        await daemon.rewindSession(sessionId, { toTurn: targetTurnIndex });
+        if (targetTurnIndex < addressableTurnCount) {
+          const { snapshots } = await daemon.getRewindSnapshots(sessionId);
+          const snapshot = snapshots.find(
+            (s) => s.turnIndex === targetTurnIndex,
+          );
+          if (!snapshot) {
+            // The gateway's transcript view names a turn boundary the
+            // daemon's snapshot list does not support (e.g. the daemon was
+            // already rewound from the TUI): from the daemon's view that
+            // turn is beyond its tip.
+            res.status(409).json({
+              error: 'Rewind not applicable',
+              code: 'rewind_not_applicable',
+            });
+            return;
+          }
+          await daemon.rewindSession(sessionId, snapshot.promptId);
+        }
       } catch (err) {
         const status = (err as { status?: unknown }).status;
         if (typeof status === 'number' && status === 409) {

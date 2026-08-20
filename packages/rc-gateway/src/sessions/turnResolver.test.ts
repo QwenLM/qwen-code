@@ -40,6 +40,7 @@ describe('resolveTurn', () => {
     expect(result).toEqual({
       ok: true,
       targetTurnIndex: 0,
+      addressableTurnCount: 2,
       truncatedEventId: 0,
     });
   });
@@ -57,6 +58,7 @@ describe('resolveTurn', () => {
     expect(result).toEqual({
       ok: true,
       targetTurnIndex: 1,
+      addressableTurnCount: 3,
       truncatedEventId: 2,
     });
   });
@@ -73,6 +75,7 @@ describe('resolveTurn', () => {
     expect(result).toEqual({
       ok: true,
       targetTurnIndex: 2,
+      addressableTurnCount: 2,
       truncatedEventId: records.length,
     });
   });
@@ -96,11 +99,13 @@ describe('resolveTurn', () => {
     expect(resolveTurn(records, 0)).toEqual({
       ok: true,
       targetTurnIndex: 0,
+      addressableTurnCount: 1,
       truncatedEventId: 3,
     });
     expect(resolveTurn(records, 1)).toEqual({
       ok: true,
       targetTurnIndex: 1,
+      addressableTurnCount: 1,
       truncatedEventId: records.length,
     });
     expect(resolveTurn(records, 2)).toEqual({
@@ -113,6 +118,7 @@ describe('resolveTurn', () => {
     expect(resolveTurn([], 0)).toEqual({
       ok: true,
       targetTurnIndex: 0,
+      addressableTurnCount: 0,
       truncatedEventId: 0,
     });
     expect(resolveTurn([], 1)).toEqual({

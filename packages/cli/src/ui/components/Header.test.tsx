@@ -52,6 +52,15 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('v1.0.0');
   });
 
+  it('shows a non-semver fallback like "unknown" without a bogus "v" prefix', () => {
+    const { lastFrame } = render(
+      <Header {...defaultProps} version="unknown" />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('(unknown)');
+    expect(frame).not.toContain('vunknown');
+  });
+
   it('displays auth type and model', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
     expect(lastFrame()).toContain('Qwen OAuth');

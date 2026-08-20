@@ -33,7 +33,10 @@ interface FollowupControllerOptions {
 
 interface FollowupControllerActions {
   setSuggestion: (text: string | null) => void;
-  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  accept: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
   dismiss: () => void;
   clear: () => void;
   cleanup: () => void;
@@ -85,7 +88,10 @@ function createFollowupController(
     }, SUGGESTION_DELAY_MS);
   };
 
-  const accept = (method?: 'tab' | 'enter' | 'right'): void => {
+  const accept = (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ): void => {
     if (accepting) {
       return;
     }
@@ -119,7 +125,9 @@ function createFollowupController(
 
     queueMicrotask(() => {
       try {
-        getOnAccept?.()?.(text);
+        if (!options?.skipOnAccept) {
+          getOnAccept?.()?.(text);
+        }
       } catch (error: unknown) {
         console.error('[followup] onAccept callback threw:', error);
       } finally {

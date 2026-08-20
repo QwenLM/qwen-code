@@ -7,7 +7,6 @@
 import { vi } from 'vitest';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { LoadedSettings } from '../config/settings.js';
-import type { GitService } from '@qwen-code/qwen-code-core';
 import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
 import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 
@@ -40,8 +39,8 @@ export const createMockCommandContext = (
       settings: {
         merged: {},
         setValue: vi.fn(),
+        isTrusted: true,
       } as unknown as LoadedSettings,
-      git: undefined as GitService | undefined,
       logger: {
         log: vi.fn(),
         logMessage: vi.fn(),
@@ -51,6 +50,7 @@ export const createMockCommandContext = (
       } as any, // Cast because Logger is a class.
     },
     ui: {
+      history: [],
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
@@ -62,6 +62,7 @@ export const createMockCommandContext = (
       btwAbortControllerRef: { current: null },
       isIdleRef: { current: true },
       loadHistory: vi.fn(),
+      refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
@@ -92,6 +93,12 @@ export const createMockCommandContext = (
             byName: {},
           },
           files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+          skills: {
+            totalCalls: 0,
+            totalSuccess: 0,
+            totalFail: 0,
+            byName: {},
+          },
         },
         promptCount: 0,
       } as SessionStatsState,

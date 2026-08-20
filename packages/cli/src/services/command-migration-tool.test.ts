@@ -13,6 +13,10 @@ import {
   migrateTomlCommands,
   generateMigrationPrompt,
 } from './command-migration-tool.js';
+import {
+  parseMarkdownCommand,
+  MarkdownCommandDefSchema,
+} from './markdown-command-parser.js';
 
 describe('command-migration-tool', () => {
   let tempDir: string;
@@ -151,6 +155,33 @@ description = "Test description"`;
         .then(() => true)
         .catch(() => false);
       expect(backupExists).toBe(false);
+    });
+
+    it('should preserve YAML-like descriptions as strings', async () => {
+      const tomlContent = `prompt = "Test prompt"
+description = "false"`;
+
+      await fs.writeFile(path.join(tempDir, 'test.toml'), tomlContent, 'utf-8');
+
+      const result = await migrateTomlCommands({
+        commandDir: tempDir,
+        createBackup: false,
+      });
+
+      expect(result.success).toBe(true);
+
+      const mdContent = await fs.readFile(
+        path.join(tempDir, 'test.md'),
+        'utf-8',
+      );
+      const parsed = parseMarkdownCommand(mdContent);
+      const validationResult = MarkdownCommandDefSchema.safeParse(parsed);
+
+      expect(validationResult.success).toBe(true);
+      if (!validationResult.success) {
+        throw new Error('expected migrated command to be valid markdown');
+      }
+      expect(validationResult.data.frontmatter?.description).toBe('false');
     });
 
     it('should fail if Markdown file already exists', async () => {

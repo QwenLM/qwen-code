@@ -38,7 +38,7 @@ function fakeClient(
     async sessionContext(id: string) {
       return { calledOn: tag, id };
     },
-    async endSession(id: string) {
+    async closeSession(id: string) {
       return { ended: true, id };
     },
     async prompt(id: string) {
@@ -47,8 +47,11 @@ function fakeClient(
     async respondToSessionPermission() {
       return true;
     },
-    async rewindSession(id: string) {
-      return { calledOn: tag, id };
+    async rewindSession(id: string, promptId: string) {
+      return { calledOn: tag, id, promptId };
+    },
+    async getRewindSnapshots(id: string) {
+      return { calledOn: tag, id, snapshots: [] };
     },
     async sessionSupportedCommands(id: string) {
       return { calledOn: tag, id };
@@ -251,10 +254,17 @@ describe('DaemonPool', () => {
     } as never);
     expect(ok).toBe(true);
 
-    const rewind = (await pool.rewindSession(id, { toTurn: 0 })) as unknown as {
+    const rewind = (await pool.rewindSession(id, 'prompt-0')) as unknown as {
       calledOn: string;
+      promptId: string;
     };
     expect(rewind.calledOn).toBe('/proj/a');
+    expect(rewind.promptId).toBe('prompt-0');
+
+    const snapshots = (await pool.getRewindSnapshots(id)) as unknown as {
+      calledOn: string;
+    };
+    expect(snapshots.calledOn).toBe('/proj/a');
 
     const cmds = (await pool.sessionSupportedCommands(id)) as unknown as {
       calledOn: string;
@@ -318,7 +328,7 @@ describe('DaemonPool', () => {
       }),
     });
     const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
-    await pool.endSession(s.sessionId);
+    await pool.closeSession(s.sessionId);
     t = 10_000;
     pool.reapIdle();
     expect(pool.size()).toBe(0);
@@ -341,7 +351,7 @@ describe('DaemonPool', () => {
       }),
     });
     const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
-    await pool.endSession(s.sessionId);
+    await pool.closeSession(s.sessionId);
     // The entry itself should still exist (not reaped yet) but be idle.
     expect(pool.size()).toBe(1);
     t = 10_000;
@@ -370,7 +380,7 @@ describe('DaemonPool', () => {
     pool.reapIdle(); // has a live session -> kept
     expect(pool.size()).toBe(1);
     expect(stopped).toEqual([]);
-    await pool.endSession(s.sessionId);
+    await pool.closeSession(s.sessionId);
     t = 10_000;
     pool.reapIdle(); // now idle -> reaped
     expect(pool.size()).toBe(0);

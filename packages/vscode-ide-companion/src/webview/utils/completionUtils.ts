@@ -44,3 +44,49 @@ export function shouldOpenSkillsSecondaryPicker(
     availableSkills.length > 0
   );
 }
+
+/**
+ * Resolve which completion trigger (`@` or `/`), if any, is active immediately
+ * before the cursor.
+ *
+ * A trigger only counts at a word boundary — the start of the input, or right
+ * after a space/newline. A valid `@` takes precedence over `/` so that
+ * path-like queries stay part of an `@` mention (e.g. `@src/components/Button`
+ * is a single mention, not a slash command). Crucially, an `@` that is NOT at
+ * a word boundary — for example inside an email like `foo@bar.com` — is not a
+ * trigger at all, so we fall through and still evaluate a later `/`. Without
+ * this, typing `foo@bar.com /he` would let the unrelated `@` suppress the
+ * slash-command menu entirely.
+ *
+ * @param text - The full input text
+ * @param cursorPosition - Cursor offset into `text` (already clamped to length)
+ * @returns The active trigger's character, position, and the query following
+ * it, or `null` when there is no valid trigger before the cursor.
+ */
+export function resolveCompletionTrigger(
+  text: string,
+  cursorPosition: number,
+): { char: '@' | '/'; pos: number; query: string } | null {
+  const textBeforeCursor = text.substring(0, cursorPosition);
+  const lastAtMatch = textBeforeCursor.lastIndexOf('@');
+  const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
+
+  const isAtWordBoundary = (pos: number): boolean =>
+    pos === 0 || text[pos - 1] === ' ' || text[pos - 1] === '\n';
+
+  let pos = -1;
+  let char: '@' | '/' | null = null;
+  if (lastAtMatch >= 0 && isAtWordBoundary(lastAtMatch)) {
+    pos = lastAtMatch;
+    char = '@';
+  } else if (lastSlashMatch >= 0 && isAtWordBoundary(lastSlashMatch)) {
+    pos = lastSlashMatch;
+    char = '/';
+  }
+
+  if (pos < 0 || !char) {
+    return null;
+  }
+
+  return { char, pos, query: text.substring(pos + 1, cursorPosition) };
+}

@@ -1,5 +1,5 @@
 /**
- * cron_create tool — creates a new in-session cron job.
+ * cron_create tool — creates a new cron job (in-session or durable).
  */
 
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -7,13 +7,43 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { parseCron } from '../utils/cronParser.js';
+import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
+import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
+
+/** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
+function formatDays(days: number): string {
+  return days === 1 ? '1 day' : `${days} days`;
+}
+
+/**
+ * Expiry paragraph for the tool description. The max age comes from config
+ * (settings / QWEN_CODE_CRON_MAX_AGE_DAYS) at construction time —
+ * changing it requires a restart, so baking it into the static
+ * description is safe. Infinity (setting 0) disables expiry.
+ */
+function recurringExpiryBlurb(maxAgeDays: number): string {
+  if (!Number.isFinite(maxAgeDays)) {
+    return (
+      'Recurring tasks never auto-expire in this configuration — they keep ' +
+      'firing until deleted with CronDelete. Tell the user the job runs ' +
+      'until cancelled when scheduling recurring jobs.'
+    );
+  }
+  const span = formatDays(maxAgeDays);
+  return (
+    `Recurring tasks auto-expire after ${span} — they fire one final time, ` +
+    'then are deleted. This bounds how long a forgotten schedule keeps ' +
+    `firing. Tell the user about the ${span} limit when scheduling ` +
+    'recurring jobs.'
+  );
+}
 
 export interface CronCreateParams {
   cron: string;
   prompt: string;
   recurring?: boolean;
+  durable?: boolean;
 }
 
 class CronCreateInvocation extends BaseToolInvocation<
@@ -46,32 +76,36 @@ class CronCreateInvocation extends BaseToolInvocation<
   async execute(): Promise<ToolResult> {
     const scheduler = this.config.getCronScheduler();
     const recurring = this.params.recurring !== false;
+    const durable = this.params.durable === true;
+    const prompt = this.params.prompt.trim();
 
     try {
       // Validate cron expression before creating the job
       parseCron(this.params.cron);
+      // Reject expressions that parse but never match a real date
+      // (e.g. "0 0 30 2 *") — otherwise the job would be accepted and
+      // silently never fire. Throws with a clear message.
+      nextFireTime(this.params.cron, new Date());
 
-      const job = scheduler.create(
-        this.params.cron,
-        this.params.prompt,
-        recurring,
-      );
+      const job = durable
+        ? await scheduler.createDurable(this.params.cron, prompt, recurring)
+        : scheduler.create(this.params.cron, prompt, recurring);
 
       const display = humanReadableCron(job.cronExpr);
-      const returnDisplay = `Scheduled ${job.id} (${display})`;
+      const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}`;
 
-      let llmContent: string;
-      if (recurring) {
-        llmContent =
-          `Scheduled recurring job ${job.id} (${job.cronExpr}). ` +
-          'Session-only (not written to disk, dies when Qwen Code exits). ' +
-          'Auto-expires after 3 days. Use CronDelete to cancel sooner.';
-      } else {
-        llmContent =
-          `Scheduled one-shot task ${job.id} (${job.cronExpr}). ` +
-          'Session-only (not written to disk, dies when Qwen Code exits). ' +
+      const where = durable
+        ? `Persisted to ${CRON_TASKS_DISPLAY_PATH}`
+        : 'Session-only (not written to disk, dies when Qwen Code exits)';
+      const maxAgeDays = this.config.getCronRecurringMaxAgeDays();
+      const expiry = Number.isFinite(maxAgeDays)
+        ? `Auto-expires after ${formatDays(maxAgeDays)}. Use CronDelete to cancel sooner.`
+        : 'Never auto-expires. Use CronDelete to cancel.';
+      const llmContent = recurring
+        ? `Scheduled recurring job ${job.id} (${job.cronExpr}). ${where}. ` +
+          expiry
+        : `Scheduled one-shot task ${job.id} (${job.cronExpr}). ${where}. ` +
           'It will fire once then auto-delete.';
-      }
 
       return { llmContent, returnDisplay };
     } catch (error) {
@@ -92,6 +126,9 @@ export class CronCreateTool extends BaseDeclarativeTool<
   static readonly Name = ToolNames.CRON_CREATE;
 
   constructor(private config: Config) {
+    // Resolved once: each call re-reads/re-parses the env var and an
+    // invalid value would warn on every call site below.
+    const maxAgeDays = config.getCronRecurringMaxAgeDays();
     super(
       CronCreateTool.Name,
       ToolDisplayNames.CRON_CREATE,
@@ -111,11 +148,14 @@ export class CronCreateTool extends BaseDeclarativeTool<
         '  "hourly" → "7 * * * *" (not "0 * * * *")\n' +
         '  "in an hour or so, remind me to..." → pick whatever minute you land on, don\'t round\n\n' +
         'Only use minute 0 or 30 when the user names that exact time and clearly means it ("at 9:00 sharp", "at half past", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n' +
-        '## Session-only\n\n' +
-        'Jobs live only in this Qwen Code session — nothing is written to disk, and the job is gone when Qwen Code exits.\n\n' +
+        '## Durability\n\n' +
+        'By default (durable: false) the job lives only in this Qwen Code session — nothing is written to disk, and the job is gone when Qwen Code exits. ' +
+        `Pass durable: true to write to ${CRON_TASKS_DISPLAY_PATH} so the job survives restarts. ` +
+        'Only use durable: true when the user explicitly asks for persistence ("keep doing this every day", "set this up permanently"). ' +
+        'Most "remind me in 5 minutes" requests should stay session-only.\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
-        'Recurring tasks auto-expire after 3 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 3-day limit when scheduling recurring jobs.\n\n' +
+        `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
         'Returns a job ID you can pass to CronDelete.',
       Kind.Other,
       {
@@ -133,7 +173,16 @@ export class CronCreateTool extends BaseDeclarativeTool<
           recurring: {
             type: 'boolean',
             description:
-              'true (default) = fire on every cron match until deleted or auto-expired after 3 days. false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',
+              `true (default) = fire on every cron match until deleted${
+                Number.isFinite(maxAgeDays)
+                  ? ` or auto-expired after ${formatDays(maxAgeDays)}`
+                  : ''
+              }. ` +
+              'false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',
+          },
+          durable: {
+            type: 'boolean',
+            description: `true = persist to ${CRON_TASKS_DISPLAY_PATH} and survive restarts. false (default) = in-memory only, dies when Qwen Code exits. Use true only when the user asks the task to survive across sessions.`,
           },
         },
         required: ['cron', 'prompt'],
@@ -153,6 +202,15 @@ export class CronCreateTool extends BaseDeclarativeTool<
     return new CronCreateInvocation(this.config, params);
   }
 
+  protected override validateToolParamValues(
+    params: CronCreateParams,
+  ): string | null {
+    if (!params.prompt || params.prompt.trim() === '') {
+      return 'Parameter "prompt" must be a non-empty string.';
+    }
+    return null;
+  }
+
   /**
    * Forward the prompt and cadence to the classifier. The scheduled
    * prompt will be enqueued and executed against the agent at fire-time,
@@ -168,6 +226,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
       cron: params.cron,
       prompt: params.prompt,
       recurring: params.recurring ?? true,
+      durable: params.durable ?? false,
     };
   }
 }

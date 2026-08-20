@@ -27,7 +27,7 @@ export const MixedStatus: Story = {
     toolCall: {
       toolCallId: 'plan-1',
       kind: 'todo_write',
-      title: 'TodoWrite',
+      title: 'TodoList',
       status: 'completed',
       content: [
         {
@@ -47,7 +47,7 @@ export const AllCompleted: Story = {
     toolCall: {
       toolCallId: 'plan-2',
       kind: 'todo_write',
-      title: 'TodoWrite',
+      title: 'TodoList',
       status: 'completed',
       content: [
         {
@@ -67,7 +67,7 @@ export const AllPending: Story = {
     toolCall: {
       toolCallId: 'plan-3',
       kind: 'todo_write',
-      title: 'TodoWrite',
+      title: 'TodoList',
       status: 'completed',
       content: [
         {
@@ -87,7 +87,7 @@ export const WithError: Story = {
     toolCall: {
       toolCallId: 'plan-4',
       kind: 'todo_write',
-      title: 'TodoWrite',
+      title: 'TodoList',
       status: 'failed',
       content: [
         {

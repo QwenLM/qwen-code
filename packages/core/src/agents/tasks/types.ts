@@ -29,15 +29,21 @@
  */
 
 /**
- * Discriminator over the task kinds tracked by the three task registries.
- * Each kind's per-kind state intersects with `TaskBase` to form the
- * union member; see `TaskState`.
+ * Discriminator over the task kinds tracked by the four core task
+ * registries. Each kind's per-kind state intersects with `TaskBase`
+ * to form the union member; see `TaskState`.
  *
- * Dream tasks (`MemoryManager`) are intentionally outside this union
- * for now — they have a separate lifecycle and their inclusion is
- * deferred to a follow-up.
+ * Dream tasks (`MemoryManager`) are intentionally outside this union —
+ * they have a separate lifecycle and their inclusion is deferred to a
+ * follow-up.
+ *
+ * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry`.
+ * Foreground workflows return through their normal tool result; background
+ * workflows emit one terminal notification through a separate completion
+ * channel. The kind is widened here so the UI surfaces (pill / dialog /
+ * detail body) can switch on `entry.kind === 'workflow'`.
  */
-export type TaskKind = 'agent' | 'shell' | 'monitor';
+export type TaskKind = 'agent' | 'shell' | 'monitor' | 'workflow';
 
 /**
  * Lifecycle states a task can occupy. `paused` and `cancelled` are
@@ -56,7 +62,7 @@ export type TaskStatus =
  * Common envelope every task carries regardless of kind. Per-kind
  * modules extend this via intersection (`TaskBase & { kind: 'agent', ... }`).
  */
-export interface TaskBase {
+export interface TaskBase<Status extends string = TaskStatus> {
   /** Stable id used as the registry key. Per-kind types alias this to
    *  their existing field name (e.g. `agentId`) during the back-compat
    *  window; both fields are populated to the same value at register time. */
@@ -65,7 +71,7 @@ export interface TaskBase {
   kind: TaskKind;
   /** Human label rendered in the pill/panel/dialog. */
   description: string;
-  status: TaskStatus;
+  status: Status;
   /** ms epoch when the task was registered. */
   startTime: number;
   /** ms epoch when the task transitioned out of running. */
@@ -90,6 +96,8 @@ export interface TaskBase {
   outputOffset: number;
   /** True once the kind's terminal notification has fired. */
   notified: boolean;
+  /** Todo work chain that created this task, when it was model-launched. */
+  todoWorkChainId?: string;
   /** Unified cancellation handle. */
   abortController: AbortController;
 }
@@ -102,7 +110,7 @@ export interface TaskBase {
  * further (e.g. shells let the registry alias `outputPath` →
  * `outputFile`).
  */
-export type TaskRegistration<T extends TaskBase> = Omit<
+export type TaskRegistration<T extends TaskBase<string>> = Omit<
   T,
   'id' | 'kind' | 'outputOffset' | 'notified'
 >;
@@ -112,11 +120,12 @@ export type TaskRegistration<T extends TaskBase> = Omit<
 import type { AgentTask } from '../background-tasks.js';
 import type { ShellTask } from '../../services/backgroundShellRegistry.js';
 import type { MonitorTask } from '../../services/monitorRegistry.js';
+import type { WorkflowTask } from '../workflow-run-registry.js';
 
 /**
- * Discriminated union over every task kind tracked by the three
+ * Discriminated union over every task kind tracked by the four
  * registries. Switch on `kind` to narrow to the per-kind shape.
  */
-export type TaskState = AgentTask | ShellTask | MonitorTask;
+export type TaskState = AgentTask | ShellTask | MonitorTask | WorkflowTask;
 
-export type { AgentTask, ShellTask, MonitorTask };
+export type { AgentTask, ShellTask, MonitorTask, WorkflowTask };

@@ -17,7 +17,6 @@ export const CODING_PLAN_CHINA_BASE_URL =
 export const CODING_PLAN_GLOBAL_BASE_URL =
   'https://coding-intl.dashscope.aliyuncs.com/v1';
 
-// keep in sync with packages/vscode-ide-companion/src/services/subscriptionPlanDefinitions.ts ALIBABA_SUBSCRIPTION_MODELS
 const MODELSTUDIO_MODELS: ModelSpec[] = [
   {
     id: 'qwen3.5-plus',
@@ -32,6 +31,7 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
     enableThinking: true,
     modalities: { image: true, video: true },
   },
+  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   {
     id: 'kimi-k2.5',

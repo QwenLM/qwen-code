@@ -1,0 +1,229 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import {
+  CreateSubSessionTool,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './create-sub-session.js';
+import type { Config, SubSessionSpawner } from '../config/config.js';
+
+function makeConfig(spawner?: SubSessionSpawner): Config {
+  return {
+    getSubSessionSpawner: () => spawner,
+  } as unknown as Config;
+}
+
+describe('CreateSubSessionTool', () => {
+  it('has the correct name', () => {
+    expect(new CreateSubSessionTool(makeConfig()).name).toBe(
+      'create_sub_session',
+    );
+  });
+
+  it('defaults to ask permission so delegated prompts face classifier review', async () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    const invocation = tool.build({ prompt: 'do X' });
+    expect(await invocation.getDefaultPermission()).toBe('ask');
+  });
+
+  it('reports daemon-only when no spawner is wired (interactive / headless)', async () => {
+    const tool = new CreateSubSessionTool(makeConfig(undefined));
+    const res = await tool
+      .build({ prompt: 'do X' })
+      .execute(new AbortController().signal);
+    expect(res.error?.message).toContain('qwen serve');
+    expect(res.returnDisplay).toContain('daemon-only');
+  });
+
+  it('first-turn (default): passes trimmed params to the spawner and returns its result', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-1',
+      result: 'the answer',
+      stopReason: 'end_turn',
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: '  summarize  ', model: 'm1', name: 'digest' })
+      .execute(new AbortController().signal);
+
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'summarize',
+      completion: 'first-turn',
+      model: 'm1',
+      name: 'digest',
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('the answer');
+    expect(res.llmContent).toContain('sub-1');
+  });
+
+  it('sent: returns immediately with the session id, not a result', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-2' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'go', completion: 'sent' })
+      .execute(new AbortController().signal);
+
+    expect(spawner).toHaveBeenCalledWith({ prompt: 'go', completion: 'sent' });
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('sub-2');
+    expect(res.llmContent).toMatch(/did not wait/i);
+  });
+
+  it('reports a completed-but-empty first turn without an error', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-3',
+      result: '',
+      stopReason: 'end_turn',
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('no text output');
+  });
+
+  it('first-turn: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
+    // The daemon reported the parent lineage was NOT durably written — surface
+    // the degraded link so the caller knows it won't survive a daemon restart.
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-9',
+      result: 'the answer',
+      stopReason: 'end_turn',
+      parentSessionPersisted: false,
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('live-only');
+    expect(res.llmContent).toContain('will not survive a daemon restart');
+  });
+
+  it('sent: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-10',
+      parentSessionPersisted: false,
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'go', completion: 'sent' })
+      .execute(new AbortController().signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('live-only');
+    expect(res.llmContent).toContain('will not survive a daemon restart');
+  });
+
+  it('does NOT warn about the parent link when it persisted (or is unreported)', async () => {
+    // parentSessionPersisted:true → durable link, no warning.
+    const persisted = vi.fn(async () => ({
+      sessionId: 'sub-11',
+      result: 'ok',
+      stopReason: 'end_turn',
+      parentSessionPersisted: true,
+    }));
+    const okRes = await new CreateSubSessionTool(makeConfig(persisted))
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(okRes.llmContent).not.toContain('live-only');
+
+    // Field absent (no parent, or a non-reporting path) → also no warning.
+    const unreported = vi.fn(async () => ({
+      sessionId: 'sub-12',
+      result: 'ok',
+      stopReason: 'end_turn',
+    }));
+    const unreportedRes = await new CreateSubSessionTool(makeConfig(unreported))
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(unreportedRes.llmContent).not.toContain('live-only');
+  });
+
+  it('surfaces a spawner error as a tool error', async () => {
+    const spawner = vi.fn(async () => {
+      throw new Error('spawn boom');
+    });
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(res.error?.message).toContain('spawn boom');
+  });
+
+  it('returns as soon as the turn is cancelled, without waiting for the spawn', async () => {
+    // Session.ts awaits execute() without racing the abort, so a tool that
+    // ignores its signal pins the caller's tool loop until the daemon's
+    // 5-minute first-turn ceiling. This spawner never settles.
+    let rejectSpawn!: (err: Error) => void;
+    const spawner = vi.fn(
+      () =>
+        new Promise<{ sessionId: string }>((_, reject) => {
+          rejectSpawn = reject;
+        }),
+    );
+    const ac = new AbortController();
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+
+    const settled = tool.build({ prompt: 'x' }).execute(ac.signal);
+    ac.abort();
+    const res = await settled;
+
+    expect(res.returnDisplay).toBe('Cancelled');
+    expect(res.llmContent).toMatch(/cancelled/i);
+    // The sub-session is NOT cancelled — it has no abort seam — so the tool
+    // must say so rather than implying the work was undone.
+    expect(res.llmContent).toMatch(/runs independently|not cancelled/i);
+    // The abandoned spawn must not raise an unhandled rejection.
+    rejectSpawn(new Error('late failure nobody is listening for'));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('never calls the spawner when the signal is already aborted', async () => {
+    // The abort must be checked BEFORE the spawn starts. Passing `spawner(…)`
+    // as an argument evaluates it first, so a pre-cancelled turn would still
+    // create a sub-session on the daemon (and consume its concurrency slot)
+    // before reporting itself cancelled.
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-should-not-exist' }));
+    const ac = new AbortController();
+    ac.abort();
+
+    const res = await new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x' })
+      .execute(ac.signal);
+
+    expect(spawner).not.toHaveBeenCalled();
+    expect(res.returnDisplay).toBe('Cancelled');
+    // Nothing was created, so the message must not hedge.
+    expect(res.llmContent).toMatch(/no sub-session was created/i);
+    expect(res.llmContent).not.toMatch(/may already have been created/i);
+  });
+
+  it('does not report cancellation when the spawn wins the race', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-7', result: 'done' }));
+    const ac = new AbortController();
+    const res = await new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x' })
+      .execute(ac.signal);
+    expect(res.returnDisplay).not.toBe('Cancelled');
+    expect(res.llmContent).toContain('done');
+  });
+
+  it('rejects a prompt over the character limit before reaching the spawner', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-8' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    expect(() =>
+      tool.build({ prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS + 1) }),
+    ).toThrow(new RegExp(`${MAX_SUB_SESSION_PROMPT_CHARS}`));
+    expect(spawner).not.toHaveBeenCalled();
+    // The boundary itself is accepted.
+    expect(() =>
+      tool.build({ prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS) }),
+    ).not.toThrow();
+  });
+});

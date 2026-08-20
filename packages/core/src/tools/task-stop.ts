@@ -122,7 +122,7 @@ class TaskStopInvocation extends BaseToolInvocation<
       if (monitorEntry.status !== 'running') {
         return notRunningError('monitor', taskId, monitorEntry.status);
       }
-      monitorRegistry.cancel(taskId);
+      monitorRegistry.cancel(taskId, { notify: false });
       return {
         llmContent:
           // Unlike background shells (which settle asynchronously when the

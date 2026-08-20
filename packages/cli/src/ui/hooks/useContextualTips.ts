@@ -85,7 +85,10 @@ export function useContextualTips({
       sessionPromptCount,
       sessionCount: tipHistory.sessionCount,
       platform: process.platform,
-      thresholds: computeThresholds(contextWindowSize),
+      thresholds: computeThresholds(
+        contextWindowSize,
+        config.getAutoCompactThreshold(),
+      ),
     };
 
     const tip = selectTip('post-response', tipContext, tipRegistry, tipHistory);
@@ -94,7 +97,7 @@ export function useContextualTips({
       addItem(
         {
           type: MessageType.INFO,
-          text: `💡 ${t(tip.content)}`,
+          text: `★ ${t(tip.content)}`,
         },
         Date.now(),
       );

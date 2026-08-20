@@ -6,7 +6,36 @@
 
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveModelId } from './modelId.js';
+import { resolveModelId, stripRuntimeSnapshotPrefix } from './modelId.js';
+
+describe('stripRuntimeSnapshotPrefix', () => {
+  it('returns bare model IDs unchanged', () => {
+    expect(stripRuntimeSnapshotPrefix('qwen3.6-27b-autoround')).toBe(
+      'qwen3.6-27b-autoround',
+    );
+  });
+
+  it('strips a single runtime snapshot prefix', () => {
+    expect(
+      stripRuntimeSnapshotPrefix('$runtime|openai|qwen3.6-27b-autoround'),
+    ).toBe('qwen3.6-27b-autoround');
+  });
+
+  it('strips nested runtime snapshot prefixes (corruption self-heal)', () => {
+    expect(
+      stripRuntimeSnapshotPrefix(
+        '$runtime|openai|$runtime|openai|qwen3.6-27b-autoround',
+      ),
+    ).toBe('qwen3.6-27b-autoround');
+  });
+
+  it('returns the input unchanged for a malformed prefix with no model ID', () => {
+    expect(stripRuntimeSnapshotPrefix('$runtime|openai|')).toBe(
+      '$runtime|openai|',
+    );
+    expect(stripRuntimeSnapshotPrefix('$runtime|')).toBe('$runtime|');
+  });
+});
 
 describe('resolveModelId', () => {
   it('returns undefined for omitted models without a current model', () => {

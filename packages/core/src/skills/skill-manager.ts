@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,8 +21,10 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -35,6 +36,7 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -173,9 +175,9 @@ export class SkillManager {
    * Notifies all registered change listeners and awaits any returned
    * promises. Sync listeners resolve immediately; async listeners (e.g.
    * `SkillTool.refreshSkills`) hold the activation pipeline until their
-   * downstream tool descriptions are refreshed, eliminating the race where
-   * a system-reminder announces a skill before the model can actually see
-   * it in `<available_skills>`.
+   * downstream validation state is refreshed, so by the time the inline
+   * activation reminder is appended the runtime already accepts the newly
+   * activated skill.
    *
    * Listeners run in parallel via `Promise.allSettled`. They're
    * independent reads (each rebuilds its own derived state from the
@@ -187,8 +189,8 @@ export class SkillManager {
    */
   private async notifyChangeListeners(): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
-    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
-    // call inside the gemini client) would permanently stall
+    // `SkillTool.refreshSkills` blocked on a slow skill reload) would
+    // permanently stall
     // `matchAndActivateByPaths` and `refreshCache`. The activation
     // registry itself has already been mutated synchronously in the
     // caller, so dropping a slow listener after the timeout is the
@@ -253,13 +255,6 @@ export class SkillManager {
     debugLogger.debug(
       `Listing skills${options.level ? ` at level: ${options.level}` : ''}${options.force ? ' (forced refresh)' : ''}`,
     );
-    const skills: SkillConfig[] = [];
-    const seenNames = new Set<string>();
-
-    const levelsToCheck: SkillLevel[] = options.level
-      ? [options.level]
-      : ['project', 'user', 'extension', 'bundled'];
-
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
 
@@ -270,6 +265,30 @@ export class SkillManager {
     } else {
       debugLogger.debug('Using cached skills');
     }
+
+    const skills = this.collectCachedSkills(options.level);
+    debugLogger.info(`Listed ${skills.length} unique skills`);
+    return skills;
+  }
+
+  /**
+   * Returns the currently committed cache without triggering discovery.
+   *
+   * Status and diagnostics callers must use this method instead of
+   * `listSkills()` so a read-only request cannot turn a cold cache into a
+   * filesystem scan. `null` means no refresh has committed yet.
+   */
+  getCachedSkills(level?: SkillLevel): SkillConfig[] | null {
+    if (this.skillsCache === null) return null;
+    return this.collectCachedSkills(level);
+  }
+
+  private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    const levelsToCheck: SkillLevel[] = level
+      ? [level]
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
@@ -298,8 +317,6 @@ export class SkillManager {
     // programmatic consumers — notably SkillTool's model-facing
     // `<available_skills>` description — are not reordered by priority.
     skills.sort((a, b) => a.name.localeCompare(b.name));
-
-    debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
   }
 
@@ -408,7 +425,10 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    // Safe mode: only load bundled (system) skills
+    const levels: SkillLevel[] = this.config.isSafeMode()
+      ? ['bundled']
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -509,9 +529,9 @@ export class SkillManager {
    * Returns the names of skills newly activated by this call. When at least
    * one skill activates, change listeners are notified and awaited — so by
    * the time this method resolves, downstream consumers (notably
-   * `SkillTool.refreshSkills` updating the model-facing tool description)
-   * have applied the new state. Callers can therefore announce the
-   * activation in the same turn without racing against a stale tool list.
+   * `SkillTool.refreshSkills` updating validation state) have applied the
+   * new state. Callers can therefore announce the activation in the same
+   * turn without racing against stale validation data.
    *
    * The activation registry reference is captured at call entry; if a
    * concurrent `refreshCache` rebuilds the registry mid-call, this
@@ -528,8 +548,7 @@ export class SkillManager {
    * an array of file paths and fire change listeners exactly once across
    * all of them. Used by `coreToolScheduler` so a single tool call that
    * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
-   * trigger N successive `SkillTool.refreshSkills` /
-   * `geminiClient.setTools()` round-trips.
+   * trigger N successive `SkillTool.refreshSkills` listener round-trips.
    */
   async matchAndActivateByPaths(
     filePaths: readonly string[],
@@ -538,7 +557,7 @@ export class SkillManager {
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
-      for (const name of registry.matchAndConsume(filePath)) {
+      for (const name of await registry.matchAndConsume(filePath)) {
         newlyAcrossPaths.add(name);
       }
     }
@@ -688,34 +707,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md
@@ -723,7 +726,8 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
-      // Extract argument-hint, when_to_use, and disable-model-invocation
+      // Extract argument-hint, when_to_use, disable-model-invocation, and
+      // user-invocable
       const argumentHint =
         typeof frontmatter['argument-hint'] === 'string'
           ? frontmatter['argument-hint']
@@ -738,6 +742,7 @@ export class SkillManager {
         disableModelInvocationRaw === 'true'
           ? true
           : undefined;
+      const userInvocable = parseUserInvocableField(frontmatter);
 
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
@@ -764,6 +769,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        userInvocable,
         paths,
         priority,
       };
@@ -924,17 +930,37 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return [
-          ...SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+      case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.resolve(
             v === QWEN_DIR
               ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
               : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
           ),
-          // Auto-discover skills from Claude Code's user skills directory.
-          // Silently ignored on machines without Claude Code installed.
-          path.join(os.homedir(), '.claude', SKILLS_CONFIG_DIR),
-        ];
+        );
+        // Auto-discover skills from Claude Code's user skills directory.
+        // Silently ignored on machines without Claude Code installed.
+        dirs.push(
+          path.resolve(path.join(os.homedir(), '.claude', SKILLS_CONFIG_DIR)),
+        );
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
+          if (!path.isAbsolute(homeExpanded)) {
+            debugLogger.warn(
+              `Custom skill directory "${customDir}" is relative; ` +
+                `resolved to "${expanded}" against the working directory`,
+            );
+          }
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':
@@ -955,6 +981,11 @@ export class SkillManager {
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
 
@@ -991,7 +1022,7 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
-            extensionName: extension.name,
+            extensionName: extension.displayName ?? extension.name,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.

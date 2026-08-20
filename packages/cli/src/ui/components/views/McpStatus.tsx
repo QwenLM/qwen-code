@@ -58,7 +58,7 @@ export const McpStatus: React.FC<McpStatusProps> = ({
       {discoveryInProgress && (
         <Box flexDirection="column" marginBottom={1}>
           <Text color={theme.status.warning}>
-            {t('⏳ MCP servers are starting up ({{count}} initializing)...', {
+            {t('◌ MCP servers are starting up ({{count}} initializing)...', {
               count: String(connectingServers.length),
             })}
           </Text>
@@ -95,18 +95,18 @@ export const McpStatus: React.FC<McpStatusProps> = ({
 
         switch (status) {
           case MCPServerStatus.CONNECTED:
-            statusIndicator = '🟢';
+            statusIndicator = '●';
             statusText = t('Ready');
             statusColor = theme.status.success;
             break;
           case MCPServerStatus.CONNECTING:
-            statusIndicator = '🔄';
+            statusIndicator = '◐';
             statusText = t('Starting... (first startup may take longer)');
             statusColor = theme.status.warning;
             break;
           case MCPServerStatus.DISCONNECTED:
           default:
-            statusIndicator = '🔴';
+            statusIndicator = '●';
             statusText = t('Disconnected');
             statusColor = theme.status.error;
             break;
@@ -252,7 +252,7 @@ export const McpStatus: React.FC<McpStatusProps> = ({
 
       {blockedServers.map((server) => (
         <Box key={server.name} marginBottom={1}>
-          <Text color={theme.status.error}>🔴 </Text>
+          <Text color={theme.status.error}>● </Text>
           <Text bold>
             {server.name}
             {server.extensionName
@@ -267,7 +267,7 @@ export const McpStatus: React.FC<McpStatusProps> = ({
 
       {showTips && (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={theme.text.accent}>{t('💡 Tips:')}</Text>
+          <Text color={theme.text.accent}>{t('★ Tips:')}</Text>
           <Text>
             {'  '}- {t('Use')} <Text color={theme.text.accent}>/mcp desc</Text>{' '}
             {t('to show server and tool descriptions')}
@@ -283,8 +283,7 @@ export const McpStatus: React.FC<McpStatusProps> = ({
             {t('to hide descriptions')}
           </Text>
           <Text>
-            {'  '}- {t('Use')}{' '}
-            <Text color={theme.text.accent}>/mcp auth &lt;server-name&gt;</Text>{' '}
+            {'  '}- {t('Use')} <Text color={theme.text.accent}>/mcp</Text>{' '}
             {t('to authenticate with OAuth-enabled servers')}
           </Text>
           <Text>

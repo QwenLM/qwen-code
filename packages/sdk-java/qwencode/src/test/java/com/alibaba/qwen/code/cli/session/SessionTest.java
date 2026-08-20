@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.cli.utils.Timeout;
 
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,6 +35,7 @@ class SessionTest {
     private static final Logger log = LoggerFactory.getLogger(SessionTest.class);
 
     @Test
+    @Tag("integration")
     void partialSendPromptSuccessfully() throws SessionControlException, SessionSendPromptException {
         Session session = QwenCodeCli.newSession(new TransportOptions().setIncludePartialMessages(true));
         session.sendPrompt("in the dir src/test/temp/, create file empty file test.touch", new SessionEventSimpleConsumers() {
@@ -70,6 +72,7 @@ class SessionTest {
     }
 
     @Test
+    @Tag("integration")
     void setPermissionModeSuccessfully() throws SessionControlException, SessionSendPromptException {
         Session session = QwenCodeCli.newSession(new TransportOptions());
 
@@ -92,6 +95,7 @@ class SessionTest {
     }
 
     @Test
+    @Tag("integration")
     void sendPromptAndSetModelSuccessfully() throws SessionControlException, SessionSendPromptException {
         Session session = QwenCodeCli.newSession(new TransportOptions());
 
@@ -117,6 +121,7 @@ class SessionTest {
     }
 
     @Test
+    @Tag("integration")
     void sendPromptAndInterruptContinueSuccessfully() throws SessionControlException, SessionSendPromptException {
         Session session = QwenCodeCli.newSession();
 

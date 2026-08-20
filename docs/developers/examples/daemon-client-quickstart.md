@@ -7,12 +7,13 @@ A minimal end-to-end example: start a `qwen serve` daemon in another terminal, t
 In one terminal:
 
 ```bash
-cd your-project/
-qwen serve --port 4170
-# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge, workspace=/path/to/your-project)
+qwen serve --port 4170 \
+  --workspace /path/to/project-a \
+  --workspace /path/to/project-b
+# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge, workspace=/path/to/project-a)
 ```
 
-Per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02 each daemon binds to one workspace at boot (the current `cwd`, or override with `--workspace /path/to/dir`). The daemon's bound path is advertised on `/capabilities.workspaceCwd` so clients can pre-flight check + omit `cwd` from `POST /session`.
+Each `--workspace` value must be an absolute directory. The first startup workspace is primary and remains the compatibility default for requests that omit `cwd`; `/capabilities.workspaces[]` is the catalog clients should use when selecting any runtime explicitly.
 
 In another:
 
@@ -27,26 +28,32 @@ import { DaemonClient, type DaemonEvent } from '@qwen-code/sdk';
 
 const client = new DaemonClient({
   baseUrl: 'http://127.0.0.1:4170',
-  // token: process.env.QWEN_SERVER_TOKEN, // required for non-loopback binds
+  // PR 27 (v0.16-alpha): when `token` is omitted, DaemonClient falls
+  // back to `process.env.QWEN_SERVER_TOKEN` automatically — same env
+  // var the daemon's `--token` CLI flag falls back to. So either:
+  //   export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"   # one-shot
+  //   export QWEN_SERVER_TOKEN="$(cat ./my-token-file)"    # user-managed file
+  //   const client = new DaemonClient({ baseUrl: '...' });
+  // OR pass it explicitly when you have a different env-var name:
+  //   token: process.env.MY_TOKEN,
 });
 
 // 1. Confirm we can reach the daemon, gate UI on its features, and
-//    read back the daemon's bound workspace (#3803 §02).
+//    select a trusted workspace from the advertised catalog.
 const caps = await client.capabilities();
 console.log('Daemon features:', caps.features);
-console.log('Daemon workspace:', caps.workspaceCwd); // canonical bound path
+const selectedWorkspace =
+  caps.workspaces?.find(
+    (workspace) => workspace.trusted && !workspace.primary,
+  ) ?? caps.workspaces?.find((workspace) => workspace.trusted);
+if (!selectedWorkspace) throw new Error('No trusted workspace is available');
+console.log('Selected workspace:', selectedWorkspace.id, selectedWorkspace.cwd);
 
-// 2. Spawn-or-attach a session. Two equally-valid shapes:
-//    (a) pass `workspaceCwd: caps.workspaceCwd` to be explicit, or
-//    (b) omit `workspaceCwd` entirely — the SDK then sends no `cwd`
-//        field and the daemon route falls back to its bound
-//        workspace. The (b) shape is concise but assumes you trust
-//        `caps.workspaceCwd` to be whatever you intended.
-//    A non-empty `workspaceCwd` that doesn't canonicalize to the
-//    daemon's bound path yields `400 workspace_mismatch` (see
-//    "Workspace mismatch" below).
+// 2. Spawn-or-attach inside that runtime. The SDK maps `workspaceCwd`
+//    to the wire-level POST /session `cwd` field. Omitting it is allowed
+//    only when the caller intentionally wants the legacy primary default.
 const session = await client.createOrAttachSession({
-  workspaceCwd: caps.workspaceCwd,
+  workspaceCwd: selectedWorkspace.cwd,
 });
 console.log(`session=${session.sessionId} attached=${session.attached}`);
 
@@ -111,13 +118,14 @@ function handleEvent(event: DaemonEvent): void {
 
 ## Workspace file helpers
 
-File routes are workspace-scoped, not session-scoped, so they live on
-`DaemonClient` directly:
+File routes are workspace-scoped, not session-scoped. Bind a qualified helper
+to the selected workspace id so every request remains inside that runtime:
 
 ```ts
-const file = await client.readWorkspaceFile('src/main.ts');
+const selected = client.workspaceById(selectedWorkspace.id);
+const file = await selected.readWorkspaceFile('src/main.ts');
 
-const updated = await client.editWorkspaceFile({
+const updated = await selected.editWorkspaceFile({
   path: 'src/main.ts',
   oldText: 'timeout: 30000',
   newText: 'timeout: 60000',
@@ -149,7 +157,7 @@ for await (const event of client.subscribeEvents(session.sessionId, {
 }
 ```
 
-The daemon retains the last 4000 events per session in a ring buffer; gaps beyond that window won't be re-deliverable.
+The daemon retains the last 8000 events per session in a ring buffer; gaps beyond that window won't be re-deliverable.
 
 ## Voting on permissions
 
@@ -175,7 +183,7 @@ case 'permission_request': {
 
 ## Shared-session collaboration
 
-Two clients pointed at the **same daemon** end up on the same session. Per #3803 §02 each daemon is bound to ONE workspace at boot, so the daemon launched as `qwen serve --workspace /work/repo` (or `cd /work/repo && qwen serve`) is what both clients connect to:
+Two clients pointed at the **same daemon workspace** end up on the same session when they use the default `sessionScope: 'single'`. For a single-workspace daemon launched as `qwen serve --workspace /work/repo` (or `cd /work/repo && qwen serve`), both clients connect to that primary workspace:
 
 ```ts
 // Daemon was launched as `qwen serve --workspace /work/repo` so
@@ -195,7 +203,7 @@ Both clients see the same `session_update` / `permission_request` stream. Either
 
 ## Workspace mismatch
 
-If `workspaceCwd` doesn't match the daemon's bound workspace, `createOrAttachSession` rejects with `DaemonHttpError` carrying status `400` and a structured body:
+If `workspaceCwd` does not match any registered advertised workspace, `createOrAttachSession` rejects with `DaemonHttpError` carrying status `400` and a structured body. A registered but untrusted secondary instead returns `403 untrusted_workspace` and must not be retried against primary:
 
 ```ts
 import { DaemonHttpError } from '@qwen-code/sdk';
@@ -211,16 +219,16 @@ try {
     };
     if (body.code === 'workspace_mismatch') {
       console.error(
-        `This daemon is bound to ${body.boundWorkspace}, ` +
-          `not ${body.requestedWorkspace}. Start a separate daemon ` +
-          `for that workspace, or route to the right one.`,
+        `Workspace ${body.requestedWorkspace} is not registered. ` +
+          `Refresh capabilities and select an advertised workspace, ` +
+          `or register it before retrying.`,
       );
     }
   }
 }
 ```
 
-Multi-workspace deployments run one daemon per workspace on separate ports — there's no intra-daemon routing under §02. An orchestrator (or the user's launcher) picks the right daemon based on the project the client wants to talk to.
+Do not retry against the primary workspace after a mismatch. Refresh `/capabilities`, select the intended entry from `workspaces[]`, or register an eligible dynamic workspace through `POST /workspaces`. Use separate daemons only when authentication, rate-limit, or process fault boundaries must also be independent.
 
 ## Authentication
 
@@ -232,6 +240,15 @@ const client = new DaemonClient({
   token: process.env.QWEN_SERVER_TOKEN,
 });
 ```
+
+**SDK env fallback (PR 27, v0.16-alpha)** — `DaemonClient` reads `QWEN_SERVER_TOKEN` from the environment automatically when `token` is omitted, mirroring the daemon's own `--token` CLI fallback. So if your shell has `export QWEN_SERVER_TOKEN=...`, this is equivalent to the above:
+
+```ts
+// Same effect as token: process.env.QWEN_SERVER_TOKEN, but without the boilerplate.
+const client = new DaemonClient({ baseUrl: 'https://your-host:4170' });
+```
+
+The fallback strips leading/trailing whitespace (handy for `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat` adds a newline) and treats empty / whitespace-only values as unset (a stale `export QWEN_SERVER_TOKEN=""` won't accidentally send `Authorization: Bearer ` with no token). The fallback runs once at construction; later `process.env` mutations don't affect already-built clients. Browser bundles (e.g. via `@qwen-code/webui`) get `undefined` cleanly because `globalThis.process` doesn't exist there.
 
 Wrong / missing tokens return `401` with a uniform body — the SDK throws `DaemonHttpError` on any 4xx/5xx from a route handler.
 

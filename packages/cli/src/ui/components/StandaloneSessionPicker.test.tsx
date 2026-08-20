@@ -852,7 +852,7 @@ describe('SessionPicker', () => {
       await act(async () => {
         await loadSessionPromise;
       });
-      // Tool group renders with raw function name fallback (no registry).
+      // 'BashTool' maps to 'other' (non-collapsible) → renders individually.
       expect(lastFrame() ?? '').toContain('BashTool');
     });
 

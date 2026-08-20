@@ -12,7 +12,6 @@ import './styles/timeline.css';
 import './styles/components.css';
 
 // Shared UI Components Export
-// Export all shared components from this package
 
 // Context
 export {
@@ -25,6 +24,13 @@ export type {
   PlatformProviderProps,
   PlatformType,
 } from './context/PlatformContext';
+
+export {
+  ExpandControlContext,
+  useExpandControl,
+  useControlledExpanded,
+} from './context/ExpandControlContext';
+export type { ExpandControlContextValue } from './context/ExpandControlContext';
 
 // Layout components
 export { default as Container } from './components/layout/Container';

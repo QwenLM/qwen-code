@@ -30,11 +30,13 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "dingtalk",
       "clientId": "$DINGTALK_CLIENT_ID",
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "useConnectionManager": true,
       "senderPolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via DingTalk.",
       "groupPolicy": "open",
+      "atSender": true,
       "groups": {
         "*": { "requireMention": true }
       }
@@ -61,6 +63,48 @@ Or define them in the `env` section of `settings.json`:
 }
 ```
 
+### Interactive Cards
+
+Add an `interactiveCards` object to opt in to DingTalk status and question
+cards. Omitting the object disables interactive cards. When the object is
+present, the overall switch and both card types default to enabled, and
+question cards time out after 270,000 milliseconds (270 seconds).
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true },
+        "questionCard": {
+          "enabled": true,
+          "timeoutMs": 270000
+        }
+      }
+    }
+  }
+}
+```
+
+Set `interactiveCards.enabled` to `false` to disable all interactive cards.
+Use `statusCard.enabled` or `questionCard.enabled` to disable one card type,
+and set `questionCard.timeoutMs` to a finite positive number to change how long
+Qwen Code waits for a question-card response. Values above 2,147,483,647
+milliseconds (about 24.8 days) are capped at that maximum. Interactive cards
+are configured through `settings.json` or the management API; the Web Shell
+channel editor does not render them, and it preserves the stored object when
+you edit other fields.
+
+### Connection Recovery
+
+`useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
+
+Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
+
 ## Running
 
 ```bash
@@ -73,15 +117,48 @@ qwen channel start
 
 Open DingTalk and send a message to the bot. You should see a 👀 emoji reaction appear while the agent processes, followed by the response.
 
+## Daemon Webhook Delivery
+
+When the channel runs under `qwen serve`, authenticated external Webhook events can trigger unattended agent tasks and deliver the final Markdown response to either a DingTalk user or group. Use the existing Webhook target fields; no separate channel type is required:
+
+```json
+{
+  "webhooks": {
+    "sources": {
+      "manual-test": {
+        "secretEnv": "QWEN_CHANNEL_DINGTALK_TEST_SECRET",
+        "targets": {
+          "operator": {
+            "chatId": "DINGTALK_USER_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": false
+          },
+          "team": {
+            "chatId": "OPEN_CONVERSATION_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Every target must set `isGroup` explicitly. For a direct message, `chatId` is the recipient's DingTalk user ID. For a group message, `chatId` is the group's `openConversationId`. Thread targets and incoming robot Webhook URLs are not supported for proactive delivery. See [Webhook-triggered tasks](./overview#webhook-triggered-tasks) for the complete channel configuration and request format.
+
 ## Group Chats
 
 DingTalk bots work in both DM and group conversations. To enable group support:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a DingTalk group
 3. @mention the bot in the group to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
+
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 
 ### Finding a Group's Conversation ID
 
@@ -99,14 +176,14 @@ You can send photos and documents to the bot, not just text.
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.
 - **Connection:** WebSocket stream instead of polling — no public IP or webhook URL needed.
-- **Formatting:** Responses use DingTalk's markdown dialect (a limited subset). Tables are automatically converted to plain text since DingTalk doesn't render them. Long messages are split into chunks at ~3800 characters.
+- **Formatting:** Responses use DingTalk's markdown dialect. Markdown tables are passed through to the DingTalk client; long messages are split into chunks at ~3800 characters.
 - **Working indicator:** A 👀 emoji reaction is added to the user's message while processing, then removed when the response is sent.
 - **Media download:** Two-step process — a `downloadCode` from the message is exchanged for a temporary download URL via DingTalk's API.
 - **Groups:** DingTalk uses `isInAtList` for @mention detection instead of parsing message entities.
 
 ## Tips
 
-- **Use DingTalk markdown-aware instructions** — DingTalk supports a limited markdown subset (headers, bold, links, code blocks, but not tables). Adding instructions like "Use DingTalk markdown. Avoid tables." helps the agent format responses correctly.
+- **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
 - **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
 - **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Quoting bot responses is not yet supported.
 
@@ -121,7 +198,8 @@ You can send photos and documents to the bot, not just text.
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure you @mention the bot in the group message
 - Verify the bot has been added to the group
 

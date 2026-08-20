@@ -129,7 +129,7 @@ export const ExecuteWithDescription: Story = {
 };
 
 /**
- * Execute variant with long output (truncated)
+ * Execute variant with long, collapsible output
  */
 export const ExecuteLongOutput: Story = {
   args: {

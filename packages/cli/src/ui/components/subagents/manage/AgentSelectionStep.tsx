@@ -7,6 +7,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
@@ -321,7 +322,7 @@ export const AgentSelectionStep = ({
       <Box key={`${agent.name}-${agent.level}`} alignItems="center">
         <Box minWidth={2} flexShrink={0}>
           <Text color={isSelected ? theme.text.accent : theme.text.primary}>
-            {isSelected ? '●' : ' '}
+            {isSelected ? ICON.CIRCLE_FILLED : ' '}
           </Text>
         </Box>
         <Text color={textColor} wrap="truncate">

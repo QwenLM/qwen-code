@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { markdownToPlainText } from './send.js';
 
 const {
@@ -110,11 +111,9 @@ describe('markdownToPlainText', () => {
     );
   });
 
-  it('converts image syntax (link regex fires before image regex)', () => {
-    // In the current implementation, the link regex fires before the image regex,
-    // so `![alt](url)` becomes `!alt (url)` rather than `[alt]`
+  it('converts image syntax to alt text', () => {
     const result = markdownToPlainText('![alt](https://img.png)');
-    expect(result).toBe('!alt (https://img.png)');
+    expect(result).toBe('[alt]');
   });
 
   it('strips blockquote markers', () => {
@@ -164,9 +163,41 @@ describe('detectImageMime', () => {
     expect(detectImageMime(buf)).toBe('image/gif');
   });
 
-  it('detects WebP magic bytes (RIFF)', () => {
-    const buf = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+  it('detects WebP magic bytes (RIFF....WEBP)', () => {
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x1a,
+      0x00,
+      0x00,
+      0x00, // file size (little-endian)
+      0x57,
+      0x45,
+      0x42,
+      0x50, // "WEBP"
+    ]);
     expect(detectImageMime(buf)).toBe('image/webp');
+  });
+
+  it('does not misidentify a non-WebP RIFF container (e.g. WAV) as WebP', () => {
+    // WAV is also a RIFF container; only bytes 8-11 distinguish it from WebP.
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x24,
+      0x00,
+      0x00,
+      0x00, // file size
+      0x57,
+      0x41,
+      0x56,
+      0x45, // "WAVE", not "WEBP"
+    ]);
+    expect(() => detectImageMime(buf)).toThrow('Unrecognized image format');
   });
 
   it('detects JPEG magic bytes', () => {
@@ -266,18 +297,35 @@ describe('validateImagePath', () => {
     );
   });
 
-  it('does not treat POSIX backslashes as directory separators', () => {
-    const imagePath = '/home/user/project\\escape.png';
+  it('reports the allowed directories when a Windows image path is rejected', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\OtherProject';
     mockRealpathSync.mockImplementation((p: string) => {
-      if (p.includes('escape.png')) return imagePath;
-      if (p === '/home/user/project') return '/home/user/project';
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('OtherProject')) return workspaceDir;
       return p;
     });
 
-    expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
-      'Image path outside allowed directories',
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      `Image path outside allowed directories: ${imagePath}. Allowed directories: /tmp, ${workspaceDir}`,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not treat POSIX backslashes as directory separators',
+    () => {
+      const imagePath = '/home/user/project\\escape.png';
+      mockRealpathSync.mockImplementation((p: string) => {
+        if (p.includes('escape.png')) return imagePath;
+        if (p === '/home/user/project') return '/home/user/project';
+        return p;
+      });
+
+      expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
+        'Image path outside allowed directories',
+      );
+    },
+  );
 
   it('rejects image with magic bytes that do not match extension', () => {
     // readSync returns JPEG magic, but file extension is .png
@@ -292,9 +340,19 @@ describe('validateImagePath', () => {
   });
 
   it('returns resolved realpath on success', () => {
-    mockRealpathSync.mockImplementation((p: string) => `/private${p}`);
-    const result = validateImagePath('/tmp/photo.png', workspaceDirs);
-    expect(result).toBe('/private/tmp/photo.png');
+    const imagePath = path.resolve('/tmp/photo.png');
+    const realImagePath = path.join(
+      path.dirname(imagePath),
+      `real-${path.basename(imagePath)}`,
+    );
+    // A distinguishable realpath (only the image path is remapped, the allowlist
+    // probes stay identity) proves the resolved path is returned rather than the
+    // argument passed through unchanged.
+    mockRealpathSync.mockImplementation((p: string) =>
+      p === imagePath ? realImagePath : p,
+    );
+    const result = validateImagePath(imagePath, workspaceDirs);
+    expect(result).toBe(realImagePath);
   });
 });
 
@@ -338,7 +396,9 @@ describe('sendImage', () => {
     // check (only 16 bytes), then sendImage calls readFileSync for
     // full file read.
     expect(mockReadFileSync).toHaveBeenCalledTimes(1);
-    expect(mockReadFileSync).toHaveBeenCalledWith('/tmp/test.png');
+    expect(mockReadFileSync).toHaveBeenCalledWith(
+      path.resolve('/tmp/test.png'),
+    );
 
     // Step 2: get upload URL called with correct params
     const encryptedSize = Math.ceil((fakeImageData.length + 1) / 16) * 16;

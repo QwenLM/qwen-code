@@ -56,6 +56,7 @@ export type AuditAction =
   | 'token_revoked'
   | 'auth_failed'
   | 'scope_denied'
+  | 'token_expired_max_age'
   | 'session_created'
   | 'session_attached'
   | 'session_detached'
@@ -120,7 +121,10 @@ export type AuditAction =
   | 'review_cancelled'
   | 'session_approval_mode_set'
   | 'policy_explained'
-  | 'session_resumed';
+  | 'session_resumed'
+  | 'cors_denied'
+  | 'cors_origin_admitted'
+  | 'cors_origin_removed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -129,6 +133,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'token_revoked',
   'auth_failed',
   'scope_denied',
+  'token_expired_max_age',
   'session_attached',
   'session_detached',
   'permission_voted',
@@ -193,6 +198,9 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_approval_mode_set',
   'policy_explained',
   'session_resumed',
+  'cors_denied',
+  'cors_origin_admitted',
+  'cors_origin_removed',
 ];
 
 export interface AuditEntry {

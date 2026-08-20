@@ -11,8 +11,30 @@ const debugLogger = createDebugLogger('ERROR_REPORT');
 
 interface ErrorReportData {
   error: { message: string; stack?: string } | { message: string };
-  context?: unknown;
+  contextSummary?: unknown;
   additionalInfo?: Record<string, unknown>;
+}
+
+interface ReportErrorOptions {
+  contextAlreadySummarized?: boolean;
+}
+
+type ContextSummary =
+  | { kind: 'array'; itemCount: number }
+  | { kind: 'object'; keys: string[] }
+  | { kind: string };
+
+function summarizeContext(context: unknown): ContextSummary {
+  if (Array.isArray(context)) {
+    return { kind: 'array', itemCount: context.length };
+  }
+  if (context && typeof context === 'object') {
+    return {
+      kind: 'object',
+      keys: Object.keys(context).slice(0, 20),
+    };
+  }
+  return { kind: typeof context };
 }
 
 /**
@@ -27,6 +49,7 @@ export async function reportError(
   baseMessage: string,
   context?: Content[] | Record<string, unknown> | unknown[],
   type = 'general',
+  options?: ReportErrorOptions,
 ): Promise<void> {
   let errorToReport: { message: string; stack?: string };
   if (error instanceof Error) {
@@ -46,34 +69,13 @@ export async function reportError(
   const reportContent: ErrorReportData = { error: errorToReport };
 
   if (context) {
-    reportContent.context = context;
+    reportContent.contextSummary = options?.contextAlreadySummarized
+      ? context
+      : summarizeContext(context);
   }
 
   const reportLabel = `${baseMessage} [${type}]`;
-  let stringifiedReportContent: string;
-  try {
-    stringifiedReportContent = JSON.stringify(reportContent, null, 2);
-  } catch (stringifyError) {
-    // This can happen if context contains something like BigInt
-    debugLogger.error(
-      `${reportLabel} Could not stringify report content (likely due to context):`,
-      stringifyError,
-      error,
-    );
-    // Fallback: try to report only the error if context was the issue
-    try {
-      const minimalReportContent = { error: errorToReport };
-      stringifiedReportContent = JSON.stringify(minimalReportContent, null, 2);
-      debugLogger.error(reportLabel, stringifiedReportContent);
-    } catch (minimalStringifyError) {
-      debugLogger.error(
-        `${reportLabel} Failed to stringify minimal error report:`,
-        minimalStringifyError,
-        error,
-      );
-    }
-    return;
-  }
+  const stringifiedReportContent = JSON.stringify(reportContent, null, 2);
 
   // Write to debug log instead of separate file
   debugLogger.error(reportLabel, stringifiedReportContent);

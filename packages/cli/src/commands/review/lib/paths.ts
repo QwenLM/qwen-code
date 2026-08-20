@@ -9,15 +9,91 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
-import { join } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { safeTarget } from '../../../utils/paths.js';
+
+/**
+ * Classify a `--out` target BEFORE the command fetches anything: an empty /
+ * whitespace-only path, or a path that resolves to an existing directory, is
+ * a usage error. A directory target otherwise survives to `writeFileSync`,
+ * dies EISDIR there — AFTER the fetches — and exit-codes as a runtime
+ * failure instead of the repairable-invocation class the caller keys on.
+ */
+export function assertWritableOutPath(out: string): void {
+  if (out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
+  // A trailing separator is the POSIX spelling of "this is a directory" —
+  // `resolve` normalizes it away, so check the RAW value: otherwise a
+  // not-yet-existing `--out /tmp/diffs/` slips past and gets written as a
+  // FILE after the fetches (every POSIX peer refuses that argument).
+  if (/[/\\]$/.test(out.trim())) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+  const resolved = resolve(out);
+  if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
+}
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
+/**
+ * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.
+ * Lives here, not in `review-worktree-lease.ts`, because the review
+ * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
+ * the lease writer must share one definition (the cleanup spec pins both).
+ */
+export const LEASE_PREFIX = 'qwen-review-lease-';
+
+/**
+ * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
+ * conventional name so a capture command can read back the effort the parser
+ * already resolved without the orchestrator threading the `--effort` value through
+ * by hand — see `resolveEffort`.
+ */
+export const PARSE_ARGS_REPORT = join(
+  REVIEW_TMP_DIR,
+  'qwen-review-parse-args.json',
+);
+
 /** Worktree path for a given PR review session. */
 export function worktreePath(prNumber: string | number): string {
   return join(REVIEW_TMP_DIR, `review-pr-${prNumber}`);
+}
+
+/**
+ * The disposable worktree the test-efficacy probe runs in — a sibling of the
+ * shared review worktree, discarded wholesale when the probe finishes (#6832).
+ *
+ * The one exception to this file's "paths are relative to the project root"
+ * rule: this returns an ABSOLUTE path. The probe drives `git worktree add`/
+ * `remove` with the shared worktree as cwd, so a relative path would resolve
+ * against that worktree, not the repo root, and land the probe tree nested
+ * inside the tree it is meant to sit beside. Both call sites — the probe and
+ * `cleanup.ts`'s stale-tree sweep — go through here so the `-probe` suffix and
+ * this normalisation stay in one place; renaming the suffix in one file used to
+ * silently stop the other from sweeping.
+ */
+export function probeWorktreePath(worktree: string): string {
+  return `${resolve(worktree)}-probe`;
+}
+
+/**
+ * The merge-base tree an A/B probe compares against — a second sibling of the
+ * review worktree, holding the code as it stood *before* the PR.
+ *
+ * Absolute for the same reason as `probeWorktreePath`: `git worktree add` runs
+ * with the review worktree as cwd, so a relative path would land the base tree
+ * nested inside the tree it is meant to sit beside. Kept here beside its sibling
+ * so `base-tree` and `cleanup.ts`'s sweep cannot drift apart on the suffix —
+ * the failure mode that made the probe tree's helper shared in the first place.
+ */
+export function baseWorktreePath(worktree: string): string {
+  return `${resolve(worktree)}-base`;
 }
 
 /** Local branch ref name for a fetched PR head. */
@@ -34,10 +110,10 @@ export function reviewBranch(prNumber: string | number): string {
  * and so they're scoped to the project rather than the user's whole machine.
  */
 export function tmpFile(target: string, suffix: string): string {
-  return join(REVIEW_TMP_DIR, `qwen-review-${target}-${suffix}`);
+  return join(REVIEW_TMP_DIR, `qwen-review-${safeTarget(target)}-${suffix}`);
 }
 
 /** Filename prefix used by `tmpFile`; useful for cleanup globbing. */
 export function tmpPrefix(target: string): string {
-  return `qwen-review-${target}-`;
+  return `qwen-review-${safeTarget(target)}-`;
 }

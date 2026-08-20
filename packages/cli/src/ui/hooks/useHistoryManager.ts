@@ -7,13 +7,19 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import process from 'node:process';
+
+const debugLogger = createDebugLogger('HISTORY_MANAGER');
 
 // Type for the updater function passed to updateHistoryItem
 type HistoryItemUpdater = (
   prevItem: HistoryItem,
 ) => Partial<HistoryItemWithoutId>;
 
-const debugLogger = createDebugLogger('HISTORY_MANAGER');
+export const UI_COMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
+export const UI_COMPACT_CLEARED_IMAGE_MESSAGE =
+  '[Old assistant image content cleared]';
+const UI_COMPACT_KEEP_RECENT = 20;
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
@@ -25,6 +31,7 @@ export interface UseHistoryManagerReturn {
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
   truncateToItem: (itemId: number) => void;
+  compactOldItems: () => void;
 }
 
 /**
@@ -65,7 +72,17 @@ export function useHistory(): UseHistoryManagerReturn {
             return prevHistory; // Don't add the duplicate
           }
         }
-        return [...prevHistory, newItem];
+
+        const newHistory = [...prevHistory, newItem];
+        if (debugLogger.isEnabled()) {
+          const textSize = newItem.text?.length ?? 0;
+          debugLogger.debug(
+            `[ADD_ITEM] type=${newItem.type}, ` +
+              `textSize=${textSize}, ` +
+              `historyLength=${newHistory.length}`,
+          );
+        }
+        return newHistory;
       });
       return id; // Return the generated ID (even if not added, to keep signature)
     },
@@ -110,6 +127,11 @@ export function useHistory(): UseHistoryManagerReturn {
 
   // Clears the entire history state and resets the ID counter.
   const clearItems = useCallback(() => {
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[CLEAR_HISTORY] Clearing history, memory before=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
     setHistory([]);
     messageIdCounterRef.current = 0;
   }, []);
@@ -122,6 +144,158 @@ export function useHistory(): UseHistoryManagerReturn {
     });
   }, []);
 
+  const compactOldItems = useCallback(() => {
+    setHistory((prev) => {
+      if (prev.length === 0) return prev;
+
+      let thoughtRemoved = 0;
+      let toolGroupsCompacted = 0;
+      let assistantImageItemsCompacted = 0;
+
+      let totalThoughts = 0;
+      let totalToolGroupsWithOutput = 0;
+      let totalAssistantItemsWithImages = 0;
+      for (const item of prev) {
+        if (
+          item.type === 'gemini_thought' ||
+          item.type === 'gemini_thought_content'
+        ) {
+          totalThoughts++;
+        } else if (
+          (item.type === 'gemini' || item.type === 'gemini_content') &&
+          (item.images?.length || item.omittedImageCount)
+        ) {
+          totalAssistantItemsWithImages++;
+        } else if (
+          item.type === 'tool_group' &&
+          item.tools.some(
+            (t) =>
+              (t.resultDisplay != null &&
+                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+              t.detailedDisplay != null ||
+              Boolean(t.images?.length || t.omittedImageCount),
+          )
+        ) {
+          totalToolGroupsWithOutput++;
+        }
+      }
+      const thoughtsToDrop = Math.max(
+        0,
+        totalThoughts - UI_COMPACT_KEEP_RECENT,
+      );
+      const toolGroupsToCompact = Math.max(
+        0,
+        totalToolGroupsWithOutput - UI_COMPACT_KEEP_RECENT,
+      );
+      const assistantImageItemsToCompact = Math.max(
+        0,
+        totalAssistantItemsWithImages - UI_COMPACT_KEEP_RECENT,
+      );
+      let thoughtsDropped = 0;
+      let toolGroupsSeen = 0;
+      let assistantImageItemsSeen = 0;
+
+      const next = prev
+        .filter((item) => {
+          if (
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content'
+          ) {
+            if (thoughtsDropped < thoughtsToDrop) {
+              thoughtsDropped++;
+              thoughtRemoved++;
+              return false;
+            }
+          }
+          return true;
+        })
+        .map((item) => {
+          if (
+            (item.type === 'gemini' || item.type === 'gemini_content') &&
+            (item.images?.length || item.omittedImageCount)
+          ) {
+            assistantImageItemsSeen++;
+            if (assistantImageItemsSeen <= assistantImageItemsToCompact) {
+              assistantImageItemsCompacted++;
+              return {
+                ...item,
+                text: item.text
+                  ? `${item.text}\n\n${UI_COMPACT_CLEARED_IMAGE_MESSAGE}`
+                  : UI_COMPACT_CLEARED_IMAGE_MESSAGE,
+                images: undefined,
+                omittedImageCount: undefined,
+              };
+            }
+          }
+          if (item.type !== 'tool_group') return item;
+          // Check for any non-null resultDisplay (covers string, FileDiff,
+          // AnsiOutputDisplay, AgentResultDisplay, etc.), a lingering
+          // `detailedDisplay`, or image payloads. Every retained output form
+          // must participate in the same keep-recent limit.
+          const hasOldOutput = item.tools.some(
+            (t) =>
+              (t.resultDisplay != null &&
+                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+              t.detailedDisplay != null ||
+              Boolean(t.images?.length || t.omittedImageCount),
+          );
+          if (!hasOldOutput) return item;
+          toolGroupsSeen++;
+          if (toolGroupsSeen > toolGroupsToCompact) return item;
+          toolGroupsCompacted++;
+          return {
+            ...item,
+            tools: item.tools.map((t) => {
+              if (
+                (t.resultDisplay != null &&
+                  t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+                t.detailedDisplay != null ||
+                t.images?.length ||
+                t.omittedImageCount
+              ) {
+                // Also drop `detailedDisplay` (the raw functionResponse text
+                // kept for the Ctrl+O full-detail transcript): clearing only
+                // `resultDisplay` would let a post-compaction transcript reopen
+                // re-surface the supposedly cleared read/search/list output,
+                // defeating the memory/privacy compaction. The `detailedDisplay`
+                // and `images` arms keep the guard robust when a tool carries
+                // raw detail or media without a `resultDisplay`.
+                return {
+                  ...t,
+                  resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
+                  detailedDisplay: undefined,
+                  images: undefined,
+                  omittedImageCount: undefined,
+                };
+              }
+              return t;
+            }),
+          };
+        });
+
+      if (
+        thoughtRemoved > 0 ||
+        toolGroupsCompacted > 0 ||
+        assistantImageItemsCompacted > 0
+      ) {
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[COMPACT_UI_HISTORY] removed ${thoughtRemoved} thought item(s), ` +
+              `compacted ${assistantImageItemsCompacted} assistant image item(s), ` +
+              `compacted ${toolGroupsCompacted} tool group(s), ` +
+              `historyLength ${prev.length} -> ${next.length}, ` +
+              `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+          );
+        }
+      }
+      return thoughtRemoved > 0 ||
+        toolGroupsCompacted > 0 ||
+        assistantImageItemsCompacted > 0
+        ? next
+        : prev;
+    });
+  }, []);
+
   return useMemo(
     () => ({
       history,
@@ -130,7 +304,16 @@ export function useHistory(): UseHistoryManagerReturn {
       clearItems,
       loadHistory,
       truncateToItem,
+      compactOldItems,
     }),
-    [history, addItem, updateItem, clearItems, loadHistory, truncateToItem],
+    [
+      history,
+      addItem,
+      updateItem,
+      clearItems,
+      loadHistory,
+      truncateToItem,
+      compactOldItems,
+    ],
   );
 }

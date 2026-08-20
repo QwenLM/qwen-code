@@ -114,6 +114,8 @@ Priority order (highest to lowest):
 
 `settings.env.QWEN_SANDBOX_IMAGE` also works as a generic env injection mechanism, but `tools.sandboxImage` is the preferred persistent setting.
 
+Custom images are user-managed. Rebuild them with an up-to-date Qwen Code installation to receive the safe update handoff; older images may still use their original in-process updater.
+
 ### macOS Seatbelt profiles
 
 Built-in profiles (set via `SEATBELT_PROFILE` env var):
@@ -163,7 +165,7 @@ If you want to restrict outbound network access to an allowlist, you can run a l
 
 This is especially useful with `*-proxied` Seatbelt profiles.
 
-For a working allowlist-style proxy example, see: [Example Proxy Script](/developers/examples/proxy-script).
+For a working allowlist-style proxy example, see: [Example Proxy Script](../../developers/examples/proxy-script.md).
 
 ## Linux UID/GID handling
 
@@ -210,7 +212,7 @@ Then rebuild the sandbox image:
 QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
 ```
 
-For more details on customizing the sandbox, see [Customizing the sandbox environment](/developers/tools/sandbox).
+For more details on customizing the sandbox, see [Customizing the sandbox environment](../../developers/tools/sandbox.md).
 
 **Network issues**
 

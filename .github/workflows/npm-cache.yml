@@ -1,0 +1,48 @@
+# Populates the shared npm cache that qwen-triage.yml's verify and
+# tmux-testing lanes restore read-only (actions/cache/restore). Without
+# this producer every restore is a guaranteed miss and `npm ci` in those
+# lanes downloads from the registry each time.
+name: 'npm cache producer'
+
+on:
+  push:
+    branches: ['main']
+    paths: ['package-lock.json']
+  workflow_dispatch:
+
+permissions:
+  actions: 'write'
+  contents: 'read'
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  save:
+    name: 'Save npm cache'
+    # Share the verify/tmux consumers' runs-on + container (qwen-triage.yml).
+    # actions/cache scopes an entry by a hash of the literal cache path plus
+    # the compression method, so a producer on ubuntu-latest (host path,
+    # zstd) can never be restored by a consumer in node:22-bookworm
+    # (container path, gzip); matching both by construction is what makes the
+    # restore hit. node:22-bookworm ships git, so checkout needs no setup.
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    container:
+      image: 'node:22-bookworm'
+      # Match the host runner UID/GID so bind-mounted files stay writable.
+      options: '--init --user node'
+    timeout-minutes: 15
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 1
+
+      - name: 'Populate npm cache'
+        run: 'npm ci --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Save npm cache'
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"

@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   normalizeImageAttachment,
@@ -141,10 +142,11 @@ describe('imageHandler', () => {
 
 describe('buildPromptBlocks', () => {
   it('builds ACP resource_link blocks from saved image attachments', () => {
+    const imagePath = path.resolve('/tmp/My Images/pasted image.png');
     expect(
       buildPromptBlocks('Please inspect this screenshot.', [
         {
-          path: '/tmp/My Images/pasted image.png',
+          path: imagePath,
           name: 'pasted image.png',
           mimeType: 'image/png',
         },
@@ -155,16 +157,36 @@ describe('buildPromptBlocks', () => {
         type: 'resource_link',
         name: 'pasted image.png',
         mimeType: 'image/png',
-        uri: 'file:///tmp/My Images/pasted image.png',
+        uri: pathToFileURL(imagePath).href,
+      },
+    ]);
+  });
+
+  it('builds valid file URIs from Windows image paths', () => {
+    expect(
+      buildPromptBlocks('', [
+        {
+          path: 'C:\\Users\\Me\\Pictures\\screen shot.png',
+          name: 'screen shot.png',
+          mimeType: 'image/png',
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'resource_link',
+        name: 'screen shot.png',
+        mimeType: 'image/png',
+        uri: 'file:///C:/Users/Me/Pictures/screen%20shot.png',
       },
     ]);
   });
 
   it('returns only resource links when the prompt has images only', () => {
+    const imagePath = path.resolve('/tmp/clipboard/pasted.webp');
     expect(
       buildPromptBlocks('', [
         {
-          path: '/tmp/clipboard/pasted.webp',
+          path: imagePath,
           name: 'pasted.webp',
           mimeType: 'image/webp',
         },
@@ -174,7 +196,7 @@ describe('buildPromptBlocks', () => {
         type: 'resource_link',
         name: 'pasted.webp',
         mimeType: 'image/webp',
-        uri: 'file:///tmp/clipboard/pasted.webp',
+        uri: pathToFileURL(imagePath).href,
       },
     ]);
   });
@@ -184,6 +206,19 @@ describe('normalizeImageAttachment', () => {
   it('rejects attachments with unsupported image mime types', () => {
     expect(
       normalizeImageAttachment({
+        id: 'img-unsupported',
+        name: 'vector.svg',
+        type: 'image/svg+xml',
+        size: 114,
+        data: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+        timestamp: Date.now(),
+      }),
+    ).toBeNull();
+  });
+
+  it('accepts GIF attachments when normalizing pasted images', () => {
+    expect(
+      normalizeImageAttachment({
         id: 'img-1',
         name: 'animated.gif',
         type: 'image/gif',
@@ -191,7 +226,11 @@ describe('normalizeImageAttachment', () => {
         data: 'data:image/gif;base64,R0lGODdhAQABAIAAAP///////ywAAAAAAQABAAACAkQBADs=',
         timestamp: Date.now(),
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      name: 'animated.gif',
+      type: 'image/gif',
+      data: 'R0lGODdhAQABAIAAAP///////ywAAAAAAQABAAACAkQBADs=',
+    });
   });
 
   it('rejects attachments whose decoded payload exceeds the enforced byte limit', () => {

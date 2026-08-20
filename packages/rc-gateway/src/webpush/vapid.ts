@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createECDH, createPrivateKey } from 'node:crypto';
+import { createECDH, createPrivateKey, type JsonWebKey } from 'node:crypto';
 import webpush from 'web-push';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -54,7 +54,7 @@ function generateVapidPem(): { pem: string } & VapidKeys {
   const ecdh = createECDH('prime256v1');
   const dBytes = Buffer.from(keys.privateKey, 'base64url');
   ecdh.setPrivateKey(dBytes);
-  const privJwk = {
+  const privJwk: JsonWebKey = {
     kty: 'EC',
     crv: 'P-256',
     d: keys.privateKey,
@@ -65,10 +65,7 @@ function generateVapidPem(): { pem: string } & VapidKeys {
       ecdh.getPublicKey(null, 'uncompressed').subarray(33, 65),
     ).toString('base64url'),
   };
-  const privKey = createPrivateKey({
-    key: privJwk as Parameters<typeof createPrivateKey>[0],
-    format: 'jwk',
-  });
+  const privKey = createPrivateKey({ key: privJwk, format: 'jwk' });
   const pem = privKey.export({ type: 'sec1', format: 'pem' }) as string;
   return { pem, publicKey: keys.publicKey, privateKey: keys.privateKey };
 }
@@ -151,17 +148,14 @@ export class VapidStore {
     const dBytes = Buffer.from(keys.privateKey, 'base64url');
     ecdh.setPrivateKey(dBytes);
     const pubBytes = ecdh.getPublicKey(null, 'uncompressed');
-    const privJwk = {
+    const privJwk: JsonWebKey = {
       kty: 'EC',
       crv: 'P-256',
       d: keys.privateKey,
       x: pubBytes.subarray(1, 33).toString('base64url'),
       y: pubBytes.subarray(33, 65).toString('base64url'),
     };
-    const privKey = createPrivateKey({
-      key: privJwk as Parameters<typeof createPrivateKey>[0],
-      format: 'jwk',
-    });
+    const privKey = createPrivateKey({ key: privJwk, format: 'jwk' });
     const pem = privKey.export({ type: 'sec1', format: 'pem' }) as string;
     await writeFile(filePath, pem, { mode: 0o600 });
   }

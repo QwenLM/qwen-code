@@ -1,0 +1,618 @@
+.tableShell {
+  position: relative;
+  --toolbar-height: 38px;
+  max-width: 100%;
+  margin: 8px 0;
+  overflow: visible;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.tableShell svg,
+.columnsPopover svg {
+  stroke-width: 1.5;
+}
+
+.densityCompact {
+  --table-row-height: 40px;
+  --table-cell-padding: 7px 10px;
+  --table-cell-padding-inline: 10px;
+  --table-header-padding: 6px 10px;
+  --table-detail-padding: 4px 8px;
+  --table-detail-gap: 2px;
+  --table-line-height: 1.35;
+  --table-column-min-width: 72px;
+  --table-column-max-width: 240px;
+}
+
+.densityStandard {
+  --table-row-height: 48px;
+  --table-cell-padding: 11px 14px;
+  --table-cell-padding-inline: 14px;
+  --table-header-padding: 8px 14px;
+  --table-detail-padding: 6px 10px;
+  --table-detail-gap: 3px;
+  --table-line-height: 1.45;
+}
+
+.densityComfortable {
+  --table-row-height: 56px;
+  --table-cell-padding: 15px 18px;
+  --table-cell-padding-inline: 18px;
+  --table-header-padding: 11px 18px;
+  --table-detail-padding: 8px 12px;
+  --table-detail-gap: 4px;
+  --table-line-height: 1.55;
+}
+
+.toolbar {
+  container: table-toolbar / inline-size;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--toolbar-height);
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 14px 14px 0 0;
+  background: var(--table-section-bg, var(--subtle-bg));
+  font-size: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.summary {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.toolbarSpacer {
+  flex: 1 1 auto;
+}
+
+.selection {
+  color: var(--agent-blue-500);
+  font-weight: 600;
+}
+
+.selectionStats {
+  display: flex;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 4px 10px;
+  align-items: center;
+  color: var(--muted-foreground);
+}
+
+.selectionMetric {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.selectionMetricValue {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.selectionCopyButton {
+  height: 24px;
+  padding-inline: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.toolbarControl {
+  height: 28px;
+  padding-inline: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.densityTrigger {
+  width: auto;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 4px;
+  padding-inline: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.densityTrigger[data-state='open'] {
+  border-color: transparent;
+  box-shadow: none;
+  outline: none;
+  --tw-ring-color: transparent;
+  --tw-ring-shadow: 0 0 #0000;
+}
+
+.densityTrigger svg,
+.densityMenu svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.5;
+}
+
+.iconButton {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.iconButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.iconButton:hover {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
+}
+
+.scroller {
+  position: relative;
+  container: table-scroller / inline-size;
+  max-width: 100%;
+  max-height: min(75vh, 720px);
+  overflow: auto;
+  border-radius: 0 0 13px 13px;
+  outline: none;
+}
+
+.scroller:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
+}
+
+.frozenColumnShadow {
+  position: absolute;
+  top: var(--toolbar-height);
+  bottom: 0;
+  z-index: 9;
+  width: 14px;
+  pointer-events: none;
+  transform: translateX(-1px);
+  background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
+}
+
+.table {
+  --action-column-width: 40px;
+
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+  table-layout: fixed;
+}
+
+.actionColumn {
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
+}
+
+.fillerColumn {
+  width: auto;
+}
+
+.headerCell,
+.cell {
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+}
+
+.fillerHeaderCell,
+.fillerCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.fillerHeaderCell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 40px;
+}
+
+.headerCell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 40px;
+  padding: 0;
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
+  overflow: visible;
+  background: var(--card);
+  color: var(--foreground);
+  font-weight: 600;
+  text-align: left;
+}
+
+.frozenHeaderCell {
+  left: var(--action-column-width);
+  z-index: 5;
+}
+
+.headerControls {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  min-width: 0;
+  padding: var(--table-header-padding, 11px 14px);
+}
+
+.cell {
+  height: var(--table-row-height, 48px);
+}
+
+.headerText {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filterTrigger,
+.sortTrigger {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.filterTrigger svg,
+.sortTrigger svg {
+  width: 13px;
+  height: 13px;
+}
+
+.filterTrigger:hover,
+.sortTrigger:hover {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
+}
+
+.activeHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  z-index: 7;
+  width: 6px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.resizeHandle:hover,
+.resizeHandle:focus-visible {
+  background: color-mix(in srgb, var(--agent-blue-500) 45%, transparent);
+  outline: none;
+}
+
+.filterTriggerActive {
+  background: color-mix(in srgb, var(--agent-blue-500) 18%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.sortTriggerActive {
+  color: var(--agent-blue-500);
+}
+
+.columnContextMenu {
+  position: fixed;
+  z-index: 1000;
+  width: 220px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 14px 28px rgb(0 0 0 / 30%);
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.columnContextMenuAction {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.columnContextMenuAction:hover,
+.columnContextMenuAction:focus-visible {
+  background: var(--subtle-bg-strong);
+  outline: none;
+}
+
+.cell {
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
+  padding: var(--table-cell-padding, 6px 8px);
+  background: var(--card);
+  color: var(--foreground);
+  line-height: var(--table-line-height, 1.45);
+  text-align: left;
+  vertical-align: middle;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: cell;
+}
+
+.cellContent,
+.detailValueContent {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cellText,
+.detailValueText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.cellContentCollapsed .cellText,
+.detailValueCollapsed .detailValueText {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.dragging .cell {
+  user-select: none;
+}
+
+tr:hover .cell {
+  background: var(--subtle-bg-strong);
+}
+
+tr:hover .fillerCell {
+  background: var(--subtle-bg-strong);
+}
+
+.selectedCell,
+tr:hover .selectedCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
+  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
+}
+
+.actionHeaderCell,
+.actionCell {
+  box-sizing: border-box;
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
+  text-align: center;
+}
+
+.stickyActionHeaderCell,
+.stickyActionCell {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+}
+
+.stickyActionHeaderCell {
+  z-index: 8;
+}
+
+.actionCell {
+  padding: 4px;
+  cursor: default;
+  line-height: 0;
+  user-select: none;
+  vertical-align: middle;
+}
+
+.frozenCell {
+  position: sticky;
+  left: var(--action-column-width);
+  z-index: 4;
+}
+
+.hasFrozenColumn .frozenHeaderCell,
+.hasFrozenColumn .frozenCell {
+  box-shadow: inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
+}
+
+.stickyActionHeaderCell,
+.frozenHeaderCell,
+.stickyActionCell,
+.frozenCell {
+  background: var(--card);
+}
+
+.activeHeaderCell.frozenHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+tr:hover .stickyActionCell,
+tr:hover .frozenCell {
+  background:
+    linear-gradient(var(--subtle-bg-strong), var(--subtle-bg-strong)),
+    var(--card);
+}
+
+.stickyActionCell.selectedCell,
+.frozenCell.selectedCell,
+tr:hover .stickyActionCell.selectedCell,
+tr:hover .frozenCell.selectedCell {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent),
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent)
+    ),
+    var(--card);
+  box-shadow:
+    8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset 0 0 0 1px var(--agent-blue-500);
+}
+
+.rowDetailButton {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.rowDetailButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.rowDetailButton:hover,
+.rowDetailButton[aria-expanded='true'] {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
+}
+
+.detailRow {
+  background: var(--table-section-bg, var(--subtle-bg));
+}
+
+.detailCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--table-section-bg, var(--subtle-bg));
+  color: var(--foreground);
+}
+
+.table tbody > tr:last-child > .cell,
+.table tbody > tr:last-child > .detailCell {
+  border-bottom: 0;
+}
+
+.detailPanel {
+  position: sticky;
+  left: 0;
+  display: grid;
+  box-sizing: border-box;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 300px));
+  justify-content: start;
+  column-gap: 24px;
+  row-gap: var(--table-detail-gap, 3px);
+  width: 100cqw;
+  padding: var(--table-detail-padding, 9px 11px);
+  padding-left: calc(
+    var(--action-column-width) + var(--table-cell-padding-inline, 14px)
+  );
+}
+
+.detailItem {
+  display: grid;
+  grid-template-columns: 72px 220px;
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding-top: 4px;
+  line-height: 1.3;
+}
+
+.detailLabel {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailValue {
+  min-width: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.emptyValue {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.emptyState {
+  padding: 16px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-align: center;
+}
+
+@container table-toolbar (max-width: 720px) {
+  .selectionMetricSecondary {
+    display: none;
+  }
+}
+
+@container table-toolbar (max-width: 500px) {
+  .compactToolbarLabel,
+  .selectionMetric:not(:first-child) {
+    display: none;
+  }
+
+  .compactToolbarControl,
+  .densityTrigger {
+    width: 28px;
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+}
+
+@container table-scroller (max-width: 320px) {
+  .detailPanel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detailItem {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+}

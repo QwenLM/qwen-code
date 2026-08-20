@@ -27,10 +27,45 @@ export {
   MAX_GOAL_ITERATIONS,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_HOOK_TIMEOUT_SECONDS,
+  getStopHookContinuationReason,
   createGoalStopHookCallback,
   abortGoalForStopHookCap,
   registerGoalHook,
   unregisterGoalHook,
 } from './goalHook.js';
 export { judgeGoal } from './goalJudge.js';
-export type { JudgeResult } from './goalJudge.js';
+export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';
+export * from './goal-protocol.js';
+export {
+  GoalConflictError,
+  GoalInvalidTransitionError,
+  elapsedActiveTime,
+  parseGoalControlRequest,
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
+  parseGoalStateRecordPayloadV2,
+  reduceGoalControl,
+  reduceGoalTurnFinished,
+} from './goal-reducer.js';
+export type {
+  GoalControlTransition,
+  GoalTurnFinishedTransition,
+} from './goal-reducer.js';
+export * from './goal-persistence.js';
+export {
+  isGoalCheckpointBookkeepingRecord,
+  projectGoalStateToLegacy,
+} from './goal-legacy-projection.js';
+export type {
+  LegacyActiveGoal,
+  LegacyGoalProjection,
+  LegacyGoalStatus,
+  LegacyGoalStatusKind,
+  LegacyGoalTerminal,
+} from './goal-legacy-projection.js';
+export * from './goal-evidence.js';
+export * from './goal-checkpoint.js';
+export * from './goal-checkpoint-verifier.js';
+export * from './goal-verifier.js';
+export * from './goal-runtime.js';
+export { goalTurnContext } from './goal-turn-context.js';
