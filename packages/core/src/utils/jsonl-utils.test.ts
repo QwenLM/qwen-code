@@ -284,6 +284,15 @@ describe('read() / readLines() with malformed lines', () => {
     ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
+  it('keeps the plain reader on a record budget after zero-record lines', async () => {
+    const file = tmpFile('{"i":\nnull\n{"i":1}\n{"i":2}\n');
+
+    await expect(readLines<{ i: number }>(file, 2)).resolves.toEqual([
+      { i: 1 },
+      { i: 2 },
+    ]);
+  });
+
   it('skips blank lines', async () => {
     const file = tmpFile('{"a":1}\n\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);

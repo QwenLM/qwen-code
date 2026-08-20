@@ -8,7 +8,7 @@
  * Efficient JSONL (JSON Lines) file utilities.
  *
  * Reading operations:
- * - readLines() - Reads the first N lines efficiently using buffered I/O
+ * - readLines() - Reads the first N records efficiently using buffered I/O
  * - read() - Reads entire file into memory as array
  *
  * Writing operations:
@@ -194,16 +194,11 @@ async function closeLineReader(
   await closed;
 }
 
-/**
- * Reads every record recovered from the first `count` non-empty lines of a
- * JSONL file. The budget counts physical lines, not records, so `complete`
- * always covers a fixed prefix of the file regardless of how many records a
- * glued line recovers.
- */
 async function readLinesWithIntegrityInternal<T = unknown>(
   filePath: string,
   count: number,
   options: JsonlReadLinesOptions = {},
+  budget: 'records' | 'lines' = 'records',
 ): Promise<{ records: T[]; complete: boolean }> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
@@ -221,13 +216,19 @@ async function readLinesWithIntegrityInternal<T = unknown>(
     let complete = true;
     let scannedLines = 0;
     for await (const line of rl) {
-      if (scannedLines >= count) break;
+      if (
+        (budget === 'records' && results.length >= count) ||
+        (budget === 'lines' && scannedLines >= count)
+      ) {
+        break;
+      }
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
       scannedLines++;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       complete &&= parsed.complete;
       for (const obj of parsed.records) {
+        if (budget === 'records' && results.length >= count) break;
         results.push(obj);
       }
     }
@@ -238,7 +239,7 @@ async function readLinesWithIntegrityInternal<T = unknown>(
     options.signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(
-        `Error reading first ${count} lines from ${filePath}:`,
+        `Error reading up to ${count} ${budget} from ${filePath}:`,
         error,
       );
     }
@@ -272,7 +273,7 @@ export async function readLinesWithIntegrity<T = unknown>(
   count: number,
   options: JsonlReadLinesOptions = {},
 ): Promise<{ records: T[]; complete: boolean }> {
-  return readLinesWithIntegrityInternal<T>(filePath, count, options);
+  return readLinesWithIntegrityInternal<T>(filePath, count, options, 'lines');
 }
 
 /**
