@@ -142,6 +142,26 @@
   background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
+.prBadge {
+  flex: 0 0 auto;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.prBadge:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
 .cardMeta {
   display: flex;
   align-items: center;
