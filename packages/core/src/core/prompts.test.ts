@@ -687,6 +687,37 @@ describe('Core System Prompt (prompts.ts)', () => {
       expect(prompt).toContain('## Software Engineering Tasks');
     });
 
+    it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {
+      // The override owns the identity sentence verbatim, so the styled
+      // wording is skipped there — but the style itself still has to land.
+      const identityPath = path.resolve('/custom/identity.md');
+      const customIdentity =
+        'You are Acme Code, an interactive CLI agent for Acme Corp.';
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return customIdentity;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt.startsWith(customIdentity)).toBe(true);
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
+      expect(prompt).toContain('# Output Style: Concise');
+    });
+
     it('does not bake the style into the QWEN_WRITE_SYSTEM_MD dump', () => {
       // The dump is meant to be reusable as a QWEN_SYSTEM_MD base; baking the
       // style in would apply it twice when that file is fed back.
