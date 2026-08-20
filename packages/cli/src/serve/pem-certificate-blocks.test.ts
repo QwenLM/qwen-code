@@ -335,6 +335,17 @@ describe('extractCertificateBlocks', () => {
     }
   });
 
+  it('stops when a second blank line appears in the data region', () => {
+    const lines = bodyLines(ROOT_PEM);
+    for (const malformed of [
+      `-----BEGIN CERTIFICATE-----\n\n\n${lines.join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      `-----BEGIN CERTIFICATE-----\n\n${lines.join('\n')}\n\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      `-----BEGIN PRIVATE KEY-----\nComment: key\n\nQUJD\n\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+    ]) {
+      expect(extractCertificateBlocks(malformed)).toBeUndefined();
+    }
+  });
+
   it('stops at a blank line that splits a body into a header section', () => {
     // Oracle: authorized=false, `not proc type` — the loader reads everything
     // before the first blank line as RFC 1421 headers, and headers without

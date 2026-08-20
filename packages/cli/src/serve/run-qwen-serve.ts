@@ -804,7 +804,7 @@ export function describeWorkerTlsTrustGaps(opts: {
     servingBlocks.some((block) => block.fingerprint256 === x509.fingerprint256);
   const workerTrustStore =
     operatorChain && servingBlocks
-      ? [...servingChain, ...operatorChain]
+      ? [...operatorChain, ...servingChain]
       : servingChain;
   // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
   // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
@@ -812,6 +812,7 @@ export function describeWorkerTlsTrustGaps(opts: {
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
   const anchorPath = walkWorkerAnchorPath(
+    x509,
     workerTrustStore,
     // The `servingBlocks === undefined` fallback prepends the leaf too, but
     // that file already reports its own gap below and the workers receive it
@@ -865,6 +866,15 @@ export function describeWorkerTlsTrustGaps(opts: {
         `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export --tls-cert as PEM with ` +
         `every -----BEGIN/END CERTIFICATE----- marker alone on its own line ` +
         `and restart.`,
+    );
+  }
+  const leafPurposeDefect = tlsServerPurposeDefect(x509);
+  if (leafPurposeDefect) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" cannot be used as a TLS server ` +
+        `certificate because ${leafPurposeDefect}. Every worker handshake ` +
+        `to the daemon will fail INVALID_PURPOSE. Reissue the leaf with a ` +
+        `TLS-server keyUsage and serverAuth extendedKeyUsage, then restart.`,
     );
   }
   if (anchorPath.nonCaTerminator) {
@@ -1020,6 +1030,9 @@ const BASIC_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x13]);
 const KEY_USAGE_OID = Buffer.from([0x55, 0x1d, 0x0f]);
 /** `keyCertSign` is bit 5 of the keyUsage BIT STRING, counted from the MSB. */
 const KEY_CERT_SIGN_MASK = 0x04;
+/** TLS server key usages: digitalSignature, keyEncipherment, keyAgreement. */
+const TLS_SERVER_KEY_USAGE_MASK = 0xa8;
+const TLS_SERVER_AUTH_OID = '1.3.6.1.5.5.7.3.1';
 /** `[0] EXPLICIT Version DEFAULT v1` — the first TBSCertificate member. */
 const VERSION_TAG = 0xa0;
 /** `[3] EXPLICIT Extensions OPTIONAL` — the last one. */
@@ -1122,6 +1135,21 @@ function keyUsageAllowsCertSign(der: Buffer): boolean {
   return first !== undefined && (first & KEY_CERT_SIGN_MASK) !== 0;
 }
 
+function tlsServerPurposeDefect(cert: X509Certificate): string | undefined {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  if (keyUsage !== undefined) {
+    const bits = derElementAt(keyUsage, 0);
+    const first = bits ? keyUsage[bits.start + 1] : undefined;
+    if (first === undefined || (first & TLS_SERVER_KEY_USAGE_MASK) === 0) {
+      return 'its keyUsage permits none of digitalSignature, keyEncipherment, or keyAgreement';
+    }
+  }
+  if (cert.keyUsage && !cert.keyUsage.includes(TLS_SERVER_AUTH_OID)) {
+    return 'its extendedKeyUsage does not include serverAuth';
+  }
+  return undefined;
+}
+
 /**
  * Whether `cert` is an X.509 v1 certificate. `version` is `[0] EXPLICIT …
  * DEFAULT v1`, and DER omits a member at its default, so a v1 certificate's
@@ -1170,6 +1198,7 @@ function cannotIssueCertificates(cert: X509Certificate): boolean {
 }
 
 function isSelfSignedCert(x509: X509Certificate): boolean {
+  if (x509.subject !== x509.issuer) return false;
   try {
     return x509.verify(x509.publicKey);
   } catch {
@@ -1294,11 +1323,12 @@ function pathLengthConstraint(cert: X509Certificate): number | undefined {
  * a member whose own validity window the handshake will enforce.
  */
 function walkWorkerAnchorPath(
+  leaf: X509Certificate,
   chain: readonly X509Certificate[],
   /**
-   * Whether `chain[0]` is a certificate the workers' loader actually hands
-   * them. It is not when the caller had to PREPEND the boot-parsed leaf
-   * because the serving file's own block is not one the loader takes.
+   * Whether `leaf` is a certificate the workers' loader actually hands them.
+   * It is not when the caller had to PREPEND the boot-parsed leaf because the
+   * serving file's own block is not one the loader takes.
    */
   leafHeldByWorkers = true,
 ): {
@@ -1316,7 +1346,7 @@ function walkWorkerAnchorPath(
    */
   unheldSelfSignedLeaf?: X509Certificate;
 } {
-  let next: X509Certificate | undefined = chain[0];
+  let next: X509Certificate | undefined = leaf;
   const walked = new Set<string>();
   const path: X509Certificate[] = [];
   let pathLengthViolation:

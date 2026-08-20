@@ -1858,6 +1858,139 @@ DBgH1Rq+scl7kyyxeucobVMtUWK6eJRwZ5gfsrpeMH0nqCJLj7s80WMNL9BLojPm
 rv3eIL/tayAWGZDmOpAiQdZn5pxv2jCLmv06Ae4=
 -----END CERTIFICATE-----
 `;
+const CROSS_ROOT_1 = `-----BEGIN CERTIFICATE-----
+MIIBkTCCATagAwIBAgIUeT/d3GHNmHzQitzyLZ3Yru0BnuIwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjEwHhcNMjYwODIwMTQwNjQ0WhcNMzYwODE3MTQwNjQ0WjAN
+MQswCQYDVQQDDAJSMTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAO2G4/eUMb5
+8sSm9P6av/SB26kYM1spOgOtSbWFIB8i31RjDHnCUrktWQCix8gFk+KKOdSUIFfP
+qjf1Z33RJbCjdDByMB0GA1UdDgQWBBSFh7tzjEtRhcFOt//KweX/vwzpUjAfBgNV
+HSMEGDAWgBSFh7tzjEtRhcFOt//KweX/vwzpUjAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAPBgNVHREECDAGhwR/AAABMAoGCCqGSM49BAMCA0kAMEYC
+IQDA9od9PwSd/dOFOnLq5gpCCzKWVBSzyXcn0KENGdgB/wIhAPU4TQLwx7xjPCHP
+etkwf72rPOGL7sfG64FP0nna+Evz
+-----END CERTIFICATE-----
+`;
+
+const CROSS_ROOT_2 = `-----BEGIN CERTIFICATE-----
+MIIBgDCCASWgAwIBAgIUZ4f0aFowpdYuwYYw+VrJYpVolGowCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQwNjQ0WhcNMzYwODE3MTQwNjQ0WjAN
+MQswCQYDVQQDDAJSMjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABEIEy3tDcQbR
+wQ7jxHWCrZtXpB4HLkaYXbYxDgwhKRTvZ/2gch/GmBtvwIn0e7pv9wfjOP664xs2
+iceOOosxacijYzBhMB0GA1UdDgQWBBSto4jb+M6nxv9BX7SwDXS9iFC88zAfBgNV
+HSMEGDAWgBSto4jb+M6nxv9BX7SwDXS9iFC88zAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNJADBGAiEAn2HbavxSri2nlXM/maDG
+25rLQnEkgM+eDwje7dQco4UCIQC3uxTxRSH3mDJEcL2Uo/1/d7x8mq577XKnA/Q5
+/1GhFQ==
+-----END CERTIFICATE-----
+`;
+
+const CROSS_INTERMEDIATE_1 = `-----BEGIN CERTIFICATE-----
+MIIBkDCCATWgAwIBAgIUK4jn+paxEGMFTbTURWtEGiEug6IwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjEwHhcNMjYwODIwMTQwNjQ1WhcNMzYwODE3MTQwNjQ1WjAd
+MRswGQYDVQQDDBJDcm9zcyBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7j4pX2nl4Nj+cUad0IFUnoLALZJ8DQQAlNUkBQ1wq+DfxBPWTXEpt
+lbqJzIZhjku881LM0M9OdTdJyqRtvuEPo2MwYTAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUyRN9LR6Pyjy6DW3xV6A+yujizkswHwYD
+VR0jBBgwFoAUhYe7c4xLUYXBTrf/ysHl/78M6VIwCgYIKoZIzj0EAwIDSQAwRgIh
+APBoGvl6f01SX3+SMMG1J+LbDRfe9cQVOTT2bG0IatGsAiEA+OqcZxyoWYxpnrNT
+frAoKCmMH+K14TpboJ8W680Xq90=
+-----END CERTIFICATE-----
+`;
+
+const CROSS_INTERMEDIATE_2 = `-----BEGIN CERTIFICATE-----
+MIIBjjCCATWgAwIBAgIUDpfNzEOZOiy6xbvKRtBLuvadA84wCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQwNjQ1WhcNMzYwODE3MTQwNjQ1WjAd
+MRswGQYDVQQDDBJDcm9zcyBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7j4pX2nl4Nj+cUad0IFUnoLALZJ8DQQAlNUkBQ1wq+DfxBPWTXEpt
+lbqJzIZhjku881LM0M9OdTdJyqRtvuEPo2MwYTAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUyRN9LR6Pyjy6DW3xV6A+yujizkswHwYD
+VR0jBBgwFoAUraOI2/jOp8b/QV+0sA10vYhQvPMwCgYIKoZIzj0EAwIDRwAwRAIg
+H9eYW8/Dvngv6kAY3bWUoqgulhWbNunKBzPTnxWmN2ICIH/quYOD05mxIzoeZGPS
+gdrf8FnFYppVQzO5Z9ttA1v6
+-----END CERTIFICATE-----
+`;
+
+const CROSS_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBuzCCAWGgAwIBAgIUMWkYua7nDRsl373Bt63skU//Qe8wCgYIKoZIzj0EAwIw
+HTEbMBkGA1UEAwwSQ3Jvc3MgSW50ZXJtZWRpYXRlMB4XDTI2MDgyMDE0MDY0NVoX
+DTM2MDgxNzE0MDY0NVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0C
+AQYIKoZIzj0DAQcDQgAEDPZB0DN12lMCkk+2ICRewMXJKIUpc03YBQJqd3UOQW1F
+yvxCCbT808DwKmLxHeJbg+kZ8yc3e/rNUz1cR4aZL6OBhzCBhDAMBgNVHRMBAf8E
+AjAAMA4GA1UdDwEB/wQEAwIDiDATBgNVHSUEDDAKBggrBgEFBQcDATAPBgNVHREE
+CDAGhwR/AAABMB0GA1UdDgQWBBTLt1u4Gt5B6g9xlFx75giiYQ+kfTAfBgNVHSME
+GDAWgBTJE30tHo/KPLoNbfFXoD7K6OLOSzAKBggqhkjOPQQDAgNIADBFAiAgcRAh
+6tcSyldzNpEgrNxX2xlAYRBDpkOkO9g8dEUDrwIhAPXeii8IRPw33QcetCJqyWvD
+rTP2mq30SnHQaRt+IxuQ
+-----END CERTIFICATE-----
+`;
+
+const CLIENT_ONLY_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBtTCCAVugAwIBAgIUOtV9BLAFWjW8r6Ni6yfEwPfbJ8kwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgyMDE0MDY0NVoXDTM2MDgxNzE0
+MDY0NVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAElLheYBUvnTKq5Ad/ZG+C9Q7EfYALIb0a4aQMRNCqn7X7MsXfq4VcWNup
+DMXeYcmB9QCJ54NphWGXUdOdE1wGF6OBijCBhzAdBgNVHQ4EFgQUyALXrNmNOYTk
+UeRJhl9YWnALHRYwHwYDVR0jBBgwFoAUyALXrNmNOYTkUeRJhl9YWnALHRYwDAYD
+VR0TAQH/BAIwADAPBgNVHREECDAGhwR/AAABMA4GA1UdDwEB/wQEAwIHgDAWBgNV
+HSUBAf8EDDAKBggrBgEFBQcDAjAKBggqhkjOPQQDAgNIADBFAiA1nG4YiUF1/hL3
+OKfHPHH6pdZMNDN4drC88D4Kd97nFwIhAKz2Al1IEEy8mJhMPFIrXRWPGFOllP3k
+Xb+fBUufjago
+-----END CERTIFICATE-----
+`;
+
+const KEY_CERT_SIGN_ONLY_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBlDCCATqgAwIBAgIUDpfNzEOZOiy6xbvKRtBLuvadA9AwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQxMDA3WhcNMzYwODE3MTQxMDA3WjAU
+MRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARc
+EdR+oRz1xXNo5GY8XXMeLhv04CuM9RZBG1klDnGko30IOiOftFfK6931KKXp9psB
+23hJWQ1d11KZZJ7H3qQJo3EwbzAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIC
+BDAPBgNVHREECDAGhwR/AAABMB0GA1UdDgQWBBSrIj1Jon0+oUBfQK4PIpr1/7Iz
+BzAfBgNVHSMEGDAWgBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAKBggqhkjOPQQDAgNI
+ADBFAiEAjz6JE5DEV0isXW3WGwPcxGgf3Hu1P+Qu4sdfJRlBY2gCIHoPr/7C+ZAw
+rMHucyDXcw48wg3WmDIbBZ5iUHkVWntx
+-----END CERTIFICATE-----
+`;
+
+const KEY_CERT_SIGN_ONLY_ISSUER = `-----BEGIN CERTIFICATE-----
+MIIBfzCCASWgAwIBAgIURbqYh3ZfxfmU94nX3KroO2oztdcwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQxMDA3WhcNMzYwODE3MTQxMDA3WjAN
+MQswCQYDVQQDDAJSMjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABN/Gq3++mu9H
+gxLRv9XJUIutKUQgKKQA+7FNfnECjfASpzq3w/kXIbNFasMEOh3N3jhe8sfMtLjW
+LhjljS+orCWjYzBhMB0GA1UdDgQWBBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAfBgNV
+HSMEGDAWgBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNIADBFAiEAwp1eqjarkry11QpWoXDh
+m6GdkDDlkgDVlo9xFthOW2gCIC4BOgSFQsZn1b6QrBbM3KeAogt0JbU/GganNV29
+YTto
+-----END CERTIFICATE-----
+`;
+
+const FAKE_SELF_VERIFIED_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIBkjCCATigAwIBAgIUcjMKrW8GdL4SWy0sjN6Ftta56IowCgYIKoZIzj0EAwIw
+ETEPMA0GA1UEAwwGUm9vdCBBMB4XDTI2MDgyMDE0MDY0NVoXDTI2MDkxOTE0MDY0
+NVowHDEaMBgGA1UEAwwRRmFrZSBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggq
+hkjOPQMBBwNCAAQca5R8kwHIhxeEXFQZTyqtHGpSBjDkC3EpkcYWPbKGQseXR/J0
+BZ8tKjrRisGrdn+FljIjl8VHAp2+vuzciqIPo2MwYTAdBgNVHQ4EFgQUAILGac/S
+nAmumOqamezMPQlXOU0wHwYDVR0jBBgwFoAUAILGac/SnAmumOqamezMPQlXOU0w
+DwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwIDSAAw
+RQIgNd8m2NjLmo5lXx1zVGqNjVRK0DlwyLUVeUa3TN5VPa8CIQDLiUSxhpBdH/yI
+konRu2+KHtLecnXRC/BaXvGWF3WoUQ==
+-----END CERTIFICATE-----
+`;
+
+const FAKE_SELF_VERIFIED_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBuTCCAWCgAwIBAgIUWYfH7FMqwt08txV68JBoFkCKvGQwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRRmFrZSBJbnRlcm1lZGlhdGUwHhcNMjYwODIwMTQwNjQ1WhcN
+MzYwODE3MTQwNjQ1WjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIB
+BggqhkjOPQMBBwNCAASBsAu8zOfr23TGC8avbWa29a6wkt8FPglHKw3G/Ab2+Cx0
+NIiITXjWKwjopnHbBOfDfmjNFlCuCDp3/OhqdpWoo4GHMIGEMAwGA1UdEwEB/wQC
+MAAwDgYDVR0PAQH/BAQDAgOIMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8GA1UdEQQI
+MAaHBH8AAAEwHQYDVR0OBBYEFPtHA766j4WTqf5fWgMwmnsKTQxLMB8GA1UdIwQY
+MBaAFACCxmnP0pwJrpjqmpnszD0JVzlNMAoGCCqGSM49BAMCA0cAMEQCIGpSpLfj
+2SUSnRFfxP1w0tVF3hwUouurjlFgydBsNz81AiAQWZklgKzmnxLSR4W1CE5m5srR
+FD7Sc2l6Dh2GBS56ZA==
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -1875,6 +2008,77 @@ describe('describeWorkerTlsTrustGaps', () => {
         cert: Buffer.from(TEST_TLS_CERT),
         certPath: '/certs/daemon.pem',
         daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('reports a leaf whose keyUsage only permits certificate signing', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(CROSS_ROOT_1),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('keyUsage permits none');
+  });
+
+  it('reports an issued leaf whose keyUsage only permits certificate signing', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        `${KEY_CERT_SIGN_ONLY_LEAF}${KEY_CERT_SIGN_ONLY_ISSUER}`,
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('keyUsage permits none');
+  });
+
+  it('reports a leaf whose extendedKeyUsage only permits client auth', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(CLIENT_ONLY_LEAF),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+  });
+
+  it('requires matching subject and issuer names for a self-signed anchor', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        `${FAKE_SELF_VERIFIED_LEAF}${FAKE_SELF_VERIFIED_INTERMEDIATE}`,
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  it('models operator certificates before serving certificates', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(`${CROSS_LEAF}${CROSS_INTERMEDIATE_2}${CROSS_ROOT_2}`),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/operator.pem',
+      operatorCaCert: Buffer.from(CROSS_INTERMEDIATE_1),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  it('uses an operator-first cross-signed path when it is anchored', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(`${CROSS_LEAF}${CROSS_INTERMEDIATE_1}`),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/operator.pem',
+        operatorCaCert: Buffer.from(`${CROSS_INTERMEDIATE_2}${CROSS_ROOT_2}`),
       }),
     ).toEqual([]);
   });

@@ -249,6 +249,9 @@ function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
     // `Name: value` line carries a colon, which the base64 judgment below
     // already refuses — measured `authorized: false` for that shape too.
     const data = separator >= 0 ? body.slice(separator + 1) : body;
+    // A second blank line is still inside the data region. OpenSSL treats it
+    // as a malformed end to the block and stops loading the file.
+    if (data.some(isHeaderSeparatorLine)) break;
     // Interior and leading whitespace in a body line is skipped by the
     // decoder, not an error, so join first and judge the base64 afterwards.
     // A BOM is NOT whitespace to the decoder: one inside a base64 line is
