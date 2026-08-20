@@ -271,7 +271,11 @@ const TEAM_AGENT_NAME_PROPERTY = {
   type: 'string',
   description:
     'When provided, spawn as a named teammate via the active team ' +
-    'instead of a one-shot subagent. Requires an active team context.',
+    'instead of a one-shot subagent. Requires an active team context. ' +
+    'Teammates always run concurrently and report through team messaging; ' +
+    'omit run_in_background for them — an explicit false is rejected. For ' +
+    'an inline blocking result, omit name and use a regular agent with ' +
+    'run_in_background: false instead.',
 };
 
 const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
@@ -734,7 +738,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates may run in the background, but must be shut down before their caller-owned worktree is removed.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -822,7 +826,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Named teammates always run concurrently and report through team messaging; omit \`run_in_background\` when spawning one — an explicit \`run_in_background: false\` is rejected, so for an inline blocking result omit \`name\` and use a regular agent instead. Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -1151,6 +1155,24 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "working_dir" requires an explicit subagent_type (and cannot be "fork").';
       }
+    }
+
+    // Named teammates are inherently concurrent: persistent team identity,
+    // messaging, and automatic final-report delivery leave no room for
+    // foreground/inline semantics. Reject the explicitly-foreground
+    // combination before spawning instead of silently ignoring it — an
+    // accepted-but-ignored flag wastes the launch and every token the
+    // teammate spends. The gate mirrors the team-routing branch in
+    // `execute`: without an active team, `name` falls through to a regular
+    // agent, where `run_in_background: false` is a valid foreground request.
+    if (
+      params.run_in_background === false &&
+      params.name &&
+      !isTeammate() &&
+      isTopLevelSession() &&
+      this.config.getTeamManager()
+    ) {
+      return 'Parameter "run_in_background" cannot be false for a named teammate: teammates always run concurrently and report through team messaging. Omit "run_in_background" when spawning a teammate, or omit "name" and keep run_in_background: false to run a regular agent in the foreground and get its result inline.';
     }
 
     if (params.plan_mode_required !== undefined) {
@@ -2264,6 +2286,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return this.buildSpawnBlockedResult(
           'Error: "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".',
           'isolation is incompatible with a named teammate',
+        );
+      } else if (this.params.run_in_background === false) {
+        // Defense in depth behind validateToolParams: a hallucinated or
+        // wildcard-list call must not spawn a teammate that the caller
+        // believes is running inline.
+        return this.buildSpawnBlockedResult(
+          'Error: "run_in_background" cannot be false for a named teammate: teammates always run concurrently and report through team messaging. Omit "run_in_background" when spawning a teammate, or omit "name" and keep run_in_background: false to run a regular agent in the foreground and get its result inline.',
+          'run_in_background: false is incompatible with a named teammate',
         );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);

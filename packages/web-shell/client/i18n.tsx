@@ -539,6 +539,16 @@ const EN: Messages = {
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
   'composer.upload.drop': 'Drop files',
+  'composer.dropChoice.title': (v) =>
+    Number(v?.count) === 1
+      ? 'Add dropped file'
+      : `Add ${v?.count ?? 0} dropped files`,
+  'composer.dropChoice.description':
+    'Attach the files to this message for the agent to read, or upload them to the workspace and insert @ references.',
+  'composer.dropChoice.cancel': 'Cancel',
+  'composer.dropChoice.upload': 'Upload to workspace',
+  'composer.dropChoice.reference': 'Attach to message',
+  'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -1014,7 +1024,7 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported file(s) were skipped.`,
+    `${v?.count ?? 0} file(s) were unavailable and skipped.`,
   'editor.imagesReadFailed': (v) =>
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
@@ -1214,6 +1224,13 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'rightPanel.add': 'Add panel',
+  'attachment.showPreview': 'Preview',
+  'attachment.showSource': 'Source',
+  'attachment.previewUnsupported':
+    'Preview is not available for this file type.',
+  'attachment.readFailed': 'Failed to read attachment.',
+  'attachment.loadingFile': 'Loading file...',
+  'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.promptFailed': 'Failed to send the side-task question',
@@ -1225,6 +1242,11 @@ const EN: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
+  'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path
+      ? `File not found in the workspace · ${v.path}`
+      : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -1398,14 +1420,11 @@ const EN: Messages = {
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.mayCorrespond':
-    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
   'queue.continueEditingConfirm':
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
-  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -3538,6 +3557,13 @@ const ZH: Messages = {
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',
   'composer.upload.drop': '拖放文件',
+  'composer.dropChoice.title': (v) => `添加拖入的 ${v?.count ?? 0} 个文件`,
+  'composer.dropChoice.description':
+    '可作为当前消息的附件供 Agent 读取，或上传到工作区并插入 @ 引用。',
+  'composer.dropChoice.cancel': '取消',
+  'composer.dropChoice.upload': '上传到工作区',
+  'composer.dropChoice.reference': '添加为附件',
+  'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -3983,7 +4009,7 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -4171,6 +4197,12 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'rightPanel.add': '添加页签',
+  'attachment.showPreview': '预览',
+  'attachment.showSource': '源码',
+  'attachment.previewUnsupported': '暂不支持预览此文件类型。',
+  'attachment.readFailed': '读取附件失败。',
+  'attachment.loadingFile': '正在加载文件...',
+  'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.promptFailed': '发送侧边任务问题失败',
@@ -4182,6 +4214,9 @@ const ZH: Messages = {
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
+  'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactUnavailable': (v) =>
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
@@ -4346,14 +4381,11 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.mayCorrespond':
-    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
-  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>

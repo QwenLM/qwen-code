@@ -50,7 +50,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
-import { git } from './lib/git.js';
+import { isGitIgnored } from '@qwen-code/qwen-code-core';
+import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import {
   hasUnmodeledWorkspaceGlob,
@@ -463,7 +464,9 @@ function normalizeClaimPath(text: string): string {
 /**
  * Is `path` gitignored in `worktree`? One `git` spawn per distinct path, memoed
  * for the process — a Test Plan naming the same artifact in its Evidence and
- * its Environment sections should not pay twice.
+ * its Environment sections should not pay twice. The memo stays caller-side:
+ * the shared helper is fresh-by-default because the audit guard's remedy
+ * re-check must observe a flip.
  *
  * `--` before the path is belt-and-braces, and measured as such: `PATH_RE`'s
  * class admits a leading `-`, but no `-`-leading text survives extraction today
@@ -473,23 +476,17 @@ function normalizeClaimPath(text: string): string {
  * ignored" or "no git here"; both fall through to the ordinary ruling, which is
  * why this returns a plain boolean.
  *
- * Spawned through the package's own `git` helper rather than a bare
- * `execFileSync`, for the deadline it carries: every other git invocation in
- * these commands runs under `GIT_TIMEOUT_MS` because, as that constant's
- * comment puts it, "a hang must still end". This was the one without it, and
- * it runs against a worktree the review does not control.
+ * The probe runs under GIT_TIMEOUT_MS, the same generous deadline every other
+ * git invocation in these commands uses — it runs against a worktree the
+ * review does not control, and a kill on a short deadline reads as "not
+ * ignored", which turns a gitignored build output into a false `contradicted`
+ * ruling in the presubmit report.
  */
-function isGitIgnored(worktree: string, path: string): boolean {
+function isGitIgnoredCached(worktree: string, path: string): boolean {
   const key = `${worktree}\0${path}`;
   const memo = ignoreCache.get(key);
   if (memo !== undefined) return memo;
-  let ignored: boolean;
-  try {
-    git('-C', worktree, 'check-ignore', '-q', '--', path);
-    ignored = true;
-  } catch {
-    ignored = false;
-  }
+  const ignored = isGitIgnored(worktree, path, GIT_TIMEOUT_MS);
   ignoreCache.set(key, ignored);
   return ignored;
 }
@@ -529,7 +526,7 @@ function rulePath(
   // unreachable and silently retired its note, which is the distinction a
   // reader needs: a tracked file that is present is state at the reviewed
   // commit, an ignored file that is present is something this run produced.
-  const ignored = isGitIgnored(worktree, path);
+  const ignored = isGitIgnoredCached(worktree, path);
   if (existsSync(join(worktree, path))) {
     return {
       kind: 'path',

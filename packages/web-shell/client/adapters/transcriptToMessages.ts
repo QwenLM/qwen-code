@@ -466,6 +466,9 @@ export function transcriptBlocksToDaemonMessages(
           msg.files = textBlock.files.map((file) => ({
             name: file.name,
             mimeType: file.mimeType || 'text/plain',
+            ...(file.data !== undefined ? { data: file.data } : {}),
+            ...(file.text !== undefined ? { text: file.text } : {}),
+            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
           }));
         }
         messages.push(msg);
@@ -1107,7 +1110,7 @@ function daemonToolBlockToToolCall(
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
-  const content = normalizeToolContent(block.content);
+  const content = normalizeToolContent(block);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -1278,10 +1281,22 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
   };
 }
 
+// The transcript store uses copy-on-write: an unchanged tool keeps its block
+// identity across frames. Keying by the block, rather than its content array,
+// also handles callers that replace a block while reusing its content array.
+const normalizedToolContentCache = new WeakMap<
+  DaemonToolTranscriptBlock,
+  readonly DaemonMessageToolCallContent[]
+>();
+
 function normalizeToolContent(
-  value: unknown,
-): DaemonMessageToolCallContent[] | undefined {
+  block: DaemonToolTranscriptBlock,
+): readonly DaemonMessageToolCallContent[] | undefined {
+  const value = block.content;
   if (!Array.isArray(value)) return undefined;
+
+  const cached = normalizedToolContentCache.get(block);
+  if (cached !== undefined) return cached;
 
   const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
     const item = getRecord(entry);
@@ -1328,7 +1343,10 @@ function normalizeToolContent(
     return [];
   });
 
-  return content.length > 0 ? content : undefined;
+  if (content.length === 0) return undefined;
+  const frozen = Object.freeze(content);
+  normalizedToolContentCache.set(block, frozen);
+  return frozen;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
