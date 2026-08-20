@@ -58,6 +58,10 @@ fn string_schema(generator: &mut SchemaGenerator) -> Schema {
     String::json_schema(generator)
 }
 
+fn boolean_schema(generator: &mut SchemaGenerator) -> Schema {
+    bool::json_schema(generator)
+}
+
 pub const MULTI_CALL_SESSION_DESCRIPTION: &str =
     "For multi-call work, prefer a short public session label and repeat it on every call that \
      accepts it. Omit it to use the authenticated transport's implicit lifecycle session.";
@@ -85,6 +89,21 @@ fn positive_number_schema(_: &mut SchemaGenerator) -> Schema {
 
 fn positive_integer_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer", "minimum": 1 })
+}
+
+fn observation_revision_schema(_: &mut SchemaGenerator) -> Schema {
+    // Mirrors the live platform subschema so the portable projection stays a
+    // provable subset of every runtime `get_window_state` schema.
+    json_schema!({
+        "type": "object",
+        "required": ["version"],
+        "properties": {
+            "version": { "type": "integer", "const": 1 },
+            "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "force_full": { "type": "boolean", "default": false }
+        },
+        "additionalProperties": false
+    })
 }
 
 fn click_button_schema(generator: &mut SchemaGenerator) -> Schema {
@@ -456,6 +475,70 @@ pub struct GetDesktopStateInput {
 
 impl ToolInput for GetDesktopStateInput {
     const TOOL_NAME: &'static str = "get_desktop_state";
+}
+
+/// Opt in to the versioned `accessibility.observation_revision.v1` protocol on
+/// `get_window_state`. Omitting the whole record preserves the legacy
+/// full-snapshot contract byte for byte.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRevisionInput {
+    /// Protocol version. Only `1` is defined; any other value is rejected
+    /// with a closed `invalid_observation_revision` error.
+    pub version: u32,
+    /// Revision the caller wants to diff against. The caller — never the
+    /// driver — decides which revision was actually delivered downstream.
+    /// Missing, expired, foreign, or incompatible bases yield a full response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<String>,
+    /// Force a full resynchronization even when a compatible base exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_full: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct GetWindowStateInput {
+    /// Target process ID.
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    /// Exact window to observe.
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    /// For multi-call work, prefer a short public session label and repeat it on every call that
+    /// accepts it. Omit it to use the authenticated transport's implicit lifecycle session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub session: Option<String>,
+    /// Case-insensitive projection filter. Incompatible with `observation_revision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub query: Option<String>,
+    /// Default true. Set false to skip the screenshot and return the tree only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "boolean_schema")]
+    pub include_screenshot: Option<bool>,
+    /// Write the PNG here instead of returning base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub screenshot_out_file: Option<String>,
+    /// Cap on the total number of accessibility nodes walked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub max_elements: Option<u32>,
+    /// Cap on the accessibility-tree walk depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub max_depth: Option<u32>,
+    /// Opt in to `accessibility.observation_revision.v1`. Requires a bound
+    /// driver session. Omit to preserve the legacy full-snapshot contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "observation_revision_schema")]
+    pub observation_revision: Option<ObservationRevisionInput>,
+}
+
+impl ToolInput for GetWindowStateInput {
+    const TOOL_NAME: &'static str = "get_window_state";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]

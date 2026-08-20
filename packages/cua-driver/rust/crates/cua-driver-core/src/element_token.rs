@@ -364,6 +364,24 @@ pub fn resolve_element_args(
         }))
     };
     let resolve_token = |tok: &str| {
+        if crate::observation_revision::is_revision_token(tok) {
+            let (window_id, element_index, snapshot_id) =
+                crate::observation_revision::revision_tokens()
+                    .resolve_current(pid, tok)
+                    .map_err(|error| refusal(error.code(), error.to_string()))?;
+            let snapshot_token = token_for(snapshot_id, element_index);
+            let (snapshot_window_id, snapshot_element_index) = global()
+                .resolve(pid, &snapshot_token)
+                .map_err(|message| refusal("stale_element_token", message))?;
+            if snapshot_window_id != window_id || snapshot_element_index != element_index {
+                return Err(refusal(
+                    "stale_element_token",
+                    "revision element_token no longer matches the current platform snapshot"
+                        .to_owned(),
+                ));
+            }
+            return Ok((window_id, element_index));
+        }
         let (wid, idx) = global().resolve(pid, tok).map_err(|message| {
             let code = if message.contains("another runtime generation") {
                 "generation_mismatch"

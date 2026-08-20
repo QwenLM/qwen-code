@@ -2047,6 +2047,170 @@ const FfiConverterTypeGetSessionStateInput = (() => {
     return new FFIConverter();
 })();
 
+/**
+ * Opt in to the versioned `accessibility.observation_revision.v1` protocol on
+ * `get_window_state`. Omitting the whole record preserves the legacy
+ * full-snapshot contract byte for byte.
+ */
+export type ObservationRevisionInput = {
+    /**
+     * Protocol version. Only `1` is defined; any other value is rejected
+     * with a closed `invalid_observation_revision` error.
+     */
+    version: number,
+    /**
+     * Revision the caller wants to diff against. The caller — never the
+     * driver — decides which revision was actually delivered downstream.
+     * Missing, expired, foreign, or incompatible bases yield a full response.
+     */
+    baseRevisionId?: string,
+    /**
+     * Force a full resynchronization even when a compatible base exists.
+     */
+    forceFull?: boolean
+}
+
+/**
+ * Generated factory for {@link ObservationRevisionInput} record objects.
+ */
+export const ObservationRevisionInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<ObservationRevisionInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<ObservationRevisionInput>,
+    });
+})();
+
+const FfiConverterTypeObservationRevisionInput = (() => {
+    type TypeName = ObservationRevisionInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                version: FfiConverterUInt32.read(from),
+                baseRevisionId: FfiConverterOptionalString.read(from),
+                forceFull: FfiConverterOptionalBoolean.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.version, into);
+            FfiConverterOptionalString.write(value.baseRevisionId, into);
+            FfiConverterOptionalBoolean.write(value.forceFull, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.version) +
+             FfiConverterOptionalString.allocationSize(value.baseRevisionId) +
+             FfiConverterOptionalBoolean.allocationSize(value.forceFull);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type GetWindowStateInput = {
+    /**
+     * Target process ID.
+     */
+    pid: number,
+    /**
+     * Exact window to observe.
+     */
+    windowId: bigint,
+    /**
+     * For multi-call work, prefer a short public session label and repeat it on every call that
+     * accepts it. Omit it to use the authenticated transport's implicit lifecycle session.
+     */
+    session?: string,
+    /**
+     * Case-insensitive projection filter. Incompatible with `observation_revision`.
+     */
+    query?: string,
+    /**
+     * Default true. Set false to skip the screenshot and return the tree only.
+     */
+    includeScreenshot?: boolean,
+    /**
+     * Write the PNG here instead of returning base64.
+     */
+    screenshotOutFile?: string,
+    /**
+     * Cap on the total number of accessibility nodes walked.
+     */
+    maxElements?: number,
+    /**
+     * Cap on the accessibility-tree walk depth.
+     */
+    maxDepth?: number,
+    /**
+     * Opt in to `accessibility.observation_revision.v1`. Requires a bound
+     * driver session. Omit to preserve the legacy full-snapshot contract.
+     */
+    observationRevision?: ObservationRevisionInput
+}
+
+/**
+ * Generated factory for {@link GetWindowStateInput} record objects.
+ */
+export const GetWindowStateInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<GetWindowStateInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<GetWindowStateInput>,
+    });
+})();
+
+const FfiConverterTypeGetWindowStateInput = (() => {
+    type TypeName = GetWindowStateInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from),
+                session: FfiConverterOptionalString.read(from),
+                query: FfiConverterOptionalString.read(from),
+                includeScreenshot: FfiConverterOptionalBoolean.read(from),
+                screenshotOutFile: FfiConverterOptionalString.read(from),
+                maxElements: FfiConverterOptionalUInt32.read(from),
+                maxDepth: FfiConverterOptionalUInt32.read(from),
+                observationRevision: FfiConverterOptionalTypeObservationRevisionInput.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.session, into);
+            FfiConverterOptionalString.write(value.query, into);
+            FfiConverterOptionalBoolean.write(value.includeScreenshot, into);
+            FfiConverterOptionalString.write(value.screenshotOutFile, into);
+            FfiConverterOptionalUInt32.write(value.maxElements, into);
+            FfiConverterOptionalUInt32.write(value.maxDepth, into);
+            FfiConverterOptionalTypeObservationRevisionInput.write(value.observationRevision, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.session) +
+             FfiConverterOptionalString.allocationSize(value.query) +
+             FfiConverterOptionalBoolean.allocationSize(value.includeScreenshot) +
+             FfiConverterOptionalString.allocationSize(value.screenshotOutFile) +
+             FfiConverterOptionalUInt32.allocationSize(value.maxElements) +
+             FfiConverterOptionalUInt32.allocationSize(value.maxDepth) +
+             FfiConverterOptionalTypeObservationRevisionInput.allocationSize(value.observationRevision);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type HotkeyInput = {
     keys: Array<string>,
     target?: ActionTarget,
@@ -3789,6 +3953,9 @@ const FfiConverterOptionalBoolean = new FfiConverterOptional(FfiConverterBool);
 // FfiConverter for CursorPointOutput | undefined
 const FfiConverterOptionalTypeCursorPointOutput = new FfiConverterOptional(FfiConverterTypeCursorPointOutput);
 
+// FfiConverter for ObservationRevisionInput | undefined
+const FfiConverterOptionalTypeObservationRevisionInput = new FfiConverterOptional(FfiConverterTypeObservationRevisionInput);
+
 // FfiConverter for Array<SessionOutput>
 const FfiConverterSequenceTypeSessionOutput = new FfiConverterArray(FfiConverterTypeSessionOutput);
 
@@ -3889,11 +4056,13 @@ export default Object.freeze({
     FfiConverterTypeGetScreenSizeInput,
     FfiConverterTypeGetSessionInput,
     FfiConverterTypeGetSessionStateInput,
+    FfiConverterTypeGetWindowStateInput,
     FfiConverterTypeHotkeyInput,
     FfiConverterTypeInvokeMenuInput,
     FfiConverterTypeListSessionsInput,
     FfiConverterTypeListSessionsOutput,
     FfiConverterTypeMoveCursorInput,
+    FfiConverterTypeObservationRevisionInput,
     FfiConverterTypePlatform,
     FfiConverterTypePredicateOutcome,
     FfiConverterTypePressKeyInput,

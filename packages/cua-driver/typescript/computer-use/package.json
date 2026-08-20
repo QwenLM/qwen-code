@@ -1,0 +1,22 @@
+{
+  "name": "@qwen-code/computer-use",
+  "version": "0.1.0",
+  "description": "Thin Computer Use wrapper over the typed @trycua/cua-driver TypeScript SDK: versioned accessibility observation revisions plus opaque element-token actions for ordinary Node.js programs.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/computer-use.test.mjs",
+    "test:integration": "node --test test/daemon-integration.test.mjs"
+  },
+  "dependencies": {
+    "@trycua/cua-driver": "file:.."
+  }
+}

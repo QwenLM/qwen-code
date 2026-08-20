@@ -45,7 +45,10 @@ use cua_driver_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ax::cache::ElementCache, cursor::state::CursorRegistry};
+use crate::{
+    ax::{cache::ElementCache, revision::MacObservationRevisions},
+    cursor::state::CursorRegistry,
+};
 
 fn pid_window_target_candidates(pid: i64) -> Vec<WindowTargetCandidate> {
     let Ok(pid) = i32::try_from(pid) else {
@@ -725,6 +728,7 @@ pub struct ToolState {
     pub cursor_registry: Arc<CursorRegistry>,
     pub zoom_registry: Arc<ZoomRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
+    pub observation_revisions: Arc<MacObservationRevisions>,
     /// Global, disk-persisted config — the base layer and the only one the
     /// anonymous session / CLI writes.
     pub config: Arc<std::sync::RwLock<DriverConfig>>,
@@ -764,6 +768,7 @@ impl ToolState {
             cursor_registry: Arc::new(CursorRegistry::new()),
             zoom_registry: Arc::new(ZoomRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
+            observation_revisions: Arc::new(MacObservationRevisions::new()),
             // Load persisted config from ~/.cua-driver/config.json so that
             // `qwen-cua-driver config set` changes carry over into MCP sessions.
             config: Arc::new(std::sync::RwLock::new(load_driver_config())),
@@ -845,6 +850,7 @@ pub fn register_all(
     if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
         let prefix = format!("__cua_runtime_{runtime_scope}:");
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         registry.retain_runtime_cleanup(move || {
             for cursor in cursor_registry
                 .all_states()
@@ -854,6 +860,8 @@ pub fn register_all(
                 cursor_registry.remove(&cursor.config.cursor_id);
                 crate::cursor::overlay::remove_cursor(cursor.config.cursor_id);
             }
+            observation_revisions.clear_runtime(&runtime_scope);
+            cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
     // Share the element cache with the recording-hook layer so it can
@@ -866,9 +874,12 @@ pub fn register_all(
     {
         let session_config = state.session_config.clone();
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         let registration =
             cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
                 session_config.clear(session_id);
+                observation_revisions.clear_session(session_id);
+                cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);
                 // Per-session agent cursor: the session_id is the cursor key when
                 // the caller gave no explicit cursor_id, so dropping it here both
                 // prunes the metadata registry and stops the overlay painting that

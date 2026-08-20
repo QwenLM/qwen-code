@@ -10,10 +10,10 @@
 use crate::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardReadOutput, ClipboardWriteInput,
     ClipboardWriteOutput, CursorAction, CursorPositionOutput, CursorSemantics, DesktopStateOutput,
-    DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, HotkeyInput,
-    InvokeMenuInput, MoveCursorInput, Platform, PressKeyInput, SchemaMode, ScreenSizeOutput,
-    ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract, ToolInput, ToolOutput,
-    TypeTextInput,
+    DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, Platform, PressKeyInput,
+    SchemaMode, ScreenSizeOutput, ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract,
+    ToolInput, ToolOutput, TypeTextInput, WindowStateOutput,
 };
 
 const ALL_PLATFORMS: [Platform; 3] = [Platform::Macos, Platform::Windows, Platform::Linux];
@@ -21,6 +21,7 @@ const ALL_PLATFORMS: [Platform; 3] = [Platform::Macos, Platform::Windows, Platfo
 pub fn contracts() -> Vec<ToolContract> {
     vec![
         get_desktop_state(),
+        get_window_state(),
         get_screen_size(),
         get_cursor_position(),
         move_cursor(),
@@ -147,6 +148,35 @@ fn get_desktop_state() -> ToolContract {
         "get_desktop_state",
         "Capture the complete primary display at native resolution for a desktop-scope GUI loop.",
         &["screen.capture", "screen.dimensions"],
+        ToolAnnotations {
+            read_only: true,
+            destructive: false,
+            idempotent: false,
+            open_world: false,
+        },
+        CursorAction::Observe,
+    )
+}
+
+// The window snapshot payload stays platform-owned (markdown + structured
+// elements shapes are still converging), so this contract commits only the
+// portable input projection and the versioned observation-revision envelope;
+// the remaining output fields stay additive extensions — the same stance
+// `list_windows` takes above.
+fn get_window_state() -> ToolContract {
+    contract::<GetWindowStateInput, WindowStateOutput>(
+        "get_window_state",
+        "Walk one exact window's accessibility tree and return the actionable element snapshot, optionally as a versioned observation revision (`accessibility.observation_revision.v1`) diffed against a caller-supplied base.",
+        &[
+            "accessibility.window_state",
+            "accessibility.tree",
+            "accessibility.tree.structured",
+            "accessibility.tree.bounded",
+            "accessibility.element_tokens",
+            "accessibility.observation_revision.v1",
+            "screen.capture",
+            "screen.capture.window",
+        ],
         ToolAnnotations {
             read_only: true,
             destructive: false,

@@ -611,7 +611,18 @@ impl Tool for GetWindowStateTool {
                     "description":"When set, write the PNG to this file path (~ expanded) instead of embedding base64 in the response. The structured output carries screenshot_file_path instead."},
                 "query":{"type":"string","description":"Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count."},
                 "max_elements":{"type":"integer","minimum":1,"description":"Cap on total AT-SPI nodes walked. Omit for the default (5 000). Lower for huge web/Electron trees."},
-                "max_depth":{"type":"integer","minimum":1,"description":"Cap on the AT-SPI tree walk depth. Omit for the default (uncapped). Lower for deeply nested apps."}
+                "max_depth":{"type":"integer","minimum":1,"description":"Cap on the AT-SPI tree walk depth. Omit for the default (uncapped). Lower for deeply nested apps."},
+                "observation_revision": {
+                    "type": "object",
+                    "description": "Opt in to accessibility.observation_revision.v1. Linux currently answers with an explicit non-retained full response (no approved stable AT-SPI identity lineage yet). Omit to preserve the legacy full-snapshot contract.",
+                    "required": ["version"],
+                    "properties": {
+                        "version": { "type": "integer", "const": 1 },
+                        "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "force_full": { "type": "boolean", "default": false }
+                    },
+                    "additionalProperties": false
+                }
             },"additionalProperties":false}),
             read_only: true, destructive: false, idempotent: true, open_world: false,
         })
@@ -639,6 +650,32 @@ impl Tool for GetWindowStateTool {
         // We don't even read the arg; it stays in the schema only so old callers
         // don't trip additionalProperties:false.
         let query = args.opt_str("query");
+        // `accessibility.observation_revision.v1` — Linux has no approved
+        // stable AT-SPI identity lineage yet (unique D-Bus owner + object path
+        // is a planned upgrade), so the versioned protocol is accepted but
+        // every response is an explicit non-retained full. Parsing stays in
+        // core so the closed error surface matches macOS byte for byte.
+        let observation_revision_request =
+            match cua_driver_core::observation_revision::parse_observation_revision_request(
+                args.get("observation_revision"),
+            ) {
+                Ok(request) => request,
+                Err(message) => {
+                    return ToolResult::error(message.clone()).with_structured(json!({
+                        "code": "invalid_observation_revision",
+                        "message": message,
+                    }))
+                }
+            };
+        if observation_revision_request.is_some() && query.is_some() {
+            return ToolResult::error(
+                "observation_revision v1 does not support the legacy query projection",
+            )
+            .with_structured(json!({
+                "code": "unsupported_observation_projection",
+                "suggestion": "omit query when requesting observation_revision v1",
+            }));
+        }
         // include_screenshot (default true) — the perf opt-out. The tree+screenshot
         // pair is the default; `include_screenshot:false` skips the grab and returns
         // tree only (the cheap re-index path before an element ax action). A
@@ -926,6 +963,32 @@ impl Tool for GetWindowStateTool {
                     if let Some(fp) = file_path {
                         structured["screenshot_file_path"] = json!(fp);
                     }
+                }
+
+                if observation_revision_request.is_some() {
+                    // Explicit full-only: AT-SPI identity is not approved for
+                    // revision lineage yet, so the caller's base (if any) is
+                    // never usable and nothing is retained for future diffs.
+                    let (lineage_id, revision_id) =
+                        cua_driver_core::observation_revision::unretained_full_ids();
+                    structured["observation_revision"] = json!({
+                        "capability": "accessibility.observation_revision.v1",
+                        "version":
+                            cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
+                        "serializer_version": "linux-atspi-markdown-v1",
+                        "mode": "full",
+                        "lineage_id": lineage_id,
+                        "revision_id": revision_id,
+                        "base_revision_id": serde_json::Value::Null,
+                        "target": { "pid": pid, "window_id": xid },
+                        "identity": "linux_atspi_snapshot",
+                        "elements_scope": "current_full",
+                        "stable_element_ids": false,
+                        "retained": false,
+                        "resync_reason":
+                            cua_driver_core::observation_revision::FullResyncReason::UnsupportedBackend
+                                .as_str(),
+                    });
                 }
 
                 ToolResult {

@@ -13,7 +13,8 @@
 
 use super::bindings::*;
 use super::window_scope::{decide_window_scope, TopLevelCandidate, WindowScope};
-use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
+use core_foundation::base::{CFEqual, CFHash, CFRelease, CFRetain, CFTypeRef};
+use std::hash::{Hash, Hasher};
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
 /// can nest deeply; 25 covers realistic app chrome without exploding on
@@ -44,6 +45,77 @@ unsafe fn set_messaging_timeout(element: AXUIElementRef) {
     let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
 }
 
+#[derive(Debug)]
+pub struct AXIdentity(usize);
+
+impl AXIdentity {
+    pub(super) unsafe fn retained(element: AXUIElementRef) -> Self {
+        CFRetain(element as CFTypeRef);
+        Self(element as usize)
+    }
+
+    pub fn as_ptr(&self) -> usize {
+        self.0
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::AXIdentity;
+    use crate::ax::bindings::AXUIElementCreateApplication;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    #[test]
+    fn independently_created_proxies_for_the_same_application_share_identity() {
+        unsafe {
+            let first = AXUIElementCreateApplication(std::process::id() as i32);
+            let second = AXUIElementCreateApplication(std::process::id() as i32);
+            assert!(!first.is_null());
+            assert!(!second.is_null());
+
+            let first_identity = AXIdentity::retained(first);
+            let second_identity = AXIdentity::retained(second);
+            CFRelease(first as CFTypeRef);
+            CFRelease(second as CFTypeRef);
+
+            assert_eq!(first_identity, second_identity);
+            let mut first_hash = DefaultHasher::new();
+            first_identity.hash(&mut first_hash);
+            let mut second_hash = DefaultHasher::new();
+            second_identity.hash(&mut second_hash);
+            assert_eq!(first_hash.finish(), second_hash.finish());
+        }
+    }
+}
+
+impl Clone for AXIdentity {
+    fn clone(&self) -> Self {
+        unsafe { CFRetain(self.0 as CFTypeRef) };
+        Self(self.0)
+    }
+}
+
+impl Drop for AXIdentity {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.0 as CFTypeRef) };
+    }
+}
+
+impl PartialEq for AXIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { CFEqual(self.0 as CFTypeRef, other.0 as CFTypeRef) != 0 }
+    }
+}
+
+impl Eq for AXIdentity {}
+
+impl Hash for AXIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unsafe { CFHash(self.0 as CFTypeRef) }.hash(state);
+    }
+}
+
 /// A single node in the AX tree.
 #[derive(Debug, Clone)]
 pub struct AXNode {
@@ -63,6 +135,7 @@ pub struct AXNode {
     pub actions: Vec<String>,
     /// The raw AXUIElementRef pointer value, for caching.
     pub element_ptr: usize,
+    pub identity: Option<AXIdentity>,
     /// Depth in the rendered markdown tree (matches the indent level used in
     /// `tree_markdown`). Layout containers AXScrollArea/AXGroup collapse so
     /// children share the parent's depth.
@@ -135,6 +208,10 @@ fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<b
 pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
+    pub complete: bool,
+    /// Bounded trace naming why `complete` is false (attribute + AX error),
+    /// drained from the walk's thread-local recorder. Empty on complete walks.
+    pub incomplete_notes: Vec<String>,
     /// True when the walk was cut short by the MAX_ELEMENTS cap.
     pub truncated: bool,
     /// Whether the requested `window_id` actually resolved to an AX surface,
@@ -195,14 +272,19 @@ pub fn walk_tree_bounded(
     // Set to true only when walk_element actually stops early due to the cap —
     // avoids a false-positive when the tree naturally ends on exactly the cap.
     let mut truncated = false;
+    let mut complete = true;
     let mut window_scope: Option<WindowScope> = None;
+    super::bindings::reset_incomplete_notes();
 
     unsafe {
         let app_elem = AXUIElementCreateApplication(pid);
         if app_elem.is_null() {
+            super::bindings::note_incomplete("AXApplication", "null application element");
             return TreeWalkResult {
                 tree_markdown: String::new(),
                 nodes,
+                complete: false,
+                incomplete_notes: super::bindings::take_incomplete_notes(),
                 truncated: false,
                 // No application AX element at all, so a requested window
                 // certainly did not resolve.
@@ -225,11 +307,12 @@ pub fn walk_tree_bounded(
         // Union AXChildren + AXWindows — the only way to see background windows.
         // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
         // AXWindows returns the window list regardless of activation state.
-        let from_children = copy_children(app_elem);
-        let from_windows = copy_ax_windows(app_elem);
+        let from_children = copy_children_with_status(app_elem);
+        let from_windows = copy_ax_windows_with_status(app_elem);
+        complete &= from_children.complete && from_windows.complete;
 
-        let mut top_level = from_children;
-        for w in from_windows {
+        let mut top_level = from_children.elements;
+        for w in from_windows.elements {
             // AXChildren and AXWindows can return different proxy pointers for
             // the same native window. CFEqual compares their AX identity;
             // pointer equality alone duplicates the whole subtree and can turn
@@ -255,9 +338,19 @@ pub fn walk_tree_bounded(
                 .iter()
                 .map(|&child| {
                     set_messaging_timeout(child);
-                    let role = copy_string_attr(child, "AXRole").unwrap_or_default();
-                    let subrole = copy_string_attr(child, "AXSubrole");
-                    let identifier = copy_string_attr(child, "AXIdentifier");
+                    let role_read = copy_string_attr_with_status(child, "AXRole");
+                    if role_read.complete && role_read.value.is_none() {
+                        super::bindings::note_incomplete(
+                            "AXRole",
+                            "top-level element with no role value",
+                        );
+                    }
+                    complete &= role_read.complete && role_read.value.is_some();
+                    let role = role_read.value.unwrap_or_default();
+                    let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
+                    complete &= subrole_read.complete;
+                    let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
+                    complete &= identifier_read.complete;
                     // Match AX window element → CGWindowID via private SPI.
                     // Only windows carry one, so skip the round-trip elsewhere.
                     let ax_window_id = if role == "AXWindow" {
@@ -267,8 +360,8 @@ pub fn walk_tree_bounded(
                     };
                     TopLevelCandidate {
                         role,
-                        subrole,
-                        identifier,
+                        subrole: subrole_read.value,
+                        identifier: identifier_read.value,
                         ax_window_id,
                     }
                 })
@@ -299,6 +392,7 @@ pub fn walk_tree_bounded(
                 &mut index_counter,
                 &mut visited_count,
                 &mut truncated,
+                &mut complete,
                 max_elements,
                 max_depth,
             );
@@ -332,6 +426,8 @@ pub fn walk_tree_bounded(
     TreeWalkResult {
         tree_markdown,
         nodes,
+        complete: complete && !truncated_flag,
+        incomplete_notes: super::bindings::take_incomplete_notes(),
         truncated: truncated_flag,
         window_scope,
     }
@@ -348,16 +444,21 @@ unsafe fn walk_element(
     counter: &mut usize,
     visited_count: &mut usize,
     truncated: &mut bool,
+    complete: &mut bool,
     max_elements: usize,
     max_depth: usize,
 ) {
     if depth > max_depth {
+        super::bindings::note_incomplete("walk", "max_depth exceeded");
+        *complete = false;
         return;
     }
     // Enforce total-node cap — mirrors Swift's maxElements guard.
     // Set the truncated flag only when we actually stop early.
     if *visited_count >= max_elements {
+        super::bindings::note_incomplete("walk", "max_elements truncated");
         *truncated = true;
+        *complete = false;
         return;
     }
     *visited_count += 1;
@@ -366,7 +467,12 @@ unsafe fn walk_element(
     // element, so every descendant must be bounded before any attribute read.
     set_messaging_timeout(element);
 
-    let role = copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
+    let role_read = copy_string_attr_with_status(element, "AXRole");
+    if role_read.complete && role_read.value.is_none() {
+        super::bindings::note_incomplete("AXRole", "success with no role value");
+    }
+    *complete &= role_read.complete && role_read.value.is_some();
+    let role = role_read.value.unwrap_or_else(|| "AXUnknown".into());
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
@@ -375,8 +481,9 @@ unsafe fn walk_element(
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
-        let children = copy_children(element);
-        for child in children {
+        let children = copy_children_with_status(element);
+        *complete &= children.complete;
+        for child in children.elements {
             walk_element(
                 child,
                 depth,
@@ -387,6 +494,7 @@ unsafe fn walk_element(
                 counter,
                 visited_count,
                 truncated,
+                complete,
                 max_elements,
                 max_depth,
             );
@@ -400,21 +508,40 @@ unsafe fn walk_element(
     // This is critical for Calculator where AXTitle="" but AXDescription="2"
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
-    let title = copy_string_attr(element, "AXTitle");
+    let title_read = copy_string_attr_with_status(element, "AXTitle");
+    *complete &= title_read.complete;
+    let title = title_read.value;
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
-    let copied_value = copy_stringish_attr(element, "AXValue");
+    let copied_value_read = copy_stringish_attr_with_status(element, "AXValue");
+    *complete &= copied_value_read.complete;
+    let copied_value = copied_value_read.value;
     let value = copied_value
         .as_ref()
         .and_then(|copied| copied.string_value.clone());
     // AXPlaceholderValue as fallback for empty text fields.
-    let value = value
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| copy_string_attr(element, "AXPlaceholderValue"));
-    let description = copy_string_attr(element, "AXDescription");
-    let identifier = copy_string_attr(element, "AXIdentifier");
-    let help = copy_string_attr(element, "AXHelp").filter(|h| !h.trim().is_empty());
-    let actions = copy_action_names(element);
+    let value = if value
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        value
+    } else {
+        let placeholder = copy_string_attr_with_status(element, "AXPlaceholderValue");
+        *complete &= placeholder.complete;
+        placeholder.value
+    };
+    let description_read = copy_string_attr_with_status(element, "AXDescription");
+    *complete &= description_read.complete;
+    let description = description_read.value;
+    let identifier_read = copy_string_attr_with_status(element, "AXIdentifier");
+    *complete &= identifier_read.complete;
+    let identifier = identifier_read.value;
+    let help_read = copy_string_attr_with_status(element, "AXHelp");
+    *complete &= help_read.complete;
+    let help = help_read.value.filter(|h| !h.trim().is_empty());
+    let actions_read = copy_action_names_with_status(element);
+    *complete &= actions_read.complete;
+    let actions = actions_read.actions;
 
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
@@ -428,23 +555,30 @@ unsafe fn walk_element(
     // field but unable to call set_value on it. Probe writability only for the
     // small family of value controls so arbitrary display nodes do not pay an
     // extra AX round trip.
-    let value_settable = actions.is_empty()
-        && role_supports_value_addressing(&role)
-        && is_attribute_settable(element, "AXValue");
+    let value_settable = if actions.is_empty() && role_supports_value_addressing(&role) {
+        let settable = is_attribute_settable_with_status(element, "AXValue");
+        *complete &= settable.complete;
+        settable.value.unwrap_or(false)
+    } else {
+        false
+    };
     // A closed submenu can keep its descendants in AXChildren while reporting
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
     // index for it invites agents to retain an unusable menu target.
     let enabled = if !actions.is_empty() || value_settable {
-        copy_bool_attr(element, "AXEnabled")
+        let enabled = copy_bool_attr_with_status(element, "AXEnabled");
+        *complete &= enabled.complete;
+        enabled.value
     } else {
         None
     };
     let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
-        let children = copy_children(element);
-        for child in children {
+        let children = copy_children_with_status(element);
+        *complete &= children.complete;
+        for child in children.elements {
             walk_element(
                 child,
                 depth + 1,
@@ -455,6 +589,7 @@ unsafe fn walk_element(
                 counter,
                 visited_count,
                 truncated,
+                complete,
                 max_elements,
                 max_depth,
             );
@@ -464,23 +599,37 @@ unsafe fn walk_element(
     }
 
     let element_ptr = element as usize;
-    let frame = element_screen_rect(element);
+    let identity = Some(AXIdentity::retained(element));
+    let frame_read = element_screen_rect_with_status(element);
+    *complete &= frame_read.complete;
+    let frame = frame_read.value;
     // Structured `elements` only contains actionable nodes. Keep all new AX
     // round-trips behind that same gate so display-only rows pay no cost.
-    let control_state = read_control_state_if_actionable(is_actionable, || ControlState {
-        value_state: copied_value
-            .map(|copied| copied.state_value)
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| value.clone())
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty()),
-        value_description: copy_string_attr(element, "AXValueDescription")
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty()),
-        min_value: copy_number_attr(element, "AXMinValue"),
-        max_value: copy_number_attr(element, "AXMaxValue"),
-        enabled,
-        selected: copy_bool_attr(element, "AXSelected"),
+    let control_state = read_control_state_if_actionable(is_actionable, || {
+        let value_description = copy_string_attr_with_status(element, "AXValueDescription");
+        *complete &= value_description.complete;
+        let min_value = copy_number_attr_with_status(element, "AXMinValue");
+        *complete &= min_value.complete;
+        let max_value = copy_number_attr_with_status(element, "AXMaxValue");
+        *complete &= max_value.complete;
+        let selected = copy_bool_attr_with_status(element, "AXSelected");
+        *complete &= selected.complete;
+        ControlState {
+            value_state: copied_value
+                .map(|copied| copied.state_value)
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| value.clone())
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            value_description: value_description
+                .value
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            min_value: min_value.value,
+            max_value: max_value.value,
+            enabled,
+            selected: selected.value,
+        }
     });
     let node = if is_actionable {
         let idx = *counter;
@@ -510,6 +659,7 @@ unsafe fn walk_element(
             help: help.clone(),
             actions: actions.clone(),
             element_ptr,
+            identity,
             depth,
             parent_element_index: parent_index,
             frame,
@@ -544,6 +694,7 @@ unsafe fn walk_element(
             help: help.clone(),
             actions: vec![],
             element_ptr,
+            identity,
             depth,
             parent_element_index: parent_index,
             frame,
@@ -566,8 +717,9 @@ unsafe fn walk_element(
     lines.push((depth, line));
     nodes.push(node);
 
-    let children = copy_children(element);
-    for child in children {
+    let children = copy_children_with_status(element);
+    *complete &= children.complete;
+    for child in children.elements {
         walk_element(
             child,
             depth + 1,
@@ -578,6 +730,7 @@ unsafe fn walk_element(
             counter,
             visited_count,
             truncated,
+            complete,
             max_elements,
             max_depth,
         );
@@ -610,10 +763,94 @@ mod web_content_role_tests {
 }
 
 fn format_node_line(node: &AXNode) -> String {
+    format_node_line_with_index(node, node.element_index)
+}
+
+pub(crate) fn format_revision_body(node: &AXNode) -> String {
+    let label = node
+        .title
+        .as_deref()
+        .or(node.description.as_deref())
+        .or(node.value.as_deref())
+        .or(node.identifier.as_deref())
+        .unwrap_or_default();
+    let mut fields = vec![format!("<{}>", node.role), json_string(label)];
+    if let Some(value) = node
+        .value_state
+        .as_deref()
+        .or(node.value.as_deref())
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!("value={}", json_string(value)));
+    }
+    if let Some(description) = node.value_description.as_deref() {
+        fields.push(format!("value_description={}", json_string(description)));
+    }
+    if let (Some(min), Some(max)) = (node.min_value, node.max_value) {
+        if min.is_finite() && max.is_finite() && max > min {
+            fields.push(format!("min={min}"));
+            fields.push(format!("max={max}"));
+        }
+    }
+    if let Some(enabled) = node.enabled {
+        fields.push(format!("enabled={enabled}"));
+    }
+    let selected = node.selected.or_else(|| {
+        let role = node.role.to_ascii_lowercase();
+        if role.contains("checkbox") || role.contains("radiobutton") {
+            node.value_state.as_deref().and_then(|value| match value {
+                "1" | "true" | "on" => Some(true),
+                "0" | "false" | "off" => Some(false),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    });
+    if let Some(selected) = selected {
+        fields.push(format!("selected={selected}"));
+    }
+    if !node.actions.is_empty() {
+        let actions = node
+            .actions
+            .iter()
+            .map(|action| {
+                let action = action
+                    .strip_prefix("AX")
+                    .unwrap_or(action)
+                    .to_ascii_lowercase();
+                if action == "showmenu" {
+                    "show_menu".to_owned()
+                } else {
+                    action
+                }
+            })
+            .collect::<Vec<_>>();
+        fields.push(format!(
+            "actions={}",
+            serde_json::to_string(&actions).expect("string actions serialize")
+        ));
+    }
+    if let Some([x, y, width, height]) = node.frame {
+        if [x, y, width, height].into_iter().all(f64::is_finite) {
+            fields.push(format!("frame={x},{y},{width},{height}"));
+        }
+    }
+    if node.in_web_content {
+        fields.push("in_web_content=true".to_owned());
+    }
+    fields.join(" ")
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("string serializes")
+}
+
+fn format_node_line_with_index(node: &AXNode, rendered_index: Option<usize>) -> String {
     let mut parts = String::new();
 
     // Common prefix (with or without index).
-    if let Some(idx) = node.element_index {
+    if let Some(idx) = rendered_index {
         parts.push_str(&format!("- [{}] {}", idx, node.role));
     } else {
         parts.push_str(&format!("- {}", node.role));
@@ -781,5 +1018,41 @@ mod tests {
         });
         assert_eq!(reads.get(), 1, "actionable nodes must read state once");
         assert_eq!(actionable.enabled, Some(true));
+    }
+
+    #[test]
+    fn revision_body_is_canonical_and_includes_model_visible_state() {
+        let node = AXNode {
+            element_index: Some(4),
+            role: "AXButton".to_owned(),
+            title: Some("Save \"draft\"\nnow".to_owned()),
+            value: None,
+            description: None,
+            identifier: None,
+            help: None,
+            actions: vec!["AXPress".to_owned(), "AXShowMenu".to_owned()],
+            element_ptr: 0,
+            identity: None,
+            depth: 1,
+            parent_element_index: None,
+            frame: Some([1.0, 2.0, 30.0, 40.0]),
+            value_state: Some("pending".to_owned()),
+            value_description: Some("Pending".to_owned()),
+            min_value: None,
+            max_value: None,
+            enabled: Some(false),
+            selected: Some(true),
+            in_web_content: true,
+        };
+
+        assert_eq!(
+            format_revision_body(&node),
+            concat!(
+                "<AXButton> \"Save \\\"draft\\\"\\nnow\" value=\"pending\" ",
+                "value_description=\"Pending\" enabled=false selected=true ",
+                "actions=[\"press\",\"show_menu\"] frame=1,2,30,40 ",
+                "in_web_content=true",
+            )
+        );
     }
 }

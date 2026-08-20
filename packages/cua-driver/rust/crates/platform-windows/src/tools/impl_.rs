@@ -1134,7 +1134,18 @@ impl Tool for GetWindowStateTool {
                 "screenshot_out_file":{"type":"string","description":"When set, write the PNG to this file path instead of embedding base64 in the response. The structured output will contain `screenshot_file_path` instead."},
                 "query":{"type":"string","description":"Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count."},
                 "max_elements":{"type":"integer","minimum":1,"description":"Cap on the total number of UIA nodes walked. Truncates depth-first; markdown and structured elements truncate together. Omit for the default (5 000). Lower for Electron / large web apps that produce 10k+ element trees."},
-                "max_depth":{"type":"integer","minimum":1,"description":"Cap on the UIA-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower for deep menu / Electron trees."}
+                "max_depth":{"type":"integer","minimum":1,"description":"Cap on the UIA-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower for deep menu / Electron trees."},
+                "observation_revision": {
+                    "type": "object",
+                    "description": "Opt in to accessibility.observation_revision.v1. Windows currently answers with an explicit non-retained full response (no approved stable UIA identity yet). Omit to preserve the legacy full-snapshot contract.",
+                    "required": ["version"],
+                    "properties": {
+                        "version": { "type": "integer", "const": 1 },
+                        "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "force_full": { "type": "boolean", "default": false }
+                    },
+                    "additionalProperties": false
+                }
             },"additionalProperties":false}),
             // Swift annotation: idempotent: false (each call is a fresh snapshot).
             read_only: true, destructive: false, idempotent: false, open_world: false,
@@ -1191,6 +1202,32 @@ impl Tool for GetWindowStateTool {
         // trip additionalProperties:false.
         let query = args.opt_str("query");
         let screenshot_out_file = args.opt_str("screenshot_out_file");
+        // `accessibility.observation_revision.v1` — Windows has no approved
+        // stable native identity yet (UIA RuntimeId + CompareElements is a
+        // planned upgrade), so the versioned protocol is accepted but every
+        // response is an explicit non-retained full. Parsing stays in core so
+        // the closed error surface matches macOS byte for byte.
+        let observation_revision_request =
+            match cua_driver_core::observation_revision::parse_observation_revision_request(
+                args.get("observation_revision"),
+            ) {
+                Ok(request) => request,
+                Err(message) => {
+                    return ToolResult::error(message.clone()).with_structured(json!({
+                        "code": "invalid_observation_revision",
+                        "message": message,
+                    }))
+                }
+            };
+        if observation_revision_request.is_some() && query.is_some() {
+            return ToolResult::error(
+                "observation_revision v1 does not support the legacy query projection",
+            )
+            .with_structured(json!({
+                "code": "unsupported_observation_projection",
+                "suggestion": "omit query when requesting observation_revision v1",
+            }));
+        }
         // Optional caps — when omitted, fall back to the walker's built-in
         // defaults (#22865). minimum:1 enforced in the schema, but defend
         // against 0 here too.
@@ -1503,6 +1540,32 @@ impl Tool for GetWindowStateTool {
                         cua_driver_core::window_inspection::BrowserChromeCaptureCoverage::NotObservable,
                     ),
                 );
+
+                if observation_revision_request.is_some() {
+                    // Explicit full-only: UIA identity is not approved for
+                    // revision lineage yet, so the caller's base (if any) is
+                    // never usable and nothing is retained for future diffs.
+                    let (lineage_id, revision_id) =
+                        cua_driver_core::observation_revision::unretained_full_ids();
+                    structured["observation_revision"] = json!({
+                        "capability": "accessibility.observation_revision.v1",
+                        "version":
+                            cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
+                        "serializer_version": "windows-uia-markdown-v1",
+                        "mode": "full",
+                        "lineage_id": lineage_id,
+                        "revision_id": revision_id,
+                        "base_revision_id": serde_json::Value::Null,
+                        "target": { "pid": pid, "window_id": hwnd },
+                        "identity": "windows_uia_snapshot",
+                        "elements_scope": "current_full",
+                        "stable_element_ids": false,
+                        "retained": false,
+                        "resync_reason":
+                            cua_driver_core::observation_revision::FullResyncReason::UnsupportedBackend
+                                .as_str(),
+                    });
+                }
 
                 ToolResult {
                     content,

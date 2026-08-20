@@ -30,10 +30,10 @@ pub use inputs::{
     action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClipboardReadInput,
     ClipboardWriteInput, DesktopScope, DragInput, EndSessionInput, EscalateSessionInput,
     EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput,
-    GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput, InvokeMenuInput,
-    ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection, ScrollInput,
-    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
-    SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
+    GetScreenSizeInput, GetSessionInput, GetSessionStateInput, GetWindowStateInput, HotkeyInput,
+    InvokeMenuInput, ListSessionsInput, MoveCursorInput, ObservationRevisionInput, PressKeyInput,
+    ScrollBy, ScrollDirection, ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
+    SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
     MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
@@ -43,9 +43,10 @@ pub use outputs::{
     ClipboardReadOutput, ClipboardWriteOutput, CursorMotionOutput, CursorPointOutput,
     CursorPositionOutput, CursorThemeOutput, CursorVisualOutput, DesktopStateOutput,
     EffectiveScope, EndSessionOutput, GetAgentCursorStateOutput, ListSessionsOutput,
-    ScreenSizeOutput, SessionClientKindOutput, SessionLifecycleState, SessionOutput,
-    SessionStateOutput, SessionTransportOutput, SetAgentCursorEnabledOutput,
+    ObservationRevisionOutput, ScreenSizeOutput, SessionClientKindOutput, SessionLifecycleState,
+    SessionOutput, SessionStateOutput, SessionTransportOutput, SetAgentCursorEnabledOutput,
     SetAgentCursorMotionOutput, SetAgentCursorThemeOutput, StartSessionOutput, ToolOutput,
+    WindowStateOutput,
 };
 pub use verification::{
     BoundsExpectation, ElementPredicate, ElementSelector, PredicateOutcome, StatePredicate,
@@ -285,6 +286,50 @@ pub fn validate_success_output(name: &str, value: Value) -> Result<bool, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_window_state_input_serializes_to_the_live_wire_shape() {
+        let minimal = serde_json::to_value(GetWindowStateInput {
+            pid: 42,
+            window_id: 7,
+            session: None,
+            query: None,
+            include_screenshot: None,
+            screenshot_out_file: None,
+            max_elements: None,
+            max_depth: None,
+            observation_revision: None,
+        })
+        .unwrap();
+        assert_eq!(minimal, serde_json::json!({ "pid": 42, "window_id": 7 }));
+
+        let revision = serde_json::to_value(GetWindowStateInput {
+            pid: 42,
+            window_id: 7,
+            session: Some("s1".into()),
+            query: None,
+            include_screenshot: Some(false),
+            screenshot_out_file: None,
+            max_elements: None,
+            max_depth: None,
+            observation_revision: Some(ObservationRevisionInput {
+                version: 1,
+                base_revision_id: Some("r_1".into()),
+                force_full: None,
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            revision,
+            serde_json::json!({
+                "pid": 42,
+                "window_id": 7,
+                "session": "s1",
+                "include_screenshot": false,
+                "observation_revision": { "version": 1, "base_revision_id": "r_1" }
+            })
+        );
+    }
 
     #[test]
     fn manifest_is_sorted_and_versioned() {
