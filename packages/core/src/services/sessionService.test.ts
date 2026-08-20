@@ -1883,6 +1883,30 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
       );
     });
+
+    it('should remove prompt ledger sidecars in both archive states', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+      );
+    });
   });
 
   describe('archiveSessions', () => {
@@ -1983,6 +2007,94 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should move the prompt ledger alongside the archived session', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.includes('/chats/archive/')) return false;
+        return value.endsWith(`${sessionIdA}.ledger.jsonl`);
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+      );
+    });
+
+    it('should warn but still archive when the prompt ledger move fails', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.includes('/chats/archive/')) return false;
+        return value.endsWith(`${sessionIdA}.ledger.jsonl`);
+      });
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const ledgerError = new Error('ledger move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.ledger.jsonl')) {
+          throw ledgerError;
+        }
+        return undefined;
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `archiveSessions: failed to move prompt ledger for ${sessionIdA}`,
+      );
+      // The warning carries the full paths so the split pair is debuggable.
+      expect(warnings[0]).toContain(`/chats/${sessionIdA}.ledger.jsonl`);
+      expect(warnings[0]).toContain(
+        `/chats/archive/${sessionIdA}.ledger.jsonl`,
+      );
+    });
+
+    it('should merge the prompt ledger into an existing destination instead of wedging', async () => {
+      mockActiveSessionOnly();
+      const sourceLedger =
+        '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n';
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(sourceLedger);
+      const appendFileSyncSpy = vi
+        .spyOn(fs, 'appendFileSync')
+        .mockImplementation(() => undefined);
+      // Both the active and the archived ledger exist (e.g. a partially
+      // completed earlier archive cycle): the merge path must run.
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      // Source records are concatenated onto the destination (append-only
+      // JSONL, write order preserved)...
+      expect(appendFileSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining('"promptId":"p1"'),
+        'utf8',
+      );
+      // ...the source sidecar is unlinked...
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+      );
+      // ...and no rename was attempted for the ledger.
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.ledger.jsonl`),
+        expect.anything(),
       );
     });
 
@@ -2226,6 +2338,27 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should move the prompt ledger back to the active directory when unarchiving', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/${sessionIdA}.jsonl`)) return false;
+        if (value.endsWith(`${sessionIdA}.ledger.jsonl`)) {
+          return value.includes('/chats/archive/');
+        }
+        return false;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
       );
     });
 
