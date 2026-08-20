@@ -641,6 +641,8 @@ export interface MicrocompactOptions {
   sizeOnly?: boolean;
   pendingContent?: Content | Content[];
   preserveReadFileResult?: PreserveReadFileResult;
+  /** Explicit caller policy that takes precedence over session/env tuning. */
+  keepRecentOverride?: number;
 }
 
 export interface MicrocompactMeta {
@@ -691,10 +693,12 @@ export function microcompactHistory(
   settings: ClearContextOnIdleSettings,
   opts?: MicrocompactOptions,
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const keepRecent = resolveKeepRecent(
-    process.env['QWEN_MC_KEEP_RECENT'],
-    settings.toolResultsNumToKeep,
-  );
+  const keepRecent =
+    normalizeKeepRecent(opts?.keepRecentOverride) ??
+    resolveKeepRecent(
+      process.env['QWEN_MC_KEEP_RECENT'],
+      settings.toolResultsNumToKeep,
+    );
 
   let triggerReason: MicrocompactTriggerReason | undefined;
   let gapMs = 0;
@@ -949,18 +953,18 @@ function resolveKeepRecent(
   envValue: string | undefined,
   settingsValue: number | undefined,
 ): number {
-  const normalize = (value: number | undefined): number | undefined => {
-    if (value === undefined || !Number.isSafeInteger(value)) return undefined;
-    return Math.max(1, value);
-  };
-
   if (envValue !== undefined) {
     const trimmed = envValue.trim();
     if (/^-?\d+$/.test(trimmed)) {
-      const envKeep = normalize(Number(trimmed));
+      const envKeep = normalizeKeepRecent(Number(trimmed));
       if (envKeep !== undefined) return envKeep;
     }
   }
 
-  return normalize(settingsValue) ?? 5;
+  return normalizeKeepRecent(settingsValue) ?? 5;
+}
+
+function normalizeKeepRecent(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+  return Math.max(1, value);
 }
