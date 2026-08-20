@@ -89,6 +89,7 @@ import {
   hostAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import type { LocalControlService } from './local-control/index.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -810,6 +811,15 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /**
+   * The Local Control service, once the runtime app exists.
+   *
+   * A getter rather than a field because the runtime app is mounted after the
+   * listener is up: at the moment this handle is constructed there is nothing
+   * to hand back. Callers await `runtimeReady` first — before that it is
+   * undefined, which is also what an API-only daemon returns forever.
+   */
+  getLocalControl(): LocalControlService | undefined;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
@@ -3502,6 +3512,23 @@ async function runQwenServeImpl(
       }
     }
 
+    // Queue Local Control teardown before disposing the ACP handle. The
+    // serialized disable runs on the next microtask and wins before further IO;
+    // ACP disposal below also removes the upgrade listeners while the daemon
+    // mount is being torn down.
+    const localControlService = app.locals?.['localControlService'] as
+      | LocalControlService
+      | undefined;
+    if (localControlService) {
+      void localControlService.dispose().catch((err: unknown) => {
+        daemonLog.warn(
+          `Local Control dispose error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
+
     const acpHandle = app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
     if (acpHandle?.dispose) {
       try {
@@ -3690,6 +3717,14 @@ async function runQwenServeImpl(
       runtimeBootSettings,
       runtimeEnvSnapshot.effectiveEnv,
     );
+    const sessionAttachmentsRoot = (
+      workspace: string,
+      runtimeBaseDir: string,
+    ): string =>
+      path.join(
+        new core.Storage(workspace, runtimeBaseDir).getProjectTempDir(),
+        'attachments',
+      );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
@@ -4287,6 +4322,10 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -4696,6 +4735,10 @@ async function runQwenServeImpl(
         ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
         onChannelDelivery: createBoundChannelDeliveryHandler(
@@ -5256,6 +5299,10 @@ async function runQwenServeImpl(
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
         wsBridge = runtime.createAcpSessionBridge({
+          sessionAttachmentsRoot: sessionAttachmentsRoot(
+            cwd,
+            wsEnv.sessionRuntimeBaseDir,
+          ),
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
           onChannelDelivery: createBoundChannelDeliveryHandler(
@@ -7383,6 +7430,10 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getLocalControl: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'localControlService'
+          ] as LocalControlService | undefined,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing
@@ -7886,7 +7937,6 @@ async function runQwenServeImpl(
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
-          opts.strictPort !== true &&
           opts.port !== 0 &&
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1

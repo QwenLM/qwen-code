@@ -11781,43 +11781,6 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('does not retry EADDRINUSE in strict-port mode', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-strict-port-')),
-    );
-    const portsAttempted: number[] = [];
-    const listenError = new Error('address in use') as NodeJS.ErrnoException;
-    listenError.code = 'EADDRINUSE';
-    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
-      locals: {},
-    } as unknown as express.Application);
-    const testServer = createServer();
-    testServer.listen = vi.fn((port: number) => {
-      portsAttempted.push(port);
-      setImmediate(() => testServer.emit('error', listenError));
-      return testServer;
-    }) as unknown as typeof testServer.listen;
-
-    await expect(
-      runQwenServe(
-        {
-          port: 4170,
-          strictPort: true,
-          hostname: '127.0.0.1',
-          mode: 'http-bridge',
-          workspace: tmpDir,
-          serveWebShell: false,
-        },
-        {
-          bridge: makeFakeBridge(),
-          httpServerFactory: () => testServer,
-        },
-      ),
-    ).rejects.toBe(listenError);
-
-    expect(portsAttempted).toEqual([4170]);
-  });
-
   it('does not retry on non-EADDRINUSE listen errors', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),

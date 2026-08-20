@@ -386,11 +386,16 @@ function convertToHistoryItems(
         }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string }
+            | { displayText?: string; attachmentReferences?: unknown[] }
             | undefined;
+          const hasAttachmentReferences =
+            Array.isArray(payload?.attachmentReferences) &&
+            payload.attachmentReferences.length > 0;
           const text =
             payload?.displayText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (hasAttachmentReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -434,8 +439,17 @@ function convertToHistoryItems(
         }
 
         const projection = projectUserTranscriptForDisplay(record);
+        const payload = record.systemPayload as
+          | { attachmentReferences?: unknown[] }
+          | undefined;
+        const hasAttachmentReferences =
+          Array.isArray(payload?.attachmentReferences) &&
+          payload.attachmentReferences.length > 0;
         const text =
-          projection.displayText ?? extractTextFromParts(projection.parts);
+          projection.displayText ||
+          (hasAttachmentReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
         if (text) {
           items.push({ type: 'user', text });
         }

@@ -88,6 +88,7 @@ import type {
   EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
+import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -104,7 +105,6 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { NewSessionDotField } from './components/NewSessionDotField';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -140,7 +140,10 @@ import {
   getFileChangePreviewContent,
   TURN_OUTPUT_KINDS,
 } from './components/artifacts/TurnOutputs';
-import { useArtifactWorkspaceTarget } from './components/artifacts/useArtifactWorkspaceTarget';
+import {
+  resolveArtifactWorkspaceOwner,
+  useArtifactWorkspaceTarget,
+} from './components/artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -270,6 +273,7 @@ import {
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import { base64ToBlob } from './utils/base64';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
@@ -949,6 +953,16 @@ export interface WebShellProps {
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1095,6 +1109,7 @@ function imageTabId(src: string): string {
   }
   return `image:${hash.toString(36)}`;
 }
+
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -1816,6 +1831,7 @@ export function App({
   atProviders,
   composerTagIcons,
   fileUploadEnabled,
+  fileUploadDirectory,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2075,6 +2091,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     }),
     [
       composerTagIcons,
@@ -2101,6 +2118,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     ],
   );
   const CustomFooter = renderFooter;
@@ -2223,6 +2241,14 @@ export function App({
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
+  const artifactWorkspaceCwd = artifactWorkspaceTarget?.workspaceCwd;
+  const artifactWorkspaceActions = artifactWorkspaceTarget?.actions;
+  const artifactWorkspaceCwdRef = useRef(artifactWorkspaceCwd);
+  const artifactWorkspaceActionsRef = useRef(artifactWorkspaceActions);
+  const workspaceCapabilitiesRef = useRef(workspace.capabilities);
+  artifactWorkspaceCwdRef.current = artifactWorkspaceCwd;
+  artifactWorkspaceActionsRef.current = artifactWorkspaceActions;
+  workspaceCapabilitiesRef.current = workspace.capabilities;
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -3405,6 +3431,107 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openAttachmentPanel = useCallback(
+    (
+      file: AttachmentPreviewRequest,
+      workspaceCwd = connection.workspaceCwd,
+      sourceSessionId = connection.sessionId,
+    ) => {
+      const open = (resolvedFile: AttachmentPreviewRequest) => {
+        const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
+        const workspaceId = resolveArtifactWorkspaceOwner(
+          workspaceCapabilitiesRef.current,
+          workspaceCwd,
+        )?.id;
+        const previewOnly =
+          resolvedFile.text !== undefined ||
+          resolvedFile.data !== undefined ||
+          resolvedFile.attachmentId !== undefined;
+        const tab: ArtifactPanelTab = {
+          id: previewOnly
+            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            : `file:${workspaceCwd ?? ''}:${workspacePath}`,
+          kind: 'file',
+          title: resolvedFile.name,
+          workspacePath,
+          ...(resolvedFile.text !== undefined
+            ? { previewContent: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.data ? { previewData: resolvedFile.data } : {}),
+          ...(resolvedFile.mimeType
+            ? { previewMimeType: resolvedFile.mimeType }
+            : {}),
+          ...(previewOnly ? { previewOnly: true } : {}),
+          ...(workspaceCwd ? { workspaceCwd } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+        };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id)
+            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            : [tab, ...tabs],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+      };
+      if (
+        file.attachmentId &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void sessionActions
+          .readAttachment(file.attachmentId)
+          .then((attachment) => {
+            if (!owner.isCurrent()) return;
+            open({
+              ...file,
+              data: base64ToBlob(attachment.data, attachment.mimeType),
+              mimeType: attachment.mimeType,
+            });
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast(
+              'error',
+              formatError(error, 'Failed to preview attachment'),
+            );
+          });
+        return;
+      }
+      if (
+        file.workspacePath &&
+        file.text === undefined &&
+        file.data === undefined &&
+        artifactWorkspaceCwdRef.current === workspaceCwd &&
+        artifactWorkspaceActionsRef.current
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void artifactWorkspaceActionsRef.current
+          .stat(file.workspacePath)
+          .then((stat) => {
+            if (!owner.isCurrent() || stat.type !== 'file') return;
+            open(file);
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast('error', formatError(error, 'Failed to preview file'));
+          });
+        return;
+      }
+      open(file);
+    },
+    [
+      connection.workspaceCwd,
+      connection.sessionId,
+      getDefaultReviewPanelWidth,
+      pushToast,
+      sessionActions,
+      sessionOwnerGuard,
+    ],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3550,6 +3677,22 @@ export function App({
         openImagePanel(request.src, request.alt);
         return;
       }
+      if (request.kind === 'attachment') {
+        openAttachmentPanel(
+          {
+            name: request.title,
+            ...(request.mimeType ? { mimeType: request.mimeType } : {}),
+            ...(request.data ? { data: request.data } : {}),
+            ...(request.text !== undefined ? { text: request.text } : {}),
+            ...(request.workspacePath
+              ? { workspacePath: request.workspacePath }
+              : {}),
+          },
+          request.workspaceCwd,
+          request.sourceSessionId,
+        );
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3606,6 +3749,7 @@ export function App({
       openReviewPanel,
       openScheduledTaskPanel,
       openImagePanel,
+      openAttachmentPanel,
       openSubagentPanelForSession,
     ],
   );
@@ -4101,6 +4245,9 @@ export function App({
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  useEffect(() => {
+    streamingStateRef.current = streamingState;
+  }, [streamingState]);
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -6123,6 +6270,8 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_attachments') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -6131,8 +6280,6 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     writeBlocked: sessionWriteBlocked,
@@ -6141,6 +6288,7 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions,
     store,
@@ -7033,10 +7181,6 @@ export function App({
     ],
   );
 
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
-
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
   const prevQueueSessionIdRef = useRef(logicalSessionKey);
@@ -7250,7 +7394,7 @@ export function App({
           ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
-        sessionCatalogController.turnCompleted(workspaceCwd);
+        sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
         if (!connectionRef.current.displayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
@@ -8664,7 +8808,6 @@ export function App({
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
           hasSession: Boolean(connectionRef.current.sessionId),
-          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -9800,7 +9943,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -10316,7 +10458,6 @@ export function App({
   const isDisabled =
     sessionWriteBlocked ||
     shouldDisableComposerInput({
-      catchingUp: Boolean(connection.catchingUp),
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
@@ -10344,7 +10485,6 @@ export function App({
       ? latestUserBlock
       : undefined;
   const composerPlaceholderInputState = {
-    catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
     isStreaming: streamingState !== 'idle',
   };
@@ -11576,10 +11716,6 @@ export function App({
                 .filter(Boolean)
                 .join(' ')}
             >
-              {isChatEmptyState &&
-                !showMissingSessionState &&
-                !activePanel &&
-                mainView === 'chat' && <NewSessionDotField />}
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled || isChatEmptyState) &&
@@ -12071,8 +12207,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  // Marker class (no declarations): keeps the ':not(...)'
-                  // exclusion in App.module.css matching.
+                  // Positioning hook: completes the compound selector in
+                  // App.module.css that keeps this wrap relative so the
+                  // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
@@ -12215,6 +12352,7 @@ export function App({
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
                                 onImagePreview={openImagePanel}
+                                onAttachmentPreview={openAttachmentPanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -12379,7 +12517,17 @@ export function App({
                           />
                         </div>
                       )}
-                      <div className={styles.composer}>
+                      {/* A pending approval overlay owns the footer: drop the
+                          composer out of layout (kept mounted so the draft
+                          survives) instead of leaving a live input below the
+                          dialog. */}
+                      <div
+                        className={
+                          approvalOverlayActive && mainView === 'chat'
+                            ? `${styles.composer} ${styles.composerHidden}`
+                            : styles.composer
+                        }
+                      >
                         {streamingState !== 'idle' ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
@@ -12482,8 +12630,7 @@ export function App({
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
+                          onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
@@ -12508,6 +12655,7 @@ export function App({
                           }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
+                          onAttachmentPreview={openAttachmentPanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -12626,7 +12774,6 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
-                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter

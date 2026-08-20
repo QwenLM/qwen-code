@@ -23,6 +23,7 @@ import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 interface MessageItemProps {
   message: Message;
@@ -31,6 +32,7 @@ interface MessageItemProps {
   onShowContextDetail?: () => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
@@ -51,6 +53,7 @@ export const MessageItem = memo(function MessageItem({
   pendingApproval,
   onShowContextDetail,
   onImagePreview,
+  onAttachmentPreview,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
@@ -74,6 +77,10 @@ export const MessageItem = memo(function MessageItem({
     [onBranchSession, branchRecordId],
   );
   const compactMode = useContext(CompactModeContext);
+  const isUserStyled =
+    message.role === 'user' ||
+    (message.role === 'system' &&
+      message.source === 'mid_turn_message_injected');
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -87,6 +94,7 @@ export const MessageItem = memo(function MessageItem({
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
             onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
           />
         );
       case 'assistant':
@@ -138,7 +146,9 @@ export const MessageItem = memo(function MessageItem({
             variant={message.variant}
             source={message.source}
             data={message.data}
+            images={message.images}
             onShowContextDetail={onShowContextDetail}
+            onImagePreview={onImagePreview}
             isLatest={isLatest}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
@@ -190,9 +200,7 @@ export const MessageItem = memo(function MessageItem({
     <ErrorBoundary
       label={`message:${message.role}`}
       resetKeys={[message]}
-      fallback={
-        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
-      }
+      fallback={<MessageRenderError align={isUserStyled ? 'end' : 'start'} />}
     >
       {body}
     </ErrorBoundary>
@@ -239,9 +247,9 @@ export const MessageItem = memo(function MessageItem({
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
-      chatMode={message.role === 'user'}
+      chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
-      copyText={message.role === 'user' ? message.content : undefined}
+      copyText={isUserStyled ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
@@ -283,6 +291,7 @@ function areMessageItemPropsEqual(
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
+  if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
@@ -351,7 +360,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         prev.variant === next.variant &&
         prev.retryable === next.retryable &&
         prev.source === next.source &&
-        prev.data === next.data
+        prev.data === next.data &&
+        stableImagesEqual(prev.images, next.images)
       );
     case 'user_shell':
       return (

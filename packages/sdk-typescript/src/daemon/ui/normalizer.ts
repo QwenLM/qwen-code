@@ -12,6 +12,7 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
+import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -61,6 +62,8 @@ const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
+
+const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -575,24 +578,68 @@ function normalizeMidTurnMessageInjected(
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  const messages = Array.isArray(event.data['messages'])
-    ? event.data['messages'].filter(
-        (message): message is string =>
-          typeof message === 'string' && message.length > 0,
-      )
-    : [];
-  if (messages.length === 0) {
+  const data = event.data;
+  const rawMessages = data['messages'];
+  const messages =
+    Array.isArray(rawMessages) &&
+    rawMessages.every(
+      (message): message is string => typeof message === 'string',
+    )
+      ? rawMessages
+      : [];
+  const items = data['items'];
+  // An injected message is renderable when its text is non-empty OR its
+  // content carries an image, resource, or non-empty text block. The drain's
+  // degraded-media path publishes `messages: ['']` whose items hold only the
+  // '[Attachment is no longer available]' text block — dropping that
+  // frame as malformed would erase the echo of the user's message.
+  const hasRenderableItemContent =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].some(
+          (block) =>
+            isRecord(block) &&
+            (block['type'] === 'image' ||
+              block['type'] === 'resource' ||
+              (block['type'] === 'text' &&
+                typeof block['text'] === 'string' &&
+                (block['text'] as string).length > 0)),
+        ),
+    );
+  if (
+    messages.length === 0 ||
+    (!messages.some(Boolean) && !hasRenderableItemContent)
+  ) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  return [
-    {
+  const messageIds = Array.isArray(data['messageIds'])
+    ? data['messageIds']
+    : [];
+  return messages.map((text, index) => {
+    const item = Array.isArray(items) ? items[index] : undefined;
+    const messageId = messageIds[index];
+    return {
       ...base,
       type: 'status',
-      text: `Inserted message: ${messages.join('\n')}`,
+      text,
       source: 'mid_turn_message_injected',
-      data: event.data,
-    },
-  ];
+      data: {
+        ...data,
+        messages: [text],
+        ...(Array.isArray(items)
+          ? { items: item !== undefined ? [item] : [] }
+          : {}),
+        ...(typeof messageId === 'string'
+          ? { messageIds: [messageId] }
+          : Array.isArray(data['messageIds'])
+            ? { messageIds: [] }
+            : {}),
+      },
+    };
+  });
 }
 
 function createBase(
@@ -691,6 +738,24 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/**
+ * True for the session-attachment reference shape (`attachmentId` instead of inline
+ * data/url/source) that replay producers persist for uploaded attachments.
+ * `extractContentPart` cannot render it; see the `user_message_chunk` case
+ * below for how it degrades instead of vanishing.
+ */
+function isAttachmentReferenceContent(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value['type'] === 'image' || value['type'] === 'resource') &&
+    typeof value['attachmentId'] === 'string' &&
+    (value['attachmentId'] as string).length > 0 &&
+    value['data'] === undefined &&
+    value['url'] === undefined &&
+    value['source'] === undefined
+  );
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -737,7 +802,15 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
-            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+            return [
+              {
+                ...base,
+                type: 'user.image.delta',
+                data,
+                mimeType,
+                ...(meta ? { meta } : {}),
+              },
+            ];
           }
           return [];
         }
@@ -754,6 +827,35 @@ function normalizeSessionUpdate(
             : [];
         }
         return [];
+      }
+      // Live consumers hydrate reference blocks before normalization; a path
+      // that reaches this point with one (offline record projection, failed
+      // hydrate) keeps the user's message visible via the placeholder.
+      if (isAttachmentReferenceContent(content)) {
+        if ((content as Record<string, unknown>)['type'] === 'resource') {
+          const attachmentId = (content as Record<string, unknown>)[
+            'attachmentId'
+          ] as string;
+          const mimeType = (content as Record<string, unknown>)['mimeType'];
+          return [
+            {
+              ...base,
+              type: 'user.file.delta',
+              name: attachmentId,
+              attachmentId,
+              mimeType: typeof mimeType === 'string' ? mimeType : '',
+              ...(meta ? { meta } : {}),
+            },
+          ];
+        }
+        return [
+          {
+            ...base,
+            type: 'user.text.delta',
+            text: ATTACHMENT_UNAVAILABLE_TEXT,
+            ...(meta ? { meta } : {}),
+          },
+        ];
       }
       const text = getTextContent(content);
       return text
@@ -1511,6 +1613,7 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isSettingsChangedData(event.data) && event.data.mutation;
   return [
     {
       ...base,
@@ -1518,6 +1621,7 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
     },
   ];
 }

@@ -60,6 +60,7 @@ import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
 const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
@@ -77,6 +78,7 @@ interface MessageListProps {
   onShowContextDetail?: () => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -144,6 +146,54 @@ interface MessageListProps {
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
+}
+
+function isStreamingTailContentOnlyUpdate(
+  previous: readonly Message[] | undefined,
+  current: readonly Message[],
+): boolean {
+  if (!previous || previous.length !== current.length || current.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < current.length - 1; i += 1) {
+    if (previous[i] !== current[i]) return false;
+  }
+  const before = previous[previous.length - 1];
+  const after = current[current.length - 1];
+  if (
+    before.id !== after.id ||
+    before.role !== after.role ||
+    (after.role !== 'assistant' && after.role !== 'thinking') ||
+    (before.role !== 'assistant' && before.role !== 'thinking') ||
+    before.isStreaming !== true ||
+    after.isStreaming !== true
+  ) {
+    return false;
+  }
+  if (before.role === 'assistant' && after.role === 'assistant') {
+    if (
+      typeof before.content !== 'string' ||
+      typeof after.content !== 'string'
+    ) {
+      return false;
+    }
+    return (
+      before.branchRecordId === after.branchRecordId &&
+      before.usage === after.usage &&
+      Boolean(before.content.trim()) === Boolean(after.content.trim())
+    );
+  }
+  return before.role === 'thinking' && after.role === 'thinking';
+}
+
+function sameIdentities(
+  left: readonly unknown[],
+  right: readonly unknown[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => Object.is(value, right[index]))
+  );
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -699,7 +749,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return isMidTurnInjectedDebugMessage(item.message);
+      return false;
     case 'user':
     case 'user_shell':
     case 'btw':
@@ -2579,6 +2629,7 @@ export const MessageList = memo(
       pendingApproval,
       onShowContextDetail,
       onImagePreview,
+      onAttachmentPreview,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2624,30 +2675,129 @@ export const MessageList = memo(
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
-    const mergedMessages = useMemo(
-      () =>
-        compactMode
-          ? mergeCompactToolGroups(messages, pendingApproval)
-          : messages,
-      [compactMode, messages, pendingApproval],
+    // Render-phase caches below are reusable only against this post-commit
+    // identity. An abandoned render cannot advance it, so its cache writes are
+    // rejected by the next committed render.
+    const previousMessagesRef = useRef<Message[] | undefined>(undefined);
+    const streamingTailContentOnly = isStreamingTailContentOnlyUpdate(
+      previousMessagesRef.current,
+      messages,
     );
-    const displayItems = useMemo(
-      () =>
-        attachTurnOutputs(
-          groupParallelAgents(mergedMessages),
-          isResponding,
-          turnFileChanges,
-          turnArtifacts,
-          turnScheduledTasks,
-        ),
-      [
-        mergedMessages,
+    useLayoutEffect(() => {
+      previousMessagesRef.current = messages;
+    }, [messages]);
+    const mergedMessagesCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          compactMode: boolean;
+          pendingApproval: PermissionRequest | null;
+          value: Message[];
+        }
+      | undefined
+    >(undefined);
+    const mergedMessages = useMemo(() => {
+      const cached = mergedMessagesCache.current;
+      const tail = messages[messages.length - 1];
+      let value: Message[];
+      if (
+        streamingTailContentOnly &&
+        tail?.role === 'assistant' &&
+        cached?.sourceMessages === previousMessagesRef.current &&
+        cached?.compactMode === compactMode &&
+        cached.pendingApproval === pendingApproval &&
+        cached.value[cached.value.length - 1]?.id === tail.id
+      ) {
+        value = cached.value.slice();
+        value[value.length - 1] = tail;
+      } else {
+        value = compactMode
+          ? mergeCompactToolGroups(messages, pendingApproval)
+          : messages;
+      }
+      mergedMessagesCache.current = {
+        sourceMessages: messages,
+        compactMode,
+        pendingApproval,
+        value,
+      };
+      return value;
+    }, [compactMode, messages, pendingApproval, streamingTailContentOnly]);
+    const displayItemsCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          compactMode: boolean;
+          pendingApproval: PermissionRequest | null;
+          isResponding: boolean;
+          turnFileChanges?: ReadonlyMap<
+            string,
+            readonly TurnOutputFileChange[]
+          >;
+          turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+          turnScheduledTasks?: ReadonlyMap<
+            string,
+            readonly TurnOutputScheduledTask[]
+          >;
+          value: DisplayItem[];
+        }
+      | undefined
+    >(undefined);
+    const displayItems = useMemo(() => {
+      const cached = displayItemsCache.current;
+      const tail = mergedMessages[mergedMessages.length - 1];
+      let value: DisplayItem[] | undefined;
+      if (
+        streamingTailContentOnly &&
+        isResponding &&
+        tail?.role === 'assistant' &&
+        cached?.sourceMessages === previousMessagesRef.current &&
+        cached?.compactMode === compactMode &&
+        cached.pendingApproval === pendingApproval &&
+        cached.isResponding === isResponding &&
+        cached.turnFileChanges === turnFileChanges &&
+        cached.turnArtifacts === turnArtifacts &&
+        cached.turnScheduledTasks === turnScheduledTasks
+      ) {
+        const previousTail = cached.value[cached.value.length - 1];
+        if (
+          previousTail?.type === 'message' &&
+          previousTail.message.id === tail.id
+        ) {
+          value = cached.value.slice();
+          value[value.length - 1] = {
+            ...previousTail,
+            message: tail,
+          };
+        }
+      }
+      value ??= attachTurnOutputs(
+        groupParallelAgents(mergedMessages),
         isResponding,
         turnFileChanges,
         turnArtifacts,
         turnScheduledTasks,
-      ],
-    );
+      );
+      displayItemsCache.current = {
+        sourceMessages: messages,
+        compactMode,
+        pendingApproval,
+        isResponding,
+        turnFileChanges,
+        turnArtifacts,
+        turnScheduledTasks,
+        value,
+      };
+      return value;
+    }, [
+      mergedMessages,
+      messages,
+      streamingTailContentOnly,
+      compactMode,
+      pendingApproval,
+      isResponding,
+      turnFileChanges,
+      turnArtifacts,
+      turnScheduledTasks,
+    ]);
     const latestBackgroundNotificationId = useMemo(() => {
       for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
         const message = mergedMessages[i];
@@ -2904,20 +3054,51 @@ export const MessageList = memo(
         ? (sessionTimelineEntries[sessionTimelineRange.currentIndex]?.id ??
           fallbackCurrentTimelineTurnId)
         : fallbackCurrentTimelineTurnId;
-    const finalAssistantTurnIdByAssistantId = useMemo(
-      () =>
-        collectFinalAssistantTurnIds(displayItems, {
+    const finalAssistantTurnIdsCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          isResponding: boolean;
+          latestTurnAwaitsAgentSummary: boolean;
+          gateBackgroundAgentStatus: boolean;
+          value: ReadonlyMap<string, string>;
+        }
+      | undefined
+    >(undefined);
+    const finalAssistantTurnIdByAssistantId = useMemo(() => {
+      const cached = finalAssistantTurnIdsCache.current;
+      let value: ReadonlyMap<string, string>;
+      if (
+        streamingTailContentOnly &&
+        isResponding &&
+        cached?.sourceMessages === previousMessagesRef.current &&
+        cached?.isResponding === isResponding &&
+        cached.latestTurnAwaitsAgentSummary === latestTurnAwaitsAgentSummary &&
+        cached.gateBackgroundAgentStatus === gateBackgroundAgentStatus
+      ) {
+        value = cached.value;
+      } else {
+        value = collectFinalAssistantTurnIds(displayItems, {
           isResponding,
           latestTurnAwaitsAgentSummary,
           gateBackgroundAgentStatus,
-        }),
-      [
-        displayItems,
-        gateBackgroundAgentStatus,
+        });
+      }
+      finalAssistantTurnIdsCache.current = {
+        sourceMessages: messages,
         isResponding,
         latestTurnAwaitsAgentSummary,
-      ],
-    );
+        gateBackgroundAgentStatus,
+        value,
+      };
+      return value;
+    }, [
+      displayItems,
+      messages,
+      streamingTailContentOnly,
+      gateBackgroundAgentStatus,
+      isResponding,
+      latestTurnAwaitsAgentSummary,
+    ]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -3003,6 +3184,10 @@ export const MessageList = memo(
     } | null>(null);
     const restoringOlderHistoryRef = useRef(false);
     restoringOlderHistoryRef.current = olderHistoryAnchor?.virtual === true;
+    const mergedMessageCountRef = useRef(mergedMessages.length);
+    useLayoutEffect(() => {
+      mergedMessageCountRef.current = mergedMessages.length;
+    }, [mergedMessages.length]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
@@ -3043,7 +3228,73 @@ export const MessageList = memo(
       },
       [scheduleScrollOverflowReport],
     );
+    const visibleItemsCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          dependencies: readonly unknown[];
+          value: DisplayItem[];
+          virtualizerItems: DisplayItem[];
+        }
+      | undefined
+    >(undefined);
+    const reusedVisibleStreamingTailRef = useRef(false);
     const visibleItems = useMemo(() => {
+      reusedVisibleStreamingTailRef.current = false;
+      const dependencies = [
+        collapseOverrides,
+        isResponding,
+        activeTurnStartedAt,
+        backgroundSummaryGraceActive,
+        latestTurnHasActiveBackgroundAgent,
+        unmatchedCompletionGraceExpired,
+        collapseEnabled,
+        hideFirstUserMessage,
+        firstTurnMetrics,
+        includeSubagentToolUsageInMetrics,
+        automaticallyExpandedAgentKeys,
+        compactMode,
+        pendingApproval,
+        turnFileChanges,
+        turnArtifacts,
+        turnScheduledTasks,
+      ] as const;
+      const cached = visibleItemsCache.current;
+      const currentTail = displayItems[displayItems.length - 1];
+      if (
+        streamingTailContentOnly &&
+        isResponding &&
+        cached &&
+        cached.sourceMessages === previousMessagesRef.current &&
+        sameIdentities(cached.dependencies, dependencies) &&
+        currentTail?.type === 'message'
+      ) {
+        const key = getDisplayItemVirtualKey(currentTail);
+        let index = -1;
+        for (let i = cached.value.length - 1; i >= 0; i -= 1) {
+          if (getDisplayItemVirtualKey(cached.value[i]) === key) {
+            index = i;
+            break;
+          }
+        }
+        if (index >= 0) {
+          const previousTail = cached.value[index];
+          if (previousTail?.type === 'message') {
+            const value = cached.value.slice();
+            value[index] = {
+              ...previousTail,
+              message: currentTail.message,
+            };
+            visibleItemsCache.current = {
+              sourceMessages: messages,
+              dependencies,
+              value,
+              virtualizerItems: cached.virtualizerItems,
+            };
+            reusedVisibleStreamingTailRef.current = true;
+            return value;
+          }
+        }
+      }
       const collapsedItems = applyTurnCollapse(displayItems, {
         overrides: collapseOverrides,
         isResponding,
@@ -3087,45 +3338,82 @@ export const MessageList = memo(
         itemsWithMetrics,
         automaticallyExpandedAgentKeys,
       );
-      if (!hideFirstUserMessage) return pinnedItems;
+      if (!hideFirstUserMessage) {
+        visibleItemsCache.current = {
+          sourceMessages: messages,
+          dependencies,
+          value: pinnedItems,
+          virtualizerItems: pinnedItems,
+        };
+        return pinnedItems;
+      }
       const firstUserId = mergedMessages.find(
         (message) => message.role === 'user',
       )?.id;
-      return firstUserId
+      const value = firstUserId
         ? pinnedItems.filter(
             (item) =>
               item.type !== 'message' || item.message.id !== firstUserId,
           )
         : pinnedItems;
+      visibleItemsCache.current = {
+        sourceMessages: messages,
+        dependencies,
+        value,
+        virtualizerItems: value,
+      };
+      return value;
     }, [
       displayItems,
+      streamingTailContentOnly,
       collapseOverrides,
       isResponding,
       activeTurnStartedAt,
       backgroundSummaryGraceActive,
       latestTurnHasActiveBackgroundAgent,
       unmatchedCompletionGraceExpired,
-      pendingApproval?.toolCallId,
       collapseEnabled,
       hideFirstUserMessage,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics,
       mergedMessages,
+      messages,
       automaticallyExpandedAgentKeys,
+      compactMode,
+      pendingApproval,
+      turnFileChanges,
+      turnArtifacts,
+      turnScheduledTasks,
     ]);
-    const visibleItemsRef = useRef(visibleItems);
-    visibleItemsRef.current = visibleItems;
+    const virtualizerItems =
+      visibleItemsCache.current?.sourceMessages === messages
+        ? visibleItemsCache.current.virtualizerItems
+        : visibleItems;
     const hasVisibleRowKey = useCallback(
       (key: string) =>
-        visibleItemsRef.current.some(
+        virtualizerItems.some(
           (item) => String(getDisplayItemVirtualKey(item)) === key,
         ),
-      [],
+      [virtualizerItems],
     );
-    const visibleTurnIdByDisplayIndex = useMemo(
-      () => getTurnIdByDisplayIndex(visibleItems),
-      [visibleItems],
-    );
+    const visibleTurnIdsCache = useRef<
+      | {
+          length: number;
+          value: Array<string | null>;
+        }
+      | undefined
+    >(undefined);
+    const visibleTurnIdByDisplayIndex = useMemo(() => {
+      if (
+        reusedVisibleStreamingTailRef.current &&
+        visibleTurnIdsCache.current?.length === visibleItems.length
+      ) {
+        return visibleTurnIdsCache.current.value;
+      }
+      const value = getTurnIdByDisplayIndex(visibleItems);
+      visibleTurnIdsCache.current = { length: visibleItems.length, value };
+      return value;
+    }, [visibleItems]);
 
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
@@ -3488,7 +3776,7 @@ export const MessageList = memo(
         if (hasTailContent && index === tailContentIndex) {
           return `slot:tail:${tailKey}`;
         }
-        const item = visibleItems[index - headerOffset];
+        const item = virtualizerItems[index - headerOffset];
         return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
       },
       [
@@ -3496,8 +3784,24 @@ export const MessageList = memo(
         hasTailContent,
         tailContentIndex,
         tailKey,
-        visibleItems,
+        virtualizerItems,
         headerOffset,
+      ],
+    );
+    const estimateItemSize = useCallback(
+      (index: number) => {
+        if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
+        if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
+        const item = virtualizerItems[index - headerOffset];
+        if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
+        return ESTIMATE_MESSAGE;
+      },
+      [
+        hasHeader,
+        hasTailContent,
+        headerOffset,
+        tailContentIndex,
+        virtualizerItems,
       ],
     );
 
@@ -3564,13 +3868,7 @@ export const MessageList = memo(
       enabled: useVirtualScroll,
       getScrollElement,
       getItemKey,
-      estimateSize: (index) => {
-        if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-        if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
-        const item = visibleItems[index - headerOffset];
-        if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
-        return ESTIMATE_MESSAGE;
-      },
+      estimateSize: estimateItemSize,
       overscan: 20,
       anchorTo: 'end',
       useFlushSync: false,
@@ -3628,19 +3926,35 @@ export const MessageList = memo(
         ? mergedMessages.length === olderHistoryAnchor.messageCount
         : current.scrollHeight === olderHistoryAnchor.scrollHeight;
       if (unchanged) {
+        olderHistoryLoadInFlight.current = false;
         if (olderHistoryAnchorFrame.current !== undefined) return;
-        olderHistoryAnchorFrame.current = requestAnimationFrame(() => {
+        // The loader can resolve before the parent commits prepended messages.
+        // Keep the anchor through a bounded frame grace instead of clearing it
+        // after one busy frame.
+        let remainingFrames = OLDER_HISTORY_ANCHOR_WAIT_FRAMES;
+        const waitForPrepend = () => {
           olderHistoryAnchorFrame.current = undefined;
           if (
             olderHistoryAnchor.generation !== olderHistoryLoadGeneration.current
           ) {
             return;
           }
-          olderHistoryLoadInFlight.current = false;
+          if (
+            mergedMessageCountRef.current !== olderHistoryAnchor.messageCount
+          ) {
+            return;
+          }
+          remainingFrames -= 1;
+          if (remainingFrames > 0) {
+            olderHistoryAnchorFrame.current =
+              requestAnimationFrame(waitForPrepend);
+            return;
+          }
           setOlderHistoryAnchor((anchor) =>
             anchor === olderHistoryAnchor ? null : anchor,
           );
-        });
+        };
+        olderHistoryAnchorFrame.current = requestAnimationFrame(waitForPrepend);
         return;
       }
       if (olderHistoryAnchorFrame.current !== undefined) {
@@ -3950,6 +4264,10 @@ export const MessageList = memo(
         olderHistoryRetryBlocked.current = false;
         olderHistoryLoadInFlight.current = true;
         const generation = ++olderHistoryLoadGeneration.current;
+        if (olderHistoryAnchorFrame.current !== undefined) {
+          cancelAnimationFrame(olderHistoryAnchorFrame.current);
+          olderHistoryAnchorFrame.current = undefined;
+        }
         setSuppressOlderHistoryLoadingStatus(!force);
         let virtualAnchor:
           | {
@@ -4637,6 +4955,7 @@ export const MessageList = memo(
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
+              onAttachmentPreview={onAttachmentPreview}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
               showRetryHint={showRetryHint}
@@ -4697,6 +5016,7 @@ export const MessageList = memo(
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
         onImagePreview,
+        onAttachmentPreview,
         generateContent,
         headerOffset,
         visibleItems,

@@ -1,7 +1,6 @@
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 
 export type ImageIngestionRejectionReason =
-  | 'unsupported'
   | 'unavailable'
   | 'too-large'
   | 'read-failed';
@@ -16,7 +15,7 @@ export interface ImageFileCandidate {
   mediaType: string;
 }
 
-export interface TextFileCandidate {
+export interface AttachmentFileCandidate {
   file: File;
   mediaType: string;
 }
@@ -24,7 +23,7 @@ export interface TextFileCandidate {
 export interface ExtractedFileTransfer {
   claimed: boolean;
   imageCandidates: ImageFileCandidate[];
-  textCandidates: TextFileCandidate[];
+  fileCandidates: AttachmentFileCandidate[];
   rejected: ImageIngestionRejection[];
 }
 
@@ -33,7 +32,7 @@ export interface ImageIngestionBatchResult {
   rejected: ImageIngestionRejection[];
 }
 
-export interface TextIngestionBatchResult {
+export interface FileIngestionBatchResult {
   accepted: PromptFile[];
   rejected: ImageIngestionRejection[];
 }
@@ -41,11 +40,11 @@ export interface TextIngestionBatchResult {
 interface ReaderLifecycle {
   onReaderCreated?: (reader: FileReader) => void;
   onReaderSettled?: (reader: FileReader) => void;
-  maxEncodedBytes?: number;
+  maxBytes?: number;
 }
 
 export const MAX_IMAGE_ATTACHMENT_DATA_BYTES = 8 * 1024 * 1024;
-export const MAX_TEXT_ATTACHMENT_DATA_BYTES = 512 * 1024;
+export const MAX_FILE_ATTACHMENT_DATA_BYTES = 8 * 1024 * 1024;
 const MAX_CONCURRENT_IMAGE_READERS = 4;
 
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -66,6 +65,7 @@ export function normalizeImageMediaType(
   fileName = '',
 ): string | undefined {
   const normalized = mediaType.trim().toLowerCase();
+  if (normalized === 'image/jpg') return 'image/jpeg';
   if (normalized === 'image/x-bmp' || normalized === 'image/x-ms-bmp') {
     return 'image/bmp';
   }
@@ -141,6 +141,7 @@ const TEXT_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   'sql',
   'html',
   'htm',
+  'svg',
   'css',
   'scss',
   'less',
@@ -168,28 +169,50 @@ export function normalizeTextMediaType(
   if (normalized.startsWith('text/')) return normalized;
   if (TEXT_MIME_TYPES.has(normalized)) return normalized;
   // Extension and well-known-name fallbacks run even when the OS reports a
-  // conflicting MIME (`.ts`/`video/mp2t`, `.csv`/`vnd.ms-excel`); actually
-  // binary content is still rejected downstream by the NUL sniff in readText.
+  // conflicting MIME (`.ts`/`video/mp2t`, `.csv`/`vnd.ms-excel`).
   const extension = fileName.split('.').pop()?.toLowerCase();
   if (extension && TEXT_FILE_EXTENSIONS.has(extension)) return 'text/plain';
   if (TEXT_FILENAMES.has(fileName.trim().toLowerCase())) return 'text/plain';
   return undefined;
 }
 
-// The daemon derives a `@<uri>` token and a `File: <uri>` label from the
-// resource URI, and `@`-token scanning stops at these characters — keep the
-// name identical across chip, URI, and token by normalizing once here.
-const ATTACHMENT_NAME_UNSAFE_RE = /[\s,;!?()[\]{}]+/g;
 /* eslint-disable no-control-regex -- intentionally strips C0/DEL controls and invisible bidi/zero-width format chars from dropped file names */
 const CONTROL_CHAR_RE =
-  /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0000-\u001f\u007f\ud800-\udfff\u200b-\u200f\u202a-\u202e\u2066-\u2069]/gu;
 /* eslint-enable no-control-regex */
+const INVALID_ATTACHMENT_NAME_RE = /[<>:"|?*]/g;
+const WINDOWS_RESERVED_NAME_RE =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const MAX_ATTACHMENT_NAME_BYTES = 255;
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const characterBytes = utf8Length(character);
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
 
 export function sanitizeAttachmentName(name: string): string {
-  const cleaned = name
+  let cleaned = name
+    .replace(/^.*[\\/]/, '')
     .trim()
-    .replace(ATTACHMENT_NAME_UNSAFE_RE, '_')
-    .replace(CONTROL_CHAR_RE, '');
+    .replace(CONTROL_CHAR_RE, '')
+    .replace(INVALID_ATTACHMENT_NAME_RE, '_')
+    .replace(/[. ]+$/u, '');
+  if (WINDOWS_RESERVED_NAME_RE.test(cleaned)) cleaned = `_${cleaned}`;
+  cleaned = truncateUtf8(cleaned, MAX_ATTACHMENT_NAME_BYTES).replace(
+    /[. ]+$/u,
+    '',
+  );
   return cleaned || 'attachment';
 }
 
@@ -198,8 +221,21 @@ export function dedupeAttachmentName(
   taken: ReadonlySet<string>,
 ): string {
   if (!taken.has(name)) return name;
-  for (let i = 2; ; i += 1) {
-    const candidate = `${name}-${i}`;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : '';
+  for (let i = 1; ; i += 1) {
+    const suffix = ` (${i})`;
+    const extensionBudget = MAX_ATTACHMENT_NAME_BYTES - utf8Length(suffix) - 1;
+    const safeExtension = truncateUtf8(extension, extensionBudget).replace(
+      /[. ]+$/u,
+      '',
+    );
+    const stemBudget =
+      MAX_ATTACHMENT_NAME_BYTES -
+      utf8Length(suffix) -
+      utf8Length(safeExtension);
+    const candidate = `${truncateUtf8(stem, stemBudget)}${suffix}${safeExtension}`;
     if (!taken.has(candidate)) return candidate;
   }
 }
@@ -212,63 +248,73 @@ export function hasFileTransferPayload(dataTransfer: DataTransfer): boolean {
   return Array.from(dataTransfer.items).some((item) => item.kind === 'file');
 }
 
+function classifyFile(
+  file: File,
+  typeHint: string,
+  result: ExtractedFileTransfer,
+) {
+  const imageMediaType = normalizeImageMediaType(typeHint, file.name);
+  if (imageMediaType) {
+    result.imageCandidates.push({ file, mediaType: imageMediaType });
+    return;
+  }
+  result.fileCandidates.push({
+    file,
+    mediaType:
+      normalizeTextMediaType(typeHint, file.name) ||
+      typeHint ||
+      'application/octet-stream',
+  });
+}
+
+export function extractFiles(files: readonly File[]): ExtractedFileTransfer {
+  const result: ExtractedFileTransfer = {
+    claimed: files.length > 0,
+    imageCandidates: [],
+    fileCandidates: [],
+    rejected: [],
+  };
+  for (const file of files) classifyFile(file, file.type, result);
+  return result;
+}
+
 export function extractFileTransfer(
   dataTransfer: DataTransfer,
   source: 'paste' | 'drop',
 ): ExtractedFileTransfer {
-  const imageCandidates: ImageFileCandidate[] = [];
-  const textCandidates: TextFileCandidate[] = [];
-  const rejected: ImageIngestionRejection[] = [];
-  let hasSupportedUnavailableItem = false;
-
-  const classify = (file: File, typeHint: string) => {
-    const imageMediaType = normalizeImageMediaType(typeHint, file.name);
-    if (imageMediaType) {
-      imageCandidates.push({ file, mediaType: imageMediaType });
-      return;
-    }
-    const textMediaType = normalizeTextMediaType(typeHint, file.name);
-    if (textMediaType) {
-      textCandidates.push({ file, mediaType: textMediaType });
-      return;
-    }
-    rejected.push({ name: file.name, reason: 'unsupported' });
+  const result: ExtractedFileTransfer = {
+    claimed: false,
+    imageCandidates: [],
+    fileCandidates: [],
+    rejected: [],
   };
+  let hasUnavailableFileItem = false;
 
   if (dataTransfer.files.length > 0) {
     for (const file of Array.from(dataTransfer.files)) {
-      classify(file, file.type);
+      classifyFile(file, file.type, result);
     }
   } else {
     for (const item of Array.from(dataTransfer.items)) {
       if (item.kind !== 'file') continue;
       const file = item.getAsFile();
       if (!file) {
-        if (
-          normalizeImageMediaType(item.type) ||
-          normalizeTextMediaType(item.type)
-        ) {
-          hasSupportedUnavailableItem = true;
-          rejected.push({ reason: 'unavailable' });
-        } else if (source === 'drop') {
-          rejected.push({ reason: 'unavailable' });
-        }
+        hasUnavailableFileItem = true;
+        result.rejected.push({ reason: 'unavailable' });
         continue;
       }
-      classify(file, file.type || item.type);
+      classifyFile(file, file.type || item.type, result);
     }
   }
 
   return {
+    ...result,
     claimed:
       source === 'drop'
         ? hasFileTransferPayload(dataTransfer)
-        : imageCandidates.length > 0 ||
-          textCandidates.length > 0 ||
-          hasSupportedUnavailableItem,
-    imageCandidates,
-    textCandidates,
-    rejected,
+        : result.imageCandidates.length > 0 ||
+          result.fileCandidates.length > 0 ||
+          hasUnavailableFileItem,
   };
 }
 
@@ -325,16 +371,12 @@ export async function readImageTransfer(
 ): Promise<ImageIngestionBatchResult> {
   const candidates: ImageFileCandidate[] = [];
   const rejected: ImageIngestionRejection[] = [];
-  let estimatedEncodedBytes = 0;
-  const maxEncodedBytes =
-    lifecycle.maxEncodedBytes ?? MAX_IMAGE_ATTACHMENT_DATA_BYTES;
+  const maxBytes = lifecycle.maxBytes ?? MAX_IMAGE_ATTACHMENT_DATA_BYTES;
   for (const candidate of imageCandidates) {
-    const candidateBytes = Math.ceil(candidate.file.size / 3) * 4;
-    if (estimatedEncodedBytes + candidateBytes > maxEncodedBytes) {
+    if (candidate.file.size > maxBytes) {
       rejected.push({ name: candidate.file.name, reason: 'too-large' });
       continue;
     }
-    estimatedEncodedBytes += candidateBytes;
     candidates.push(candidate);
   }
 
@@ -375,113 +417,31 @@ export async function readImageTransfer(
   return { accepted, rejected };
 }
 
-class BinaryContentError extends Error {
-  constructor() {
-    super('File decodes to binary content');
-    this.name = 'BinaryContentError';
-  }
-}
-
-function readText(
-  candidate: TextFileCandidate,
-  lifecycle: ReaderLifecycle,
-): Promise<PromptFile> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    let settled = false;
-    lifecycle.onReaderCreated?.(reader);
-
-    const settle = (result?: PromptFile, error?: Error) => {
-      if (settled) return;
-      settled = true;
-      lifecycle.onReaderSettled?.(reader);
-      reader.onload = null;
-      reader.onerror = null;
-      reader.onabort = null;
-      if (result) {
-        resolve(result);
-      } else {
-        reject(error ?? new Error('Failed to read text file'));
-      }
-    };
-
-    reader.onload = () => {
-      const text = typeof reader.result === 'string' ? reader.result : '';
-      if (text.includes(String.fromCharCode(0))) {
-        settle(undefined, new BinaryContentError());
-        return;
-      }
-      settle({
-        name: candidate.file.name,
-        media_type: candidate.mediaType,
-        text,
-        size: candidate.file.size,
-      });
-    };
-    reader.onerror = () => settle();
-    reader.onabort = () => settle();
-
-    try {
-      reader.readAsText(candidate.file);
-    } catch {
-      settle();
-    }
-  });
-}
-
-export async function readTextTransfer(
-  textCandidates: readonly TextFileCandidate[],
-  lifecycle: ReaderLifecycle = {},
-): Promise<TextIngestionBatchResult> {
-  const candidates: TextFileCandidate[] = [];
+export function readFileTransfer(
+  fileCandidates: readonly AttachmentFileCandidate[],
+  options: { maxBytes?: number } = {},
+): Promise<FileIngestionBatchResult> {
+  const accepted: PromptFile[] = [];
   const rejected: ImageIngestionRejection[] = [];
-  let estimatedBytes = 0;
-  const maxBytes = lifecycle.maxEncodedBytes ?? MAX_TEXT_ATTACHMENT_DATA_BYTES;
-  for (const candidate of textCandidates) {
-    if (estimatedBytes + candidate.file.size > maxBytes) {
+  const maxBytes = options.maxBytes ?? MAX_FILE_ATTACHMENT_DATA_BYTES;
+  for (const candidate of fileCandidates) {
+    if (candidate.file.size > maxBytes) {
       rejected.push({ name: candidate.file.name, reason: 'too-large' });
       continue;
     }
-    estimatedBytes += candidate.file.size;
-    candidates.push(candidate);
+    const name = sanitizeAttachmentName(candidate.file.name);
+    const nameImageType = normalizeImageMediaType('', name);
+    const declaredImageType = normalizeImageMediaType(candidate.mediaType);
+    const shieldedName =
+      nameImageType && nameImageType !== declaredImageType
+        ? `${truncateUtf8(name, MAX_ATTACHMENT_NAME_BYTES - utf8Length('.file')).replace(/[. ]+$/u, '') || 'attachment'}.file`
+        : name;
+    accepted.push({
+      name: shieldedName,
+      media_type: declaredImageType ?? candidate.mediaType,
+      data: candidate.file,
+      size: candidate.file.size,
+    });
   }
-
-  const settled: Array<PromiseSettledResult<PromptFile>> = new Array(
-    candidates.length,
-  );
-  let nextIndex = 0;
-  const readNext = async () => {
-    while (nextIndex < candidates.length) {
-      const index = nextIndex++;
-      try {
-        settled[index] = {
-          status: 'fulfilled',
-          value: await readText(candidates[index]!, lifecycle),
-        };
-      } catch (reason) {
-        settled[index] = { status: 'rejected', reason };
-      }
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(MAX_CONCURRENT_IMAGE_READERS, candidates.length) },
-      readNext,
-    ),
-  );
-  const accepted: PromptFile[] = [];
-  settled.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      accepted.push(result.value);
-    } else {
-      rejected.push({
-        name: candidates[index]?.file.name,
-        reason:
-          result.reason instanceof BinaryContentError
-            ? 'unsupported'
-            : 'read-failed',
-      });
-    }
-  });
-  return { accepted, rejected };
+  return Promise.resolve({ accepted, rejected });
 }

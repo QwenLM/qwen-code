@@ -138,6 +138,7 @@ export const compressFastCommand: SlashCommand = {
               originalTokenCount: compressed.originalTokenCount,
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
+              compressionKind: 'fast',
             },
           } as HistoryItemCompression,
           Date.now(),
