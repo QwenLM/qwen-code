@@ -1441,6 +1441,16 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  // Snapshot of request.args exactly as the PreToolUse hook saw them, taken
+  // when a call is bounced by a hook 'ask'. The bounced re-execution skips
+  // the hook, so it must run (and report) exactly these args — off-TUI
+  // responders can mutate request.args directly while the call waits, and
+  // the snapshot is restored over such mutations in _executeToolCallBody
+  // (#9434 review R6-1). Cleared on terminal state via finalizeToolSpan.
+  private readonly bouncedHookReviewedArgs = new Map<
+    string,
+    Record<string, unknown>
+  >();
   // Plan-mode shell policy decisions computed in the CONFIRMATION phase
   // (`_schedule`), keyed by callId. The EXECUTION phase cannot recompute
   // them cheaply (evaluation needs the confirmation-phase permission
@@ -1879,6 +1889,7 @@ export class CoreToolScheduler {
     // defensive no-span path.
     this.bouncedAwaitingApproval.delete(callId);
     this.bouncedToolUseId.delete(callId);
+    this.bouncedHookReviewedArgs.delete(callId);
     this.planShellDecisionByCallId.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
@@ -3909,6 +3920,18 @@ export class CoreToolScheduler {
       );
       this.finalizeToolSpan(callId);
     } else if (outcome === ToolConfirmationOutcome.ModifyWithEditor) {
+      // A bounced re-execution skips the PreToolUse hook, so content edited
+      // through the editor during the bounce would reach execution without
+      // the hook ever reviewing it. Reject the editor modify outright while
+      // bounced; the call stays in awaiting_approval (spans left open, same
+      // as the no-editor-available path below) and the user can still Cancel
+      // or Proceed (#9434 review R6-1).
+      if (this.bouncedAwaitingApproval.has(callId)) {
+        debugLogger.warn(
+          `ModifyWithEditor rejected for bounced call ${callId} — a post-ask re-execution skips the PreToolUse hook, so editor-edited content must not reach execution; tool stays in awaiting_approval (Cancel/Proceed still available)`,
+        );
+        return;
+      }
       const waitingToolCall = toolCall as WaitingToolCall;
       if (
         waitingToolCall.confirmationDetails.type === 'edit' &&
@@ -4303,6 +4326,7 @@ export class CoreToolScheduler {
     } catch (error) {
       this.bouncedAwaitingApproval.delete(callId);
       this.bouncedToolUseId.delete(callId);
+      this.bouncedHookReviewedArgs.delete(callId);
       // _executeToolCallBody records the span outcome only AFTER its main
       // try/catch is entered: ERROR or CANCELLED, while success remains
       // UNSET. Throws from the prelude — for example getMessageBus — happen
@@ -4454,6 +4478,14 @@ export class CoreToolScheduler {
     }
 
     this.bouncedAwaitingApproval.add(callId);
+    // Snapshot exactly what the PreToolUse hook saw: the bounced
+    // re-execution skips the hook, so _executeToolCallBody restores this
+    // over any mutation a responder applies to request.args while the call
+    // waits (#9434 review R6-1).
+    this.bouncedHookReviewedArgs.set(
+      callId,
+      structuredClone(scheduledCall.request.args as Record<string, unknown>),
+    );
 
     // Mirror the ordinary confirmation phase: capture the invocation
     // context NOW (while we still run in the invocation's async context)
@@ -4485,6 +4517,13 @@ export class CoreToolScheduler {
       return rest;
     };
 
+    // Double-response guard for the plan-shell branches below: the claim is
+    // checked and set synchronously BEFORE the validation await, so racing
+    // answers to the same bounced call collapse to one
+    // handleConfirmationResponse — mirroring planShellResponseClaimed in the
+    // ordinary confirmation phase (#9434 review R6-2).
+    let planShellResponseClaimed = false;
+
     let confirmationDetails: ToolCallConfirmationDetails;
     if (toolDetails) {
       const originalOnConfirm = toolDetails.onConfirm;
@@ -4507,6 +4546,8 @@ export class CoreToolScheduler {
               planShellDecision &&
               planShellDecision.classification !== 'not-applicable'
             ) {
+              if (planShellResponseClaimed) return;
+              planShellResponseClaimed = true;
               const approval = await validatePlanModeShellApproval({
                 config: this.config,
                 decision: planShellDecision,
@@ -4558,6 +4599,8 @@ export class CoreToolScheduler {
               planShellDecision &&
               planShellDecision.classification !== 'not-applicable'
             ) {
+              if (planShellResponseClaimed) return;
+              planShellResponseClaimed = true;
               const approval = await validatePlanModeShellApproval({
                 config: this.config,
                 decision: planShellDecision,
@@ -4595,17 +4638,12 @@ export class CoreToolScheduler {
 
     this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
 
-    // Mirror the confirmation phase: give the IDE a chance to resolve an
-    // edit confirmation too. Pass the PRE-wrap details so the IDE
-    // resolution routes through handleConfirmationResponse exactly once
-    // with the tool's own onConfirm — the wrapped onConfirm above would
-    // re-enter handleConfirmationResponse and double-process the outcome.
-    if (
-      toolDetails &&
-      (toolDetails.type !== 'edit' || !toolDetails.skipIdeDiff)
-    ) {
-      this.openIdeDiffIfEnabled(toolDetails, callId, signal);
-    }
+    // The IDE diff is deliberately NOT opened on a bounce: it would answer
+    // through the PRE-wrap details (the tool's own onConfirm), bypassing
+    // dropBounceModifyPayload, so an IDE accept-with-edit would rewrite the
+    // args of a re-execution that skips the PreToolUse hook. The TUI view
+    // (hideModify) is the only confirm surface while bounced (#9434 review
+    // R6-1).
 
     // blocked_on_user span as a child of the tool span — mirrors the
     // confirmation-phase setup so walk-away aborts and finalize paths
@@ -4661,7 +4699,6 @@ export class CoreToolScheduler {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
-    const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
     // Re-execution after the user approved a PreToolUse 'ask' bounce: the
     // hook already ran and the user already confirmed. Consuming the marker
@@ -4671,6 +4708,20 @@ export class CoreToolScheduler {
     // confirmation loop) and the path-unescape prelude (unescapePath is not
     // idempotent — running it twice corrupts paths with escaped metachars).
     const isPostAskReexecution = this.bouncedAwaitingApproval.delete(callId);
+    // A bounced re-execution must run exactly the args the PreToolUse hook
+    // reviewed. Off-TUI responders (stream-json controller) mutate
+    // request.args directly before answering — a channel the onConfirm
+    // payload drop cannot intercept — so restore the hook-reviewed snapshot
+    // here (#9434 review R6-1).
+    if (isPostAskReexecution) {
+      const hookReviewedArgs = this.bouncedHookReviewedArgs.get(callId);
+      this.bouncedHookReviewedArgs.delete(callId);
+      if (hookReviewedArgs) {
+        scheduledCall.request.args =
+          hookReviewedArgs as typeof scheduledCall.request.args;
+      }
+    }
+    const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
     if (!isPostAskReexecution) {
       // Normalize shell-escaped path params so hooks operate on actual

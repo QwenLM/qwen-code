@@ -10670,6 +10670,381 @@ describe('CoreToolScheduler Plan shell routing', () => {
     );
   });
 
+  // Round-6 ask-bounce regressions (#9434 review R6-1 / R6-2): a bounced
+  // re-execution skips the PreToolUse hook, so every confirmation surface
+  // while bounced must keep running exactly the args the hook reviewed.
+  function editToolForAskBounce(options: {
+    name: string;
+    execute: ReturnType<typeof vi.fn>;
+  }) {
+    return new MockTool({
+      name: options.name,
+      kind: Kind.Edit,
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'edit',
+        title: `Confirm ${options.name}`,
+        fileName: 'test.txt',
+        filePath: 'test.txt',
+        fileDiff: 'diff',
+        originalContent: 'old',
+        newContent: 'new',
+        onConfirm: async () => undefined,
+      }),
+      execute: options.execute,
+    });
+  }
+
+  const bouncedWaitingCall = (onToolCallsUpdate: Mock) =>
+    (
+      onToolCallsUpdate.mock.calls.flatMap(
+        (call) => call[0] as ToolCall[],
+      ) as Array<
+        ToolCall & { confirmationDetails?: { hookAskReason?: string } }
+      >
+    )
+      .filter((call) => call.status === 'awaiting_approval')
+      .find(
+        (call) =>
+          call.confirmationDetails?.hookAskReason === 'hook says confirm',
+      ) as WaitingToolCall | undefined;
+
+  it('keeps the IDE diff closed when a PreToolUse ask bounces an edit call', async () => {
+    // R6-1: the bounce must not open an IDE diff — the IDE answers through
+    // the PRE-wrap details, bypassing dropBounceModifyPayload, so an
+    // accept-with-edit would rewrite the args of a hook-skipping
+    // re-execution. The ordinary confirmation phase opens one diff; the
+    // bounce adds none (reviewer witness: openDiff count 2 → 1).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+    // Never resolve: the IDE surface must not get a chance to answer.
+    mockIdeClient.openDiff.mockReturnValue(new Promise(() => {}));
+
+    try {
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        buildPlanShellScheduler({
+          tools: [editToolForAskBounce({ name: 'bounceIdeEdit', execute })],
+          mode: () => ApprovalMode.DEFAULT,
+          ideMode: true,
+          messageBus: planShellAskMessageBus(),
+          disableHooks: false,
+        });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'bounce-ide-edit',
+            name: 'bounceIdeEdit',
+            args: { param: 'hook-reviewed' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-bounce-ide-edit',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      // Round 1: the ordinary confirmation phase opens exactly one diff.
+      await vi.waitFor(() =>
+        expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1),
+      );
+      const first = (await waitForStatus(
+        onToolCallsUpdate,
+        'awaiting_approval',
+      )) as WaitingToolCall;
+      await first.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      // Round 2: the hook's 'ask' bounces execution back.
+      await vi.waitFor(() =>
+        expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+      );
+      const bounced = bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+      expect(bounced.request.callId).toBe('bounce-ide-edit');
+      expect(bounced.confirmationDetails).toMatchObject({
+        type: 'edit',
+        hideModify: true,
+      });
+
+      // Answer through the bounced TUI view: the tool executes with the
+      // original args, and the bounce added NO second IDE diff.
+      await bounced.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+      expect(execute).toHaveBeenCalledWith({ param: 'hook-reviewed' });
+      expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1);
+      const completed = onAllToolCallsComplete.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[];
+      expect(completed[0].status).toBe('success');
+    } finally {
+      vi.mocked(IdeClient.getInstance).mockReset();
+      mockIdeClient.openDiff.mockReset();
+    }
+  });
+
+  it('rejects ModifyWithEditor while a PreToolUse ask bounce is pending', async () => {
+    // R6-1: content edited through the editor during the bounce would reach
+    // a hook-skipping re-execution, so the bounced call rejects the modify
+    // and stays in awaiting_approval; Cancel/Proceed still recover.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const editorCall = vi.fn(async () => ({
+      updatedParams: { param: 'editor-evil' },
+      updatedDiff: 'evil diff',
+    }));
+    modifyWithEditorOverride.value = editorCall;
+    const tool = Object.assign(
+      editToolForAskBounce({ name: 'bounceEditorEdit', execute }),
+      {
+        getModifyContext: () => ({
+          getFilePath: () => 'test.txt',
+          getCurrentContent: async () => 'old',
+          getProposedContent: async () => 'new',
+          createUpdatedParams: () => ({ param: 'editor-evil' }),
+        }),
+      },
+    );
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [tool],
+        mode: () => ApprovalMode.DEFAULT,
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'bounce-editor-edit',
+          name: 'bounceEditorEdit',
+          args: { param: 'hook-reviewed' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-bounce-editor-edit',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() =>
+      expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+    );
+    const bounced = bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+    expect(bounced.confirmationDetails).toMatchObject({ hideModify: true });
+
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ModifyWithEditor,
+    );
+
+    // The call stays in awaiting_approval with untouched args, and the
+    // editor modify was never applied.
+    const latest = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .filter((call) => call.request.callId === 'bounce-editor-edit')
+      .at(-1);
+    expect(latest?.status).toBe('awaiting_approval');
+    expect(latest?.request.args).toEqual({ param: 'hook-reviewed' });
+    expect(editorCall).not.toHaveBeenCalled();
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'ModifyWithEditor rejected for bounced call bounce-editor-edit',
+      ),
+    );
+
+    // Recovery: Cancel still completes the call.
+    await bounced.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('restores hook-reviewed args when a responder mutates them during the bounce', async () => {
+    // R6-1: the stream-json controller replaces request.args directly before
+    // answering (toolCall.request.args = updatedInput) — a channel the
+    // onConfirm payload drop cannot intercept. The bounced re-execution must
+    // restore the hook-reviewed snapshot and run (and report) that instead.
+    const hookRequests: Array<{
+      eventName?: string;
+      input?: { tool_input?: Record<string, unknown> };
+    }> = [];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (req: { eventName?: string }) => {
+          hookRequests.push(req as (typeof hookRequests)[number]);
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: 'pre-hook',
+            success: true,
+            output:
+              req.eventName === 'PreToolUse'
+                ? { decision: 'ask', reason: 'hook says confirm' }
+                : {},
+          };
+        }),
+    } as unknown as MessageBus;
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [editToolForAskBounce({ name: 'bounceArgsEdit', execute })],
+        mode: () => ApprovalMode.DEFAULT,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'bounce-args-edit',
+          name: 'bounceArgsEdit',
+          args: { param: 'hook-reviewed' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-bounce-args-edit',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() =>
+      expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+    );
+    const bounced = bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+    // Exactly what the stream-json permission controller does before
+    // answering: replace request.args wholesale on the waiting call.
+    bounced.request.args = { param: 'evil-rewritten' };
+
+    await bounced.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    // The tool ran with the hook-reviewed args, not the mutation.
+    expect(execute).toHaveBeenCalledWith({ param: 'hook-reviewed' });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(completed[0].request.args).toEqual({ param: 'hook-reviewed' });
+    // PostToolUse reports what ran — the restored args, not the mutation.
+    const postToolUse = hookRequests.find(
+      (req) => req.eventName === 'PostToolUse',
+    );
+    expect(postToolUse?.input?.tool_input).toEqual({
+      param: 'hook-reviewed',
+    });
+  });
+
+  it('answers a bounced plan-shell call at most once when responses race', async () => {
+    // R6-2: the bounced plan-shell branches awaited validation without the
+    // ordinary phase's claim guard, so two racing answers both entered
+    // handleConfirmationResponse (witness: command executed after the user
+    // cancelled). The synchronous claim collapses the race to the first
+    // responder — here ProceedOnce — and the racing Cancel is dropped.
+    const rawCommand = "python -c 'print(1)'";
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [
+          shellTool({
+            confirmation: async () => ({
+              type: 'exec',
+              title: 'Confirm shell',
+              command: rawCommand,
+              rootCommand: 'python',
+              onConfirm,
+            }),
+            execute,
+          }),
+        ],
+        messageBus: planShellAskMessageBus(),
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [request('plan-ask-bounce-race', rawCommand)],
+      new AbortController().signal,
+    );
+
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() =>
+      expect(bouncedWaitingCall(onToolCallsUpdate)).toBeDefined(),
+    );
+    const bounced = bouncedWaitingCall(onToolCallsUpdate) as WaitingToolCall;
+
+    // Two surfaces answer the SAME bounced call at once. The claim guard is
+    // synchronous-before-await, so the first responder wins deterministically.
+    await Promise.all([
+      bounced.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+      bounced.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel),
+    ]);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    // The command executed AT MOST once, and the racing cancel never
+    // landed: the call completes as the winner's outcome, not cancelled.
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    // Round-1 approval + the claim winner: the tool's own onConfirm ran
+    // exactly twice and never with Cancel.
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(
+      onConfirm.mock.calls.some(
+        (call) => call[0] === ToolConfirmationOutcome.Cancel,
+      ),
+    ).toBe(false);
+  });
+
   it('invalidates exact approval when ambient cwd moves while pending', async () => {
     const rawCommand = "python -c 'print(1)'";
     let targetDir = '/tmp/one';
