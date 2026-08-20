@@ -243,6 +243,15 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(process.exitCode).toBeUndefined();
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    // The Aone path FORCES context-unavailable into the compose input —
+    // the cap lives where `aoneWrite` is a fact, not in the model-written
+    // state, so an omitted/forged field cannot buy a real platform
+    // approval. Dropping the force must fail this pin.
+    expect(
+      (composeMock.mock.calls[0][0] as Record<string, unknown>)[
+        'contextUnavailable'
+      ],
+    ).toBe(true);
     const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
     expect(req.prNumber).toBe(1);
     expect(req.ownerRepo).toBe('maxcompute/odps_src');
@@ -456,6 +465,13 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(postedJson().posted).toBe(true);
+    // The force applies ONLY to the Aone path — a GitHub write keeps the
+    // state's own context claim (the reads are backed there).
+    expect(
+      (composeMock.mock.calls[0][0] as Record<string, unknown>)[
+        'contextUnavailable'
+      ],
+    ).toBe(false);
   });
 
   it('the FAST path with no recording at all refuses — the cwd probe must not guess the platform', () => {

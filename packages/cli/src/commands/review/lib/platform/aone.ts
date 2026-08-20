@@ -723,31 +723,32 @@ function createMrComment(
 /** The cause of an a1 failure for a terminal report — the one line the
  *  user reads, capped so a kilobyte stack trace never lands there. */
 function a1Cause(err: unknown): string {
-  const e = err as Error & { stderr?: Buffer | string };
+  const e = err as Error & {
+    stderr?: Buffer | string;
+    status?: number;
+    signal?: string;
+  };
   const firstLine = (text: string): string | undefined =>
     text
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean)
       .find(Boolean);
-  // The message an execFileSync failure raises is NOT trustworthy here:
-  // its first line is the "Command failed: a1 …" preamble, and Node embeds
-  // the FULL argv in that preamble — for a comment create, the ENTIRE
-  // multi-line comment body. Parsing the message therefore surfaces the
-  // operator's own review text, never a1's error (auth expired,
-  // `HTTP 422: line out of range`), hiding which remedy applies. a1's real
-  // error rides the captured `stderr` property; fall back to the message
-  // only for shapes with no stderr.
+  // The message an execFileSync failure raises is NEVER a text source
+  // here: its first line is the "Command failed: a1 …" preamble, and Node
+  // embeds the FULL argv in that preamble — for a comment create, the
+  // ENTIRE multi-line comment body. a1's real error rides the captured
+  // `stderr` property. An empty-stderr failure (the 120 s deadline kill
+  // — aone-client's own note: "usually no stderr" — SIGKILL/OOM, an a1
+  // crash before writing) has no trustworthy text source at all, so the
+  // fallback reports the EXIT FACTS, never the message: parsing it would
+  // quote a line of the operator's own review text as the "cause".
   const stderr = e.stderr === undefined ? undefined : String(e.stderr);
   const cause =
-    (stderr !== undefined ? firstLine(stderr) : undefined) ??
-    (() => {
-      const lines = (e.message ?? String(err))
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean);
-      return lines.slice(1).find(Boolean) ?? lines[0] ?? String(err);
-    })();
+    (stderr === undefined ? undefined : firstLine(stderr)) ??
+    `a1 failed without stderr` +
+      (typeof e.status === 'number' ? ` (exit ${e.status})` : '') +
+      (e.signal ? ` (signal ${e.signal})` : '');
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 

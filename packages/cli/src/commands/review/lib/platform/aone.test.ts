@@ -1022,13 +1022,42 @@ describe('submitAoneReview (the a1 write path)', () => {
 
   it('an approve failure alone does not fail the post', () => {
     a1OnceMock.mockImplementation(() => {
-      throw new Error('Command failed: approval denied');
+      throw Object.assign(new Error('Command failed: a1 repo mr approve'), {
+        stderr: 'approval denied\n',
+      });
     });
     const result = submitAoneReview(req({ event: 'APPROVE' }));
     expect(result.approved).toBe(false);
     expect(result.approveError).toContain('approval denied');
     expect(result.postedInline).toBe(2);
     expect(result.summaryPosted).toBe(true);
+  });
+
+  it('an empty-stderr failure reports EXIT FACTS, never the argv-bearing message', () => {
+    // The 120 s deadline kill / SIGKILL / OOM shape: no stderr at all.
+    // Parsing the message would quote a line of the operator's own review
+    // body (Node embeds the full argv) as the "cause".
+    a1JsonOnceMock.mockImplementationOnce(() => {
+      throw Object.assign(
+        new Error(
+          'Command failed: a1 repo mr comment create --message the body text\nmore body',
+        ),
+        { status: undefined, signal: 'SIGTERM' },
+      );
+    });
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'a.ts', line: 3, body: 'b' }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.message).toContain('a1 failed without stderr');
+    expect(partial.message).toContain('signal SIGTERM');
+    expect(partial.message).not.toContain('more body');
   });
 
   it('an empty summary body posts no summary comment', () => {
@@ -1051,6 +1080,19 @@ describe('submitAoneReview (the a1 write path)', () => {
     // first-class "accepted, id unknown" state. summaryPosted must not be
     // conditioned on the id reading back.
     expect(result.summaryPosted).toBe(true);
+  });
+
+  it('reads ids from the result/data nestings too — the tolerance is PINNED, not merely alive', () => {
+    // createdCommentId tolerates {result:{id}} and {data:{id}} — but a
+    // mutation dropping those keys from the loop survived the suite
+    // (correct behavior, zero pins). This cell kills it.
+    a1JsonOnceMock
+      .mockReturnValueOnce({ result: { id: 301 } })
+      .mockReturnValueOnce({ data: { id: 302 } })
+      .mockReturnValueOnce({ result: { id: 303 } });
+    const result = submitAoneReview(req());
+    expect(result.inlineCommentIds).toEqual([301, 302]);
+    expect(result.summaryCommentId).toBe(303);
   });
 
   it('counts an accepted-but-unreadable answer as POSTED — no undercount, no throw', () => {
