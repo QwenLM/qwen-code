@@ -26,7 +26,7 @@ export type McpServerScope = 'project' | 'workspace' | 'system';
 /**
  * Why an MCP server's tools are currently unavailable, used to give the model a
  * precise tool-not-found recovery action. See
- * {@link Config.getMcpServerUnavailableReason}.
+ * `Config.getMcpServerUnavailableReason` in `./config.ts`.
  * - `removed`: deleted from config this session.
  * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
  * - `excluded`: present in the `mcp.excluded` list.
