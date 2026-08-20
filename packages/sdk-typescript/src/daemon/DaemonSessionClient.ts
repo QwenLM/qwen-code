@@ -47,8 +47,10 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -848,18 +850,41 @@ export class DaemonSessionClient {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
+  async workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
+    return await this.client.sessionWorkflowTasks(
+      this.sessionId,
+      this.clientId,
+    );
+  }
+
   async lspStatus(): Promise<DaemonSessionLspStatus> {
     return await this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
   async cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
     return await this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
+      this.clientId,
+    );
+  }
+
+  async controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return await this.client.sessionWorkflowTaskAction(
+      this.sessionId,
+      taskId,
+      action,
       this.clientId,
     );
   }

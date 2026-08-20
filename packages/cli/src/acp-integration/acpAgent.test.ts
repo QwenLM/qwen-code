@@ -90,6 +90,12 @@ const { mockPreloadContentGenerator } = vi.hoisted(() => ({
   mockPreloadContentGenerator: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
+  mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+}));
+const { mockListSavedWorkflows } = vi.hoisted(() => ({
+  mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
+}));
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
@@ -248,6 +254,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).toolResultPartDiagnosticValues,
   preloadContentGenerator: mockPreloadContentGenerator,
+  listSavedWorkflows: mockListSavedWorkflows,
+  listWorkflowSnapshots: mockListWorkflowSnapshots,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -2011,6 +2019,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         dispose: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
+        deleteWorkflowHistory: ReturnType<typeof vi.fn>;
         isIdle: ReturnType<typeof vi.fn>;
         isTurnIdle: ReturnType<typeof vi.fn>;
       }
@@ -3887,6 +3896,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getFolderTrustFeature: vi.fn().mockReturnValue(false),
+      getFolderTrust: vi.fn().mockReturnValue(true),
     };
   }
 
@@ -4120,50 +4133,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(loadCliConfig).mockResolvedValue(
       innerConfig as unknown as Config,
     );
-    vi.mocked(Session).mockImplementation((createdSessionId, createdConfig) => {
-      const sessionMock = {
-        sessionId: createdSessionId,
-        getId: vi.fn().mockReturnValue(createdSessionId),
-        getConfig: vi.fn().mockReturnValue(createdConfig),
-        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        replayHistory: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
-        startCronScheduler: vi.fn(),
-        beginClose: vi.fn().mockReturnValue(vi.fn()),
-        beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
-        waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
-        waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
-        cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
-        enqueueBackgroundNotification: vi
-          .fn()
-          .mockResolvedValue({ accepted: true }),
-        enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
-        appendLiveConversationTranscript: vi.fn().mockResolvedValue(undefined),
-        collectActiveWorkHolds: vi.fn().mockReturnValue([]),
-        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
-        dispose: vi.fn(),
-        emitGoalStatus: vi.fn(),
-        captureHistorySnapshot: vi
-          .fn()
-          .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
-        restoreHistory: vi.fn(),
-        rewindToTurn: vi
-          .fn()
-          .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
-        beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
-        getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
-        clearActiveTodoPlanRevision: vi.fn(),
-        clearTodoStopGuardTrust: vi.fn(),
-        hardSuspendTodoStopGuard: vi.fn(),
-        releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
-        isIdle: vi.fn().mockReturnValue(true),
-        isTurnIdle: vi.fn().mockReturnValue(true),
-        prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
-      };
-      lastSessionMock = sessionMock;
-      return sessionMock as unknown as InstanceType<typeof Session>;
-    });
+    vi.mocked(Session).mockImplementation(
+      (
+        createdSessionId,
+        createdConfig,
+        _client,
+        _settings,
+        _runExclusiveAutomaticHistoryMutation,
+        _onActiveWorkChanged,
+        workflowHistory = [],
+      ) => {
+        const sessionMock = {
+          sessionId: createdSessionId,
+          getId: vi.fn().mockReturnValue(createdSessionId),
+          getConfig: vi.fn().mockReturnValue(createdConfig),
+          getWorkflowHistory: vi.fn().mockReturnValue(workflowHistory),
+          refreshWorkflowHistory: vi.fn(() =>
+            mockListWorkflowSnapshots(createdConfig),
+          ),
+          deleteWorkflowHistory: vi.fn().mockResolvedValue(false),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          beginClose: vi.fn().mockReturnValue(vi.fn()),
+          beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+          waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
+          waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+          cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+          enqueueBackgroundNotification: vi
+            .fn()
+            .mockResolvedValue({ accepted: true }),
+          enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+          appendLiveConversationTranscript: vi
+            .fn()
+            .mockResolvedValue(undefined),
+          collectActiveWorkHolds: vi.fn().mockReturnValue([]),
+          assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+          dispose: vi.fn(),
+          emitGoalStatus: vi.fn(),
+          captureHistorySnapshot: vi
+            .fn()
+            .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+          restoreHistory: vi.fn(),
+          rewindToTurn: vi
+            .fn()
+            .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+          beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
+          getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
+          hardSuspendTodoStopGuard: vi.fn(),
+          releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
+          isIdle: vi.fn().mockReturnValue(true),
+          isTurnIdle: vi.fn().mockReturnValue(true),
+          prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+        };
+        lastSessionMock = sessionMock;
+        return sessionMock as unknown as InstanceType<typeof Session>;
+      },
+    );
     return innerConfig;
   }
 
@@ -7443,6 +7473,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000);
     Object.assign(innerConfig, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        list: vi.fn().mockReturnValue([]),
+      }),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         getAll: vi.fn().mockReturnValue([
           {
@@ -7543,6 +7576,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
     });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    mockListSavedWorkflows.mockResolvedValueOnce([
+      {
+        name: 'deep-review',
+        source: 'project',
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      },
+      {
+        name: 'release-check',
+        source: 'user',
+        scriptPath: '/home/test/.qwen/workflows/release-check.js',
+      },
+    ]);
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -7600,6 +7646,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       availableSkills: ['review'],
+      workflowsEnabled: true,
+      savedWorkflows: [
+        { name: 'deep-review', source: 'project' },
+        { name: 'release-check', source: 'user' },
+      ],
     });
     expect(tasks).toEqual({
       v: 1,
@@ -7695,6 +7746,86 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loads persisted workflow snapshots into the session task history', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([]),
+      }),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([]),
+      }),
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([]),
+      }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        list: vi.fn().mockReturnValue([]),
+      }),
+    });
+    const persistedSnapshot = {
+      runId: 'wf_saved',
+      description: 'Review and fix',
+      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      status: 'completed',
+      script: 'return 1;',
+      phases: ['Inspect'],
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 1,
+      agentsCompleted: 1,
+      tokensSpent: 500,
+      tokenBudgetTotal: 2_000,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    mockListWorkflowSnapshots
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([persistedSnapshot]);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const legacyTasks = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTasks,
+      { sessionId },
+    );
+    const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
+      sessionId,
+      includeWorkflows: true,
+    });
+
+    expect(legacyTasks).toMatchObject({ sessionId, tasks: [] });
+    expect(tasks).toMatchObject({
+      sessionId,
+      tasks: [
+        {
+          kind: 'workflow',
+          id: 'wf_saved',
+          label: 'review-and-fix',
+          status: 'completed',
+          isHistorical: true,
+        },
+      ],
+    });
+    expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
+
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -9592,7 +9723,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskId: 'task-1',
         taskKind: 'invalid',
       }),
-    ).rejects.toThrow('taskKind must be "agent", "shell", or "monitor"');
+    ).rejects.toThrow(
+      'taskKind must be "agent", "shell", "monitor", or "workflow"',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9677,6 +9810,495 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({ cancelled: true, status: 'running' });
     expect(cancel).toHaveBeenCalledWith('monitor-1');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('cancels active workflow tasks', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const task = {
+      id: 'wf-1',
+      runId: 'wf-1',
+      kind: 'workflow' as const,
+      status: 'paused' as 'paused' | 'cancelled',
+    };
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const cancel = vi.fn(() => {
+      task.status = 'cancelled';
+    });
+    Object.assign(innerConfig, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(task),
+        getHandle: vi.fn().mockReturnValue({ completion }),
+        cancel,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let settled = false;
+    const request = agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'wf-1',
+        taskKind: 'workflow',
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveCompletion();
+    await expect(request).resolves.toEqual({
+      cancelled: true,
+      status: 'cancelled',
+    });
+    expect(cancel).toHaveBeenCalledWith('wf-1', expect.any(Number));
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    ['workflows are disabled', false, false, false, true],
+    ['bare mode is active', true, true, false, true],
+    ['the workspace is untrusted', true, false, true, false],
+  ])(
+    'does not advertise or execute workflow controls when %s',
+    async (
+      _condition,
+      workflowsEnabled,
+      bareMode,
+      folderTrustFeature,
+      folderTrust,
+    ) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.isWorkflowsEnabled.mockReturnValue(workflowsEnabled);
+      innerConfig.getBareMode.mockReturnValue(bareMode);
+      innerConfig.getFolderTrustFeature.mockReturnValue(folderTrustFeature);
+      innerConfig.getFolderTrust.mockReturnValue(folderTrust);
+      const get = vi.fn();
+      const cancel = vi.fn();
+      Object.assign(innerConfig, {
+        getWorkflowRunRegistry: vi.fn().mockReturnValue({ get, cancel }),
+      });
+      vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
+        availableCommands: [
+          {
+            name: 'workflows',
+            description: 'Custom workflows command',
+            input: null,
+            _meta: { source: 'skill-dir-command' },
+          },
+          { name: 'init', description: 'Initialize', input: null },
+        ],
+        availableSkills: [],
+      });
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSupportedCommands, {
+          sessionId,
+        }),
+      ).resolves.toMatchObject({
+        availableCommands: workflowsEnabled
+          ? [{ name: 'init', description: 'Initialize', input: null }]
+          : [
+              {
+                name: 'workflows',
+                description: 'Custom workflows command',
+                input: null,
+                _meta: { source: 'skill-dir-command' },
+              },
+              { name: 'init', description: 'Initialize', input: null },
+            ],
+        workflowsEnabled: false,
+        savedWorkflows: [],
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+          sessionId,
+          taskId: 'wf-1',
+          taskKind: 'workflow',
+        }),
+      ).resolves.toEqual({ cancelled: false, reason: 'disabled' });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+          sessionId,
+          taskId: 'wf-1',
+          action: 'delete-history',
+        }),
+      ).resolves.toEqual({ changed: false });
+      expect(mockListSavedWorkflows).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(lastSessionMock!.deleteWorkflowHistory).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('pauses and resumes a background workflow task', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const task = {
+      id: 'wf-1',
+      runId: 'wf-1',
+      kind: 'workflow' as const,
+      status: 'running' as 'running' | 'pausing' | 'paused',
+      isBackgrounded: true,
+    };
+    const pause = vi.fn(() => {
+      task.status = 'pausing';
+      return true;
+    });
+    const resume = vi.fn(() => {
+      task.status = 'running';
+      return true;
+    });
+    Object.assign(innerConfig, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn(() => task),
+        pause,
+        resume,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: 'wf-1',
+        action: 'pause',
+      }),
+    ).resolves.toEqual({ changed: true, status: 'pausing' });
+    expect(pause).toHaveBeenCalledWith('wf-1');
+
+    task.status = 'paused';
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: 'wf-1',
+        action: 'resume',
+      }),
+    ).resolves.toEqual({ changed: true, status: 'running' });
+    expect(resume).toHaveBeenCalledWith('wf-1');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses the exact run id when a concurrent saved workflow uses the same script', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const tasks: Array<{
+      runId: string;
+      status: 'running';
+      scriptPath: string;
+    }> = [];
+    const registry = {
+      get: vi.fn((runId: string) =>
+        tasks.find((candidate) => candidate.runId === runId),
+      ),
+    };
+    const execute = vi.fn().mockImplementation(async () => {
+      tasks.push({
+        runId: 'wf_concurrent',
+        status: 'running',
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      });
+      tasks.push({
+        runId: 'wf_5678efab',
+        status: 'running',
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      });
+      return { llmContent: 'started', workflowRunId: 'wf_5678efab' };
+    });
+    const build = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'workflow' ? { build } : undefined,
+        ),
+      }),
+    });
+    mockListSavedWorkflows.mockResolvedValueOnce([
+      {
+        name: 'deep-review',
+        source: 'project',
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      },
+    ]);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: 'deep-review',
+        action: 'run-saved',
+      }),
+    ).resolves.toEqual({
+      changed: true,
+      status: 'running',
+      taskId: 'wf_5678efab',
+    });
+    expect(build).toHaveBeenCalledWith({
+      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      run_in_background: true,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('retries a failed workflow with its original script, args, and journal', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const task = {
+      id: 'wf_1234abcd',
+      runId: 'wf_1234abcd',
+      kind: 'workflow' as const,
+      status: 'failed' as 'failed' | 'running',
+      script: 'return await agent(args.prompt)',
+      args: { prompt: 'retry this path' },
+    };
+    const registry = {
+      get: vi.fn(() => task),
+      getHandle: vi.fn(() => undefined),
+    };
+    const execute = vi.fn().mockImplementation(async () => {
+      task.status = 'running';
+      return { llmContent: 'started' };
+    });
+    const build = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'workflow' ? { build } : undefined,
+        ),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: 'wf_1234abcd',
+        action: 'retry',
+      }),
+    ).resolves.toEqual({ changed: true, status: 'running' });
+    expect(build).toHaveBeenCalledWith({
+      script: task.script,
+      args: task.args,
+      resumeFromRunId: task.runId,
+      run_in_background: true,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reruns a terminal workflow from scratch with a new run id', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const task = {
+      id: 'wf_1234abcd',
+      runId: 'wf_1234abcd',
+      kind: 'workflow' as const,
+      status: 'failed' as 'failed' | 'running',
+      script: 'return await agent(args.prompt)',
+      args: { prompt: 'rerun everything' },
+    };
+    const rerun = {
+      ...task,
+      id: 'wf_5678efab',
+      runId: 'wf_5678efab',
+      status: 'running' as const,
+    };
+    const concurrentRerun = {
+      ...task,
+      id: 'wf_concurrent',
+      runId: 'wf_concurrent',
+      status: 'running' as const,
+    };
+    const tasks = [task];
+    const setLineage = vi.fn(
+      (runId: string, sourceRunId: string, startMode: 'rerun') => {
+        const entry = tasks.find((candidate) => candidate.runId === runId);
+        if (!entry) return false;
+        Object.assign(entry, { sourceRunId, startMode });
+        return true;
+      },
+    );
+    const registry = {
+      get: vi.fn((runId: string) =>
+        tasks.find((candidate) => candidate.runId === runId),
+      ),
+      getHandle: vi.fn(() => undefined),
+      setLineage,
+    };
+    const execute = vi.fn().mockImplementation(async () => {
+      tasks.push(concurrentRerun, rerun);
+      return { llmContent: 'started', workflowRunId: rerun.runId };
+    });
+    const build = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'workflow' ? { build } : undefined,
+        ),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: task.runId,
+        action: 'rerun',
+      }),
+    ).resolves.toEqual({
+      changed: true,
+      status: 'running',
+      taskId: rerun.runId,
+    });
+    expect(build).toHaveBeenCalledWith({
+      script: task.script,
+      args: task.args,
+      run_in_background: true,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(rerun).toMatchObject({
+      sourceRunId: task.runId,
+      startMode: 'rerun',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('deletes a restored workflow from persistent session history', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.deleteWorkflowHistory.mockResolvedValueOnce(true);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId,
+        taskId: 'wf_abcd',
+        action: 'delete-history',
+      }),
+    ).resolves.toEqual({ changed: true });
+    expect(lastSessionMock!.deleteWorkflowHistory).toHaveBeenCalledWith(
+      'wf_abcd',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

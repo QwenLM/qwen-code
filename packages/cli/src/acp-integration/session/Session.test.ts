@@ -74,6 +74,8 @@ const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
+const deleteWorkflowSnapshotSpy = vi.hoisted(() => vi.fn());
+const listWorkflowSnapshotsSpy = vi.hoisted(() => vi.fn());
 const agentTelemetry = vi.hoisted(() => ({
   span: {},
   getActiveInteractionSpan: vi.fn(),
@@ -151,6 +153,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       logRepeatedToolFailureGuardSpy(...args);
       return actual.logRepeatedToolFailureGuard(...args);
     },
+    deleteWorkflowSnapshot: deleteWorkflowSnapshotSpy,
+    listWorkflowSnapshots: listWorkflowSnapshotsSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -483,8 +487,12 @@ describe('Session', () => {
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -593,6 +601,10 @@ describe('Session', () => {
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
     logRepeatedToolFailureGuardSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockResolvedValue(true);
+    listWorkflowSnapshotsSpy.mockReset();
+    listWorkflowSnapshotsSpy.mockResolvedValue([]);
     agentTelemetry.getActiveInteractionSpan.mockReset();
     agentTelemetry.addAgentInputMessageAttributes.mockReset();
     agentTelemetry.captures.length = 0;
@@ -689,8 +701,12 @@ describe('Session', () => {
       ),
     };
     mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       setApprovalRequestCallback: vi.fn(),
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
+      getHandle: vi.fn().mockReturnValue(undefined),
     };
 
     mockChatRecordingService = {
@@ -2180,6 +2196,180 @@ describe('Session', () => {
       .mocked(mockChat.sendMessageStream)
       .mock.calls.at(-1)?.[1] as { message: Part[] };
     expect(textParts(notificationCall.message)).toContain(reminder);
+  });
+
+  it('delivers background workflow completions through the session queue', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: {
+        runId: string;
+        status: 'completed' | 'failed';
+        todoWorkChainId?: string;
+      },
+    ) => void;
+
+    callback('Workflow completed.', '<task-notification/>', {
+      runId: 'wf_1234abcd',
+      status: 'completed',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [{ text: '<task-notification/>' }],
+        'Workflow completed.',
+        expect.objectContaining({
+          taskId: 'wf_1234abcd',
+          status: 'completed',
+          kind: 'workflow',
+        }),
+      ),
+    );
+  });
+
+  it('adds terminal workflow status changes to the session history cache', () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_saved',
+      kind: 'workflow',
+      runId: 'wf_saved',
+      description: 'Review and fix',
+      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: ['Inspect'],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 1,
+      agentsCompleted: 1,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 500,
+      tokenBudgetTotal: 2_000,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_saved',
+        description: 'Review and fix',
+        status: 'completed',
+      }),
+    ]);
+  });
+
+  it('keeps cached history on disk failure and removes it after deletion', async () => {
+    session.dispose();
+    const onActiveWorkChanged = vi.fn();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      onActiveWorkChanged,
+      [
+        {
+          runId: 'wf_abcd',
+          meta: { name: 'review-and-fix', description: 'Review and fix' },
+          status: 'failed',
+          script: 'return 1;',
+          phases: ['Inspect'],
+          agentsDispatched: 1,
+          agentsCompleted: 0,
+          tokensSpent: 500,
+          tokenBudgetTotal: 2_000,
+          perPhaseTokens: [],
+          recentLogs: [],
+          startTime: 1_000,
+          endTime: 2_000,
+        },
+      ],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue(session.getWorkflowHistory());
+
+    deleteWorkflowSnapshotSpy.mockResolvedValueOnce(false);
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(false);
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+    expect(onActiveWorkChanged).not.toHaveBeenCalled();
+
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(true);
+
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      'wf_abcd',
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledTimes(2);
+    expect(session.getWorkflowHistory()).toEqual([]);
+    expect(onActiveWorkChanged).toHaveBeenCalledOnce();
+  });
+
+  it('keeps history unchanged when the requested saved run is unknown', async () => {
+    await expect(session.deleteWorkflowHistory('wf_missing')).resolves.toBe(
+      false,
+    );
+
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('waits for an active run owner to finish persistence before deletion', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_pending',
+      meta: null,
+      status: 'completed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishPersistence: (() => void) | undefined;
+    const completion = new Promise<void>((resolve) => {
+      finishPersistence = resolve;
+    });
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await Promise.resolve();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    finishPersistence?.();
+    await expect(deletion).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
   });
 
   it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
@@ -28595,6 +28785,12 @@ describe('Session', () => {
       expect(
         mockBackgroundShellRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.setCompletionCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
     });
 
     it('aborts an active notificationAbortController and nulls the reference', () => {

@@ -126,6 +126,10 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type WorkflowParams,
+  type WorkflowToolResult,
+  listSavedWorkflows,
+  listWorkflowSnapshots,
   type TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -7701,19 +7705,49 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
     const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
     const { availableCommands, availableSkills } =
-      await buildAvailableCommandsSnapshot(session.getConfig());
+      await buildAvailableCommandsSnapshot(config);
+    const workflowsEnabled = this.canUseWorkflowControls(config);
+    const savedWorkflows = workflowsEnabled
+      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+          name,
+          source,
+        }))
+      : [];
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      availableCommands,
+      availableCommands:
+        workflowsEnabled || !config.isWorkflowsEnabled()
+          ? availableCommands
+          : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
+      workflowsEnabled,
+      savedWorkflows,
     };
   }
 
-  private buildSessionTasksStatus(sessionId: string): ServeSessionTasksStatus {
+  private canUseWorkflowControls(config: Config): boolean {
+    return (
+      config.isWorkflowsEnabled() &&
+      !config.getBareMode() &&
+      (!config.getFolderTrustFeature() || config.getFolderTrust())
+    );
+  }
+
+  private async buildSessionTasksStatus(
+    sessionId: string,
+    includeWorkflows = false,
+  ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
-    return buildSessionTasksStatus(sessionId, session.getConfig());
+    return buildSessionTasksStatus(
+      sessionId,
+      session.getConfig(),
+      Date.now(),
+      includeWorkflows ? await session.refreshWorkflowHistory() : [],
+      { includeWorkflows },
+    );
   }
 
   private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
@@ -8699,10 +8733,10 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionTasksStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildSessionTasksStatus(
+          sessionId,
+          params['includeWorkflows'] === true,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
         const sessionId = params['sessionId'];
@@ -10955,11 +10989,12 @@ class QwenAgent implements Agent {
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
-          taskKind !== 'monitor'
+          taskKind !== 'monitor' &&
+          taskKind !== 'workflow'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", or "monitor"',
+            'taskKind must be "agent", "shell", "monitor", or "workflow"',
           );
         }
         debugLogger.info(
@@ -11020,11 +11055,160 @@ class QwenAgent implements Agent {
             );
             return { cancelled: true, status: task.status };
           }
+          case 'workflow': {
+            if (!this.canUseWorkflowControls(config)) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const registry = config.getWorkflowRunRegistry();
+            const task = registry.get(taskId);
+            if (
+              !task ||
+              (task.status !== 'running' &&
+                task.status !== 'pausing' &&
+                task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            const handle = registry.getHandle(taskId);
+            registry.cancel(taskId, Date.now());
+            if (handle) await handle.completion;
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
           default: {
             const exhaustive: never = taskKind;
             throw new Error(`Unhandled task kind: ${exhaustive}`);
           }
         }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const action = params['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!this.canUseWorkflowControls(config)) {
+          return { changed: false };
+        }
+        if (action === 'delete-history') {
+          return { changed: await session.deleteWorkflowHistory(taskId) };
+        }
+        const registry = config.getWorkflowRunRegistry();
+        if (action === 'run-saved') {
+          const savedWorkflow = (await listSavedWorkflows(config)).find(
+            (entry) => entry.name === taskId,
+          );
+          if (!savedWorkflow) return { changed: false };
+          const workflowTool = config
+            .getToolRegistry()
+            .getTool(ToolNames.WORKFLOW);
+          if (!workflowTool) {
+            throw RequestError.invalidParams(
+              undefined,
+              'The workflow tool is unavailable; cannot run this saved workflow.',
+            );
+          }
+          const result = (await workflowTool
+            .build({
+              scriptPath: savedWorkflow.scriptPath,
+              run_in_background: true,
+            } satisfies WorkflowParams)
+            .execute(new AbortController().signal)) as WorkflowToolResult;
+          const startedTask = result.workflowRunId
+            ? registry.get(result.workflowRunId)
+            : undefined;
+          return startedTask
+            ? {
+                changed: true,
+                status: startedTask.status,
+                taskId: startedTask.runId,
+              }
+            : { changed: false };
+        }
+        const task = registry.get(taskId);
+        if (!task) return { changed: false };
+        if (action === 'retry' || action === 'rerun') {
+          const canStart =
+            action === 'retry'
+              ? task.status === 'failed' && !registry.getHandle(taskId)
+              : task.status === 'completed' ||
+                task.status === 'failed' ||
+                task.status === 'cancelled';
+          if (!canStart || !task.script) {
+            return { changed: false, status: task.status };
+          }
+          const workflowTool = config
+            .getToolRegistry()
+            .getTool(ToolNames.WORKFLOW);
+          if (!workflowTool) {
+            throw RequestError.invalidParams(
+              undefined,
+              `The workflow tool is unavailable; cannot ${action} this run.`,
+            );
+          }
+          const startParams: WorkflowParams = {
+            script: task.script,
+            args: task.args,
+            ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+            run_in_background: true,
+          };
+          const result = (await workflowTool
+            .build(startParams)
+            .execute(new AbortController().signal)) as WorkflowToolResult;
+          if (action === 'rerun') {
+            const rerunTask = result.workflowRunId
+              ? registry.get(result.workflowRunId)
+              : undefined;
+            if (rerunTask) {
+              registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+            }
+            return rerunTask
+              ? {
+                  changed: true,
+                  status: rerunTask.status,
+                  taskId: rerunTask.runId,
+                }
+              : { changed: false, status: task.status };
+          }
+          return {
+            changed: true,
+            status: registry.get(taskId)?.status,
+          };
+        }
+        const changed =
+          action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
+        return { changed, status: task.status };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
         const sessionId = params['sessionId'];
@@ -12876,7 +13060,7 @@ class QwenAgent implements Agent {
       );
     }
     options.beforeSessionCreate?.();
-
+    const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,
       config,
@@ -12884,6 +13068,7 @@ class QwenAgent implements Agent {
       settings,
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
+      workflowHistory,
     );
     let published = false;
     try {

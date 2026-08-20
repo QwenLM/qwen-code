@@ -52,6 +52,8 @@ import type {
   ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
+  WorkflowSnapshot,
+  WorkflowTask,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -195,6 +197,11 @@ import {
   toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
+  isTerminalWorkflowStatus,
+  MAX_RETAINED_SNAPSHOTS,
+  toSnapshot,
+  deleteWorkflowSnapshot,
+  listWorkflowSnapshots,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
   collectSessionTurnState,
@@ -1313,7 +1320,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
   toolUseId?: string;
   todoWorkChainId?: string;
   /** Structured fields for i18n rendering on the frontend. */
@@ -1839,6 +1846,8 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
+  private workflowHistory: WorkflowSnapshot[];
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
@@ -1895,8 +1904,10 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    workflowHistory: readonly WorkflowSnapshot[] = [],
   ) {
     this.sessionId = id;
+    this.workflowHistory = [...workflowHistory];
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
@@ -3083,6 +3094,41 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getWorkflowHistory(): readonly WorkflowSnapshot[] {
+    return this.workflowHistory;
+  }
+
+  async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
+    this.workflowHistory = await listWorkflowSnapshots(this.config);
+    return this.workflowHistory;
+  }
+
+  async deleteWorkflowHistory(runId: string): Promise<boolean> {
+    const handle = this.config.getWorkflowRunRegistry().getHandle(runId);
+    if (handle) await handle.completion;
+    await this.refreshWorkflowHistory();
+    if (!this.workflowHistory.some((item) => item.runId === runId)) {
+      return false;
+    }
+    if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    this.workflowHistory = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    this.#activeWorkChanged();
+    return true;
+  }
+
+  #rememberWorkflowHistory(entry: WorkflowTask): void {
+    if (!isTerminalWorkflowStatus(entry.status)) return;
+    const snapshot = toSnapshot(entry);
+    this.workflowHistory = [
+      snapshot,
+      ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
+    ]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+  }
+
   async assertCanStartTurn(): Promise<void> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -3352,6 +3398,13 @@ export class Session implements SessionContext {
     if (this.#shellStatusChangeCallback) {
       shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
       this.#shellStatusChangeCallback = undefined;
+    }
+    this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
+    if (this.#workflowStatusChangeCallback) {
+      this.config
+        .getWorkflowRunRegistry()
+        .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
+      this.#workflowStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
@@ -7860,6 +7913,26 @@ export class Session implements SessionContext {
         structured: entry
           ? { commandLabel: truncateNotificationLabel(entry.description) }
           : undefined,
+      });
+    });
+
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    this.#workflowStatusChangeCallback = (entry) => {
+      this.#activeWorkChanged();
+      if (entry) this.#rememberWorkflowHistory(entry);
+    };
+    workflowRegistry.setStatusChangeCallback(
+      this.#workflowStatusChangeCallback,
+    );
+    workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.runId,
+        status: meta.status,
+        kind: 'workflow',
+        continuesTodoStopGuardWorkChain: meta.todoWorkChainId !== undefined,
+        todoWorkChainId: meta.todoWorkChainId,
       });
     });
 
