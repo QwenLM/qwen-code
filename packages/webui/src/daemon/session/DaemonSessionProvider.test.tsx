@@ -13229,10 +13229,12 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it('re-anchors pagination and releases the latch once eviction frees room for the rejected page', async () => {
-    // A byte-budget rejection stores the rejected page's footprint; the
-    // eviction re-open must fire only once enough capacity has actually been
-    // freed for THAT page, then fetch against the re-anchored anchor.
+  it('grows the latched rejected-page footprint by a re-anchoring trim’s evicted band and keeps the latch closed', async () => {
+    // A byte-budget rejection stores the rejected page's footprint. A later
+    // re-anchoring eviction trim re-serves the evicted band on the next fetch,
+    // so the latched footprint must grow by that band; when the grown page no
+    // longer fits, the latch stays closed (no fetch/reject churn, no spurious
+    // terminal failure).
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -13341,37 +13343,25 @@ describe('DaemonSessionProvider', () => {
     });
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
 
-    // Live growth crosses the budget; the trim evicts the big replay block,
-    // freeing more than the rejected page needs — the latch re-opens and the
-    // anchor moves to the oldest retained record.
+    // Live growth crosses the budget; the trim evicts record-1 and re-anchors
+    // to record-2. A faithful daemon re-serves the evicted record-1 on the next
+    // exclusive-before fetch (it is persisted and now before the anchor), so
+    // the re-anchored page is record-1 + record-a — larger than the latched
+    // footprint. The fix grows the latched footprint by the evicted band, so the
+    // re-open gate sees that grown page no longer fits and keeps the latch
+    // closed instead of re-opening into a fetch/reject churn (or misclassifying
+    // the now-larger page as a terminal failure).
     await act(async () => {
       liveGate.resolve();
       await flushTranscriptDispatch();
     });
     expect(history).toMatchObject({
-      hasMore: true,
+      hasMore: false,
       loading: false,
-      capacityReached: false,
+      capacityReached: true,
+      paginationError: false,
     });
-
-    await act(async () => {
-      await history?.loadMore();
-      await flushPromises();
-    });
-    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
-      2,
-      session.sessionId,
-      {
-        beforeRecordId: 'record-2',
-        limit: 25,
-        clientId: session.clientId,
-      },
-    );
-    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
-      'record-a',
-      'record-2',
-      'record-live-1',
-    ]);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the capacity latch closed on live trims when pagination is unavailable', async () => {

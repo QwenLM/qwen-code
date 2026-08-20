@@ -800,6 +800,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
               history.cursor = undefined;
+              // A re-anchoring trim invalidates a latched rejectedPage
+              // footprint: the daemon (exclusive-before, served from disk)
+              // re-serves the evicted band on the next fetch, so the page will
+              // be larger than latched. Grow the latched footprint by the
+              // evicted band so the re-open gate measures the page the
+              // re-anchored fetch actually gets — a stale (too-small) footprint
+              // would churn fetch/reject, or misclassify a now-larger page as
+              // terminal. `store.getSnapshot()` is still pre-trim here: the
+              // store swaps its state only after the reduce completes.
+              if (history.rejectedPage) {
+                const preTrim = store.getSnapshot();
+                const postTrimBlockCount =
+                  detail.blockCount ?? preTrim.blocks.length;
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? preTrim.retainedBytes;
+                history.rejectedPage = {
+                  blocks:
+                    history.rejectedPage.blocks +
+                    Math.max(0, preTrim.blocks.length - postTrimBlockCount),
+                  bytes:
+                    history.rejectedPage.bytes +
+                    Math.max(0, preTrim.retainedBytes - postTrimRetainedBytes),
+                };
+              }
               // A live trim evicts oldest blocks that stay persisted
               // daemon-side, so there is now fetchable content older than the
               // re-set anchor. A session that loaded unlatched (hasMore=false,
@@ -2121,23 +2145,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 } else {
                   // The rebuild trimmed but no retained block carries a
                   // recordId, so a re-anchor to a retained record is
-                  // uncomputable. If the pre-trim replay carried any recordId
-                  // at all, that record's blocks were all evicted, and
-                  // exclusive `beforeRecordId` pagination never returns the
-                  // anchor record itself — anchoring there would leave that
-                  // record silently unreachable. Fail closed (drop the anchor;
-                  // the affordance closes below). With zero pre-trim recordIds
-                  // there is no anchor to drop either way.
-                  const replayRecordIds = new Set<string>();
-                  for (const replayEvent of replayEvents) {
-                    const recordId = getPersistedReplayRecordId(replayEvent);
-                    if (recordId !== undefined) {
-                      replayRecordIds.add(recordId);
-                    }
-                  }
-                  if (replayRecordIds.size >= 1) {
-                    transcriptHistoryRef.current.beforeRecordId = undefined;
-                  }
+                  // uncomputable. Any pre-trim anchor points at an evicted
+                  // record the exclusive pagination contract can never return
+                  // again — drop it unconditionally, mirroring the live store's
+                  // fail-closed branch. Scanning only the fresh replayEvents
+                  // would miss recordIds trimmed from the repair checkpoint in
+                  // a marker-visible live-journal repair, leaving a stale anchor
+                  // with the affordance still on; when no recordId ever existed
+                  // the anchor is already undefined, so the drop is a no-op.
+                  transcriptHistoryRef.current.beforeRecordId = undefined;
                 }
                 // A rebuild trim can evict the records a cursor points past;
                 // drop it so the beforeRecordId (re-anchored or pre-trim) is
@@ -3507,6 +3523,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (history.paginationError) {
         if (options?.force !== true) {
+          return;
+        }
+        // A fail-closed trim can drop both anchors. With neither cursor nor
+        // beforeRecordId, the daemon defaults the request to the journal's
+        // oldest page, which would be prepended below the window and re-stamp
+        // a bogus anchor. Refuse to re-arm anchor-less; the affordance stays
+        // closed until a later trim re-establishes an anchor.
+        if (
+          history.beforeRecordId === undefined &&
+          history.cursor === undefined
+        ) {
           return;
         }
         // The failed page's cursor was never advanced, so clearing the

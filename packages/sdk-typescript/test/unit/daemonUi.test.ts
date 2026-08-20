@@ -1377,6 +1377,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.retainedBytes).toBeGreaterThan(4 * 1024 * 1024);
   });
 
+  it('tolerates a degenerate maxBlocks without crashing the trim (R14-1)', () => {
+    // maxBlocks is a public option with no validated lower bound. A
+    // non-positive value must not evict down to zero blocks — the record snap
+    // would then read one past the end of the block array and throw on every
+    // dispatch. Keep at least one block instead.
+    const store = createDaemonTranscriptStore({ maxBlocks: 0 });
+    expect(() =>
+      store.dispatch({ type: 'user.text.delta', text: 'survives' }),
+    ).not.toThrow();
+    expect(store.getSnapshot().blocks).toHaveLength(1);
+    // A second dispatch must not throw either (the crash repeated on every
+    // dispatch before the floor clamp).
+    expect(() =>
+      store.dispatch({ type: 'user.text.delta', text: 'still alive' }),
+    ).not.toThrow();
+    expect(store.getSnapshot().blocks.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('keeps the retention estimate current when a tool payload is replaced', () => {
     let state = createDaemonTranscriptState({
       maxBlocks: 10,

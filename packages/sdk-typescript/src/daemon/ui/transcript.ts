@@ -1615,8 +1615,15 @@ function trimTranscriptState(
 ): DaemonTranscriptState {
   const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
   if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
-  // Count-based floor: keep at most the last `maxBlocks` blocks.
-  let removeCount = Math.max(0, state.blocks.length - state.maxBlocks);
+  // Count-based floor: keep at most the last `maxBlocks` blocks. Keep at least
+  // one block: a non-positive or non-finite maxBlocks is a degenerate input
+  // that must not evict the whole window (and would otherwise make the record
+  // snap below read one past the end of the block array).
+  const effectiveMaxBlocks = Math.max(
+    1,
+    Number.isFinite(state.maxBlocks) ? state.maxBlocks : 1,
+  );
+  let removeCount = Math.max(0, state.blocks.length - effectiveMaxBlocks);
   let bytes = state.retainedBytes;
   for (let i = 0; i < removeCount; i += 1) {
     bytes -= estimateBlockBytes(state.blocks[i]!);
