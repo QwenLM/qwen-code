@@ -168,11 +168,15 @@ export function useProviderSetupFlow(
   // displayed list actually changes without taking the state as a dependency
   // (which would re-run the effect on its own result).
   const discoveredModelsRef = useRef<ModelSpec[] | null>(null);
-  // Mirrors `modelIds` — the selection the model step currently shows. An edit
-  // arrives as the whole composed selection, so recording it as authored needs
-  // the previous one to tell the user's delta from what discovery had already
-  // done to it.
+  // The last selection the FLOW installed — start's defaults, discovery's
+  // prune, a pair-change restore. An edit arrives as the whole composed
+  // selection, so recording it as authored needs a reference point to tell the
+  // user's delta from what discovery had already done to it, and this is that
+  // point. Keystrokes deliberately do NOT move it: an edit is a delta against
+  // what the wizard last put on screen, not against the previous keystroke.
   const displayedModelIdsRef = useRef('');
+  // The selection on screen right now, keystrokes included.
+  const liveModelIdsRef = useRef('');
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
   // of any edit before that edit becomes the authored baseline.
@@ -180,24 +184,46 @@ export function useProviderSetupFlow(
 
   const setDisplayedModelIds = useCallback((value: string) => {
     displayedModelIdsRef.current = value;
+    liveModelIdsRef.current = value;
+    setModelIds(value);
+  }, []);
+
+  /** Move the on-screen selection without moving the authorship reference. */
+  const editModelIds = useCallback((value: string) => {
+    liveModelIdsRef.current = value;
     setModelIds(value);
   }, []);
 
   /**
-   * Record a model-step edit as authorship. The step hands over the whole
-   * composed selection, which by then also carries discovery's own edits: ids
+   * Fold the selection on screen into the authored baseline. The step composes
+   * the whole selection, which by then also carries discovery's own edits: ids
    * the prune removed are absent and the fallback the wizard checked is
    * present. Recording that verbatim would bake this pair's endpoint into the
-   * baseline, so the edit is applied to the baseline as a delta against what
-   * was on screen instead — ids the user never saw stay untouched, and the
-   * wizard's fallback never reads as typed.
+   * baseline, so it is applied as a delta against what the flow last put on
+   * screen instead — ids the user never saw stay untouched, and the wizard's
+   * fallback never reads as typed.
+   *
+   * R11-1: this is called when an edit is COMMITTED — submitted, or left
+   * behind by stepping off `models`, or overtaken by a discovery result — and
+   * deliberately not on every keystroke. A per-keystroke delta cannot tell a
+   * removal from a token still being typed: while the user types
+   * `qwen3.5-plus-latest`, the buffer passes through exactly `qwen3.5-plus`,
+   * so the very next keystroke saw that id leave the composed selection and
+   * deleted it from the baseline — although the user never saw or unchecked
+   * it. It is an unserved built-in, pruned from the display but still in the
+   * baseline, and the next pair change restored a selection missing it: a
+   * default the new endpoint serves came back unchecked. Judging keystrokes
+   * only by whether the vanished token was a strict prefix does not work
+   * either — the additions half of this delta accumulated every intermediate
+   * prefix into the baseline.
    */
-  const recordAuthoredModelIds = useCallback((value: string) => {
+  const recordAuthoredModelIds = useCallback((value?: string) => {
+    const committed = value ?? liveModelIdsRef.current;
     const injected = injectedModelIdRef.current;
     const strip = (ids: string[]) =>
       injected === null ? ids : ids.filter((id) => id !== injected);
     const before = strip(normalizeModelIds(displayedModelIdsRef.current));
-    const after = strip(normalizeModelIds(value));
+    const after = strip(normalizeModelIds(committed));
     const removed = new Set(before.filter((id) => !after.includes(id)));
     const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
       (id) => !removed.has(id),
@@ -206,6 +232,10 @@ export function useProviderSetupFlow(
       if (!authored.includes(id)) authored.push(id);
     }
     authoredModelIdsRef.current = authored.join(', ');
+    // The commit is the new reference point: recording it twice would read the
+    // second pass's `before` as ids the user had removed.
+    displayedModelIdsRef.current = committed;
+    liveModelIdsRef.current = committed;
   }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
@@ -256,6 +286,11 @@ export function useProviderSetupFlow(
       // into one string, so they are indistinguishable here. Ids outside the
       // built-in list are left alone; they may be legitimately unlisted
       // (private deployments, aliases).
+      // A lookup can resolve while the user is typing into the step it is
+      // about to replace. The prune reads the baseline and the display swap
+      // below overwrites the buffer, so commit what is on screen first or the
+      // edit disappears with no way back to it.
+      recordAuthoredModelIds();
       const served = new Set(models.map((model) => model.id));
       const builtIn = new Set(getDefaultModelIds(config));
       const kept = normalizeModelIds(authoredModelIdsRef.current).filter(
@@ -277,7 +312,7 @@ export function useProviderSetupFlow(
       setDiscoveryStatus('success');
       setDisplayedModelIds(next);
     },
-    [replaceRecommendations, setDisplayedModelIds],
+    [recordAuthoredModelIds, replaceRecommendations, setDisplayedModelIds],
   );
 
   useEffect(() => {
@@ -467,13 +502,17 @@ export function useProviderSetupFlow(
   }, [resetDiscovery]);
 
   const goBack = useCallback((): boolean => {
+    // Stepping off `models` commits whatever was typed there: the pair change
+    // this Esc usually precedes restores the selection FROM the baseline, so
+    // an edit still sitting only on screen would be silently dropped.
+    if (currentStep === 'models') recordAuthoredModelIds();
     if (stepIndex > 0) {
       setStepIndex((i) => i - 1);
       return true;
     }
     reset();
     return false;
-  }, [stepIndex, reset]);
+  }, [currentStep, recordAuthoredModelIds, stepIndex, reset]);
 
   const goNext = useCallback(() => {
     setStepIndex((i) => Math.min(i + 1, visibleSteps.length - 1));
@@ -591,11 +630,10 @@ export function useProviderSetupFlow(
 
   const changeModelIds = useCallback(
     (value: string) => {
-      recordAuthoredModelIds(value);
-      setDisplayedModelIds(value);
+      editModelIds(value);
       setModelIdsError(null);
     },
-    [recordAuthoredModelIds, setDisplayedModelIds],
+    [editModelIds],
   );
 
   const submitModelIds = useCallback(

@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ModelDiscoveryResult } from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
+import { normalizeModelIds } from './useAuth.js';
 
 const fetchProviderModelIdsMock = vi.hoisted(() => vi.fn());
 
@@ -667,5 +668,168 @@ describe('useProviderSetupFlow model discovery', () => {
     await waitFor(() => expect(result.current.state.step).toBe('models'));
 
     expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(1);
+  });
+  it('does not read a token still being typed as a user removal', async () => {
+    // R11-1. The step syncs the WHOLE composed selection on every keystroke,
+    // so while a longer custom id is typed the buffer passes through shorter
+    // ids as exact prefixes. `RETIRED_ID` is one of them: this endpoint does
+    // not serve it, so the prune took it off screen while the authored
+    // baseline kept it. The keystroke right after the buffer read exactly
+    // `RETIRED_ID` saw it leave the composed selection and deleted it from
+    // that baseline — although the user never saw or unchecked it. The pair
+    // change below restores FROM the baseline, so a default the SECOND
+    // endpoint does serve came back silently unchecked.
+    fetchProviderModelIdsMock.mockImplementation(
+      async ({ baseUrl }: { baseUrl: string }) =>
+        discovered(
+          baseUrl === CODING_PLAN_GLOBAL_BASE_URL ? BUILT_IN_IDS : SERVED_IDS,
+        ),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(result.current.state.modelIds).not.toContain(RETIRED_ID);
+
+    // Type `<RETIRED_ID>-latest` one character at a time, the way the custom
+    // input syncs it. The buffer is exactly RETIRED_ID at one of these steps.
+    const typed = `${RETIRED_ID}-latest`;
+    const pruned = result.current.state.modelIds;
+    for (let at = 1; at <= typed.length; at += 1) {
+      const buffer = typed.slice(0, at);
+      act(() => result.current.changeModelIds(`${pruned}, ${buffer}`));
+    }
+    expect(result.current.state.modelIds).toContain(typed);
+
+    // Change region under the same key: the new endpoint serves every built-in.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => {
+      result.current.goBack();
+    });
+    expect(result.current.state.step).toBe('baseUrl');
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    const restored = result.current.state.modelIds
+      .split(',')
+      .map((id) => id.trim());
+    // The default the user never touched comes back checked...
+    expect(restored).toContain(RETIRED_ID);
+    // ...the id they actually typed survives...
+    expect(restored).toContain(typed);
+    // ...and no intermediate keystroke prefix was banked as an id of its own.
+    // RETIRED_ID is itself a prefix of what was typed and is asserted above —
+    // it is a real built-in the user never edited, not a keystroke artefact.
+    for (let at = 1; at < typed.length; at += 1) {
+      const prefix = typed.slice(0, at);
+      if (BUILT_IN_IDS.includes(prefix)) continue;
+      expect(restored).not.toContain(prefix);
+    }
+  });
+
+  it('still records an id the user removes before leaving the step', async () => {
+    // The control for the test above: deferring authorship to the commit must
+    // not make a real removal invisible. Unchecking a served built-in and
+    // stepping off has to survive the pair change, or the prune would restore
+    // an id the user deliberately took out.
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const dropped = SERVED_IDS[0]!;
+    expect(result.current.state.modelIds).toContain(dropped);
+
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== dropped)
+          .join(', '),
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      dropped,
+    );
+  });
+  it('lets a second commit remove what the first one banked', async () => {
+    // The commit is the new authorship reference point. Leaving it on the
+    // pre-edit display made a later removal invisible: `before` still lacked
+    // the id the first commit had just banked, so it never landed in
+    // `removed` and survived in the baseline — and the next pair change
+    // restored an id the user had deleted. Re-entering the step under the
+    // same pair is served from the cache and installs no selection of its
+    // own, so nothing else moves the reference point here.
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // Commit 1: type a custom id and step off, banking it.
+    const kept = result.current.state.modelIds;
+    act(() => result.current.changeModelIds(`${kept}, my-private-deploy`));
+    act(() => {
+      result.current.goBack();
+    });
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(1);
+
+    // Commit 2: delete it again and step off.
+    act(() => result.current.changeModelIds(kept));
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      'my-private-deploy',
+    );
   });
 });
