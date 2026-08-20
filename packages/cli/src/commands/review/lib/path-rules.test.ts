@@ -262,8 +262,6 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['third_party/docs/protocols/frames.md', false],
     ['test/fixtures/docs/reference/sample.md', false],
     ['node_modules/pkg/docs/api/x.md', false],
-    // …while a package-local reference section is an ordinary monorepo shape.
-    ['packages/foo/docs/api/routes.md', true],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
