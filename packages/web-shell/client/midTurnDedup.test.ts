@@ -114,6 +114,23 @@ describe('removeInjectedFromQueue', () => {
     expect(next?.map((p) => p.text)).toEqual(['keep']);
   });
 
+  it('removes an in-flight explicit insert on a strict id match', () => {
+    // An explicitly inserted row carries no `midTurnState` until its admission
+    // response lands, so the strict-id pass must reach it through
+    // `isInserting` — otherwise the injection echo leaves it queued twice.
+    const inserting = {
+      ...q('explicit insert', [{ data: 'x' }]),
+      midTurnState: undefined,
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting, q('keep')],
+      [batchWithIds('s', ['explicit insert'], [inserting.midTurnMessageId!])],
+      's',
+    );
+    expect(next?.map((p) => p.text)).toEqual(['keep']);
+  });
+
   it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
     const withFile = { ...q('with file'), files: [{ name: 'app.log' }] };
     const prompts = [withFile, q('with file')];
@@ -159,6 +176,19 @@ describe('removeInjectedFromQueue', () => {
     const next = removeInjectedFromQueue(
       [submitting],
       [batchWithIds('s', ['early injection'], ['mid-early'])],
+      's',
+    );
+    expect(next).toEqual([]);
+  });
+
+  it('matches an explicit insert before its admission response arrives', () => {
+    const inserting = {
+      text: 'early explicit insert',
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting],
+      [batch('s', 'early explicit insert')],
       's',
     );
     expect(next).toEqual([]);

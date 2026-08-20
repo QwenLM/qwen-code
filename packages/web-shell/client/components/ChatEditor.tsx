@@ -1061,6 +1061,7 @@ function ModelReasoningControls({
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
+  const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
     if (busy) return;
     setBusy(true);
@@ -1090,26 +1091,30 @@ function ModelReasoningControls({
           }
         />
       </div>
-      <div className={styles.reasoningDivider} />
-      <div className={styles.reasoningSectionTitle}>
-        {t('reasoning.effort')}
-      </div>
-      {reasoning.efforts.map((effort) => (
-        <button
-          key={effort}
-          type="button"
-          className={styles.reasoningEffortRow}
-          aria-pressed={reasoning.effort === effort}
-          data-web-shell-effort={effort}
-          disabled={!reasoning.enabled || busy}
-          onClick={() => void select(effort)}
-        >
-          <span>{t(`reasoning.effort.${effort}`)}</span>
-          <span className={styles.dropdownItemCheck}>
-            {reasoning.effort === effort ? <CheckIcon /> : null}
-          </span>
-        </button>
-      ))}
+      {hasEffortOptions ? (
+        <>
+          <div className={styles.reasoningDivider} />
+          <div className={styles.reasoningSectionTitle}>
+            {t('reasoning.effort')}
+          </div>
+          {reasoning.efforts.map((effort) => (
+            <button
+              key={effort}
+              type="button"
+              className={styles.reasoningEffortRow}
+              aria-pressed={reasoning.effort === effort}
+              data-web-shell-effort={effort}
+              disabled={!reasoning.enabled || busy}
+              onClick={() => void select(effort)}
+            >
+              <span>{t(`reasoning.effort.${effort}`)}</span>
+              <span className={styles.dropdownItemCheck}>
+                {reasoning.effort === effort ? <CheckIcon /> : null}
+              </span>
+            </button>
+          ))}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -2310,7 +2315,9 @@ export const ChatEditor = memo(
     });
     const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
     const reasoningEffortLabel = reasoning
-      ? t(`reasoning.effort.${reasoning.effort}`)
+      ? reasoning.efforts.length > 0
+        ? t(`reasoning.effort.${reasoning.effort}`)
+        : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions
       ? `${modelLabel} · ${

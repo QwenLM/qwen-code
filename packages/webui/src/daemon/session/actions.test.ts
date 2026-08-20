@@ -4,6 +4,7 @@ import {
   DaemonPendingPromptLimitError,
   type DaemonCapabilities,
   type DaemonSessionClient,
+  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -27,6 +28,7 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-a',
         displayName: 'Session A',
         tokenCount: 42,
+        goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
@@ -53,6 +55,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
+    expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
@@ -169,6 +172,20 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('clears the previous Goal before starting a fresh session', async () => {
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: { v: 2, goal: null, activity: 'idle' },
+      },
+    });
+
+    await actions.newSession();
+
+    expect(getConnection().goalState).toBeUndefined();
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{
@@ -399,7 +416,11 @@ describe('createDaemonSessionActions', () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection, pendingSessionLoadRef, sessionRef } =
       createActionsHarness({
-        connection: { status: 'connected', sessionId: 'session-a' },
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          goalState: { v: 2, goal: null, activity: 'idle' },
+        },
         session: existingSession,
       });
 
@@ -419,6 +440,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       requestTimeoutMs: 70_000,
     });
+    expect(getConnection().goalState).toBeUndefined();
   });
 
   it('carries the daemon-advertised restore budget into the load request', async () => {
@@ -1036,6 +1058,189 @@ describe('createDaemonSessionActions', () => {
 
     expect(onAdmissionStarted).not.toHaveBeenCalled();
     expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reads and controls the authoritative Goal through the session client', async () => {
+    const session = createMockSession('session-a');
+    const snapshot = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: null,
+    };
+    session.goal.mockResolvedValue({ snapshot });
+    session.controlGoal.mockResolvedValue({ snapshot });
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+    const request = { action: 'create' as const, objective: 'ship safely' };
+
+    await expect(actions.getGoal()).resolves.toEqual({ snapshot });
+    await expect(actions.controlGoal(request)).resolves.toEqual({ snapshot });
+
+    expect(session.goal).toHaveBeenCalledOnce();
+    expect(session.controlGoal).toHaveBeenCalledWith(request);
+    expect(getConnection().goalState).toBe(snapshot);
+  });
+
+  it('does not let delayed Goal responses regress the current revision', async () => {
+    const session = createMockSession('session-a');
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'newer objective',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, revision: 6, status: 'active' as const },
+    };
+    session.goal.mockResolvedValue({ snapshot: stale });
+    session.controlGoal.mockResolvedValue({ snapshot: stale });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: current,
+      },
+      session,
+    });
+
+    await actions.getGoal();
+    await actions.controlGoal({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 7,
+    });
+
+    expect(getConnection().goalState).toBe(current);
+  });
+
+  it('installs an out-of-band Goal snapshot for the attached session only', () => {
+    const session = createMockSession('session-a');
+    const active: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 3,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    actions.applyGoalSnapshot('session-b', active);
+    expect(getConnection().goalState).toBeUndefined();
+
+    actions.applyGoalSnapshot('session-a', active);
+    expect(getConnection().goalState).toBe(active);
+
+    // Reconciled like any other snapshot, so a stale one cannot regress it.
+    actions.applyGoalSnapshot('session-a', {
+      ...active,
+      goal: { ...active.goal!, revision: 2 },
+    });
+    expect(getConnection().goalState).toBe(active);
+  });
+
+  it('does not let a stale bare-null Goal read wipe a Goal created meanwhile', async () => {
+    // The daemon answered the read while the session was goal-less, so the
+    // response carries no `clearedGoal` tombstone. Reconciling it against the
+    // goal created while it was in flight would clear that goal outright.
+    const session = createMockSession('session-a');
+    let resolveRead:
+      | ((value: { snapshot: GoalSnapshotV2 }) => void)
+      | undefined;
+    session.goal.mockReturnValue(
+      new Promise<{ snapshot: GoalSnapshotV2 }>((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    const read = actions.getGoal();
+    const created: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    replaceConnection({
+      status: 'connected',
+      sessionId: 'session-a',
+      goalState: created,
+    });
+    resolveRead?.({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+    await read;
+
+    expect(getConnection().goalState).toBe(created);
+  });
+
+  it('applies a bare-null Goal read to the Goal it observed', async () => {
+    // Same shape, but nothing changed while the read was in flight: an older
+    // daemon that clears without a tombstone must still clear the UI.
+    const session = createMockSession('session-a');
+    const active: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    session.goal.mockResolvedValue({
+      snapshot: { v: 2, goal: null, activity: 'idle' },
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: active,
+      },
+      session,
+    });
+
+    await actions.getGoal();
+
+    expect(getConnection().goalState?.goal).toBeNull();
   });
 
   it('uploads prompt images and submits attachment references instead of base64', async () => {
@@ -1855,6 +2060,42 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('uploads a file attachment with its original name and MIME type', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+    const data = new Blob(['hello'], { type: 'text/plain' });
+
+    await actions.uploadAttachment({
+      name: 'notes.txt',
+      data,
+      mimeType: 'text/plain',
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledWith(
+      data,
+      'notes.txt',
+      'text/plain',
+      undefined,
+    );
+  });
+
+  it('does not upload an attachment after the active session changes', async () => {
+    const session = createMockSession('session-b');
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.uploadAttachment(
+        {
+          name: 'notes.txt',
+          data: new Blob(['hello']),
+          mimeType: 'text/plain',
+        },
+        { sessionId: 'session-a' },
+      ),
+    ).rejects.toThrow('Attachment session changed');
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
   it('does not restart the event stream when the admitted prompt is stale', async () => {
     const restartEventStream = vi.fn();
     const session = createMockSession('session-a');
@@ -2312,6 +2553,8 @@ function createMockSession(
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
+    goal: vi.fn(),
+    controlGoal: vi.fn(),
   };
 }
 

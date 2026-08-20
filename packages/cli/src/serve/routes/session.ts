@@ -30,6 +30,7 @@ import {
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
+  parseGoalControlRequest,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
@@ -4358,6 +4359,46 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/goal',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/goal',
+      async (req, res, sessionId, runtime) => {
+        const request = parseGoalControlRequest(safeBody(req));
+        if (!request) {
+          res.status(400).json({
+            error: 'Invalid Goal control request',
+            code: 'invalid_goal_control_request',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionGoal(
+              sessionId,
+              request,
+              clientId === undefined ? undefined : { clientId },
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/goal',
+    withOwnerReadSession(
+      'GET /session/:id/goal',
+      async (_req, res, sessionId, runtime) => {
+        const goal = await runtime.bridge.getSessionGoal(sessionId);
+        res.status(200).json({ snapshot: goal.snapshot });
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/goal/clear',
     mutate({ strict: true }),
     withOwnerMutableSession(
@@ -4416,27 +4457,20 @@ export function registerSessionRoutes(
     withOwnerMutableSession(
       'POST /session/:id/attachments',
       async (req, res, sessionId, runtime) => {
-        const encodedName = req.headers['x-qwen-attachment-name'];
+        const name = req.query['name'];
         const contentType = req.headers['content-type']
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
         if (
-          typeof encodedName !== 'string' ||
+          typeof name !== 'string' ||
           !contentType ||
           !Buffer.isBuffer(req.body)
         ) {
           res.status(400).json({
             error:
-              'request body, Content-Type, and X-Qwen-Attachment-Name are required',
+              'request body, Content-Type, and name query parameter are required',
           });
-          return;
-        }
-        let name: string;
-        try {
-          name = decodeURIComponent(encodedName);
-        } catch {
-          res.status(400).json({ error: 'attachment name is invalid' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
@@ -6257,7 +6291,10 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
-          mediaBlocks ? { content: mediaBlocks } : undefined,
+          {
+            rejectIfIdle: true,
+            ...(mediaBlocks ? { content: mediaBlocks } : {}),
+          },
         );
         res.status(200).json(result);
       },
