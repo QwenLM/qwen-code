@@ -171,6 +171,16 @@ type FetchPrResult = PlanReport & {
    * cleanup audit queries the same host the review did. */
   host: string | null;
   worktreePath: string;
+  /**
+   * The common dir of the repository this command added the worktree to,
+   * resolved through the creating side's own discovery at fetch time and
+   * never through the worktree's gitfile. The residue probe's identity gate
+   * compares what that gitfile resolves to against THIS recorded value, so a
+   * gitfile swapped during the review cannot certify a foreign repository as
+   * the tree (#9557). Null when git could not answer at fetch time; the probe
+   * then falls back to the checks its own reads provide.
+   */
+  worktreeCommonDir: string | null;
   baseRefName: string;
   headRefName: string;
   isCrossRepository: boolean;
@@ -1627,6 +1637,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // a padded host silently drops to github.com anchor links.
       host: args.host?.trim() || null,
       worktreePath: wt,
+      // Resolved from the SAME discovery the `worktree add` above ran under
+      // — the creating repository — and recorded now, before any PR content
+      // runs: the residue probe refuses a tree whose gitfile resolves
+      // anywhere else (see `worktreeResidue`'s identity gate).
+      worktreeCommonDir: gitOpt(
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ),
       baseRefName: meta.baseRefName,
       headRefName: meta.headRefName,
       isCrossRepository: meta.isCrossRepository,

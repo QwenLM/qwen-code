@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -185,6 +186,19 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(tree).unmeasured).toBeUndefined();
   });
 
+  it('measures the same residue when the caller anchors the creating repository', () => {
+    // The anchor is an OPT-IN third check: callers that know the common dir of
+    // the repository the tree was created from hand it in, and healthy trees
+    // measure byte-identically with and without it — a wrong pin would be
+    // worse than none, so the healthy path is the one that must not move.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+    const expected = realpathSync(join(repo, '.git'));
+    const got = worktreeResidue(tree, 12, expected);
+    expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
+    expect(got.unmeasured).toBeUndefined();
+  });
+
   it('says UNMEASURED for a gitfile swapped at a repo that answers for this path', () => {
     // The identity gate reads `--show-toplevel`, which prints the directory the
     // `.git` FILE sits in — whatever that file points at. A repository whose
@@ -233,6 +247,66 @@ describe('worktreeResidue', () => {
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('does not point back');
+  });
+
+  it('says UNMEASURED for a forge that fabricates its own admin backpointer', () => {
+    // The round-trip proves only that two files the swapper controls agree
+    // with each other: a forge holding the contamination as committed content
+    // writes its own admin `gitdir` file naming this tree, and the round-trip
+    // reads self-consistent — `--show-toplevel` answers this tree, the
+    // backpointer names it back, and the pin then locks every measurement to
+    // the forge. Measured at the pre-fix gate: the probe answers
+    // `{paths: [], total: 0}` — certified clean — with the mutant on disk.
+    // The out-of-band anchor is the check a forge cannot pass: it resolves
+    // outside the repository the tree was created from.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const expected = realpathSync(join(repo, '.git'));
+    // Genuine first, anchored, so the fixture is known to measure at all.
+    expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const forge = join(repo, 'forge');
+    mkdirSync(forge);
+    const fgit = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: forge, encoding: 'utf8' },
+      );
+    fgit('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+    fgit('add', '-A');
+    fgit(
+      'commit',
+      '-qm',
+      'the mutant, as if it were the commit',
+      '--no-verify',
+    );
+    fgit('config', 'core.worktree', tree);
+    // The fabrication: an admin backpointer of the forge's own making. A
+    // single write, and the round-trip has nothing left to disagree with.
+    writeFileSync(join(forge, '.git', 'gitdir'), `${join(tree, '.git')}\n`);
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+
+    const got = worktreeResidue(tree, 12, expected);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('other than the one this tree was');
+    // The mutant is still on disk: the refusal withholds the certificate, it
+    // does not touch the tree.
+    expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
   });
 
   it('says UNMEASURED, not clean, when a repository is planted at the path', () => {
@@ -550,6 +624,71 @@ describe('worktreeResidue', () => {
       // unmeasured verdict withholds the certificate, not the evidence.
       expect(got.paths).toEqual(['__probe__.test.ts']);
       expect(got.total).toBe(1);
+    },
+  );
+
+  // A shim again — a shell script, so Windows skips it (see the oracle test
+  // above); the behaviour pinned is platform-independent.
+  it.skipIf(process.platform === 'win32')(
+    'still measures the residue when the gitfile is swapped after the gate',
+    () => {
+      // The pin is what closes the window between the gate's reads and the
+      // commands that follow it: this shim rewrites `tree/.git` to a
+      // committed-clean plant the moment it is invoked with `status` —
+      // strictly AFTER the gate, no race — and every anchored spawn ignores
+      // the swap because it names the verified admin entry outright. Drop the
+      // anchor spreads and the plant answers a clean status for this dirty
+      // tree: the mutant certified clean, deterministically.
+      writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+      const expected = realpathSync(join(repo, '.git'));
+
+      // The plant: the contamination committed, `core.worktree` answering for
+      // this tree — a clean `status` for the dirty tree, if a spawn ever
+      // re-discovers through the swapped gitfile.
+      const plant = join(repo, 'plant');
+      mkdirSync(plant);
+      const pgit = (...args: string[]) =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            ...args,
+          ],
+          { cwd: plant, encoding: 'utf8' },
+        );
+      pgit('init', '-q', '-b', 'main', '--template=', '.');
+      writeFileSync(join(plant, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(plant, '__probe__.test.ts'), 'probe');
+      pgit('add', '-A');
+      pgit('commit', '-qm', 'the contamination, committed', '--no-verify');
+      pgit('config', 'core.worktree', tree);
+
+      const shim = mkdtempSync(join(tmpdir(), 'qwen-git-shim-'));
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shim, 'git'),
+        `#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = status ]; then\n    printf 'gitdir: ${plant}/.git\\n' > '${tree}/.git'\n    break\n  fi\ndone\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      process.env['PATH'] = `${shim}:${realPath}`;
+
+      const got = worktreeResidue(tree, 12, expected);
+
+      // The swap DID land — the shim fired, the gitfile names the plant — and
+      // the measurement ignored it.
+      expect(readFileSync(join(tree, '.git'), 'utf8')).toContain(
+        join(plant, '.git'),
+      );
+      expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
+      expect(got.unmeasured).toBeUndefined();
     },
   );
 });

@@ -1538,6 +1538,63 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('says UNMEASURED instead of clean when the plan records another creating repository', () => {
+    // fetch-pr records the common dir of the repository it added the worktree
+    // from, and the probe refuses a tree whose gitfile resolves anywhere else
+    // — a gitfile swapped during the review names a foreign repository, and a
+    // probe that measured it would certify the forge instead of the tree. The
+    // plan field is the out-of-band half of that gate, and this is its
+    // wiring: a plan naming the wrong repository turns a dirty tree's verdict
+    // from dirty into unmeasured, never clean.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-anchor-'));
+    const gitIsolation = isolateHostGitConfig();
+    try {
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 't@t.t');
+      git('config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+      git('add', '-A');
+      git('commit', '-qm', 'head');
+      const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
+      git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
+      // A second repository — the shape a swapped gitfile's common dir
+      // resolves to.
+      const foreign = join(dir, 'foreign');
+      mkdirSync(foreign);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: foreign });
+
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: wt,
+          worktreeCommonDir: join(foreign, '.git'),
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
+      expect(brief).toContain('Whether it is clean could not be measured');
+      expect(brief).toContain('other than the one this tree was created from');
+      expect(brief).not.toContain('And right now it is not clean');
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('could not measure'),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
+    }
+  });
+
   it('builds and records the whole 3A roster', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-roster-'));
     try {

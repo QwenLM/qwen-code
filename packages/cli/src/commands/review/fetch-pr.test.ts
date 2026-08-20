@@ -526,6 +526,19 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
+  it('records the creating repository common dir for the residue anchor', async () => {
+    // The residue probe refuses a review tree whose gitfile resolves anywhere
+    // other than the repository fetch-pr added it from; the expected common
+    // dir is recorded HERE, at creation, and rides the plan (#9557). Off the
+    // default mock (gitOpt answers null) the field degrades to null — readers
+    // treat that as "no anchor recorded".
+    expect((await reportFor({})).worktreeCommonDir).toBeNull();
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args.includes('--git-common-dir') ? '/repo/.git' : null,
+    );
+    expect((await reportFor({})).worktreeCommonDir).toBe('/repo/.git');
+  });
+
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {
     // The base ref is server-controlled and reaches git's argv through the
     // base fetch — a dash-leading name (`--upload-pack=<payload>` is

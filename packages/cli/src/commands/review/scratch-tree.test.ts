@@ -89,6 +89,38 @@ describe('runScratchTree', () => {
     );
   });
 
+  it('anchors the shared-tree residue at the creating repository the caller names', () => {
+    // The --common-dir the pipeline welds into this call is the residue
+    // probe's out-of-band identity: a shared tree whose gitfile resolves
+    // anywhere else fails closed as unmeasured instead of being measured
+    // against the foreign repository. The correct common dir measures the
+    // residue normally.
+    writeFileSync(join(worktree, '__probe__.test.ts'), 'probe');
+    const foreign = join(repo, 'foreign');
+    mkdirSync(foreign);
+    git(foreign, 'init', '-q', '-b', 'main');
+
+    const refused = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      commonDir: join(foreign, '.git'),
+    });
+    expect(refused.available).toBe(true);
+    expect(refused.sharedTreeResidue).toEqual([]);
+    expect(refused.sharedTreeUnmeasured).toContain(
+      'other than the one this tree was created from',
+    );
+
+    const measured = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      commonDir: join(repo, '.git'),
+    });
+    expect(measured.available).toBe(true);
+    expect(measured.sharedTreeResidue).toEqual(['__probe__.test.ts']);
+    expect(measured.sharedTreeUnmeasured).toBeUndefined();
+  });
+
   it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
     // NO_HOOKS covers hooks only; a checkout still runs a configured
     // smudge/clean filter, and the common dir the planting surface lives in
