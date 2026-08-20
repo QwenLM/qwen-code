@@ -10999,8 +10999,10 @@ describe('useGeminiStream', () => {
             value: {
               originalTokenCount: 100,
               newTokenCount: 50,
+              // Asymmetric flags so a swapped flag-argument mutation in
+              // formatCount is detectable.
               originalTokenCountIsEstimated: true,
-              newTokenCountIsEstimated: true,
+              newTokenCountIsEstimated: false,
             },
           };
           yield {
@@ -11020,7 +11022,38 @@ describe('useGeminiStream', () => {
         .filter((item) => item.type === 'info');
       expect(infoItems).toEqual([
         expect.objectContaining({
-          text: expect.stringContaining('compressed from: ~100 to ~50 tokens'),
+          text: expect.stringContaining('compressed from: ~100 to 50 tokens'),
+        }),
+      ]);
+    });
+
+    it('renders unknown counts when the auto-compaction event value is null', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: null,
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test null compression event');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining(
+            'compressed from: unknown to unknown tokens',
+          ),
         }),
       ]);
     });
