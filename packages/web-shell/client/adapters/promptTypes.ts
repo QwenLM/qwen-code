@@ -9,4 +9,5 @@ export interface PromptFile {
   data?: Blob;
   text?: string;
   size?: number;
+  attachmentId?: string;
 }
