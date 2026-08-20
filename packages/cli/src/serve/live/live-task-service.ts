@@ -53,6 +53,7 @@ interface LocatedTask {
   runtime: WorkspaceRuntime;
   persisted: Awaited<ReturnType<SessionService['loadSession']>>;
   summary: BridgeSessionSummary;
+  liveSessionId: string;
 }
 
 interface WaitTarget {
@@ -802,11 +803,11 @@ export class LiveTaskService {
     const { cursor } = decodeCursor(target.afterCursor, target.threadId);
     const lastEventId =
       cursor.eventEpoch ===
-      task.runtime.bridge.getSessionEventEpoch(target.threadId)
+      task.runtime.bridge.getSessionEventEpoch(task.liveSessionId)
         ? cursor.eventId
-        : task.runtime.bridge.getSessionLastEventId(target.threadId);
+        : task.runtime.bridge.getSessionLastEventId(task.liveSessionId);
     for await (const event of task.runtime.bridge.subscribeEvents(
-      target.threadId,
+      task.liveSessionId,
       { lastEventId, signal },
     )) {
       const reason = eventWakeReason(event);
@@ -832,9 +833,11 @@ export class LiveTaskService {
       ...(task.summary.clientCount > 0
         ? {
             eventEpoch: task.runtime.bridge.getSessionEventEpoch(
-              target.threadId,
+              task.liveSessionId,
             ),
-            eventId: task.runtime.bridge.getSessionLastEventId(target.threadId),
+            eventId: task.runtime.bridge.getSessionLastEventId(
+              task.liveSessionId,
+            ),
           }
         : {}),
       updatedAt: laterActivityTimestamp(
@@ -862,7 +865,7 @@ export class LiveTaskService {
     const failed = task.summary.hasTurnError === true;
     const revision =
       task.summary.clientCount > 0
-        ? task.runtime.bridge.getSessionLastEventId(target.threadId)
+        ? task.runtime.bridge.getSessionLastEventId(task.liveSessionId)
         : epochSeconds(
             laterActivityTimestamp(
               task.summary.updatedAt,
@@ -1053,10 +1056,9 @@ export class LiveTaskService {
   }
 
   private async ensureResident(task: LocatedTask): Promise<string> {
-    const liveSessionId = normalizeSessionIdForLookup(task.summary.sessionId);
     try {
-      task.runtime.bridge.getSessionSummary(liveSessionId);
-      return liveSessionId;
+      task.runtime.bridge.getSessionSummary(task.liveSessionId);
+      return task.liveSessionId;
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
@@ -1072,15 +1074,16 @@ export class LiveTaskService {
       throw new SessionNotFoundError(task.summary.sessionId);
     }
     await task.runtime.bridge.resumeSession({
-      sessionId: liveSessionId,
+      sessionId: task.liveSessionId,
       workspaceCwd: task.runtime.workspaceCwd,
       ...metadata,
     });
     if (task.runtime.provenance === 'live-conversation') {
-      const directory =
-        await this.options.materializeConversationDirectory(liveSessionId);
+      const directory = await this.options.materializeConversationDirectory(
+        task.liveSessionId,
+      );
       const changed = await task.runtime.bridge.changeSessionCwd(
-        liveSessionId,
+        task.liveSessionId,
         {
           path: directory,
           allowedRoots: [task.runtime.workspaceCwd],
@@ -1091,7 +1094,7 @@ export class LiveTaskService {
         throw new Error('Projectless task relocation was rejected.');
       }
     }
-    return liveSessionId;
+    return task.liveSessionId;
   }
 
   private async rollbackFreshSession(
@@ -1134,8 +1137,9 @@ export class LiveTaskService {
   }
 
   private async locateTask(threadId: string): Promise<LocatedTask> {
+    const liveSessionId = normalizeSessionIdForLookup(threadId);
     const live =
-      this.options.workspaceRegistry.resolveLiveSessionOwner(threadId);
+      this.options.workspaceRegistry.resolveLiveSessionOwner(liveSessionId);
     if (live.kind === 'ambiguous') {
       throw new Error(`Task id is ambiguous: ${threadId}`);
     }
@@ -1169,7 +1173,7 @@ export class LiveTaskService {
     const persisted = await service.loadSession(threadId);
     let summary: BridgeSessionSummary;
     try {
-      summary = runtime.bridge.getSessionSummary(threadId);
+      summary = runtime.bridge.getSessionSummary(liveSessionId);
     } catch (error) {
       if (
         !(error instanceof SessionNotFoundError) &&
@@ -1195,7 +1199,7 @@ export class LiveTaskService {
       if (!found) throw new SessionNotFoundError(threadId);
       summary = found;
     }
-    return { runtime, persisted, summary };
+    return { runtime, persisted, summary, liveSessionId };
   }
 }
 

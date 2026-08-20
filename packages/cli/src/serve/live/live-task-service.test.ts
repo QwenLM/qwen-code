@@ -255,12 +255,19 @@ function makeHarness() {
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
     markSessionCatalogChanged: vi.fn(),
-    getSessionEventEpoch: vi.fn(() => 'event-epoch'),
-    getSessionLastEventId: vi.fn(() => 7),
+    getSessionEventEpoch: vi.fn((sessionId: string) => {
+      if (!resident.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      return 'event-epoch';
+    }),
+    getSessionLastEventId: vi.fn((sessionId: string) => {
+      if (!resident.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      return 7;
+    }),
     async *subscribeEvents(
-      _sessionId: string,
+      sessionId: string,
       options: { signal?: AbortSignal },
     ) {
+      if (!resident.has(sessionId)) throw new SessionNotFoundError(sessionId);
       yield await new Promise<never>((_resolve, reject) => {
         options.signal?.addEventListener(
           'abort',
@@ -950,6 +957,40 @@ describe('LiveTaskService', () => {
       undefined,
       expect.any(Object),
     );
+
+    const activeSummary: BridgeSessionSummary = {
+      ...summary,
+      sessionId,
+      clientCount: 1,
+      hasActivePrompt: true,
+    };
+    harness.summaries.set(sessionId, activeSummary);
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [{ ...activeSummary, sessionId: storageSessionId }],
+    });
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const waiting = harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: result['threadId'] }],
+        timeoutMs: 120_000,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeEvents).toHaveBeenCalled());
+    harness.service.interruptWait('live-root');
+    const wait = await waiting;
+
+    expect(wait).toMatchObject({
+      timedOut: false,
+      polls: [{ thread: { id: storageSessionId } }],
+    });
+    expect(harness.bridge.getSessionEventEpoch).toHaveBeenCalledWith(sessionId);
+    expect(harness.bridge.getSessionLastEventId).toHaveBeenCalledWith(
+      sessionId,
+    );
+    expect(subscribeEvents).toHaveBeenCalledWith(sessionId, expect.any(Object));
   });
 
   it('reuses a canonical live entry for a mixed-case stored task', async () => {

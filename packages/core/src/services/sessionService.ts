@@ -793,13 +793,6 @@ export class SessionService {
   async findSessionIdIgnoringCase(
     sessionId: string,
   ): Promise<string | undefined> {
-    // Exact spelling first: a readable transcript under the requested
-    // spelling is what loading uses — even when both state copies exist,
-    // loads read the active copy, matching the CLI resume path. Only a
-    // request that resolves nothing pays for the case-twin scan below.
-    if ((await this.getSessionLocation(sessionId)) !== undefined) {
-      return sessionId;
-    }
     const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
     const candidates = new Map<string, Set<SessionArchiveState>>();
     for (const state of ['active', 'archived'] as const) {

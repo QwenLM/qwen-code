@@ -2637,7 +2637,10 @@ describe('SessionService', () => {
         .mockResolvedValue([] as never);
     });
 
-    it('resolves the requested spelling without scanning when it is readable', async () => {
+    it('resolves the requested spelling when it is the only candidate', async () => {
+      readdirSpy
+        .mockResolvedValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
       const getLocation = vi
         .spyOn(sessionService, 'getSessionLocation')
         .mockResolvedValue('active');
@@ -2646,7 +2649,36 @@ describe('SessionService', () => {
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBe(sessionIdA);
       expect(getLocation).toHaveBeenCalledTimes(1);
-      expect(readdirSpy).not.toHaveBeenCalled();
+      expect(readdirSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects an exact spelling with a readable case twin', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'active',
+      );
+      statSyncSpy.mockImplementation(
+        (filePath: fs.PathLike) =>
+          ({
+            dev: 1,
+            ino: String(filePath).includes(legacySessionId) ? 43 : 42,
+            isFile: () => true,
+          }) as fs.Stats,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+      });
     });
 
     it('finds a legacy mixed-case transcript', async () => {
@@ -2702,7 +2734,7 @@ describe('SessionService', () => {
         candidateSessionId: undefined,
         message: `Multiple persisted sessions match "${sessionIdA}" by case.`,
       });
-      expect(getLocation).toHaveBeenCalledTimes(3);
+      expect(getLocation).toHaveBeenCalledTimes(2);
     });
 
     it('rejects case-only duplicates whose heads are all unreadable as occupying the id', async () => {
@@ -2733,6 +2765,7 @@ describe('SessionService', () => {
     it('resolves the requested spelling when it exists in both states', async () => {
       // Loads read the active copy (CLI resume parity), so a session left in
       // both states by a crashed archive stays reachable by its own spelling.
+      readdirSpy.mockResolvedValue([`${sessionIdA}.jsonl`] as never);
       const getLocation = vi
         .spyOn(sessionService, 'getSessionLocation')
         .mockResolvedValue('conflict');
@@ -2741,7 +2774,7 @@ describe('SessionService', () => {
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBe(sessionIdA);
       expect(getLocation).toHaveBeenCalledTimes(1);
-      expect(readdirSpy).not.toHaveBeenCalled();
+      expect(readdirSpy).toHaveBeenCalledTimes(2);
     });
 
     it('resolves a case twin persisted in both active and archive state', async () => {
@@ -2909,9 +2942,7 @@ describe('SessionService', () => {
       await expect(
         sessionService.findSessionIdIgnoringCase(agentSessionId),
       ).resolves.toBeUndefined();
-      // Only the exact-spelling fast path probes it (and pattern-rejects
-      // without touching the filesystem); enumeration never classifies it.
-      expect(getLocation).toHaveBeenCalledExactlyOnceWith(agentSessionId);
+      expect(getLocation).not.toHaveBeenCalled();
     });
 
     it('collapses case-variant spellings that alias one physical transcript', async () => {
