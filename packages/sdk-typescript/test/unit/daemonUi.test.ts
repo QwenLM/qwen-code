@@ -1252,6 +1252,49 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.retainedBytes).toBe(expected);
   });
 
+  it('backs the record-boundary snap off the floor instead of cutting mid-record (R12-21)', () => {
+    // One persisted record can fan out into several blocks. When byte pressure
+    // evicts down to the last block, the forward snap's at-least-one-block
+    // floor stops it from advancing — even when the evicted penultimate block
+    // shares the record with the survivor, which would ship a mid-record cut.
+    // The snap must back off the floor and keep the record whole instead.
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      // Fits one ~100 KB block but not both, so the byte loop evicts to the
+      // floor (one block left) and the snap is pinned there.
+      maxRetainedBytes: 150_000,
+      now: 1,
+    });
+    for (const toolCallId of ['tool-a', 'tool-b']) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId,
+            title: `Tool ${toolCallId}`,
+            status: 'completed',
+            rawOutput: large,
+            sourceRecordIds: ['record-x'],
+          },
+        ],
+        { now: 2 },
+      );
+    }
+
+    // Both siblings of record-x stay: evicting only tool-a would leave a
+    // mid-record cut that exclusive-before pagination can never re-fetch.
+    const keptToolCallIds = state.blocks.map(
+      (block) => (block as { toolCallId?: string }).toolCallId,
+    );
+    expect(keptToolCallIds).toEqual(['tool-a', 'tool-b']);
+    expect(state.blocks).toHaveLength(2);
+    for (const block of state.blocks) {
+      expect(block.sourceRecordIds).toContain('record-x');
+    }
+  });
+
   it('keeps the retention estimate current when a tool payload is replaced', () => {
     let state = createDaemonTranscriptState({
       maxBlocks: 10,

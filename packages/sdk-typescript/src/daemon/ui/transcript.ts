@@ -1626,6 +1626,25 @@ function trimTranscriptState(
     bytes -= estimateBlockBytes(state.blocks[removeCount]!);
     removeCount += 1;
   }
+  // The forward snap can be pinned one block short by the floor: the byte
+  // loop evicts down to the last block and the snap's `removeCount < len - 1`
+  // bound stops there even when the evicted penultimate block shares a record
+  // with the surviving one — a mid-record cut the snap detects but cannot fix
+  // by advancing. Back the cut off the floor instead, re-retaining that block
+  // so the record stays whole. This trades at most one extra retained block
+  // against the budget, the same "budget + one worst-case block" ceiling the
+  // byte loop above already documents.
+  if (
+    removeCount > 0 &&
+    removeCount === state.blocks.length - 1 &&
+    sharesSourceRecordId(
+      state.blocks[removeCount - 1]!,
+      state.blocks[removeCount]!,
+    )
+  ) {
+    removeCount -= 1;
+    bytes += estimateBlockBytes(state.blocks[removeCount]!);
+  }
   // Nothing evictable (e.g. one oversized block): skip the callback and
   // rebuild. Firing `kind: 'blocks'` with zero removals records a false
   // truncation and churns snapshot identity on every dispatch.

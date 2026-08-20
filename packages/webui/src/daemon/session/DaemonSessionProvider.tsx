@@ -304,18 +304,18 @@ function materializeTranscriptHistory(
   // unioning the daemon's recordId-stamped echo. RecordId dedup is blind to
   // it, so once a trim leaves it as the oldest retained block, a load-older
   // page returning that same prompt's persisted record would materialize a
-  // second user block and double-count it. Collect such prompts' text and
-  // drop matching page blocks below.
-  const localEchoUserTexts = new Set<string>();
-  for (const block of current.blocks) {
-    if (block.kind !== 'user' || (block.sourceRecordIds?.length ?? 0) > 0) {
-      continue;
-    }
-    const text = (block as { text?: string }).text;
-    if (text !== undefined && text !== '') {
-      localEchoUserTexts.add(text);
-    }
-  }
+  // second user block and double-count it. The collision is strictly a
+  // boundary pair — the window's oldest block (the echo) against the page's
+  // newest user block (that same prompt's persisted record, adjacent to the
+  // window) — so only that pair is compared below. Keying on text window-wide
+  // would instead drop DISTINCT older prompts the user happened to send twice
+  // ("yes", a retry), permanently orphaning their assistant replies.
+  const oldestRetainedBlock = current.blocks[0];
+  const boundaryEchoText =
+    oldestRetainedBlock?.kind === 'user' &&
+    (oldestRetainedBlock.sourceRecordIds?.length ?? 0) === 0
+      ? ((oldestRetainedBlock as { text?: string }).text ?? '')
+      : '';
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -336,17 +336,23 @@ function materializeTranscriptHistory(
   });
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
-  // Drop page user blocks that duplicate a displayed recordId-less local echo
-  // prompt (matched by text). They are the same prompt already rendered, and
-  // keeping them would render it twice and double-count retained bytes.
-  const pageBlockList =
-    localEchoUserTexts.size === 0
-      ? history.blocks
-      : history.blocks.filter((block) => {
-          if (block.kind !== 'user') return true;
-          const text = (block as { text?: string }).text;
-          return text === undefined || !localEchoUserTexts.has(text);
-        });
+  // Drop the page's newest user block only when it duplicates the window's
+  // oldest recordId-less echo (the boundary pair). A same-text user block
+  // deeper in older history is a distinct prompt and must survive.
+  let pageBlockList = history.blocks;
+  if (boundaryEchoText !== '') {
+    for (let i = history.blocks.length - 1; i >= 0; i -= 1) {
+      const block = history.blocks[i];
+      if (block?.kind !== 'user') continue;
+      if ((block as { text?: string }).text === boundaryEchoText) {
+        pageBlockList = [
+          ...history.blocks.slice(0, i),
+          ...history.blocks.slice(i + 1),
+        ];
+      }
+      break;
+    }
+  }
   let pageBytes = 0;
   for (const block of pageBlockList) {
     pageBytes += estimateDaemonTranscriptBlockBytes(block);
@@ -1946,7 +1952,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const observeReplayTrim = (
                 detail: DaemonTranscriptTruncationDetail,
               ) => {
-                if (detail.kind === 'blocks') replayTrimmed = true;
+                // A rewind also fires `kind: 'blocks'` but with
+                // `evictedOldest: false` — it drops the NEWEST blocks and
+                // leaves the oldest pagination anchor valid, so it must not
+                // latch the capacity/re-anchor path (same gate as the live
+                // store's onTruncation handler above).
+                if (detail.kind === 'blocks' && detail.evictedOldest !== false)
+                  replayTrimmed = true;
               };
               // Both rebuild branches can trim (count cap or byte budget), so
               // both observe it — a marker-visible repair seeded from the
@@ -3634,6 +3646,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored — or the fail-closed branch dropped —
+          // the pagination anchor while this fetch was in flight. Restoring
+          // `hasMore` here would revive the load-older affordance in the
+          // anchor-less state the fail-closed branch just closed, and the next
+          // fetch (no cursor, no beforeRecordId) would default to the oldest
+          // page and corrupt the anchor. Leave the fail-closed state intact.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         const retryable =
