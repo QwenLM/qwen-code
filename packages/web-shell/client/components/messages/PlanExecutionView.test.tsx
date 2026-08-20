@@ -765,17 +765,114 @@ describe('PlanExecutionView', () => {
       );
     });
 
-    expect(
-      container
-        .querySelector('[data-from="docs"][data-to="release"]')
-        ?.getAttribute('d'),
-    ).toBe('M 504 160 H 532 V 216 H 848 V 50 H 876');
+    // Asserted behaviourally rather than as a golden path string: the guarantee
+    // is that the edge leaves the source, drops clear of every node's bottom
+    // edge (200 here) and climbs back to the target — not the corner radius
+    // used to draw it. (A failure here used to skip the mockRestore calls below
+    // and leak the rect spy into the next four tests.)
+    const spanningEdge = container
+      .querySelector('[data-from="docs"][data-to="release"]')
+      ?.getAttribute('d');
+    expect(spanningEdge).toBeTruthy();
+    expect(spanningEdge).toMatch(/^M 504 160 /);
+    expect(spanningEdge?.endsWith('H 876')).toBe(true);
+    const routedYs = [...spanningEdge!.matchAll(/[-\d.]+ ([-\d.]+)/g)].map(
+      (match) => Number(match[1]),
+    );
+    expect(Math.max(...routedYs)).toBeGreaterThan(200);
 
     act(() => root.unmount());
     container.remove();
     rectSpy.mockRestore();
     widthSpy.mockRestore();
     heightSpy.mockRestore();
+  });
+
+  it('gives each layer-spanning edge its own return lane', () => {
+    // Two dependencies that both skip a layer. They used to share one routeY
+    // and draw on top of each other, which is unreadable as soon as a plan has
+    // more than one long edge.
+    const todos: TodoItem[] = [
+      { id: 'a', content: 'A', status: 'completed' },
+      { id: 'b', content: 'B', status: 'pending', blockedBy: ['a'] },
+      { id: 'c', content: 'C', status: 'pending', blockedBy: ['b'] },
+      { id: 'd', content: 'D', status: 'pending', blockedBy: ['c', 'a', 'b'] },
+    ];
+    const positions: Record<string, [number, number]> = {
+      a: [10, 10],
+      b: [300, 10],
+      c: [590, 10],
+      d: [880, 10],
+    };
+    const rect = (left: number, top: number, width: number, height: number) =>
+      ({
+        x: left,
+        y: top,
+        left,
+        top,
+        width,
+        height,
+        right: left + width,
+        bottom: top + height,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.parentElement?.hasAttribute('data-plan-workflow')) {
+          return rect(100, 50, 1100, 300);
+        }
+        if (this.tagName === 'ARTICLE') {
+          const [left, top] =
+            positions[this.querySelector('span')!.textContent!]!;
+          return rect(100 + left, 50 + top, 200, 80);
+        }
+        return rect(0, 0, 0, 0);
+      });
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetWidth', 'get')
+      .mockReturnValue(1100);
+    const heightSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockReturnValue(300);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <PlanExecutionView todos={todos} tools={[]} tasks={[]} />
+          </I18nProvider>,
+        );
+      });
+
+      const laneY = (from: string, to: string) => {
+        const d = container
+          .querySelector(`[data-from="${from}"][data-to="${to}"]`)
+          ?.getAttribute('d');
+        expect(d).toBeTruthy();
+        const ys = [...d!.matchAll(/[-\d.]+ ([-\d.]+)/g)].map((m) =>
+          Number(m[1]),
+        );
+        return Math.max(...ys);
+      };
+
+      // Layers are a=0, b=1, c=2, d=3, so a→d (span 3) and b→d (span 2) both
+      // skip a layer and must not share a lane.
+      expect(laneY('a', 'd')).not.toBe(laneY('b', 'd'));
+      // The longer span routes further out, so the lanes nest instead of
+      // crossing each other.
+      expect(laneY('a', 'd')).toBeGreaterThan(laneY('b', 'd'));
+      // Both still clear the tallest node bottom (90 in normalized space).
+      expect(laneY('b', 'd')).toBeGreaterThan(90);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      rectSpy.mockRestore();
+      widthSpy.mockRestore();
+      heightSpy.mockRestore();
+    }
   });
 
   it('does not synchronously remeasure unchanged topology on task polling', () => {

@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
@@ -41,15 +42,40 @@ interface PlanGraphLayout {
   width: number;
   height: number;
   edges: PlanEdgePath[];
+  /**
+   * How many stacked return lanes the layer-spanning edges needed. The canvas
+   * reserves bottom padding for them so a lane never runs under a node.
+   */
+  lanes: number;
 }
 
 const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
   width: 1,
   height: 1,
   edges: [],
+  lanes: 0,
 };
 
+/** Vertical distance between two stacked layer-spanning return lanes. */
+const EDGE_LANE_HEIGHT = 9;
+/** Corner radius where an orthogonal edge turns. */
+const EDGE_CORNER = 6;
+
 const MAX_RENDERED_PLAN_EDGES = 500;
+
+/**
+ * Status is carried by a glyph as well as a colour so the graph survives
+ * colour-blindness, high-contrast mode, and a greyscale screenshot. Every
+ * surface showing plan status uses the same glyph for the same status.
+ */
+export const PLAN_STATUS_GLYPH: Record<PlanNodeStatus, string> = {
+  blocked: '\u22ef',
+  ready: '\u25cb',
+  in_progress: '\u25d0',
+  running: '\u25d0',
+  paused: '\u2016',
+  completed: '\u2713',
+};
 
 export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   const byId = new Map(todos.map((todo) => [todo.id, todo]));
@@ -448,14 +474,20 @@ export function PlanExecutionView({
       if (!viewport || !node) return;
       const viewportRect = viewport.getBoundingClientRect();
       const nodeRect = node.getBoundingClientRect();
-      viewport.scrollTo({
-        left:
-          viewport.scrollLeft +
-          nodeRect.left -
-          viewportRect.left -
-          (viewport.clientWidth - nodeRect.width) / 2,
-        behavior,
-      });
+      const left =
+        viewport.scrollLeft +
+        nodeRect.left -
+        viewportRect.left -
+        (viewport.clientWidth - nodeRect.width) / 2;
+      // This runs inside a requestAnimationFrame, where a throw cannot be
+      // caught by anything and takes the surrounding render down with it.
+      // Centring the current step is a convenience; the plain assignment, or
+      // skipping it, always beats an unhandled exception.
+      if (typeof viewport.scrollTo === 'function') {
+        viewport.scrollTo({ left, behavior });
+      } else {
+        viewport.scrollLeft = left;
+      }
     },
     [focusTodoId],
   );
@@ -515,6 +547,15 @@ export function PlanExecutionView({
         maxNodeBottom = Math.max(maxNodeBottom, normalizedRect.bottom);
       }
       const edges: PlanEdgePath[] = [];
+      const spanning: Array<{
+        from: string;
+        to: string;
+        startX: number;
+        startY: number;
+        endX: number;
+        endY: number;
+        span: number;
+      }> = [];
       for (const [todoId, dependencies] of topologyRef.current) {
         const targetRect = measuredNodes.get(todoId);
         if (!targetRect) continue;
@@ -525,28 +566,66 @@ export function PlanExecutionView({
           const startY = sourceRect.top + sourceRect.height / 2;
           const endX = targetRect.left - 4;
           const endY = targetRect.top + targetRect.height / 2;
-          const spansLayers =
+          const span =
             (layerByTodoRef.current.get(todoId) ?? 0) -
-              (layerByTodoRef.current.get(dependencyId) ?? 0) >
-            1;
+            (layerByTodoRef.current.get(dependencyId) ?? 0);
+          if (span > 1) {
+            spanning.push({
+              from: dependencyId,
+              to: todoId,
+              startX,
+              startY,
+              endX,
+              endY,
+              span,
+            });
+            continue;
+          }
           const controlX = startX + Math.max(24, (endX - startX) / 2);
-          const routeY = Math.min(maxNodeBottom + 16, graphHeight - 16);
-          const d = spansLayers
-            ? `M ${startX} ${startY} H ${startX + 28} V ${routeY} H ${endX - 28} V ${endY} H ${endX}`
-            : `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`;
           edges.push({
             from: dependencyId,
             to: todoId,
-            d,
+            d: `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`,
           });
         }
       }
+      // Layer-spanning edges all shared one routeY, so any plan with two long
+      // dependencies drew them on top of each other. Give each its own lane,
+      // ordered by span so the longest sits furthest out and the lanes nest
+      // instead of crossing.
+      spanning.sort((a, b) => a.span - b.span);
+      spanning.forEach((edge, lane) => {
+        const routeY = Math.min(
+          maxNodeBottom + 14 + lane * EDGE_LANE_HEIGHT,
+          Math.max(graphHeight - 6, maxNodeBottom + 14),
+        );
+        const dropX = edge.startX + 24;
+        const riseX = edge.endX - 24;
+        const down = routeY > edge.startY ? 1 : -1;
+        const up = edge.endY > routeY ? 1 : -1;
+        edges.push({
+          from: edge.from,
+          to: edge.to,
+          d:
+            `M ${edge.startX} ${edge.startY} ` +
+            `H ${dropX - EDGE_CORNER} ` +
+            `Q ${dropX} ${edge.startY} ${dropX} ${edge.startY + EDGE_CORNER * down} ` +
+            `V ${routeY - EDGE_CORNER * down} ` +
+            `Q ${dropX} ${routeY} ${dropX + EDGE_CORNER} ${routeY} ` +
+            `H ${riseX - EDGE_CORNER} ` +
+            `Q ${riseX} ${routeY} ${riseX} ${routeY + EDGE_CORNER * up} ` +
+            `V ${edge.endY - EDGE_CORNER * up} ` +
+            `Q ${riseX} ${edge.endY} ${riseX + EDGE_CORNER} ${edge.endY} ` +
+            `H ${edge.endX}`,
+        });
+      });
       const next = {
         width: graphWidth,
         height: graphHeight,
         edges,
+        lanes: spanning.length,
       };
-      const signature = `${next.width}:${next.height}:${edges.map((edge) => edge.d).join('|')}`;
+      const signature = `${next.width}:${next.height}:${next.lanes}:${edges.map((edge) => edge.d).join('|')}`;
       if (signature === graphSignatureRef.current) return;
       graphSignatureRef.current = signature;
       setGraph(next);
@@ -777,6 +856,11 @@ export function PlanExecutionView({
         <div
           className={hasDependencies ? styles.dagCanvas : styles.flatCanvas}
           ref={hasDependencies ? graphRef : undefined}
+          style={
+            hasDependencies
+              ? ({ '--plan-edge-lanes': graph.lanes } as CSSProperties)
+              : undefined
+          }
         >
           {drawsDependencyEdges && graph.edges.length > 0 && (
             <svg
@@ -862,6 +946,9 @@ export function PlanExecutionView({
                       }
                     >
                       <div className={styles.nodeTop}>
+                        <i aria-hidden="true" className={styles.nodeGlyph}>
+                          {PLAN_STATUS_GLYPH[state.status]}
+                        </i>
                         <span className={styles.nodeId}>{todo.id}</span>
                         <span
                           className={`${styles.nodeStatus} ${styles[state.status]}`}
