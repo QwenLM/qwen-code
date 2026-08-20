@@ -34,6 +34,7 @@ let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
+let lastAliasedSessionId: string | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
 export function isDebugLogFileEnabled(): boolean {
@@ -125,6 +126,14 @@ function writeLog(
   const traceCtx = getTraceContext();
   const line = buildLogLine(level, message, tag, traceCtx);
 
+  // In a multi-session daemon the active session can change between writes.
+  // Keep the `latest` alias pointed at the file that is actually receiving
+  // logs right now, not just the last Config that was constructed.
+  if (sessionId !== lastAliasedSessionId) {
+    lastAliasedSessionId = sessionId;
+    updateLatestDebugLogAlias(sessionId);
+  }
+
   void ensureDebugDirExists()
     // Debug logs are best-effort diagnostic output: 1050+ call sites,
     // default-enabled, fire-and-forget. Per-line fsync would force
@@ -156,6 +165,7 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
+  lastAliasedSessionId = null;
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
@@ -191,7 +201,9 @@ export function setDebugLogSession(
 ) {
   globalSession = session ?? null;
   if (session) {
-    updateLatestDebugLogAlias(session.getSessionId());
+    const sessionId = session.getSessionId();
+    lastAliasedSessionId = sessionId;
+    updateLatestDebugLogAlias(sessionId);
   }
 }
 

@@ -200,6 +200,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       super(`Invalid or inactive branch point: ${recordId}`);
     }
   },
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
@@ -941,6 +944,7 @@ import {
   APPROVAL_MODES,
   ToolNames,
   GoalPersistenceUnavailableError,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
@@ -16094,6 +16098,116 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       mockConnectionState.resolve();
       await agentPromise;
     }
+  });
+});
+
+// Regression coverage for issue #9535: control-plane ext-method dispatch must
+// bind sessionIdContext so debug logs and shell env vars route to the targeted
+// session even when a Config for another session was created afterwards.
+describe('QwenAgent extMethod sessionIdContext binding', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        extMethod: (
+          method: string,
+          params: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      })
+    | undefined;
+
+  let mockConfig: Config;
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+
+  const mockArgv = {} as CliArgs;
+  const mockSettings = { merged: { mcpServers: {} } } as LoadedSettings;
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+  });
+
+  async function bootAgent() {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    return { agent, agentPromise };
+  }
+
+  it('binds sessionIdContext around session-scoped extMethod dispatch', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    // Use an unknown method so the test only verifies dispatch wrapping;
+    // extMethodInternal will throw methodNotFound, but the wrap must happen
+    // before that.
+    await expect(
+      agent.extMethod('qwen/control/session/unknown-method', { sessionId }),
+    ).rejects.toThrow();
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not bind sessionIdContext for extMethods without a sessionId', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await expect(
+      agent.extMethod('qwen/control/session/unknown-method', {}),
+    ).rejects.toThrow();
+
+    expect(runSpy).not.toHaveBeenCalled();
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 });
 

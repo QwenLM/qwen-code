@@ -31,6 +31,7 @@ import {
   MCPServerConfig,
   runForkedAgent,
   SessionService,
+  sessionIdContext,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
   SESSION_TITLE_MAX_LENGTH,
@@ -8366,6 +8367,16 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
+      const sessionId = normalizedParams['sessionId'];
+      if (typeof sessionId === 'string' && sessionId.length > 0) {
+        // Bind the owning session to this async context so that debug logs,
+        // shell env vars, and any other session-scoped diagnostics route to
+        // session A even if a Config for session B was created afterwards.
+        return await sessionIdContext.run(sessionId, () =>
+          this.extMethodInternal(method, normalizedParams),
+        );
+      }
+
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);

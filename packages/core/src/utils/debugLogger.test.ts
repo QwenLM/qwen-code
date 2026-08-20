@@ -478,6 +478,26 @@ describe('debugLogger', () => {
 
       expect(fs.symlink).not.toHaveBeenCalled();
     });
+
+    it('updates latest alias when the active session changes mid-process', async () => {
+      resetDebugLoggingState();
+      setDebugLogSession(uuidSession);
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+      vi.clearAllMocks();
+      const logger = createDebugLogger();
+
+      sessionIdContext.run(otherSession, () => {
+        logger.info('message from other session');
+      });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledWith(
+        '6ba7b810-9dad-11d1-80b4-00c04fd430c8.txt',
+        expectedLatestPath,
+      );
+    });
   });
 
   describe('resetDebugLoggingState', () => {
