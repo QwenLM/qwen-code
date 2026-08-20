@@ -27,6 +27,10 @@ import {
   MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
   mcpVersionNegotiationFor,
 } from './mcp-client.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 
 type RequestMessage = JSONRPCRequest;
 
@@ -52,7 +56,7 @@ describe('configured MCP SDK v2 negotiation', () => {
     );
   });
 
-  it('keeps remotes on legacy and shrinks the stdio probe to the discovery budget', () => {
+  it('keeps remotes on legacy and reserves a stdio fallback window', () => {
     expect(
       mcpVersionNegotiationFor({
         httpUrl: 'https://example.com/mcp',
@@ -69,18 +73,60 @@ describe('configured MCP SDK v2 negotiation', () => {
         command: 'node',
         discoveryTimeoutMs: 2_000,
       } as MCPServerConfig),
-    ).toEqual({
-      mode: 'auto',
-      probe: {
-        timeoutMs: 2_000 - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
-      },
-    });
+    ).toEqual({ mode: 'legacy' });
     expect(
       mcpVersionNegotiationFor({
         command: 'node',
-        discoveryTimeoutMs: 100,
+        discoveryTimeoutMs: 8_000,
       } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
+    ).toEqual({
+      mode: 'auto',
+      probe: {
+        timeoutMs: 8_000 - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+      },
+    });
+  });
+
+  it('preserves short discovery budgets for legacy initialization', async () => {
+    const config = {
+      command: process.execPath,
+      args: [
+        '--input-type=module',
+        '--eval',
+        `
+          import readline from 'node:readline';
+          const lines = readline.createInterface({ input: process.stdin });
+          lines.on('line', (line) => {
+            const request = JSON.parse(line);
+            if (request.method !== 'initialize') return;
+            setTimeout(() => {
+              process.stdout.write(JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: {
+                  protocolVersion: '2025-06-18',
+                  capabilities: {},
+                  serverInfo: { name: 'slow-legacy', version: '1.0.0' },
+                },
+              }) + '\\n');
+            }, 750);
+          });
+        `,
+      ],
+      discoveryTimeoutMs: 2_000,
+    } as MCPServerConfig;
+
+    const client = await runWithTimeout(
+      connectToMcpServer('slow-legacy', config, false, workspaceContext()),
+      discoveryTimeoutFor(config),
+      'slow legacy negotiation',
+    );
+
+    try {
+      expect(client.getProtocolEra()).toBe('legacy');
+    } finally {
+      await client.close();
+    }
   });
 
   it('connects to a modern-only server and reuses cache-hinted tool lists', async () => {

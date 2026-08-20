@@ -39,15 +39,12 @@ describe('Web Shell sandbox framing', () => {
   });
 
   it('keeps camera, microphone, and geolocation host-blocked', () => {
-    const policy = buildWebShellPermissionsPolicy(
-      loopbackSandboxOrigins('localhost:4170'),
-    );
+    const policy = buildWebShellPermissionsPolicy();
     expect(policy).toContain('camera=()');
     expect(policy).toContain('microphone=(self)');
     expect(policy).toContain('geolocation=()');
-    expect(policy).toContain(
-      'clipboard-write=(self "http://localhost:4170" "http://127.0.0.1:4170" "https://localhost:4170" "https://127.0.0.1:4170")',
-    );
-    expect(policy).not.toContain('[::1]');
+    expect(policy).toContain('payment=()');
+    expect(policy).toContain('clipboard-write=(self)');
+    expect(policy).not.toContain('localhost');
   });
 });

@@ -83,20 +83,11 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
         inner.style.cssText = 'width:100%;height:100%;border:0;background:transparent';
         document.body.appendChild(inner);
 
-        // Opaque inner origin cannot use camera/mic; geo stays host-blocked.
-        const allowFeatures = {
-          clipboardWrite: 'clipboard-write',
-        };
         window.addEventListener('message', (event) => {
           if (event.source === window.parent) {
             if (event.origin !== hostOrigin) return;
             if (event.data?.method === 'ui/notifications/sandbox-resource-ready') {
               const params = event.data.params || {};
-              const allow = Object.entries(allowFeatures)
-                .filter(([key]) => params.permissions?.[key])
-                .map(([, value]) => value)
-                .join('; ');
-              if (allow) inner.setAttribute('allow', allow);
               if (typeof params.html === 'string') {
                 inner.srcdoc = params.html;
               }

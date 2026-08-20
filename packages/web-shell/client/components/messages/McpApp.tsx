@@ -1,7 +1,6 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppBridge,
-  buildAllowAttribute,
   PostMessageTransport,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import { McpAppHostContext } from '../../mcpAppHostContext';
@@ -123,9 +122,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   const [height, setHeight] = useState(260);
   const [error, setError] = useState<string>();
   const cspKey = display.csp ? JSON.stringify(display.csp) : '';
-  const permissionsKey = display.permissions
-    ? JSON.stringify(display.permissions)
-    : '';
   const toolArgumentsKey = JSON.stringify(display.toolArguments);
   const toolResultKey = JSON.stringify(display.toolResult);
   const sandboxUrl = useMemo(() => {
@@ -151,9 +147,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       {
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
-          ...(current.permissions?.clipboardWrite !== undefined
-            ? { permissions: { clipboardWrite: {} } }
-            : {}),
         },
       },
       { hostContext: mcpAppHostContext(themeRef.current) },
@@ -166,9 +159,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         .sendSandboxResourceReady({
           html: resource.html,
           ...(resource.csp ? { csp: resource.csp } : {}),
-          ...(resource.permissions
-            ? { permissions: resource.permissions }
-            : {}),
         })
         .catch((reason: unknown) => setError(String(reason)));
     };
@@ -227,7 +217,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     display.resourceUri,
     display.html,
     cspKey,
-    permissionsKey,
     toolArgumentsKey,
     toolResultKey,
   ]);
@@ -255,7 +244,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         className={styles.frame}
         style={{ height, display: error ? 'none' : undefined }}
         sandbox="allow-scripts allow-forms"
-        allow={buildAllowAttribute(display.permissions)}
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}
       />

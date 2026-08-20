@@ -23,7 +23,6 @@ const appBridgeMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
-  buildAllowAttribute: () => '',
   PostMessageTransport: class PostMessageTransport {},
   AppBridge: class AppBridge {
     setHostContext = appBridgeMocks.setHostContext;
@@ -190,8 +189,8 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.sendToolResult).toHaveBeenCalledWith({ content: [] });
   });
 
-  it('advertises only clipboardWrite as a host-granted sandbox permission', async () => {
-    renderApp(
+  it('does not advertise or delegate requested sandbox permissions', async () => {
+    const { container } = renderApp(
       appDisplay({
         permissions: {
           clipboardWrite: {},
@@ -203,9 +202,8 @@ describe('McpApp host lifetime', () => {
       await Promise.resolve();
     });
 
-    expect(appBridgeMocks.lastCapabilities).toEqual({
-      sandbox: { permissions: { clipboardWrite: {} } },
-    });
+    expect(appBridgeMocks.lastCapabilities).toEqual({ sandbox: {} });
+    expect(container.querySelector('iframe')?.getAttribute('allow')).toBeNull();
     expect(appBridgeMocks.last?.onsandboxready).toEqual(expect.any(Function));
 
     await act(async () => {
@@ -213,11 +211,9 @@ describe('McpApp host lifetime', () => {
       await Promise.resolve();
     });
 
-    expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith(
-      expect.objectContaining({
-        permissions: { clipboardWrite: {}, camera: {} },
-      }),
-    );
+    expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith({
+      html: '<main>Demo</main>',
+    });
   });
 
   it('renders fallbackText for compacted html and never mounts the sandbox', () => {

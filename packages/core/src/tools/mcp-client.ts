@@ -91,8 +91,9 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 // with no `initialize` fallback. Modern-only remotes are deferred
 // until that SDK gap closes.
 export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
-/** Leftover initialize budget after a silent stdio `server/discover` probe. */
-export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS = 500;
+/** Reserve a full handshake window after a silent stdio discovery probe. */
+export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
+  MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 

@@ -75,7 +75,8 @@ describe('MCP App sandbox', () => {
     expect(response.text).not.toContain(
       "inner.setAttribute('sandbox', 'allow-scripts allow-same-origin",
     );
-    expect(response.text).toContain("clipboardWrite: 'clipboard-write'");
+    expect(response.text).not.toContain("inner.setAttribute('allow'");
+    expect(response.text).not.toContain("clipboardWrite: 'clipboard-write'");
     expect(response.text).not.toContain("camera: 'camera'");
     expect(response.text).not.toContain("microphone: 'microphone'");
     expect(response.text).not.toContain("geolocation: 'geolocation'");

@@ -47,9 +47,8 @@ export function loopbackSandboxOrigins(
 ): string[] {
   const port = portFromHostHeader(hostHeader);
   const suffix = port ? `:${port}` : '';
-  // CSP host-sources and Permissions-Policy origins reject bracketed
-  // IPv6 (`http://[::1]:<port>`). The sandbox iframe aliases `[::1]`
-  // to `localhost`, so those two hosts are enough.
+  // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
+  // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
   const hosts = ['localhost', '127.0.0.1'] as const;
   return (['http', 'https'] as const).flatMap((scheme) =>
     hosts.map((host) => `${scheme}://${host}${suffix}`),
@@ -74,19 +73,13 @@ export function portFromHostHeader(
   return /^\d+$/u.test(port) ? port : undefined;
 }
 
-export function buildWebShellPermissionsPolicy(
-  sandboxOrigins: readonly string[] = [],
-): string {
-  const clipboardAllowlist =
-    sandboxOrigins.length > 0
-      ? `self ${sandboxOrigins.map((origin) => `"${origin}"`).join(' ')}`
-      : 'self';
+export function buildWebShellPermissionsPolicy(): string {
   return [
     'camera=()',
     'microphone=(self)',
     'geolocation=()',
     'payment=()',
-    `clipboard-write=(${clipboardAllowlist})`,
+    'clipboard-write=(self)',
   ].join(', ');
 }
 
@@ -198,7 +191,7 @@ function createSendIndex(
         // work there, and this header also blocks delegating them to the
         // cross-origin sandbox.
         'Permissions-Policy',
-        buildWebShellPermissionsPolicy(sandboxOrigins),
+        buildWebShellPermissionsPolicy(),
       )
       .set('Cache-Control', 'no-cache');
     // X-Frame-Options can't express an allowlist, so only send the hard DENY
