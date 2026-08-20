@@ -529,7 +529,7 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
@@ -547,7 +547,7 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
@@ -565,7 +565,7 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
@@ -589,7 +589,7 @@ jobs:
                 echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
                 exit 0
               fi
-              npm publish "${PUBLISH_ARGS[@]}"
+              npm publish --provenance "${PUBLISH_ARGS[@]}"
               echo "${channel}" >> "${PUBLISH_MARKER}"
             )
             echo "::endgroup::"
