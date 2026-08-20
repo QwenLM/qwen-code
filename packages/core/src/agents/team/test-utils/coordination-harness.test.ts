@@ -1009,6 +1009,79 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
+    it('clears shutdown state when a response arrives during a concurrent write', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      let markWriteStarted!: () => void;
+      const writeStarted = new Promise<void>((resolve) => {
+        markWriteStarted = resolve;
+      });
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      mockSendStructuredMessage.mockImplementationOnce(async () => {
+        markWriteStarted();
+        await writeGate;
+      });
+
+      const concurrentShutdown = h.teamManager.requestShutdown('target');
+      await writeStarted;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      releaseWrite();
+      await concurrentShutdown;
+
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('preserves a new shutdown request after an earlier request is resolved', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      let markOldWriteStarted!: () => void;
+      const oldWriteStarted = new Promise<void>((resolve) => {
+        markOldWriteStarted = resolve;
+      });
+      let releaseOldWrite!: () => void;
+      const oldWriteGate = new Promise<void>((resolve) => {
+        releaseOldWrite = resolve;
+      });
+      mockSendStructuredMessage.mockImplementationOnce(async () => {
+        markOldWriteStarted();
+        await oldWriteGate;
+      });
+
+      const oldShutdown = h.teamManager.requestShutdown('target');
+      await oldWriteStarted;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      await h.teamManager.requestShutdown('target');
+      releaseOldWrite();
+      await oldShutdown;
+
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
     it('gates task assignment while the shutdown mailbox write is pending', async () => {
       const h = await createHarness();
       const target = await h.spawnTeammate('target', {

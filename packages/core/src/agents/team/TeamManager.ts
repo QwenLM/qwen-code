@@ -233,7 +233,7 @@ export class TeamManager {
    *  cannot clear another request's pending state. */
   private readonly shutdownRequestStates = new Map<
     string,
-    { inFlight: number; delivered: boolean }
+    { inFlight: number; delivered: boolean; resolved: boolean }
   >();
 
   /** Per-agent last activity timestamp (updated on events). */
@@ -698,10 +698,11 @@ export class TeamManager {
     }
 
     let requestState = this.shutdownRequestStates.get(member.name);
-    if (!requestState) {
+    if (!requestState || requestState.resolved) {
       requestState = {
         inFlight: 0,
         delivered: this._shutdownPending.has(member.name),
+        resolved: false,
       };
       this.shutdownRequestStates.set(member.name, requestState);
     }
@@ -721,7 +722,11 @@ export class TeamManager {
       requestState.delivered = true;
     } finally {
       requestState.inFlight -= 1;
-      if (requestState.inFlight === 0 && !requestState.delivered) {
+      if (
+        requestState.inFlight === 0 &&
+        (!requestState.delivered || requestState.resolved) &&
+        this.shutdownRequestStates.get(member.name) === requestState
+      ) {
         this.shutdownRequestStates.delete(member.name);
         this._shutdownPending.delete(member.name);
       }
@@ -1356,7 +1361,7 @@ export class TeamManager {
       return;
     }
 
-    requestState.delivered = false;
+    requestState.resolved = true;
     if (requestState.inFlight === 0) {
       this.shutdownRequestStates.delete(name);
       this._shutdownPending.delete(name);
