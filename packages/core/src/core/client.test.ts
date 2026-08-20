@@ -3113,6 +3113,51 @@ describe('Gemini Client (client.ts)', () => {
       });
       expect(mockTurnRunFn).not.toHaveBeenCalled();
     });
+
+    it('applies the session limit to a resolved full-turn route selector', async () => {
+      // The vision-bridge full-turn selector `${id}\0${baseUrl}\0` arrives as
+      // modelOverride. GeminiChat.sendMessageStream resolves it and stamps
+      // counts under the RESOLVED route's identity, so the gate must resolve
+      // the selector before keying — the raw selector key (always containing
+      // a NUL) can never match a stamped count (#9454).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'vision-agent@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: 'vision-agent',
+        contentGeneratorConfig: undefined,
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'vision route' }],
+          new AbortController().signal,
+          'prompt-selector-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'openai:vision-agent\0https://vision.example/v1\0',
+          },
+        ),
+      );
+
+      expect(resolveForModel).toHaveBeenCalledWith(
+        'openai:vision-agent\0https://vision.example/v1',
+        { failClosed: true },
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
   });
 
   /**

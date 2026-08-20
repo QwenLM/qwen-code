@@ -3133,7 +3133,20 @@ export class GeminiClient {
       const model = options?.modelOverride ?? this.config.getModel();
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
-        const requestRouteKey = this.config.getModelRouteIdentity(model);
+        // An exact `\0` full-turn route selector resolves to its route before
+        // GeminiChat.sendMessageStream stamps counts under it, so the gate
+        // must key the resolved route too — the raw selector key can never
+        // match a stamped count. Mirrors the resolution at the top of
+        // GeminiChat.sendMessageStream (#9454).
+        const exactRoute = model.endsWith('\0')
+          ? await this.config
+              .getBaseLlmClient()
+              .resolveForModel(model.slice(0, -1), { failClosed: true })
+          : undefined;
+        const requestRouteKey = this.config.getModelRouteIdentity(
+          exactRoute ? exactRoute.model : model,
+          exactRoute?.contentGeneratorConfig,
+        );
         const lastPromptTokenCount =
           this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {

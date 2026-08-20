@@ -15691,6 +15691,44 @@ describe('GeminiChat', async () => {
       ).not.toHaveBeenCalledWith(42);
     });
 
+    it('mirrors cached content alongside a route-stamped prompt count', async () => {
+      // The cached-content mirror's only non-zero production write lives
+      // inside the prompt-count guard; deleting it must not leave the suite
+      // green. Consumed without a route switch, a cached-content response
+      // must reach the /context cached-tokens line (#9454).
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'cached' }] },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 100,
+              totalTokenCount: 100,
+              cachedContentTokenCount: 42,
+            },
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'cached-happy' },
+        'prompt-cached-happy',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chat.getLastPromptTokenCount()).toBe(100);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenCalledWith(42);
+    });
+
     it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
       // Hard-rescue only fires for non-exact sends, whose request route key
       // can differ from the active route's. tryCompress re-stamps the key
