@@ -9857,8 +9857,13 @@ export class Session implements SessionContext {
                 // Drop through to the manual-approval flow below.
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable';
-                if (outcome.reason === 'external_write') {
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write';
+
+                if (
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write'
+                ) {
                   autoModeFallbackMessage = outcome.message;
                 }
 

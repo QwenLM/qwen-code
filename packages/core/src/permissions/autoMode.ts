@@ -739,13 +739,6 @@ export async function evaluateAutoMode(
     return { via: 'fallback', reason: 'ask_rule' };
   }
 
-  // Caller (scheduler) has detected an armed fallback state; surface that
-  // so the call drops to manual approval instead of burning a classifier
-  // request that would deepen the denial streak.
-  if (input.skipClassifierReason) {
-    return { via: 'fallback', reason: input.skipClassifierReason };
-  }
-
   // L5.2.6: External writes must never be auto-approved by the classifier.
   // If a write tool targets a path outside the workspace, force a fallback to
   // manual approval (ask) instead of risking an LLM classifier auto-approval.
@@ -757,6 +750,13 @@ export async function evaluateAutoMode(
       .isPathWithinWorkspace(input.ctx.filePath)
   ) {
     return { via: 'fallback', reason: 'external_write' };
+  }
+
+  // Caller (scheduler) has detected an armed fallback state; surface that
+  // so the call drops to manual approval instead of burning a classifier
+  // request that would deepen the denial streak.
+  if (input.skipClassifierReason) {
+    return { via: 'fallback', reason: input.skipClassifierReason };
   }
 
   // L5.3: two-stage LLM classifier.
