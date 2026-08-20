@@ -8,11 +8,12 @@
 use cua_driver_contract::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DragInput, EndSessionInput,
     EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput, GetCursorPositionInput,
-    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput,
-    InvokeMenuInput, ListSessionsInput, ListSessionsOutput, MoveCursorInput, PressKeyInput,
-    ScrollInput, SessionOutput, SessionStateOutput, SetAgentCursorEnabledInput,
-    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput,
-    StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
+    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListSessionsInput, ListSessionsOutput,
+    MoveCursorInput, PressKeyInput, ScrollInput, SessionOutput, SessionStateOutput,
+    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
+    SetWindowFrameInput, StartSessionInput, StartSessionOutput, ToolInput, TypeTextInput,
+    VerifyStateInput, VerifyStateOutput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
@@ -615,6 +616,7 @@ macro_rules! desktop_tool_methods {
     ($callback:ident) => {
         $callback! {
             get_desktop_state: GetDesktopStateInput,
+            get_window_state: GetWindowStateInput,
             get_screen_size: GetScreenSizeInput,
             get_cursor_position: GetCursorPositionInput,
             verify_state: VerifyStateInput,

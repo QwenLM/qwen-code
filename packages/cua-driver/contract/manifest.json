@@ -1416,6 +1416,165 @@
       }
     },
     {
+      "name": "get_window_state",
+      "description": "Walk one exact window's accessibility tree and return the actionable element snapshot, optionally as a versioned observation revision (`accessibility.observation_revision.v1`) diffed against a caller-supplied base.",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "capabilities": [
+        "accessibility.window_state",
+        "accessibility.tree",
+        "accessibility.tree.structured",
+        "accessibility.tree.bounded",
+        "accessibility.element_tokens",
+        "accessibility.observation_revision.v1",
+        "screen.capture",
+        "screen.capture.window"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": false,
+        "open_world": false
+      },
+      "schema_mode": "portable_subset",
+      "cursor_semantics": {
+        "action": "observe"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_screenshot": {
+            "description": "Default true. Set false to skip the screenshot and return the tree only.",
+            "type": "boolean"
+          },
+          "max_depth": {
+            "description": "Cap on the accessibility-tree walk depth.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_elements": {
+            "description": "Cap on the total number of accessibility nodes walked.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "observation_revision": {
+            "additionalProperties": false,
+            "description": "Opt in to `accessibility.observation_revision.v1`. Requires a bound\ndriver session. Omit to preserve the legacy full-snapshot contract.",
+            "properties": {
+              "base_revision_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "force_full": {
+                "default": false,
+                "type": "boolean"
+              },
+              "version": {
+                "const": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "version"
+            ],
+            "type": "object"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Case-insensitive projection filter. Incompatible with `observation_revision`.",
+            "type": "string"
+          },
+          "screenshot_out_file": {
+            "description": "Write the PNG here instead of returning base64.",
+            "type": "string"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+            "type": "string"
+          },
+          "window_id": {
+            "description": "Exact window to observe.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "window_id"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "observation_revision": {
+            "additionalProperties": true,
+            "properties": {
+              "base_revision_id": {
+                "type": "string"
+              },
+              "capability": {
+                "const": "accessibility.observation_revision.v1"
+              },
+              "lineage_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "full",
+                  "diff",
+                  "no_change"
+                ],
+                "type": "string"
+              },
+              "resync_reason": {
+                "type": "string"
+              },
+              "revision_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "serializer_version": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "stable_element_ids": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "version": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "capability",
+              "version",
+              "serializer_version",
+              "mode",
+              "lineage_id",
+              "revision_id"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
       "name": "hotkey",
       "description": "Press a key chord in the foreground desktop application.",
       "platforms": [

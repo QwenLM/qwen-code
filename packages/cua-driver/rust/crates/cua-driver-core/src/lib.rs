@@ -67,6 +67,7 @@ pub mod ffmpeg_install;
 pub mod health_report;
 pub mod image_utils;
 pub mod model_payload;
+pub mod observation_revision;
 pub mod page;
 pub mod pip_hook;
 pub mod policy;

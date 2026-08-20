@@ -4,6 +4,7 @@ use cua_driver_core::{
     tool::{Tool, ToolDef},
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::ToolState;
@@ -96,6 +97,17 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Cap on the AX-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower this for deep menu/Electron trees."
+                },
+                "observation_revision": {
+                    "type": "object",
+                    "description": "Opt in to accessibility.observation_revision.v1. Requires a bound driver session. Omit to preserve the legacy full-snapshot contract.",
+                    "required": ["version"],
+                    "properties": {
+                        "version": { "type": "integer", "const": 1 },
+                        "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "force_full": { "type": "boolean", "default": false }
+                    },
+                    "additionalProperties": false
                 }
             },
             "additionalProperties": false
@@ -179,6 +191,27 @@ impl Tool for GetWindowStateTool {
         }
 
         let query = args.opt_str("query");
+        let observation_revision_request =
+            match cua_driver_core::observation_revision::parse_observation_revision_request(
+                args.get("observation_revision"),
+            ) {
+                Ok(request) => request,
+                Err(message) => {
+                    return ToolResult::error(message.clone()).with_structured(serde_json::json!({
+                        "code": "invalid_observation_revision",
+                        "message": message,
+                    }))
+                }
+            };
+        if observation_revision_request.is_some() && query.is_some() {
+            return ToolResult::error(
+                "observation_revision v1 does not support the legacy query projection",
+            )
+            .with_structured(serde_json::json!({
+                "code": "unsupported_observation_projection",
+                "suggestion": "omit query when requesting observation_revision v1",
+            }));
+        }
         let screenshot_out_file = args.opt_str("screenshot_out_file").map(|s| {
             // Expand ~ prefix.
             if let Some(relative) = s.strip_prefix("~/") {
@@ -293,6 +326,45 @@ impl Tool for GetWindowStateTool {
                 }
             }
         }
+
+        let observation_revision =
+            match (observation_revision_request.as_ref(), tree_result.as_ref()) {
+                (Some(request), Some(tree)) if !observation_only => {
+                    match self.state.observation_revisions.observe(
+                        pid,
+                        window_id,
+                        max_elements,
+                        max_depth,
+                        &tree.nodes,
+                        tree.complete && scope_matched,
+                        request,
+                    ) {
+                        Ok(revision) => Some(revision),
+                        Err(message) => {
+                            return ToolResult::error(message.clone()).with_structured(
+                                serde_json::json!({
+                                    "code": "observation_revision_unavailable",
+                                    "message": message,
+                                }),
+                            )
+                        }
+                    }
+                }
+                (Some(_), _) => {
+                    return ToolResult::error(
+                        "observation_revision is unavailable for an internal observation-only call",
+                    )
+                    .with_structured(serde_json::json!({
+                        "code": "observation_revision_unavailable",
+                    }))
+                }
+                (None, _) => None,
+            };
+        let selected_tree_markdown = observation_revision
+            .as_ref()
+            .map(|revision| revision.text.as_str())
+            .or_else(|| tree_result.as_ref().map(|tree| tree.tree_markdown.as_str()))
+            .unwrap_or_default();
 
         // Capture the screenshot and deliver it alongside the tree — the
         // grounding frame the agent cross-checks the (sometimes-lying) tree
@@ -440,20 +512,28 @@ impl Tool for GetWindowStateTool {
                 .as_ref()
                 .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
                 .unwrap_or(0);
-            let summary = if let Some(ref r) = tree_result {
+            let summary = if tree_result.is_some() {
                 format!(
                     "window_id={window_id} pid={pid} size={}x{} elements={element_count}\n\n{}",
-                    w, h, r.tree_markdown
+                    w, h, selected_tree_markdown
                 )
             } else {
                 format!("window_id={window_id} pid={pid} size={}x{}", w, h)
             };
             content.push(Content::text(summary));
-        } else if let Some(ref r) = tree_result {
-            let element_count = r.nodes.iter().filter(|n| n.element_index.is_some()).count();
+        } else if tree_result.is_some() {
+            let element_count = tree_result
+                .as_ref()
+                .map(|tree| {
+                    tree.nodes
+                        .iter()
+                        .filter(|node| node.element_index.is_some())
+                        .count()
+                })
+                .unwrap_or_default();
             content.push(Content::text(format!(
                 "window_id={window_id} pid={pid} elements={element_count}\n\n{}",
-                r.tree_markdown
+                selected_tree_markdown
             )));
         }
 
@@ -467,10 +547,7 @@ impl Tool for GetWindowStateTool {
             .as_ref()
             .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
             .unwrap_or(0);
-        let tree_md = tree_result
-            .as_ref()
-            .map(|r| r.tree_markdown.clone())
-            .unwrap_or_default();
+        let tree_md = selected_tree_markdown.to_owned();
 
         // Surface 6: register a snapshot in the global token registry so
         // every actionable element gets an opaque `element_token` keyed
@@ -497,15 +574,43 @@ impl Tool for GetWindowStateTool {
             None
         };
 
+        let revision_capture_complete = observation_revision
+            .as_ref()
+            .is_some_and(|revision| revision.stable_element_ids)
+            && tree_result
+                .as_ref()
+                .is_some_and(|tree| tree.complete && scope_matched);
+        if let (Some(revision), Some(sid)) = (
+            observation_revision
+                .as_ref()
+                .filter(|_| revision_capture_complete),
+            snapshot_id,
+        ) {
+            if let Err(error) = cua_driver_core::observation_revision::revision_tokens()
+                .register_current(&revision.lineage_id, pid, window_id, sid, &revision.nodes)
+            {
+                return ToolResult::error(error.to_string()).with_structured(serde_json::json!({
+                    "code": error.code(),
+                }));
+            }
+        }
+
         // Build the structured `elements` array — one entry per actionable
         // node, matching the order (and indices) of the markdown rendering.
         // This is the preferred consumption path; `tree_markdown` is kept
         // alongside for back-compat with existing text-parsing callers
         // (Hermes' regex parser, Codex, Claude Code) and is signalled as
         // preferred-for-back-compat-only via the `_note` field below.
-        let elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
-            (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
-            (None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
+        let elements_json: Vec<serde_json::Value> = match (
+            observation_revision.as_ref(),
+            snapshot_id,
+            tree_result.as_ref(),
+        ) {
+            (Some(revision), Some(_), Some(r)) if revision_capture_complete => {
+                build_revision_elements_array(&r.nodes, revision)
+            }
+            (_, Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
+            (_, None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
             _ => Vec::new(),
         };
         let elements_json = cua_driver_core::element_query::project_elements_for_query(
@@ -547,6 +652,37 @@ impl Tool for GetWindowStateTool {
                 serde_json::json!(cua_driver_core::element_token::token_for(sid, 0)
                     .trim_end_matches(":0")
                     .to_string());
+        }
+        if let Some(revision) = observation_revision.as_ref() {
+            structured["observation_revision"] = serde_json::json!({
+                "capability": "accessibility.observation_revision.v1",
+                "version": cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
+                "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
+                "mode": revision.mode.as_str(),
+                "lineage_id": revision.lineage_id,
+                "revision_id": revision.revision_id,
+                "base_revision_id": revision.base_revision_id,
+                "target": { "pid": pid, "window_id": window_id },
+                "identity": "macos_ax_cf",
+                "elements_scope": "current_full",
+                "stable_element_ids": revision_capture_complete,
+                "capture_complete": revision_capture_complete,
+                "retained": revision_capture_complete,
+                "selected_bytes": revision.text.len(),
+                "full_bytes": revision.full_text.len(),
+            });
+            if let Some(reason) = revision.full_resync_reason {
+                structured["observation_revision"]["resync_reason"] =
+                    serde_json::json!(reason.as_str());
+            }
+            if !revision_capture_complete {
+                if let Some(tree) = tree_result.as_ref() {
+                    if !tree.incomplete_notes.is_empty() {
+                        structured["observation_revision"]["capture_incomplete_details"] =
+                            serde_json::json!(tree.incomplete_notes);
+                    }
+                }
+            }
         }
         // Best-effort-background ladder, rung (2). Both rungs point the agent at
         // the same next move: an empty AX tree means element_index has nothing
@@ -835,6 +971,9 @@ pub(crate) fn build_elements_array_with_token(
             if let Some(enabled) = node.enabled {
                 entry["enabled"] = serde_json::Value::Bool(enabled);
             }
+            if !node.actions.is_empty() {
+                entry["actions"] = serde_json::json!(node.actions);
+            }
             let selected = node.selected.or_else(|| {
                 let role = node.role.to_ascii_lowercase();
                 if role.contains("checkbox") || role.contains("radiobutton") {
@@ -862,6 +1001,36 @@ pub(crate) fn build_elements_array_with_token(
             Some(entry)
         })
         .collect()
+}
+
+pub(crate) fn build_revision_elements_array(
+    nodes: &[crate::ax::tree::AXNode],
+    revision: &cua_driver_core::observation_revision::ObservationRevisionResult,
+) -> Vec<serde_json::Value> {
+    let stable_ids = revision
+        .nodes
+        .iter()
+        .filter_map(|node| node.actionable_index.map(|index| (index, node.element_id)))
+        .collect::<HashMap<_, _>>();
+    let mut elements = build_elements_array(nodes);
+    for element in &mut elements {
+        let Some(index) = element.get("element_index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(element_id) = usize::try_from(index)
+            .ok()
+            .and_then(|index| stable_ids.get(&index).copied())
+        else {
+            continue;
+        };
+        element["element_id"] = serde_json::json!(element_id);
+        element["element_token"] =
+            serde_json::json!(cua_driver_core::observation_revision::revision_token_for(
+                &revision.lineage_id,
+                element_id,
+            ));
+    }
+    elements
 }
 
 /// Back-compat wrapper for callers that don't yet have a snapshot id
@@ -1032,6 +1201,7 @@ mod tests {
             help: None,
             actions: vec![],
             element_ptr: 0,
+            identity: None,
             depth,
             parent_element_index: parent,
             frame,
@@ -1212,6 +1382,7 @@ mod tests {
         nodes[0].max_value = Some(8.0);
         nodes[0].enabled = Some(true);
         nodes[0].selected = Some(false);
+        nodes[0].actions = vec!["AXIncrement".to_owned()];
         let entry = &build_elements_array(&nodes)[0];
         assert_eq!(
             entry["value"], "8",
@@ -1222,6 +1393,7 @@ mod tests {
         assert_eq!(entry["max"], 8.0);
         assert_eq!(entry["enabled"], true);
         assert_eq!(entry["selected"], false);
+        assert_eq!(entry["actions"], serde_json::json!(["AXIncrement"]));
     }
 
     #[test]
@@ -1377,6 +1549,36 @@ mod tests {
             "back-compat shim must NOT emit element_token; got: {}",
             entries[0]
         );
+    }
+
+    #[test]
+    fn revision_elements_use_stable_ids_and_revision_tokens() {
+        let nodes = vec![node(Some(4), "AXButton", Some("Save"), 1, None, None)];
+        let revision = cua_driver_core::observation_revision::ObservationRevisionResult {
+            lineage_id: "lineage-a".to_owned(),
+            revision_id: "lineage-a:r2".to_owned(),
+            base_revision_id: Some("lineage-a:r1".to_owned()),
+            mode: cua_driver_core::observation_revision::ObservationMode::Diff,
+            full_resync_reason: None,
+            stable_element_ids: true,
+            text: String::new(),
+            full_text: String::new(),
+            nodes: vec![cua_driver_core::observation_revision::RevisionNode {
+                element_id: 37,
+                order: 0,
+                depth: 1,
+                parent_id: None,
+                body: "AXButton \"Save\"".to_owned(),
+                actionable_index: Some(4),
+            }],
+        };
+
+        let entries = build_revision_elements_array(&nodes, &revision);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["element_index"], 4);
+        assert_eq!(entries[0]["element_id"], 37);
+        assert_eq!(entries[0]["element_token"], "rv1:lineage-a:25");
     }
 
     #[test]

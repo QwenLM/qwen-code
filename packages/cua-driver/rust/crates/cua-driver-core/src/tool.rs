@@ -56,6 +56,45 @@ pub fn current_dispatch_runtime_scope() -> Option<String> {
         .or_else(|| CONSTRUCTION_RUNTIME_SCOPE.with(|scope| scope.borrow().clone()))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DispatchSessionIdentity {
+    pub runtime_scope: String,
+    pub session_id: String,
+    pub transport_session_id: String,
+}
+
+pub(crate) fn current_dispatch_session_identity() -> Option<DispatchSessionIdentity> {
+    let runtime_scope = current_dispatch_runtime_scope()?;
+    let context = DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone).ok()?;
+    let evidence = DISPATCH_TRUSTED_INVOCATION_EVIDENCE
+        .try_with(Clone::clone)
+        .unwrap_or_default();
+    let session = evidence
+        .session_id
+        .as_deref()
+        .or_else(|| context.public_session())
+        .or(evidence.transport_session_id.as_deref())
+        .or_else(|| context.transport_session())?;
+    let transport = evidence
+        .transport_session_id
+        .as_deref()
+        .or_else(|| context.transport_session())
+        .unwrap_or(session);
+    let prefix = format!("__cua_runtime_{runtime_scope}:");
+    let namespace = |value: &str| {
+        if value.starts_with(&prefix) {
+            value.to_owned()
+        } else {
+            format!("{prefix}{value}")
+        }
+    };
+    Some(DispatchSessionIdentity {
+        runtime_scope,
+        session_id: namespace(session),
+        transport_session_id: namespace(transport),
+    })
+}
+
 #[doc(hidden)]
 pub fn with_runtime_scope<T>(scope: String, action: impl FnOnce() -> T) -> T {
     struct RestoreScope(Option<String>);
@@ -341,20 +380,10 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         ],
         // ── accessibility / window state ─────────────────────────────
         "get_accessibility_tree" => &["accessibility.tree", "accessibility.tree.structured"],
-        "get_window_state" => &[
-            "accessibility.window_state",
-            "accessibility.tree",
-            "accessibility.tree.structured",
-            "accessibility.tree.bounded",
-            // Surface 6: emits `element_token` on every structured
-            // element entry — paired with the existing integer
-            // `element_index`.
-            "accessibility.element_tokens",
-            // capture_mode:"vision" returns a window screenshot — see
-            // platform-{macos,windows,linux}/src/tools/get_window_state.rs.
-            "screen.capture",
-            "screen.capture.window",
-        ],
+        // `get_window_state` is declared in the published contract
+        // (cua-driver-contract/src/desktop.rs) and resolved through the
+        // contract lookup above, including
+        // `accessibility.observation_revision.v1`.
 
         // ── apps / windows ───────────────────────────────────────────
         "launch_app" => &["app.launch"],
@@ -4777,6 +4806,11 @@ mod capability_tests {
         // Surface 6 — claimed by tools that accept the opaque
         // `element_token` arg + get_window_state which emits them.
         "accessibility.element_tokens",
+        // Versioned opt-in revision/diff protocol on get_window_state.
+        // Advertising the token promises the versioned protocol is accepted;
+        // platforms without approved native identity still answer with
+        // explicit full-only responses.
+        "accessibility.observation_revision.v1",
         // app / window
         "app.launch",
         "app.list",

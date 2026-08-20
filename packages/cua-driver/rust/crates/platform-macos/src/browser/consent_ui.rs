@@ -264,6 +264,7 @@ mod tests {
             help: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_ptr: 7,
+            identity: None,
             depth,
             parent_element_index: None,
             frame: None,

@@ -3278,6 +3278,156 @@ class _UniffiFfiConverterTypeGetSessionStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.session, buf)
 
 @dataclass
+class ObservationRevisionInput:
+    """
+    Opt in to the versioned `accessibility.observation_revision.v1` protocol on
+    `get_window_state`. Omitting the whole record preserves the legacy
+    full-snapshot contract byte for byte.
+"""
+    def __init__(self, *, version:int, base_revision_id:typing.Optional[str], force_full:typing.Optional[bool]):
+        self.version = version
+        self.base_revision_id = base_revision_id
+        self.force_full = force_full
+
+
+
+
+    def __str__(self):
+        return "ObservationRevisionInput(version={}, base_revision_id={}, force_full={})".format(self.version, self.base_revision_id, self.force_full)
+    def __eq__(self, other):
+        if self.version != other.version:
+            return False
+        if self.base_revision_id != other.base_revision_id:
+            return False
+        if self.force_full != other.force_full:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeObservationRevisionInput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ObservationRevisionInput(
+            version=_UniffiFfiConverterUInt32.read(buf),
+            base_revision_id=_UniffiFfiConverterOptionalString.read(buf),
+            force_full=_UniffiFfiConverterOptionalBoolean.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.version)
+        _UniffiFfiConverterOptionalString.check_lower(value.base_revision_id)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.force_full)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.version, buf)
+        _UniffiFfiConverterOptionalString.write(value.base_revision_id, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.force_full, buf)
+
+class _UniffiFfiConverterOptionalTypeObservationRevisionInput(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeObservationRevisionInput.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeObservationRevisionInput.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeObservationRevisionInput.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class GetWindowStateInput:
+    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], observation_revision:typing.Optional[ObservationRevisionInput]):
+        self.pid = pid
+        self.window_id = window_id
+        self.session = session
+        self.query = query
+        self.include_screenshot = include_screenshot
+        self.screenshot_out_file = screenshot_out_file
+        self.max_elements = max_elements
+        self.max_depth = max_depth
+        self.observation_revision = observation_revision
+
+
+
+
+    def __str__(self):
+        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, observation_revision={})".format(self.pid, self.window_id, self.session, self.query, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.observation_revision)
+    def __eq__(self, other):
+        if self.pid != other.pid:
+            return False
+        if self.window_id != other.window_id:
+            return False
+        if self.session != other.session:
+            return False
+        if self.query != other.query:
+            return False
+        if self.include_screenshot != other.include_screenshot:
+            return False
+        if self.screenshot_out_file != other.screenshot_out_file:
+            return False
+        if self.max_elements != other.max_elements:
+            return False
+        if self.max_depth != other.max_depth:
+            return False
+        if self.observation_revision != other.observation_revision:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return GetWindowStateInput(
+            pid=_UniffiFfiConverterUInt32.read(buf),
+            window_id=_UniffiFfiConverterUInt64.read(buf),
+            session=_UniffiFfiConverterOptionalString.read(buf),
+            query=_UniffiFfiConverterOptionalString.read(buf),
+            include_screenshot=_UniffiFfiConverterOptionalBoolean.read(buf),
+            screenshot_out_file=_UniffiFfiConverterOptionalString.read(buf),
+            max_elements=_UniffiFfiConverterOptionalUInt32.read(buf),
+            max_depth=_UniffiFfiConverterOptionalUInt32.read(buf),
+            observation_revision=_UniffiFfiConverterOptionalTypeObservationRevisionInput.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterUInt64.check_lower(value.window_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.session)
+        _UniffiFfiConverterOptionalString.check_lower(value.query)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.include_screenshot)
+        _UniffiFfiConverterOptionalString.check_lower(value.screenshot_out_file)
+        _UniffiFfiConverterOptionalUInt32.check_lower(value.max_elements)
+        _UniffiFfiConverterOptionalUInt32.check_lower(value.max_depth)
+        _UniffiFfiConverterOptionalTypeObservationRevisionInput.check_lower(value.observation_revision)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterUInt64.write(value.window_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.session, buf)
+        _UniffiFfiConverterOptionalString.write(value.query, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.include_screenshot, buf)
+        _UniffiFfiConverterOptionalString.write(value.screenshot_out_file, buf)
+        _UniffiFfiConverterOptionalUInt32.write(value.max_elements, buf)
+        _UniffiFfiConverterOptionalUInt32.write(value.max_depth, buf)
+        _UniffiFfiConverterOptionalTypeObservationRevisionInput.write(value.observation_revision, buf)
+
+@dataclass
 class HotkeyInput:
     def __init__(self, *, keys:typing.List[str], target:typing.Optional[ActionTarget], scope:typing.Optional[DesktopScope], session:typing.Optional[str]):
         self.keys = keys
@@ -5352,6 +5502,8 @@ __all__ = [
     "GetScreenSizeInput",
     "GetSessionInput",
     "GetSessionStateInput",
+    "ObservationRevisionInput",
+    "GetWindowStateInput",
     "HotkeyInput",
     "InvokeMenuInput",
     "ListSessionsInput",

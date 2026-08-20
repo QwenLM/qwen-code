@@ -319,6 +319,101 @@ fn png_mime_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({ "const": "image/png" })
 }
 
+/// Versioned `accessibility.observation_revision.v1` envelope attached to a
+/// `get_window_state` success when the caller opted in. Platform runtimes add
+/// diagnostic fields beyond this committed core; they flow into `extensions`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ObservationRevisionOutput {
+    #[schemars(schema_with = "observation_revision_capability_schema")]
+    pub capability: String,
+    #[schemars(schema_with = "integer_schema")]
+    pub version: u64,
+    #[schemars(schema_with = "string_schema_required")]
+    pub serializer_version: String,
+    #[schemars(schema_with = "observation_revision_mode_schema")]
+    pub mode: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub lineage_id: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub revision_id: String,
+    /// Base the driver actually diffed against. Absent on full responses
+    /// without a usable base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub base_revision_id: Option<String>,
+    /// Whether emitted element tokens are stable revision tokens that survive
+    /// compatible diffs. False means the response is a non-retained full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_element_ids: Option<bool>,
+    /// Closed reason naming why a full resynchronization was required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub resync_reason: Option<String>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, Value>,
+}
+
+impl ObservationRevisionOutput {
+    fn validate(&self) -> Result<(), String> {
+        if self.capability != "accessibility.observation_revision.v1" {
+            return Err(
+                "observation_revision.capability must be accessibility.observation_revision.v1"
+                    .into(),
+            );
+        }
+        if self.version != 1 {
+            return Err("observation_revision.version must be 1".into());
+        }
+        if !matches!(self.mode.as_str(), "full" | "diff" | "no_change") {
+            return Err("observation_revision.mode must be full, diff, or no_change".into());
+        }
+        if self.lineage_id.is_empty() || self.revision_id.is_empty() {
+            return Err("observation_revision lineage_id and revision_id must be non-empty".into());
+        }
+        if matches!(self.mode.as_str(), "diff" | "no_change") && self.base_revision_id.is_none() {
+            return Err(
+                "observation_revision diff/no_change responses must name their base_revision_id"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn observation_revision_capability_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "const": "accessibility.observation_revision.v1" })
+}
+
+fn observation_revision_mode_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "enum": ["full", "diff", "no_change"] })
+}
+
+fn string_schema_required(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "minLength": 1 })
+}
+
+/// Portable projection of a `get_window_state` success. The snapshot payload
+/// (markdown rendering, structured elements, screenshot fields) remains
+/// platform-owned and still converging, so only the versioned observation
+/// revision envelope is committed here; everything else flows through
+/// `extensions` unvalidated.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct WindowStateOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_revision: Option<ObservationRevisionOutput>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, Value>,
+}
+
+impl ToolOutput for WindowStateOutput {
+    fn validate(&self) -> Result<(), String> {
+        match &self.observation_revision {
+            Some(revision) => revision.validate(),
+            None => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ScreenSizeOutput {
     #[schemars(schema_with = "number_schema")]
