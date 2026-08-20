@@ -71,9 +71,9 @@ import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
 import {
-  SESSION_MEDIA_MAX_ITEM_BYTES,
-  SessionMediaStore,
-} from './sessionMedia.js';
+  SESSION_ATTACHMENT_MAX_ITEM_BYTES,
+  SessionAttachmentStore,
+} from './sessionAttachments.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -3119,7 +3119,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
           promptActive?: boolean;
-          media?: SessionMediaStore;
+          attachments?: SessionAttachmentStore;
         }
       | undefined,
     ownsSession?: (sessionId: string) => boolean,
@@ -3127,7 +3127,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const resolvedEntry = entry
       ? {
           ...entry,
-          media: entry.media ?? new SessionMediaStore(),
+          attachments: entry.attachments ?? new SessionAttachmentStore(),
           pendingPromptList: entry.pendingPromptList ?? [],
           settledMidTurnMessageIds: entry.settledMidTurnMessageIds ?? [],
         }
@@ -3283,11 +3283,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
   });
 
-  it('resolves media references for the child and preserves their replay metadata', async () => {
+  it('resolves attachment references for the child and preserves their replay metadata', async () => {
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const entry = {
         sessionId: 'sess:media-reference',
         midTurnMessageQueue: [
@@ -3299,7 +3302,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:media-reference', entry);
 
@@ -3314,7 +3317,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
               { type: 'text', text: 'look' },
               { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
-            mediaReferences: [reference],
+            attachmentReferences: [reference],
           },
         ],
       });
@@ -3323,11 +3326,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('degrades a mediaId reused across drained messages after its first use', async () => {
+  it('degrades a attachmentId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const read = vi.spyOn(media, 'read');
       const entry = {
         sessionId: 'sess:shared-media',
@@ -3339,7 +3345,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:shared-media', entry);
 
@@ -3359,7 +3365,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'b\n[Attached media is no longer available]',
+                text: 'b\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3367,7 +3373,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'c\n[Attached media is no longer available]',
+                text: 'c\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3375,7 +3381,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'd\n[Attached media is no longer available]',
+                text: 'd\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3398,7 +3404,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         await gate;
         return content ?? [];
       }),
-    } as unknown as SessionMediaStore;
+    } as unknown as SessionAttachmentStore;
     const entry = {
       sessionId: 'sess:slow-media',
       midTurnMessageQueue: [
@@ -3412,7 +3418,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       ],
       settledMidTurnMessageIds: [] as string[],
       events: { publish: vi.fn().mockReturnValue(true) },
-      media,
+      attachments: media,
     };
     const client = makeClientWithEntry('sess:slow-media', entry);
 
@@ -3439,7 +3445,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       content: [
         {
           type: 'image' as const,
-          mediaId: 'expired',
+          attachmentId: 'expired',
           mimeType: 'image/png',
           size: 3,
         },
@@ -3468,7 +3474,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           content: [
             {
               type: 'text',
-              text: 'look at this\n[Attached media is no longer available]',
+              text: 'look at this\n[Attachment is no longer available]',
             },
           ],
         },
@@ -3484,14 +3490,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish).toHaveBeenCalledOnce();
   });
 
-  it('drains every valid media reference even when their total exceeds 16 MiB', async () => {
-    const media = new SessionMediaStore();
+  it('drains every valid attachment reference even when their total exceeds 16 MiB', async () => {
+    const media = new SessionAttachmentStore();
     try {
-      const large = new Uint8Array(SESSION_MEDIA_MAX_ITEM_BYTES);
+      const large = new Uint8Array(SESSION_ATTACHMENT_MAX_ITEM_BYTES);
       const refs = [
-        await media.put(large, 'image/png'),
-        await media.put(large, 'image/png'),
-        await media.put(Uint8Array.of(1), 'image/png'),
+        await media.putAttachment(large, 'image/png'),
+        await media.putAttachment(large, 'image/png'),
+        await media.putAttachment(Uint8Array.of(1), 'image/png'),
       ];
       const entry = {
         sessionId: 'sess:large-drain',
@@ -3500,7 +3506,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish: vi.fn().mockReturnValue(true) },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:large-drain', entry);
 
@@ -3509,14 +3515,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       })) as {
         items: Array<{
           content: Array<Record<string, unknown>>;
-          mediaReferences?: unknown[];
+          attachmentReferences?: unknown[];
         }>;
       };
 
       expect(
         result.items[0]?.content.filter((block) => block['type'] === 'image'),
       ).toHaveLength(3);
-      expect(result.items[0]?.mediaReferences).toEqual(refs);
+      expect(result.items[0]?.attachmentReferences).toEqual(refs);
     } finally {
       await media.close();
     }
@@ -3527,14 +3533,17 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     // media of every queued message: the store still holds the bytes, so the
     // drain surfaces the error and hands the messages back for the next one.
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     const readFile = vi
       .spyOn(fsp, 'readFile')
       .mockRejectedValueOnce(
         Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
       );
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const entry = {
         sessionId: 'sess:emfile',
         midTurnMessageQueue: [
@@ -3543,7 +3552,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:emfile', entry);
 
@@ -3588,11 +3597,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     // One dead reference must drop only itself, not the whole message's
     // media: the sibling the store still holds reaches the child.
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const live = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
-      const gone = await media.put(Uint8Array.of(4, 5), 'image/png');
-      await media.remove(gone.mediaId);
+      const live = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      const gone = await media.putAttachment(Uint8Array.of(4, 5), 'image/png');
+      await media.remove(gone.attachmentId);
       const entry = {
         sessionId: 'sess:mixed',
         midTurnMessageQueue: [
@@ -3600,7 +3612,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:mixed', entry);
 
@@ -3615,11 +3627,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'mixed\n[Attached media is no longer available]',
+                text: 'mixed\n[Attachment is no longer available]',
               },
               { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
-            mediaReferences: [live],
+            attachmentReferences: [live],
           },
         ],
       });
