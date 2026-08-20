@@ -120,6 +120,13 @@ export interface GoalSnapshotV2 {
   v: typeof GOAL_STATE_VERSION;
   goal: GoalRecord | null;
   activity: GoalActivity;
+  clearedGoal?: GoalOrder;
+}
+
+export interface GoalOrder {
+  goalId: string;
+  revision: number;
+  updatedAt: number;
 }
 
 /**

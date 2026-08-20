@@ -222,6 +222,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   GoalPersistenceUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).GoalPersistenceUnavailableError,
+  parseGoalControlRequest: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseGoalControlRequest,
+  // The real classes for the same reason as above: `mapGoalControlError`
+  // narrows on them with `instanceof`, and a stand-in (or an omission, which
+  // resolves to undefined) makes every conflict/transition branch throw before
+  // it can be asserted.
+  GoalConflictError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).GoalConflictError,
+  GoalInvalidTransitionError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).GoalInvalidTransitionError,
   SessionIdCaseConflictError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionIdCaseConflictError,
@@ -945,6 +958,8 @@ import {
   APPROVAL_MODES,
   ToolNames,
   GoalPersistenceUnavailableError,
+  GoalConflictError,
+  GoalInvalidTransitionError,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
@@ -3891,6 +3906,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
 
@@ -7172,6 +7188,79 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('projects toggle-only Qwen reasoning without effort tiers', async () => {
+    const sessionId = 'qwen37-toggle-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string };
+    } = {};
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.7-plus');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+          _meta?: Record<string, unknown>;
+        }>;
+      };
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option).toMatchObject({
+        currentValue: 'default',
+        options: [{ value: 'none' }, { value: 'default' }],
+        _meta: {
+          'qwenCode/reasoning': { toggleOnly: true },
+        },
+      });
+
+      const disabled = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'none',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toBe(false);
+      expect(
+        disabled.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('none');
+
+      const enabled = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toBeUndefined();
+      expect(
+        enabled.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('default');
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'low',
+        }),
+      ).rejects.toThrow(
+        'Unknown reasoning effort: low. Choose one of: none, default',
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('hides qwen3.8-max reasoning controls when thinking is mandatory', async () => {
     const sessionId = 'qwen38-mandatory-thinking-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -9772,6 +9861,158 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       action: 'clear',
       expectedGoalId: 'goal-1',
       expectedRevision: 1,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('allows reducing Goal work in an untrusted workspace but rejects starting it', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const snapshot = goalSnapshot({ objective: 'ship it', turnCount: 1 });
+    const dispatch = vi.fn().mockResolvedValue({ snapshot });
+    Object.assign(innerConfig, {
+      isTrustedFolder: vi.fn().mockReturnValue(false),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({
+        getSnapshot: () => snapshot,
+        dispatch,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+        sessionId,
+        request: {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        },
+      }),
+    ).resolves.toEqual({ snapshot });
+    // Every action that starts or expands Goal work is gated, not just create:
+    // dropping any one of them restarts work in an untrusted workspace.
+    for (const request of [
+      { action: 'create' as const, objective: 'new work' },
+      {
+        action: 'replace' as const,
+        objective: 'new work',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+      {
+        action: 'edit' as const,
+        objective: 'revised work',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+      {
+        action: 'resume' as const,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      },
+    ]) {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+          sessionId,
+          request,
+        }),
+      ).rejects.toMatchObject({
+        code: -32003,
+        data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+      });
+    }
+    expect(dispatch).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps a Goal control dispatch failure onto its wire contract', async () => {
+    // The client's 409 resync reads `data.errorKind` and `data.current`: a
+    // refactor that drops `current`, swaps the `instanceof` order, or changes
+    // the code breaks resync silently. The only other coverage here is the
+    // success path and the untrusted gate, and the gate throws before this
+    // mapping is reachable.
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const current = goalSnapshot({ objective: 'ship it', revision: 4 });
+    const persistFallback = goalSnapshot({ objective: 'from the runtime' });
+    const dispatch = vi.fn();
+    Object.assign(innerConfig, {
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getGoalRuntime: vi.fn().mockReturnValue({
+        getSnapshot: () => persistFallback,
+        dispatch,
+      }),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({
+        getSnapshot: () => persistFallback,
+        dispatch,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const control = (request: Record<string, unknown>) =>
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalControl, {
+        sessionId,
+        request,
+      });
+    const pause = {
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 1,
+    };
+
+    // A CAS miss carries the daemon's own snapshot so the client can resync
+    // against it rather than re-reading.
+    dispatch.mockRejectedValueOnce(new GoalConflictError(current));
+    await expect(control(pause)).rejects.toMatchObject({
+      code: -32009,
+      data: { errorKind: 'goal_conflict', current },
+    });
+
+    // Same code, different kind: the two are distinguished only by errorKind.
+    dispatch.mockRejectedValueOnce(
+      new GoalInvalidTransitionError('cannot pause a completed goal', current),
+    );
+    await expect(control(pause)).rejects.toMatchObject({
+      code: -32009,
+      message: 'cannot pause a completed goal',
+      data: { errorKind: 'goal_invalid_transition', current },
+    });
+
+    // Anything else is a persistence failure, and its `current` comes from the
+    // runtime — the failure carries no snapshot of its own.
+    dispatch.mockRejectedValueOnce(new Error('disk full'));
+    await expect(control(pause)).rejects.toMatchObject({
+      code: -32603,
+      message: 'disk full',
+      data: { errorKind: 'goal_persist_failed', current: persistFallback },
     });
 
     mockConnectionState.resolve();

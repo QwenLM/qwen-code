@@ -272,6 +272,91 @@ Enterprise paragraph.
   exported-GH_HOST only, and "unavailable otherwise"), or gate it off
   explicitly on non-github.com runs. E2E: `--comment` against a
   scratch/test CR.
+  - **Landed (2026-08-19):** the `submit` slice. `submitAoneReview` in
+    `lib/platform/aone.ts` posts the review as N+1 calls — one
+    `a1 repo mr comment create` per inline finding, the summary comment
+    last (Q5 order), `a1 repo mr approve` on APPROVE (D6); writes ride a
+    no-retry transport (`a1Once`) so a transient retry can never
+    double-post. The commit_id gate GitHub enforces server-side lives in
+    the provider as a pre-write head-drift refusal; a mid-batch failure
+    throws `AonePartialPostError` naming exactly what landed, and
+    `submit` reports it exit-3 with do-not-re-run advice (a retry would
+    duplicate). REQUEST_CHANGES posts the blocking summary header (D6);
+    the recorded-but-hostless refusal stays fail-closed, now between two
+    WRITABLE platforms. The created-comment read-back is tolerant: an
+    exec failure still propagates, but an ACCEPTED write whose answer
+    fails to parse degrades to "landed, id unknown" — counting it as
+    unposted would re-post it on a retry. Two deliberate trade-offs to
+    revisit when the Q4-era response changes land: the head-drift gate is
+    fail-OPEN on an empty `sourceBranch` (a `mr view` shape regression
+    must not brick posting), and the id read-back parses a set of
+    tolerated shapes best-effort. Still open: `composeUrl`, cleanup
+    audit, AI-comment marking (Q4), the render-adjudication carve-out.
+  - **Hardened (2026-08-19, review round 2):** five write-safety fixes
+    from the maintainer review of #9491. (1) The `target-platform-unbound`
+    refusal now HONOURS its own remedy — an explicit `--host` on the
+    re-run is platform proof and lifts it, instead of refusing again.
+    (2) The write gate binds hosts through `hostsEquivalent`, not raw
+    equality — Aone's web/git host pair is one platform. (3) Write
+    routing keys on the CANONICAL Aone pair (`isAoneCanonicalHost`),
+    never the family wildcard (a `*.alibaba-inc.com` GHE host is not
+    Aone), never the ambient GH_HOST (reads never detect from it), and
+    an explicit `--host` outranks the recorded binding in both
+    directions. (4) A size gate refuses any message over the
+    131072-byte single-argv-element limit a1 must pass it as, BEFORE
+    any write lands (a long CJK summary is inside compose-review's
+    char cap and outside the OS byte limit). (5) An exec failure counts
+    as possibly-landed (`ambiguous`), so submit's do-not-re-run advisory
+    fires even when the count is zero — an accepted-then-died write must
+    never read back as a clean total failure.
+  - **Hardened further (2026-08-20, verify-lane review of #9491):** the
+    sandboxed-verification review surfaced the next layer. (6) The
+    fail-closed refusal now also fires when NO recording exists at all —
+    a `--user-authorized` publish invoked from another directory finds
+    nothing, and the cwd probe alone must not pick the platform of an
+    irreversible write. (7) The gh write rebinds its routing host to the
+    same evidence that selected it (`explicitHost ?? recordedHost`), so a
+    recorded non-canonical host (a GHE instance) no longer posts wherever
+    the ambient env pointed. (8) The REQUEST_CHANGES terminal note is
+    conditioned on the inline Criticals actually posted — a body-only
+    Critical posts no discussion threads, so nothing mechanically blocks
+    the merge and the note says so. (9) `a1Cause` reads the captured
+    stderr, not the execFileSync message — the message embeds the FULL
+    argv (the multi-line comment body), so parsing it surfaced the
+    operator's review text instead of a1's error. (10) The summary
+    skip-guard keys on the posted `summaryMessage`, not the raw body — an
+    empty-body REQUEST_CHANGES still posts its blocking header, the
+    verdict's sole carrier. Host comparison is normalised once
+    (`normalizeHostSpelling`: case/port/trailing-dot) and shared by
+    `hostsEquivalent` and `isAoneCanonicalHost`; the fast-path repo axis
+    binds case-insensitively; the cross-session scan is last-writer-wins
+    by mtime, and the newest same-PR recording decides (host or unbound)
+    instead of harvesting an older session's stale host.
+  - **Hardened again (2026-08-20, third review round of #9491):** the
+    next review pass found the layer under that one. (11) The cwd arm of
+    the write gate now probes the origin through the canonical predicate
+    itself instead of delegating to the registry's family-wildcard
+    detection — a `ghe.alibaba-inc.com` origin no longer takes the a1
+    path. (12) `submit` FORCES context-unavailable into the compose input
+    on the Aone path — the cap no longer rides the model-written state,
+    so an omitted field cannot buy a real platform approval; the docs now
+    say the native approve does not fire this phase. (13) A mid-batch
+    failure now emits `"partial": true` with the landed counts/ids —
+    `posted: false` alone invited a wrapper retry that double-posts; and
+    a deliberate pre-write refusal (drift, oversized) reads as
+    `aone-post-refused`, while an UNEXPECTED pre-write error rethrows
+    (gh parity — nothing landed, a re-run is safe). (14) The floor
+    recovery's host axis binds to the host the write routes at
+    (explicit ?? recorded ?? gh fallback), so a flagless Aone post no
+    longer drops the operator's recorded floor. (15) The batch re-reads
+    the head once after posting and discloses a mid-batch amend
+    (`headMovedDuringPost`) instead of claiming the pins held. The
+    approve-failure and oversized refusals name the USER as the manual
+    actor; the completion contract reads `partial`/`approved`; and the
+    repeat-round caveats (no dedup backing, no self-PR detection) are
+    documented for the user. Still open: dedup/self-PR backing for Aone,
+    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
+    render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
