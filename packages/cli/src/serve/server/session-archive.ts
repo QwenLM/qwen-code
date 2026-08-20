@@ -18,6 +18,7 @@ import {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
   disableTasksForSessions,
   enableTasksForSessions,
@@ -64,8 +65,13 @@ export class SessionArchiveCoordinator {
     | { promise: Promise<void>; resolve: () => void }
     | undefined;
 
+  // Lock keys are canonicalized like every other session-id lookup: batch
+  // delete/archive/unarchive lock raw caller spellings while restore locks
+  // the request spelling, and on a case-insensitive filesystem both reach
+  // the same transcript file — uncanonicalized keys would let a differently
+  // cased caller id slip past a held guard and unlink it mid-restore.
   assertNotTransitioning(sessionId: string): void {
-    if (this.exclusive.has(sessionId)) {
+    if (this.exclusive.has(normalizeSessionIdForLookup(sessionId))) {
       throw new SessionArchivingError(sessionId);
     }
   }
@@ -77,7 +83,9 @@ export class SessionArchiveCoordinator {
     if (this.maintenanceSealed) {
       throw new DaemonDrainingError();
     }
-    const uniqueSessionIds = [...new Set(sessionIds)];
+    const uniqueSessionIds = [
+      ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+    ];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
       if ((this.shared.get(sessionId) ?? 0) > 0) {
@@ -124,7 +132,9 @@ export class SessionArchiveCoordinator {
     if (this.maintenanceSealed) {
       throw new DaemonDrainingError();
     }
-    const uniqueSessionIds = [...new Set(sessionIds)];
+    const uniqueSessionIds = [
+      ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+    ];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
     }
@@ -374,7 +384,7 @@ async function deletePersistedSessionWithLease(
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   onError?: (entry: {
@@ -391,7 +401,9 @@ export async function deleteDaemonSessions(params: {
     coordinatorLockHeld = false,
     onError,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -401,22 +413,40 @@ export async function deleteDaemonSessions(params: {
     uniqueSessionIds.map(async (sessionId) => {
       try {
         const mutateSession = async () => {
+          const removePersistedSession = async () => {
+            const result = await deletePersistedSessionWithLease(
+              service,
+              sessionId,
+            );
+            if (result.kind === 'error') {
+              onError?.({
+                phase: 'remove',
+                sessionId,
+                error: errorMessage(result.error),
+              });
+              return result;
+            }
+            try {
+              await bridge.deleteSessionAttachments(sessionId);
+              return result;
+            } catch (error) {
+              onError?.({
+                phase: 'delete',
+                sessionId,
+                error: errorMessage(error),
+              });
+              return {
+                kind: 'error' as const,
+                error,
+                mutationApplied: result.mutationApplied,
+              };
+            }
+          };
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
             if (isSessionNotFoundError(error)) {
-              const result = await deletePersistedSessionWithLease(
-                service,
-                sessionId,
-              );
-              if (result.kind === 'error') {
-                onError?.({
-                  phase: 'remove',
-                  sessionId,
-                  error: errorMessage(result.error),
-                });
-              }
-              return result;
+              return await removePersistedSession();
             }
             onError?.({
               phase: 'close',
@@ -430,18 +460,7 @@ export async function deleteDaemonSessions(params: {
             };
           }
 
-          const result = await deletePersistedSessionWithLease(
-            service,
-            sessionId,
-          );
-          if (result.kind === 'error') {
-            onError?.({
-              phase: 'remove',
-              sessionId,
-              error: errorMessage(result.error),
-            });
-          }
-          return result;
+          return await removePersistedSession();
         };
         return await (coordinatorLockHeld
           ? mutateSession()
@@ -485,7 +504,7 @@ export async function deleteDaemonSessions(params: {
 export async function deleteDaemonSessionIfOrphan(params: {
   sessionId: string;
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'killSession'>;
+  bridge: Pick<AcpSessionBridge, 'killSession' | 'markSessionCatalogChanged'>;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
   const { sessionId, service, bridge, coordinator } = params;
@@ -511,6 +530,10 @@ export async function deleteDaemonSessionIfOrphan(params: {
   if (result.kind === 'error') {
     throw result.error;
   }
+  // The persisted removal succeeded. A live removal already advanced the
+  // catalog revision through the lifecycle choke point; this conservative
+  // extra mark covers the never-live orphan case and is protocol-permitted.
+  bridge.markSessionCatalogChanged();
   return true;
 }
 
@@ -627,7 +650,9 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);
@@ -787,7 +812,9 @@ export async function unarchiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
   } = params;
-  const uniqueSessionIds = [...new Set(sessionIds)];
+  const uniqueSessionIds = [
+    ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
+  ];
   if (!coordinatorLockHeld) {
     for (const sessionId of uniqueSessionIds) {
       coordinator.assertNotTransitioning(sessionId);

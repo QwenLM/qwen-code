@@ -124,8 +124,8 @@ function notifyMidTurnInjectedListeners(): void {
 /**
  * Parse a raw daemon SSE frame into the injected-messages payload, or
  * `undefined` if the frame is not a well-formed `mid_turn_message_injected`
- * event. Filters out non-string / empty entries; returns `undefined` when
- * nothing usable remains.
+ * event. Empty text slots are preserved so `messages` and `messageIds`
+ * remain index-aligned for image-only messages.
  */
 export function parseSidechannelMidTurnInjected(
   event: unknown,
@@ -141,16 +141,44 @@ export function parseSidechannelMidTurnInjected(
   if (typeof sessionId !== 'string' || !Array.isArray(messages)) {
     return undefined;
   }
-  const stringMessages = messages.filter(
-    (message): message is string =>
-      typeof message === 'string' && message.length > 0,
-  );
-  if (stringMessages.length === 0) return undefined;
+  if (!messages.every((message) => typeof message === 'string')) {
+    return undefined;
+  }
+  const stringMessages = messages as string[];
+  // Mirror the SDK normalizer's `hasRenderableItemContent`: a frame survives
+  // when any item carries an image block OR a non-empty text block. The
+  // degraded-media drain publishes `messages: ['']` whose items hold only the
+  // '[Attachment is no longer available]' text block — dropping it here
+  // while the normalizer renders it leaves the queued row unsettled until the
+  // turn-end idle reconcile. Evaluate over the RAW items array exactly like
+  // the normalizer (no index-alignment precondition), so the two consumers
+  // of the same frame can never disagree.
+  const items = dataRecord['items'];
+  const hasRenderableContent =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        !!item &&
+        typeof item === 'object' &&
+        Array.isArray((item as Record<string, unknown>)['content']) &&
+        ((item as Record<string, unknown>)['content'] as unknown[]).some(
+          (block) =>
+            !!block &&
+            typeof block === 'object' &&
+            ((block as Record<string, unknown>)['type'] === 'image' ||
+              (block as Record<string, unknown>)['type'] === 'resource' ||
+              ((block as Record<string, unknown>)['type'] === 'text' &&
+                typeof (block as Record<string, unknown>)['text'] ===
+                  'string' &&
+                ((block as Record<string, unknown>)['text'] as string).length >
+                  0)),
+        ),
+    );
+  if (!stringMessages.some(Boolean) && !hasRenderableContent) return undefined;
   const messageIds = dataRecord['messageIds'];
   const stringMessageIds =
     Array.isArray(messageIds) &&
     messageIds.length === messages.length &&
-    stringMessages.length === messages.length &&
     messageIds.every(
       (messageId) => typeof messageId === 'string' && messageId.length > 0,
     )
@@ -159,6 +187,11 @@ export function parseSidechannelMidTurnInjected(
   // Older daemons put `originatorClientId` on the SSE envelope. New clients
   // use it only in the capability fallback for those daemons.
   const originatorClientId = record['originatorClientId'];
+  // `items` (hydrated inline base64 image content) is deliberately NOT
+  // carried into the sidechannel: no consumer reads it (dedup settles by
+  // `messageIds` and removes rows by `messages`), and multi-MB payloads
+  // would otherwise ride parser → buffer → consume unread. The transcript
+  // renders from the hydrated event stream directly.
   return {
     sessionId,
     messages: stringMessages,

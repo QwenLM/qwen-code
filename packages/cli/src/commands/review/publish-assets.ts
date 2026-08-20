@@ -51,7 +51,11 @@ import {
   type AssetsManifest,
   type PublishedAsset,
 } from './lib/assets.js';
-import { validateFindings, buildReport, type Finding } from './findings.js';
+import {
+  validateFindings,
+  buildReport,
+  type Finding,
+} from '../../utils/findings.js';
 
 interface PublishAssetsArgs {
   pr: number;

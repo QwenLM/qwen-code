@@ -15,6 +15,8 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
+  DaemonSessionAttachmentReference,
+  DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
@@ -38,7 +40,11 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SessionMetadataResult,
   SetModelResult,
@@ -87,6 +93,8 @@ export interface DaemonConnectionState {
   displayName?: string;
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
+  /** Authoritative Goal v2 state for the current session. */
+  goalState?: GoalSnapshotV2;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -148,7 +156,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
@@ -203,7 +215,11 @@ export type DaemonNoticeOperation =
   | 'load_context_usage'
   | 'load_tasks'
   | 'load_artifacts'
+  | 'read_attachment'
+  | 'remove_attachment'
   | 'cancel_task'
+  | 'load_goal'
+  | 'control_goal'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -312,7 +328,8 @@ export interface DaemonPromptImage {
 
 export interface DaemonPromptFile {
   name: string;
-  text: string;
+  data?: Blob;
+  text?: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -440,14 +457,30 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  uploadAttachment(
+    attachment: DaemonPromptImage | DaemonPromptFile,
+    opts?: { signal?: AbortSignal; sessionId?: string },
+  ): Promise<DaemonSessionAttachmentReference>;
+  readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  removeAttachment(
+    attachmentId: string,
+    opts?: { sessionId?: string },
+  ): Promise<boolean>;
   /**
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
-   * on an ambiguous transport failure so the caller can reconcile.
+   * on an ambiguous transport failure so the caller can reconcile. `content`
+   * carries attachment blocks — pre-flight the daemon's
+   * `session_attachments` capability before attaching references.
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+      onAdmissionStarted?: () => void;
+    },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
     messageId: string,
@@ -477,6 +510,15 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  getGoal(): Promise<GoalStateResponse>;
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
+  /**
+   * Install a Goal snapshot obtained outside the session action layer — a
+   * workspace-scoped control against the session this connection is attached
+   * to — reconciled like any other snapshot. A no-op once the connection has
+   * moved to another session.
+   */
+  applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2): void;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
