@@ -425,9 +425,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
-    expect(
-      publishJob.slice(0, publishJob.indexOf('steps:')),
-    ).not.toContain('CI_BOT_PAT');
+    expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
     const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
     const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
     const commitStep = getWorkflowStep(
@@ -450,10 +450,7 @@ describe('package scripts', () => {
     const exportTokenIdx = commitStep.indexOf(
       'export GH_TOKEN="${CI_BOT_PAT}"',
     );
-    const setupGitIdx = commitStep.indexOf(
-      'gh auth setup-git',
-      exportTokenIdx,
-    );
+    const setupGitIdx = commitStep.indexOf('gh auth setup-git', exportTokenIdx);
     expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
     expect(setupGitIdx).toBeLessThan(
       commitStep.indexOf('git push --force --set-upstream'),
