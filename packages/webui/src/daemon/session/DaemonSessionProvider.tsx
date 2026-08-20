@@ -310,12 +310,24 @@ function materializeTranscriptHistory(
   // window) — so only that pair is compared below. Keying on text window-wide
   // would instead drop DISTINCT older prompts the user happened to send twice
   // ("yes", a retry), permanently orphaning their assistant replies.
+  // The key must key on echo PRESENCE, not non-empty text: image/file-only
+  // prompts submit with empty text, so a `text !== ''` gate would skip their
+  // dedup and double-render the prompt. Fold media into the key (image/file
+  // counts) so two distinct media-only prompts at the boundary don't collapse.
+  const userBlockBoundaryKey = (
+    block: DaemonTranscriptBlock | undefined,
+  ): string | undefined => {
+    if (block?.kind !== 'user') return undefined;
+    const text = (block as { text?: string }).text ?? '';
+    const images = (block as { images?: unknown[] }).images?.length ?? 0;
+    const files = (block as { files?: unknown[] }).files?.length ?? 0;
+    return `${text} img:${images} file:${files}`;
+  };
   const oldestRetainedBlock = current.blocks[0];
-  const boundaryEchoText =
-    oldestRetainedBlock?.kind === 'user' &&
-    (oldestRetainedBlock.sourceRecordIds?.length ?? 0) === 0
-      ? ((oldestRetainedBlock as { text?: string }).text ?? '')
-      : '';
+  const boundaryEchoKey =
+    (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) === 0
+      ? userBlockBoundaryKey(oldestRetainedBlock)
+      : undefined;
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -340,11 +352,11 @@ function materializeTranscriptHistory(
   // oldest recordId-less echo (the boundary pair). A same-text user block
   // deeper in older history is a distinct prompt and must survive.
   let pageBlockList = history.blocks;
-  if (boundaryEchoText !== '') {
+  if (boundaryEchoKey !== undefined) {
     for (let i = history.blocks.length - 1; i >= 0; i -= 1) {
       const block = history.blocks[i];
       if (block?.kind !== 'user') continue;
-      if ((block as { text?: string }).text === boundaryEchoText) {
+      if (userBlockBoundaryKey(block) === boundaryEchoKey) {
         pageBlockList = [
           ...history.blocks.slice(0, i),
           ...history.blocks.slice(i + 1),
@@ -788,6 +800,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
               history.cursor = undefined;
+              // A live trim evicts oldest blocks that stay persisted
+              // daemon-side, so there is now fetchable content older than the
+              // re-set anchor. A session that loaded unlatched (hasMore=false,
+              // capacityReached=false) must surface that affordance, or the
+              // evicted band is unreachable until a reload. Mirror the replay
+              // path's olderHistoryReachable gates.
+              if (!history.capacityReached && !history.hasMore) {
+                const features = sessionCapabilitiesRef.current?.features;
+                const windowCaps = store.getSnapshot();
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? windowCaps.retainedBytes;
+                const byteCap =
+                  detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+                const olderHistoryReachable =
+                  Array.isArray(features) &&
+                  features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE) &&
+                  postTrimRetainedBytes < byteCap;
+                if (olderHistoryReachable) {
+                  history.hasMore = true;
+                  setTranscriptHistoryState({
+                    hasMore: true,
+                    loading: false,
+                    capacityReached: false,
+                    paginationError: history.paginationError,
+                  });
+                }
+              }
             } else {
               // Re-anchor uncomputable — no retained block carries a
               // recordId. The current anchor points at an evicted record the

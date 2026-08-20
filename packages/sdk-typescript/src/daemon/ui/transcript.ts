@@ -1650,17 +1650,19 @@ function trimTranscriptState(
     bytes -= estimateBlockBytes(state.blocks[removeCount]!);
     removeCount += 1;
   }
-  // The forward snap can be pinned one block short by the floor: the byte
-  // loop evicts down to the last block and the snap's `removeCount < len - 1`
-  // bound stops there even when the evicted penultimate block shares a record
-  // with the surviving one — a mid-record cut the snap detects but cannot fix
-  // by advancing. Back the cut off the floor instead, re-retaining that block
-  // so the record stays whole. This trades at most one extra retained block
-  // against the budget, the same "budget + one worst-case block" ceiling the
-  // byte loop above already documents.
-  if (
+  // The forward snap can be pinned by the floor: the byte loop evicts down to
+  // the last block and the snap's `removeCount < len - 1` bound stops there even
+  // when the evicted tail shares a record with the surviving block — a
+  // mid-record cut the snap detects but cannot fix by advancing. Back the cut
+  // off the floor instead, re-retaining siblings while the boundary pair still
+  // shares a record so the record stays whole. A single record can fan out into
+  // several contiguous blocks, so this loops; when nothing is left to evict the
+  // `removeCount === 0` guard below keeps the whole window rather than cutting
+  // mid-record. This trades at most one extra retained record against the
+  // budget, extending the "budget + one worst-case block" ceiling the byte loop
+  // above already documents.
+  while (
     removeCount > 0 &&
-    removeCount === state.blocks.length - 1 &&
     sharesSourceRecordId(
       state.blocks[removeCount - 1]!,
       state.blocks[removeCount]!,
@@ -2035,6 +2037,14 @@ function estimateRetainedBytes(value: unknown, depth = 0): number {
   if (depth > MAX_CLONE_DEPTH) return 0;
   if (typeof value === 'string') return value.length * 2;
   if (typeof value === 'number' || typeof value === 'boolean') return 16;
+  // Binary payloads (Blob/File, ArrayBuffer, typed-array/DataView views) carry
+  // their content in non-enumerable internal slots, so the record walk below
+  // would only charge the fixed object overhead for them. Charge by real binary
+  // size instead, or media-heavy transcripts never trip the budget — the OOM
+  // class this budget exists to stop.
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return value.size;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
   if (Array.isArray(value)) {
     let total = 32;
     for (const entry of value) {

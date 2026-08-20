@@ -1295,6 +1295,88 @@ describe('daemon UI normalizer and transcript reducer', () => {
     }
   });
 
+  it('backs the record-boundary snap off the floor across a 3-block record (R12-21)', () => {
+    // A single record fans out into 3+ contiguous blocks; the floor back-off
+    // must loop (not stop after one block) or the tail is still cut mid-record.
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 150_000,
+      now: 1,
+    });
+    for (const toolCallId of ['tool-a', 'tool-b', 'tool-c']) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId,
+            title: `Tool ${toolCallId}`,
+            status: 'completed',
+            rawOutput: large,
+            sourceRecordIds: ['record-x'],
+          },
+        ],
+        { now: 2 },
+      );
+    }
+    // All three record-x siblings stay — the loop re-retains tool-a and tool-b
+    // after the byte loop pins the cut to the floor.
+    expect(
+      state.blocks.map(
+        (block) => (block as { toolCallId?: string }).toolCallId,
+      ),
+    ).toEqual(['tool-a', 'tool-b', 'tool-c']);
+  });
+
+  it('counts Blob-backed file payloads against the retention budget', () => {
+    // Blob/File payloads live in non-enumerable internal slots, so a plain
+    // record walk would only charge the fixed object overhead — an 8 MiB file
+    // would count as ~64 bytes and the byte budget would never fire. Charge
+    // their real size instead.
+    const eightMiB = new Blob([new Uint8Array(8 * 1024 * 1024)]);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 100_000_000,
+      now: 1,
+    });
+    state = appendLocalUserTranscriptMessage(state, '', {
+      files: [
+        {
+          name: 'big.bin',
+          mimeType: 'application/octet-stream',
+          data: eightMiB,
+        },
+      ],
+    });
+    expect(state.retainedBytes).toBeGreaterThanOrEqual(8 * 1024 * 1024);
+  });
+
+  it('evicts Blob-backed file blocks that cross the retention budget', () => {
+    const fourMiB = new Blob([new Uint8Array(4 * 1024 * 1024)]);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 9 * 1024 * 1024,
+      now: 1,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      state = appendLocalUserTranscriptMessage(state, `attach ${index}`, {
+        files: [
+          {
+            name: `f${index}.bin`,
+            mimeType: 'application/octet-stream',
+            data: fourMiB,
+          },
+        ],
+      });
+    }
+    // 4 × 4 MiB = 16 MiB > 9 MiB budget: the byte trim must fire only because
+    // the Blob payloads are counted. Without it, retainedBytes would stay at
+    // the fixed record overhead and no block would be evicted.
+    expect(state.blocks.length).toBeLessThan(4);
+    expect(state.retainedBytes).toBeGreaterThan(4 * 1024 * 1024);
+  });
+
   it('keeps the retention estimate current when a tool payload is replaced', () => {
     let state = createDaemonTranscriptState({
       maxBlocks: 10,
