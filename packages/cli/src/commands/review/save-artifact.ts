@@ -28,14 +28,29 @@ import {
   buildReport,
   type FindingsReport,
   validateFindings,
-} from './findings.js';
+} from '../../utils/findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
+import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
-interface PersistedVerdict extends ComposeReviewResult {
+interface PersistedVerdict
+  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
   verdictLine: string;
+  /**
+   * Optional HERE, required on the composed result it is otherwise a copy
+   * of: a live compose always knows how many comments the round posts, but
+   * an artifact read back from disk may have been written before the field
+   * existed. Absence is preserved rather than defaulted — see the validator.
+   *
+   * `prevPostedInline` is omitted from this type entirely rather than
+   * inherited: the validator neither reads nor writes it, so carrying it
+   * here would advertise a field no artifact contains and license a
+   * consumer into an always-undefined branch. The two-round window stays
+   * recoverable from the marker chain inside `body`.
+   */
+  postedInline?: number;
 }
 
 export interface ReviewArtifactV1 {
@@ -233,6 +248,40 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.deferredCount must be a non-negative integer.',
     );
   }
+  // Same absence semantics as deferredCount, and for the same reason: a
+  // composed JSON persisted before floor enforcement existed carries no
+  // `floorEnforced`, and it names indices this artifact only re-displays.
+  const floorEnforced = verdict['floorEnforced'] ?? [];
+  if (
+    !Array.isArray(floorEnforced) ||
+    floorEnforced.some(
+      (i) => typeof i !== 'number' || !Number.isInteger(i) || i < 0,
+    )
+  ) {
+    throw new Error(
+      'Composed verdict.floorEnforced must be an array of non-negative integers.',
+    );
+  }
+  // Absence is PRESERVED here, not defaulted — the one place this field
+  // parts company with its siblings. `deferredCount: 0`, `floorEnforced: []`
+  // and an untrimmed `bodyTrim` are all TRUE statements about a round that
+  // predates those features: it deferred nothing, enforced nothing, trimmed
+  // nothing. But a pre-telemetry round DID post comments, so writing zero
+  // would assert a count nobody observed — and a converged round that really
+  // posted none becomes indistinguishable from it. That is the same
+  // zero-versus-absent conflation this field refuses at every other boundary
+  // (the parser, the side-file recovery, the carried `prevPosted`), and
+  // `lowSignal` in this very function already persists `null` rather than
+  // inventing a default. A PRESENT value of the wrong shape is still refused
+  // like every other field.
+  const rawPosted = verdict['postedInline'];
+  const postedAbsent = rawPosted === undefined || rawPosted === null;
+  const postedInline = postedAbsent ? undefined : volumeOf(rawPosted);
+  if (!postedAbsent && postedInline === undefined) {
+    throw new Error(
+      'Composed verdict.postedInline must be a non-negative integer.',
+    );
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -281,6 +330,8 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.remediation',
     ),
     deferredCount,
+    floorEnforced: floorEnforced as number[],
+    ...(postedInline === undefined ? {} : { postedInline }),
     lowSignal:
       lowSignal === null
         ? null
