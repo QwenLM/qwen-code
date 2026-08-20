@@ -159,6 +159,42 @@ describe('ToolApproval accessibility', () => {
     expect(container!.textContent).not.toContain('确认计划并开始协作？');
   });
 
+  it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
+    // The production exit_plan_mode option set: two `allow_once` options whose
+    // outcomes differ materially, so they must never share one label.
+    const productionPlanRequest: PermissionRequest = {
+      ...planRequest,
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode (yolo)',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_always',
+          label: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'cancel', label: 'No, keep planning (esc)', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, productionPlanRequest, [
+      { id: 'review', content: 'Review', status: 'pending' },
+    ]);
+
+    const labels = optionLabels();
+    expect(labels).toContain('Confirm and start');
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      labels.filter((label) => label === 'Confirm and start'),
+    ).toHaveLength(1);
+  });
+
   it('keeps the text-only Plan Mode approval when there are no Todos', () => {
     render(undefined, planRequest);
 

@@ -408,8 +408,10 @@ export function PlanExecutionView({
   const completedCount = todos.filter(
     (todo) => todo.status === 'completed',
   ).length;
+  // floor, not round: (N-1)/N rounds up to 100% on long plans, reporting
+  // completion (including to aria-valuenow) while a step is still outstanding.
   const progressPercent =
-    todos.length === 0 ? 0 : Math.round((completedCount / todos.length) * 100);
+    todos.length === 0 ? 0 : Math.floor((completedCount / todos.length) * 100);
   const activeAgentCount = tools.reduce((count, tool) => {
     const root = taskForTool(tool, taskIndex);
     if (!root) return count;
@@ -508,6 +510,14 @@ export function PlanExecutionView({
       setSelectedTodoId(undefined);
     }
   }, [selectedTodoId, todos]);
+
+  // A removed node never gets a pointerleave, so a stale hover id would keep
+  // data-focused set with no edge matching it — dimming the whole graph.
+  useEffect(() => {
+    if (hoveredTodoId && !todos.some((todo) => todo.id === hoveredTodoId)) {
+      setHoveredTodoId(undefined);
+    }
+  }, [hoveredTodoId, todos]);
 
   useEffect(() => {
     if (
@@ -669,6 +679,7 @@ export function PlanExecutionView({
     ? (dependentsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const detailsId = `plan-step-details-${graphId}`;
+  const overallProgressId = `plan-overall-progress-${graphId}`;
 
   const renderExecution = (tool: ACPToolCall, expanded = false) => {
     const status = executionStatus(tool, taskIndex);
@@ -834,38 +845,47 @@ export function PlanExecutionView({
           )}
         </div>
       )}
-      <div className={styles.overview} aria-label={t('planExecution.overview')}>
-        <div className={styles.progressCard}>
-          <div className={styles.progressHeading}>
-            <span>{t('planExecution.overallProgress')}</span>
-            <strong>{progressPercent}%</strong>
+      <div className={styles.overviewContainer}>
+        <div
+          className={styles.overview}
+          role="group"
+          aria-label={t('planExecution.overview')}
+        >
+          <div className={styles.progressCard}>
+            <div className={styles.progressHeading}>
+              <span id={overallProgressId}>
+                {t('planExecution.overallProgress')}
+              </span>
+              <strong>{progressPercent}%</strong>
+            </div>
+            <div
+              className={styles.progressTrack}
+              role="progressbar"
+              aria-labelledby={overallProgressId}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPercent}
+            >
+              <span style={{ width: `${progressPercent}%` }} />
+            </div>
+          </div>
+          <div className={styles.overviewStat}>
+            <strong>
+              {completedCount} / {todos.length}
+            </strong>
+            <span>{t('planExecution.stepsCompleted')}</span>
+          </div>
+          <div className={styles.overviewStat}>
+            <strong>{activeAgentCount}</strong>
+            <span>{t('planExecution.activeAgents')}</span>
           </div>
           <div
-            className={styles.progressTrack}
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progressPercent}
+            className={styles.overviewStat}
+            data-attention={attentionCount > 0 || undefined}
           >
-            <span style={{ width: `${progressPercent}%` }} />
+            <strong>{attentionCount}</strong>
+            <span>{t('planExecution.needsAttention')}</span>
           </div>
-        </div>
-        <div className={styles.overviewStat}>
-          <strong>
-            {completedCount} / {todos.length}
-          </strong>
-          <span>{t('planExecution.stepsCompleted')}</span>
-        </div>
-        <div className={styles.overviewStat}>
-          <strong>{activeAgentCount}</strong>
-          <span>{t('planExecution.activeAgents')}</span>
-        </div>
-        <div
-          className={styles.overviewStat}
-          data-attention={attentionCount > 0 || undefined}
-        >
-          <strong>{attentionCount}</strong>
-          <span>{t('planExecution.needsAttention')}</span>
         </div>
       </div>
       {/* Past the edge budget the SVG is skipped entirely. The nodes still

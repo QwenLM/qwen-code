@@ -31,7 +31,6 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
-  showPlanPreview?: boolean;
 }
 
 export function parseTitle(title?: string): {
@@ -221,7 +220,6 @@ export function ToolApproval({
   variant = 'inline',
   keyboardActive = true,
   planTodos = [],
-  showPlanPreview = true,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
@@ -250,7 +248,16 @@ export function ToolApproval({
     }
     return (option: PermissionRequest['options'][number]) => {
       if (showsPlanWorkflow) {
-        if (option.kind === 'allow_once') {
+        // An exit_plan_mode approval emits two `allow_once` options, so this
+        // cannot relabel by kind alone: `restore_previous` restores the
+        // pre-plan approval mode (YOLO if the user entered plan from YOLO)
+        // while the plain confirm keeps manual approval. Sharing one label
+        // would hide that difference behind two identical buttons.
+        if (
+          option.kind === 'allow_once' &&
+          option.id !== 'restore_previous' &&
+          option.id !== 'proceed_once_and_switch_to_default'
+        ) {
           return t('workflow.planReview.confirm');
         }
         if (option.kind === 'reject_once' || option.kind === 'reject_always') {
@@ -477,7 +484,7 @@ export function ToolApproval({
         </pre>
       ) : null}
 
-      {showsPlanWorkflow && showPlanPreview && (
+      {showsPlanWorkflow && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
         </div>

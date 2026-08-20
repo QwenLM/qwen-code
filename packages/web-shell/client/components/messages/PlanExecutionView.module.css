@@ -4,6 +4,11 @@
   gap: 8px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+/* Query container for the overview strip only. Keeping the containment off
+ * .section lets the DAG's intrinsic width still size an auto-width dialog. */
+.overviewContainer {
   container-type: inline-size;
 }
 
@@ -81,7 +86,12 @@
   height: 100%;
   border-radius: inherit;
   background: var(--success-color);
-  transition: width 160ms ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progressTrack span {
+    transition: width 160ms ease;
+  }
 }
 
 .overviewStat {
@@ -360,10 +370,6 @@
 .blocked,
 .attention {
   color: var(--warning-color);
-}
-
-.in_progress {
-  color: var(--agent-blue-500);
 }
 
 .ready {

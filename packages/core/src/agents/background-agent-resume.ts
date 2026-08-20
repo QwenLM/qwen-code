@@ -1063,6 +1063,11 @@ export class BackgroundAgentResumeService {
         agentColor: target.subagentConfig?.color ?? meta.agentColor,
         resumeCount: nextResumeCount,
         lastError: undefined,
+        // The previous incarnation's terminal summary must not survive into the
+        // restarted run: a crash mid-resume would otherwise leave discovery
+        // restoring run N-1's stats/activities as the interrupted run's state.
+        stats: undefined,
+        recentActivities: undefined,
       });
 
       const pendingMessages = [
@@ -1450,6 +1455,10 @@ export class BackgroundAgentResumeService {
             lastUpdatedAt: new Date().toISOString(),
             lastError: undefined,
             resumeCount: hotResumeCount,
+            // See the cold-resume patch: the completed run's summary must not
+            // describe the continuation that is starting here.
+            stats: undefined,
+            recentActivities: undefined,
           });
 
           const nextContextState = new ContextState();

@@ -134,9 +134,11 @@ function initials(value: string): string {
       .join('')
       .toUpperCase();
   }
+  // Keep CJK in the single-word fallback too: Chinese labels carry no spaces,
+  // so stripping it here would collapse every such row to the same 'AG'.
   return (
     value
-      .replace(/[^A-Za-z]/g, '')
+      .replace(/[^A-Za-z\u4e00-\u9fff]/g, '')
       .slice(0, 3)
       .toUpperCase() || 'AG'
   );

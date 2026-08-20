@@ -3107,9 +3107,9 @@ describe('Session', () => {
 
     it('clears the active Todo plan revision when changing mode', async () => {
       enableSessionWorkflowRevisionContext();
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
+      // Capture requires PLAN mode: sending this update in DEFAULT would never
+      // bind a revision, and the assertion below would pass vacuously.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
         entries: [
@@ -3127,6 +3127,18 @@ describe('Session', () => {
         },
       });
 
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // A user-driven transition into plan mode from a non-plan mode starts a
+      // fresh approval cycle, so the bound revision must be dropped.
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
       await session.setMode({
         sessionId: 'test-session-id',
         modeId: 'plan',
@@ -3233,32 +3245,60 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      await session.sendUpdate({
-        sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
-        _meta: {
-          qwenSessionWorkflow: true,
-          qwenTodoPlan: { id: 'old-plan' },
-          qwenTranscript: { planToolCallId: 'old-call' },
-        },
-      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      const request = await runExitPlanModeApprovalPrompt();
-      expect(request.toolCall._meta).toEqual(
-        expect.not.objectContaining({
-          qwenTodoApproval: expect.anything(),
-        }),
-      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
         [],
+      );
+    });
+
+    it('clears the active Todo plan revision when rewinding', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.rewindToTurn(1);
+
+      const rewound = await runExitPlanModeApprovalPrompt();
+      expect(rewound.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
       );
     });
 

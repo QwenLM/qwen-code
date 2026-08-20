@@ -30,10 +30,42 @@ function makeApp(
   overrides: {
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    userSettings?: Record<string, unknown>;
+    workspaceSettings?: Record<string, unknown>;
   } = {},
 ) {
   const app = express();
   app.use(express.json());
+
+  // The route derives the live Session Workflow value from the post-write
+  // merged settings, so tests that exercise it seed the scopes `loadSettings`
+  // should report. Only applied when seeded, so tests that install their own
+  // `loadSettings` mock after makeApp() keep control of it.
+  if (overrides.userSettings || overrides.workspaceSettings) {
+    const user = structuredClone(overrides.userSettings ?? {});
+    const workspace = structuredClone(overrides.workspaceSettings ?? {});
+    // Mirror the real precedence (workspace over user), merging one level deep
+    // so sibling keys under `experimental` are not lost.
+    const merged: Record<string, unknown> = { ...user };
+    for (const [key, value] of Object.entries(workspace)) {
+      const base = merged[key];
+      merged[key] =
+        base &&
+        typeof base === 'object' &&
+        !Array.isArray(base) &&
+        value &&
+        typeof value === 'object' &&
+        !Array.isArray(value)
+          ? { ...(base as object), ...(value as object) }
+          : value;
+    }
+    vi.mocked(loadSettings).mockReturnValue({
+      merged,
+      user: { settings: user },
+      workspace: { settings: workspace },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+  }
 
   const persistSetting = vi.fn(async () => {
     overrides.afterPersist?.();
@@ -64,7 +96,10 @@ function makeApp(
 
 describe('POST /workspace/settings', () => {
   it('updates live sessions when Session Workflow changes', async () => {
-    const { app, updateSessionWorkflow } = makeApp();
+    // Seeded as the post-write state: the route reads back the effective value.
+    const { app, updateSessionWorkflow } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
 
     const res = await request(app).post('/workspace/settings').send({
       scope: 'workspace',
@@ -74,6 +109,25 @@ describe('POST /workspace/settings', () => {
 
     expect(res.status).toBe(200);
     expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+  });
+
+  it('applies the effective value when a user write is shadowed by workspace', async () => {
+    // A user-scoped write persists to the user file but stays shadowed by the
+    // workspace value, so live sessions must keep following the merged value.
+    const { app, updateSessionWorkflow, persistSetting } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: false,
+    });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+    expect(updateSessionWorkflow).not.toHaveBeenCalledWith(false);
   });
 
   it('exposes the Live shortcut as user-global and rejects generic writes', async () => {

@@ -296,6 +296,26 @@ export interface WorkspaceSettingsRouteDeps {
   includeLiveVoice?: boolean;
 }
 
+// A user-scoped write can be shadowed by a workspace-scoped value (workspace
+// wins the merge), so live sessions must follow the post-write effective value
+// rather than the raw value that was just written.
+function readEffectiveSessionWorkflow(
+  boundWorkspace: string,
+  workspaceTrusted: boolean,
+): boolean {
+  const loaded = loadSettings(boundWorkspace, {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
+  });
+  return (
+    getNestedProperty(
+      loaded.merged as Record<string, unknown>,
+      'experimental.sessionWorkflow',
+    ) === true
+  );
+}
+
 async function updateLiveSessionWorkflow(
   update: (enabled: boolean) => Promise<unknown>,
   enabled: boolean,
@@ -521,7 +541,10 @@ export function registerWorkspaceSettingsRoutes(
         if (
           !(await updateLiveSessionWorkflow(
             deps.updateSessionWorkflow,
-            value as boolean,
+            readEffectiveSessionWorkflow(
+              boundWorkspace,
+              deps.isWorkspaceTrusted?.() ?? true,
+            ),
             boundWorkspace,
             res,
           ))
@@ -746,7 +769,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
                 SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
                 { enabled },
               ),
-            value as boolean,
+            readEffectiveSessionWorkflow(runtime.workspaceCwd, true),
             runtime.workspaceCwd,
             res,
           ))

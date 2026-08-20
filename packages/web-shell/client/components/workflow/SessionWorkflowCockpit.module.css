@@ -5,8 +5,9 @@
   font-family: inherit;
 }
 
-.cockpit button,
-.emptyCockpit button {
+/* Zero-specificity reset so the component's own button rules (.primaryButton,
+ * .backButton) keep their font metrics and colors. */
+:where(.cockpit, .emptyCockpit) button {
   color: inherit;
   font: inherit;
 }
@@ -345,6 +346,12 @@ button.activityRow {
   cursor: pointer;
 }
 
+/* Activity rows run edge-to-edge inside a container with overflow: hidden, so
+ * the default outward focus ring would have its side segments clipped. */
+button.activityRow:focus-visible {
+  outline-offset: -3px;
+}
+
 button.activityRow:hover {
   background: var(--accent);
 }
@@ -617,10 +624,6 @@ button.activityRow:hover {
   cursor: pointer;
   font-size: 13px;
   font-weight: 700;
-}
-
-:is(.cockpit, .emptyCockpit) button.primaryButton {
-  color: var(--primary-foreground);
 }
 
 .emptyCockpit {

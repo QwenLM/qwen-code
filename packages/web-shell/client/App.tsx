@@ -6736,9 +6736,13 @@ export function App({
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
-  // required to fail closed in that case too.
+  // required to fail closed in that case too. `loading` is deliberately NOT
+  // part of the gate: a background revalidation (any client of this workspace
+  // saving any setting bumps settingsVersion) sets loading:true while keeping
+  // the last-known-good data, and gating on it would evict the user from an
+  // established Workflow view and delete its deep link. The initial load still
+  // fails closed via `status === undefined`.
   const sessionWorkflowEnabled =
-    !workspaceSettingsState.loading &&
     !workspaceSettingsState.error &&
     workspaceSettingsState.status !== undefined &&
     workspaceSettings.find(
@@ -11803,8 +11807,7 @@ export function App({
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
-                ((chatHeaderEnabled && mainView === 'chat') ||
-                  mainView === 'cockpit') && (
+                (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
                   {sidebarOptions.enabled &&
                     sidebarOptions.showCompactToggle && (

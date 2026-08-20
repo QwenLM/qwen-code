@@ -49,6 +49,9 @@ import type {
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 const MAX_PENDING_STREAM_BYTES = 64 * 1024;
+// Kept in sync by hand with MAX_RECENT_ACTIVITIES in background-tasks.ts.
+// That module imports patchAgentMeta from this one, so importing the constant
+// back would turn a type-only edge into a runtime import cycle.
 const MAX_PERSISTED_RECENT_ACTIVITIES = 10;
 
 export function sanitizeFilenameComponent(value: string): string {

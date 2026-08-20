@@ -160,6 +160,67 @@ describe('SessionWorkflowCockpit', () => {
     act(() => openOutput?.click());
     expect(onOpenSubagent).toHaveBeenCalledWith(failedChild);
 
+    // The attention detail's dependency labels are localized, not raw keys.
+    // `t` is untyped, so a missing dictionary entry only shows up at runtime.
+    expect(container.textContent).toContain('Depends on');
+    expect(container.textContent).toContain('Unblocks');
+    expect(container.textContent).not.toContain('workflow.dependencies.');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('localizes the attention detail dependency labels in zh-CN', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const tools: ACPToolCall[] = [
+      {
+        callId: 'root-agent',
+        toolName: 'Agent',
+        status: 'failed',
+        args: { todo_id: 'work' },
+      },
+    ];
+    const tasks = [
+      {
+        kind: 'agent' as const,
+        id: 'root-task',
+        label: 'Root agent',
+        description: 'Coordinate work',
+        status: 'failed' as const,
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'root-agent',
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <SessionWorkflowCockpit
+            sessionId="session-1"
+            connected
+            todos={[{ id: 'work', content: 'Work', status: 'in_progress' }]}
+            tools={tools}
+            tasks={tasks}
+            onBackToChat={() => undefined}
+            onOpenSubagent={() => undefined}
+          />
+        </I18nProvider>,
+      );
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="待我处理"]')
+        ?.click();
+    });
+
+    expect(container.textContent).toContain('依赖于');
+    expect(container.textContent).toContain('解除阻塞');
+    expect(container.textContent).not.toContain('workflow.dependencies.');
+
     act(() => root.unmount());
     container.remove();
   });

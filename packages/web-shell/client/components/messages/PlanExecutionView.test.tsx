@@ -581,50 +581,54 @@ describe('PlanExecutionView', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
 
-    act(() => {
-      root.render(
-        <I18nProvider language="en">
-          <PlanExecutionView todos={branchedTodos} tools={[]} tasks={[]} />
-        </I18nProvider>,
-      );
-    });
-    expect(scrollTo).toHaveBeenCalledWith({ left: 550, behavior: 'auto' });
-
-    act(() => {
-      root.render(
-        <I18nProvider language="en">
-          <PlanExecutionView
-            todos={branchedTodos}
-            tools={[]}
-            tasks={[task('running')]}
-          />
-        </I18nProvider>,
-      );
-    });
-    expect(scrollTo).toHaveBeenCalledTimes(1);
-
-    act(() => {
-      Array.from(container.querySelectorAll('button'))
-        .find((button) => button.textContent === 'Locate current step')
-        ?.click();
-    });
-    expect(scrollTo).toHaveBeenLastCalledWith({
-      left: 550,
-      behavior: 'smooth',
-    });
-
-    act(() => root.unmount());
-    container.remove();
-    animationSpy.mockRestore();
-    rectSpy.mockRestore();
-    widthSpy.mockRestore();
-    if (originalScrollTo) {
-      Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
-        configurable: true,
-        value: originalScrollTo,
+    // These patches live on HTMLElement.prototype, so a failing assertion must
+    // not leak them into the rest of the file.
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <PlanExecutionView todos={branchedTodos} tools={[]} tasks={[]} />
+          </I18nProvider>,
+        );
       });
-    } else {
-      delete HTMLElement.prototype.scrollTo;
+      expect(scrollTo).toHaveBeenCalledWith({ left: 550, behavior: 'auto' });
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <PlanExecutionView
+              todos={branchedTodos}
+              tools={[]}
+              tasks={[task('running')]}
+            />
+          </I18nProvider>,
+        );
+      });
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        Array.from(container.querySelectorAll('button'))
+          .find((button) => button.textContent === 'Locate current step')
+          ?.click();
+      });
+      expect(scrollTo).toHaveBeenLastCalledWith({
+        left: 550,
+        behavior: 'smooth',
+      });
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      animationSpy.mockRestore();
+      rectSpy.mockRestore();
+      widthSpy.mockRestore();
+      if (originalScrollTo) {
+        Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+          configurable: true,
+          value: originalScrollTo,
+        });
+      } else {
+        delete HTMLElement.prototype.scrollTo;
+      }
     }
   });
 

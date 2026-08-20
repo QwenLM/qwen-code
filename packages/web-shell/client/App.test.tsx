@@ -393,6 +393,9 @@ const {
       } | null,
       settings: [] as DaemonSettingDescriptor[],
       settingsLoading: false,
+      // A background revalidation: the real resource sets loading:true while
+      // keeping the last-known-good data and status.
+      settingsReloading: false,
       settingsError: undefined as Error | undefined,
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
@@ -488,7 +491,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
         testState.settingsLoading || testState.settingsError
           ? undefined
           : { v: 1, settings: testState.settings },
-      loading: testState.settingsLoading,
+      loading: testState.settingsLoading || testState.settingsReloading,
       error: testState.settingsError,
     }),
     useProviders: () => ({
@@ -4760,6 +4763,7 @@ beforeEach(() => {
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
   testState.settingsLoading = false;
+  testState.settingsReloading = false;
   testState.settingsError = undefined;
   testState.latestSettingsState = null;
   testState.latestModelManagement = null;
@@ -4913,6 +4917,11 @@ afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
+  }
+  const url = new URL(window.location.href);
+  if (url.searchParams.has('view')) {
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -5231,20 +5240,6 @@ describe('App plan todos', () => {
   });
 });
 
-afterEach(() => {
-  for (const { root, container } of mounted.splice(0)) {
-    act(() => root.unmount());
-    container.remove();
-  }
-  const url = new URL(window.location.href);
-  if (url.searchParams.has('view')) {
-    url.searchParams.delete('view');
-    window.history.replaceState(null, '', url);
-  }
-  vi.useRealTimers();
-  vi.restoreAllMocks();
-});
-
 describe('App session workflow', () => {
   it('keeps a direct cockpit route and normal approval fail-closed when disabled', async () => {
     testState.blocks = [makePendingPermissionBlock()];
@@ -5385,6 +5380,39 @@ describe('App session workflow', () => {
     expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
   });
 
+  it('keeps an established cockpit through a background settings revalidation', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // Any client of this workspace saving any setting bumps settingsVersion,
+    // which reloads the resource: loading flips true while the last-known-good
+    // status is retained. That must not evict the view or drop the deep link.
+    testState.settingsReloading = true;
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    testState.settingsReloading = false;
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps the revision-bound plan approval in Chat', async () => {
     const approvedEntries = [
       {
@@ -5497,48 +5525,6 @@ describe('App session workflow', () => {
     await flush();
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
     expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
-  });
-
-  it('refreshes dependencies when only blockedBy changes', async () => {
-    testState.messages = [
-      {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
-          {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
-          },
-        ],
-      },
-    ];
-    const { rerender } = renderApp();
-    await flush();
-
-    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual(['prepare']);
-
-    testState.messages = [
-      {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
-          {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: [],
-          },
-        ],
-      },
-    ];
-    rerender();
-    await flush();
-
-    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
   });
 
   it('opens the unified Workflow view with plan todos and linked agents', async () => {

@@ -10592,12 +10592,7 @@ class QwenAgent implements Agent {
           );
         }
         this.sessionWorkflowEnabledOverride = enabled;
-        for (const session of this.sessions.values()) {
-          session
-            .getConfig()
-            .setSessionWorkflowEnabledProvider?.(() => enabled);
-          session.clearActiveTodoPlanRevision();
-        }
+        this.applySessionWorkflowOverrideToLiveSessions();
         return { enabled, sessionsUpdated: this.sessions.size };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
@@ -12201,6 +12196,19 @@ class QwenAgent implements Agent {
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
 
+        // A settings-file edit to the Session Workflow gate must reach live
+        // sessions too. The UI ext method pins every Session's provider to the
+        // daemon-held override, so without re-deriving it here a disk change
+        // (hand edit, dotfile sync) would stay masked until daemon restart.
+        const readSessionWorkflow = (merged: Record<string, unknown>) =>
+          (merged as { experimental?: { sessionWorkflow?: unknown } })
+            .experimental?.sessionWorkflow === true;
+        const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
+        if (reloadedSessionWorkflow !== readSessionWorkflow(oldMerged)) {
+          this.sessionWorkflowEnabledOverride = reloadedSessionWorkflow;
+          this.applySessionWorkflowOverrideToLiveSessions();
+        }
+
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -12869,6 +12877,23 @@ class QwenAgent implements Agent {
         },
         'Authentication failed: ' + (e as Error).message,
       );
+    }
+  }
+
+  /**
+   * Pins every live Session's workflow gate to the daemon-held override and
+   * drops any bound plan revision. The provider reads the field rather than
+   * capturing a value so a later re-derivation (a settings-file reload) reaches
+   * sessions that were pinned earlier.
+   */
+  private applySessionWorkflowOverrideToLiveSessions(): void {
+    for (const session of this.sessions.values()) {
+      session
+        .getConfig()
+        .setSessionWorkflowEnabledProvider?.(
+          () => this.sessionWorkflowEnabledOverride === true,
+        );
+      session.clearActiveTodoPlanRevision();
     }
   }
 
