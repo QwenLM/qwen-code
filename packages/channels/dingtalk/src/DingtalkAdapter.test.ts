@@ -1808,11 +1808,15 @@ describe('DingtalkChannel status cards', () => {
       .fn()
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
+    const acceptsLateDelivery = vi.fn().mockReturnValue(true);
     (
       channel as unknown as {
-        interactionPresenter: { closeOutput: typeof closeOutput };
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          acceptsLateDelivery: typeof acceptsLateDelivery;
+        };
       }
-    ).interactionPresenter = { closeOutput };
+    ).interactionPresenter = { closeOutput, acceptsLateDelivery };
     const segment = {
       channelName: 'dingtalk',
       sessionId: 'session-1',
@@ -4897,11 +4901,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       (
         channel as unknown as {
-          interactionPresenter: { closeOutput: typeof closeOutput };
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
         }
-      ).interactionPresenter = { closeOutput };
+      ).interactionPresenter = { closeOutput, acceptsLateDelivery };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5799,6 +5807,234 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('does not fall back when the run terminalizes mid-delivery', async () => {
+    // R9-1: the boundary gate checked liveness only BEFORE `sendReplyFiles`.
+    // A run terminalizing as cancelled or failed DURING the multi-second
+    // delivery made `closeOutput` answer false on terminality, and the
+    // unconditional fallback POSTed the baked receipts after the terminal
+    // card replaced the status card.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      // Live at the pre-delivery gate, terminal by the fallback's turn.
+      const acceptsLateDelivery = vi
+        .fn()
+        .mockReturnValueOnce(true)
+        .mockReturnValue(false);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(acceptsLateDelivery).toHaveBeenCalledTimes(2);
+      // The file already went out before the cancel was observable; only the
+      // receipt fallback is suppressed.
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fall back when a final delivery outlives terminalization', async () => {
+    // R9-1 sibling: `onResponseComplete`'s fallback tail had no liveness
+    // gate at all — a cancel or failure landing during the delivery let the
+    // baked receipts POST after the terminal card.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(false);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = { closeOutput, acceptsLateDelivery };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getCompleteHook(channel)(
+        'cid-1',
+        `done [FILE: ${file.path}]`,
+        'session-1',
+        segment,
+      );
+
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('clears the segment presentation when the boundary gate suppresses delivery', async () => {
+    // R9-2 shape 1: the gate early-returned without ever calling
+    // `closeOutput`, so a stale segment's presentation leaked in the
+    // presenter's uncapped `segments` map forever. The cleanup call removes
+    // it even though the terminal run delivers nothing.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(false);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      // The upload already ran before the terminal state was observable;
+      // only the delivery is suppressed — and the presentation is cleared.
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(0);
+      expect(markdownCalls()).toHaveLength(0);
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'response_boundary',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a same-line failure notice beside undeliverable residue', async () => {
+    // R9-3: an ill-formed same-line `[FILE:` residue strips to END OF LINE,
+    // and the sweep used to run over the baked result — eating the failure
+    // notice baked onto the same line and resolving a failed delivery as a
+    // fully successful turn with no output.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-file-'));
+    try {
+      const channel = createChannel({ cwd: dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid-1',
+        `[FILE: ${join(dir, 'b')} [FILE: ${join(dir, 'nonexistent.pdf')}]`,
+      );
+
+      expect(fileCalls()).toHaveLength(0);
+      expect(markdownCalls()).toHaveLength(1);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown?: { text?: string } };
+      expect(body.markdown?.text).toContain(
+        '[File delivery failed: nonexistent.pdf]',
+      );
+      expect(body.markdown?.text).not.toContain(join(dir, 'b'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a same-line receipt beside undeliverable residue', async () => {
+    // R9-3 success twin: the same end-of-line strip swallowed the delivered
+    // file's `[File sent: …]` receipt when residue shared its line.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid-1',
+        `[FILE: ${join(file.dir, 'b')} [FILE: ${file.path}]`,
+      );
+
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(1);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown?: { text?: string } };
+      expect(body.markdown?.text).toContain('[File sent: report.txt]');
+      expect(body.markdown?.text).not.toContain(join(file.dir, 'b'));
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('strips undeliverable marker residue from the outgoing webhook text', async () => {
     // R4-1: `prepareOutgoingContent` substituted only well-formed markers and
     // nothing sanitized between prepare and POST, so every undeliverable
@@ -5846,6 +6082,24 @@ describe('DingtalkChannel outbound file delivery', () => {
     await channel.sendMessage('cid-1', '[FILE: /workspace/report.pdf');
 
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('never POSTs a blank markdown chunk on the reply path', async () => {
+    // R9-4: a long blank run splits into a whitespace-only trailing chunk
+    // (`splitChunks` also yields `['']` for blank text) — the loop POSTed it
+    // anyway, and DingTalk rejects a blank markdown body with a non-zero
+    // errcode or renders it as an empty bubble.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const { markdownCalls } = stubFileReplyFetch();
+
+    await channel.sendMessage('cid-1', `x\n${' '.repeat(4000)}`);
+
+    expect(markdownCalls()).toHaveLength(1);
+    const body = JSON.parse(
+      String((markdownCalls()[0]![1] as RequestInit).body),
+    ) as { markdown?: { text?: string } };
+    expect(body.markdown?.text).toContain('x');
   });
 });
 
@@ -6421,6 +6675,18 @@ describe('DingtalkChannel proactive send', () => {
     await channel.pushProactive(groupTarget, '[FILE: /workspace/report.pdf');
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('never POSTs a blank proactive chunk', async () => {
+    // R9-4 sibling: the proactive chunk loop POSTed whitespace-only chunks
+    // the same way `sendPreparedReply` did.
+    const channel = proactive(createChannel());
+    const { sendCalls } = stubProactiveFetch();
+
+    await channel.pushProactive(groupTarget, `x\n${' '.repeat(4000)}`);
+
+    expect(sendCalls()).toHaveLength(1);
+    expect(msgParamOf(sendCalls()[0]!).text).toContain('x');
   });
 
   it('rewrites the baked receipt when a proactive file delivery fails', async () => {

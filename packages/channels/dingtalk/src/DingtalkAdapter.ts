@@ -30,7 +30,6 @@ import {
   MAX_FILES_PER_RESPONSE,
   findFileMarkers,
   readValidatedFile,
-  replaceFileMarkers,
   safeFileName,
   sanitizeMediaMarkersToStable,
   uploadDingTalkFile,
@@ -792,7 +791,27 @@ export class DingtalkChannel extends ChannelBase {
           replacements.push(`[File delivery failed: ${fileName}]`);
         }
       }
-      outgoingText = replaceFileMarkers(imageText, markers, replacements);
+      // R9-3: sanitize the gaps BETWEEN the markers, never the baked
+      // result. Residue stripping extends an ill-formed `[FILE:` opening to
+      // END OF LINE, and running it over the whole text after the receipts
+      // were baked ate any receipt or failure notice sharing a line with
+      // residue — a failed delivery resolved as a fully successful turn with
+      // no output. A gap never contains a baked artifact, and no artifact
+      // can splice across one into a new marker shape.
+      let assembled = '';
+      let previousEnd = 0;
+      for (const [index, marker] of markers.entries()) {
+        assembled += sanitizeMediaMarkersToStable(
+          imageText.slice(previousEnd, marker.start),
+          stripPartialImageMarker,
+        );
+        assembled += replacements[index]!;
+        previousEnd = marker.end;
+      }
+      outgoingText = `${assembled}${sanitizeMediaMarkersToStable(
+        imageText.slice(previousEnd),
+        stripPartialImageMarker,
+      )}`;
     }
 
     // R4-1: nothing else sanitizes between here and the POST —
@@ -800,13 +819,13 @@ export class DingtalkChannel extends ChannelBase {
     // cannot deliver (a cross-line `[IMAGE:\n/path]`, a cutoff `[FILE: /path`,
     // a bracketed or spaced opening) would otherwise ship as literal text,
     // absolute path included, while the display surfaces strip the very same
-    // shapes fail-closed. Run that same sanitization over the outgoing text:
-    // well-formed markers are already replaced with receipts above, so only
-    // undeliverable residue is touched.
-    const sanitizedText = sanitizeMediaMarkersToStable(
-      outgoingText,
-      stripPartialImageMarker,
-    );
+    // shapes fail-closed. With no markers the whole text is still sanitized
+    // here; with markers the gap-wise pass above stripped every residue
+    // without touching a baked receipt.
+    const sanitizedText =
+      markers.length > 0
+        ? outgoingText
+        : sanitizeMediaMarkersToStable(outgoingText, stripPartialImageMarker);
     // R7-4: residue-only input (a cutoff landing inside a marker) sanitizes
     // to nothing. Flag that with the empty string so the delivery consumers
     // send nothing instead of an empty markdown post — which DingTalk either
@@ -838,6 +857,11 @@ export class DingtalkChannel extends ChannelBase {
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
+      // R9-4: never POST a blank chunk — `splitChunks('')` yields `['']`,
+      // and a long blank run yields a whitespace-only trailing chunk.
+      // DingTalk rejects blank markdown with a non-zero errcode (failing the
+      // turn over content that does not exist) or renders an empty bubble.
+      if (!chunk.trim()) continue;
       const isMention = i === 0 && atUserId !== undefined;
       const body = {
         msgtype: 'markdown',
@@ -1088,10 +1112,13 @@ export class DingtalkChannel extends ChannelBase {
     let chunkError: unknown;
     try {
       for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i]!;
+        // R9-4: never POST a blank chunk, same as `sendPreparedReply`.
+        if (!chunk.trim()) continue;
         await this.sendProactiveChunk(
           target,
           i === 0 ? title : `${title} (cont.)`,
-          chunks[i]!,
+          chunk,
           `chunk ${i + 1}/${chunks.length}`,
         );
       }
@@ -1986,6 +2013,11 @@ export class DingtalkChannel extends ChannelBase {
       ) {
         return;
       }
+      // R9-1: the same mid-delivery race as the boundary close — a cancel or
+      // failure landing during the delivery must not receive the receipts.
+      if (!this.interactionPresenter.acceptsLateDelivery(segment.runId)) {
+        return;
+      }
       // The files already went out above — the fallback must not resend them.
       await this.sendPreparedResponse(
         chatId,
@@ -2066,7 +2098,12 @@ export class DingtalkChannel extends ChannelBase {
     // flight must not be delivered after its terminal card. R8-4: gate on the
     // terminal REASON, not bare terminality — a run COMPLETING mid-upload is
     // still a valid delivery target, and the bare gate dropped its files.
-    if (!presenter.acceptsLateDelivery(segment.runId)) return;
+    if (!presenter.acceptsLateDelivery(segment.runId)) {
+      // R9-2: still hand the segment to `closeOutput` — the bare return
+      // leaked its presentation in the presenter's `segments` map forever.
+      await presenter.closeOutput(segment.segmentId, '', reason, segment);
+      return;
+    }
     // R8-1 (mirrors R2-5): deliver BEFORE the display finalizes. `closeOutput`
     // bakes `prepared.text` — receipts included — into a surface it can no
     // longer amend, so a `sendReplyFiles` failure landing after it left a
@@ -2079,6 +2116,10 @@ export class DingtalkChannel extends ChannelBase {
       segment,
     );
     if (delivered) return;
+    // R9-1: the run can still terminalize as cancelled or failed DURING the
+    // delivery above; `closeOutput` then answers false on terminality, and
+    // the fallback would POST the baked receipts after the terminal card.
+    if (!presenter.acceptsLateDelivery(segment.runId)) return;
     // The files already went out above — the fallback must not resend them.
     await this.sendPreparedResponse(
       chatId,

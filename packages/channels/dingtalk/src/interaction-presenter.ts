@@ -219,9 +219,14 @@ export class DingtalkInteractionPresenter {
     }
     if (!presentation) return Promise.resolve(false);
     const run = presentation.run;
-    if (run.terminal) return Promise.resolve(false);
+    // R9-2: remove unconditionally — a run terminalizing mid-close used to
+    // leave the presentation in `segments` forever: `terminalizeRun` deletes
+    // only the active segment, and the terminal early return below skipped
+    // the removal. The map has no cap, so each occurrence pinned up to
+    // CONTENT_LIMIT of text for the life of the daemon.
     this.segments.delete(segmentId);
     this.addTerminalSegment(segmentId);
+    if (run.terminal) return Promise.resolve(false);
     if (run.activeSegmentId === segmentId) {
       run.activeSegmentId = undefined;
     }

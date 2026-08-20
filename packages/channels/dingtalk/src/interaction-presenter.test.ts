@@ -223,6 +223,40 @@ describe('DingtalkInteractionPresenter', () => {
     expect(presenter.acceptsLateDelivery('run-d')).toBe(true);
   });
 
+  it('removes stale segment presentations on a terminal close', async () => {
+    // R9-2: `closeOutput` answered false on `run.terminal` BEFORE deleting,
+    // and `terminalizeRun` deletes only the active segment — a boundary
+    // segment terminalized mid-close leaked its presentation in the uncapped
+    // `segments` map forever. Removal must be unconditional.
+    const { presenter } = createHarness();
+    presenter.appendOutput(segment('segment-A'), 'stale boundary content');
+    presenter.appendOutput(segment('segment-B'), 'active content');
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await expect(
+      presenter.closeOutput('segment-A', '', 'cancelled'),
+    ).resolves.toBe(false);
+    expect(presenter.segmentContent('segment-A')).toBeUndefined();
+
+    // Completed twin: the boundary segment outlived a newer active segment,
+    // so the completion's terminalization deleted only the active one.
+    presenter.registerRun('run-2', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-A2', { runId: 'run-2' }),
+      'boundary content',
+    );
+    presenter.appendOutput(
+      segment('segment-B2', { runId: 'run-2' }),
+      'active content',
+    );
+    presenter.terminalizeRun('run-2', 'completed');
+
+    await expect(
+      presenter.closeOutput('segment-A2', '', 'completed'),
+    ).resolves.toBe(false);
+    expect(presenter.segmentContent('segment-A2')).toBeUndefined();
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
