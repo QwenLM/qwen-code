@@ -252,6 +252,20 @@ export async function readAgentViewSessionState(
   return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
+export async function readAgentViewSessionStateStrict(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewSessionStateFile | undefined> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecordForConditionalWrite(paths.statePath);
+  if (!raw) return undefined;
+  const state = normalizeSessionState(raw, path.basename(paths.sessionDir));
+  if (!state) {
+    throw new Error(`Agent View state at ${paths.statePath} is invalid.`);
+  }
+  return state;
+}
+
 export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},

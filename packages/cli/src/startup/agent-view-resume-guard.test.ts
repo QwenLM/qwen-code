@@ -23,6 +23,7 @@ const mockPatchAgentViewSessionStateIf = vi.hoisted(() =>
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
   readAgentViewSessionState: mockReadAgentViewSessionState,
+  readAgentViewSessionStateStrict: mockReadAgentViewSessionState,
   patchAgentViewSessionStateIf: mockPatchAgentViewSessionStateIf,
   sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
 }));
@@ -151,6 +152,14 @@ describe('managed Agent View resume guards', () => {
     await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
       true,
     );
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
+      true,
+    );
+  });
+
+  it('fails closed when the delete guard cannot read session state', async () => {
+    mockReadAgentViewSessionState.mockRejectedValue(new Error('EIO'));
+
     await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
       true,
     );

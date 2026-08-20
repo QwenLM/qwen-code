@@ -17,6 +17,7 @@ import {
   patchAgentViewSessionStateIf,
   readAgentViewRoster,
   readAgentViewSessionState,
+  readAgentViewSessionStateStrict,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   writeAgentViewRoster,
@@ -263,6 +264,17 @@ describe('agent view supervisor store', () => {
         getAgentViewSessionPaths('session-1', { globalDir: tempDir }).tmpDir,
       ),
     ).toBe(true);
+  });
+
+  it('surfaces state read errors for destructive safety checks', async () => {
+    const paths = getAgentViewSessionPaths('unreadable', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.statePath, { recursive: true });
+
+    await expect(
+      readAgentViewSessionStateStrict('unreadable', { globalDir: tempDir }),
+    ).rejects.toThrow();
   });
 
   it('patches only the specified session state fields', async () => {

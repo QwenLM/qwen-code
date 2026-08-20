@@ -43,6 +43,24 @@ function pressKey(key: Partial<Key>) {
   });
 }
 
+function pressKeys(keys: Array<Partial<Key>>) {
+  const handler = keypressState.handlers.at(-1);
+  expect(handler).toBeDefined();
+  act(() => {
+    for (const key of keys) {
+      handler?.({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...key,
+      });
+    }
+  });
+}
+
 const sessions = [
   {
     sessionId: 's1',
@@ -278,6 +296,35 @@ describe('useSessionPicker multi-select state', () => {
 });
 
 describe('useSessionPicker filtering', () => {
+  it('composes same-tick navigation before selecting', () => {
+    const onSelect = vi.fn();
+    renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect,
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: [
+            ...sessions,
+            { ...sessions[0], sessionId: 's3', prompt: 'three' },
+          ],
+        }),
+      { wrapper },
+    );
+
+    pressKeys([
+      { name: 'down', sequence: '\x1b[B' },
+      { name: 'down', sequence: '\x1b[B' },
+      { name: 'return', sequence: '\r' },
+    ]);
+
+    expect(onSelect).toHaveBeenCalledWith(
+      's3',
+      expect.objectContaining({ sessionId: 's3' }),
+    );
+  });
+
   it('keeps selection on the same session after an async re-sort', () => {
     const onSelect = vi.fn();
     const { rerender } = renderHook(

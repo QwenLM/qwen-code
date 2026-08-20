@@ -111,6 +111,22 @@ export function filterAgentRosterRows(
   return rows.filter((row) => matchesFilter(row, filter));
 }
 
+export function orderAgentRosterRows(
+  rows: AgentRosterRow[],
+  groupMode: AgentRosterGroupMode,
+): AgentRosterRow[] {
+  if (groupMode === 'state') {
+    return rows;
+  }
+  const groups = new Map<string, AgentRosterRow[]>();
+  for (const row of rows) {
+    const group = groups.get(row.project) ?? [];
+    group.push(row);
+    groups.set(row.project, group);
+  }
+  return Array.from(groups.values()).flat();
+}
+
 function toRosterRow(
   session: AgentViewSessionStateFile,
   rosterEntry: AgentViewRosterEntry | undefined,

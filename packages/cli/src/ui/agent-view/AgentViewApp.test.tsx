@@ -547,6 +547,31 @@ describe('AgentViewApp', () => {
     expect(onAttachRequested).not.toHaveBeenCalled();
   }, 10_000);
 
+  it('clears same-tick peek input instead of exiting', async () => {
+    const onExit = vi.fn();
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: ready']),
+        })}
+        onExit={onExit}
+      />,
+    );
+
+    stdin.write(' ');
+    await flushInk();
+    stdin.write('\x03');
+    await flushInk();
+    stdin.write('a');
+    stdin.write('\x03');
+    await flushInk();
+
+    expect(onExit).not.toHaveBeenCalled();
+    expect(lastFrame()).not.toContain('> a');
+  });
+
   it('shows the persisted pending prompt when reopening a peek', async () => {
     const sendToSession = vi.fn();
     const { stdin, lastFrame } = render(
@@ -763,6 +788,48 @@ describe('AgentViewApp', () => {
 
     expect(stopSession).toHaveBeenCalledWith('session-1');
     expect(removeSession).toHaveBeenCalledWith('session-1');
+  });
+
+  it('composes repeated same-tick selection moves', async () => {
+    const onAttachRequested = vi.fn();
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[row('session-1'), row('session-2'), row('session-3')]}
+        actions={actions()}
+        onExit={vi.fn()}
+        onAttachRequested={onAttachRequested}
+      />,
+    );
+
+    stdin.write('\x1b[B\x1b[B');
+    await flushInk();
+    stdin.write('\r');
+    await flushInk();
+
+    expect(onAttachRequested).toHaveBeenCalledWith('session-3');
+  });
+
+  it('navigates directory groups in their rendered order', async () => {
+    const onAttachRequested = vi.fn();
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[
+          row('alpha-new', { project: 'alpha', ageMs: 10 }),
+          row('beta-mid', { project: 'beta', ageMs: 20 }),
+          row('alpha-old', { project: 'alpha', ageMs: 30 }),
+        ]}
+        actions={actions()}
+        onExit={vi.fn()}
+        onAttachRequested={onAttachRequested}
+      />,
+    );
+
+    stdin.write('\x13');
+    await flushInk();
+    stdin.write('\x1b[B\r');
+    await flushInk();
+
+    expect(onAttachRequested).toHaveBeenCalledWith('alpha-old');
   });
 
   it('stops a non-running session before allowing remove', async () => {
@@ -1145,6 +1212,23 @@ describe('AgentViewApp', () => {
 
     stdin.write('\x03');
     await flushInk();
+    expect(onExit).toHaveBeenCalledOnce();
+  });
+
+  it('composes same-tick Ctrl+C presses', async () => {
+    const onExit = vi.fn();
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions()}
+        onExit={onExit}
+      />,
+    );
+
+    stdin.write('\x03');
+    stdin.write('\x03');
+    await flushInk();
+
     expect(onExit).toHaveBeenCalledOnce();
   });
 

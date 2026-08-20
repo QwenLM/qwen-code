@@ -7,6 +7,7 @@
 import {
   patchAgentViewSessionStateIf,
   readAgentViewSessionState,
+  readAgentViewSessionStateStrict,
   sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
 import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
@@ -77,11 +78,15 @@ export async function isManagedAgentViewDeleteBlocked(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
-  const state = await readAgentViewSessionState(sessionId);
-  return (
-    (state?.ownership === 'managed' && state.processState !== 'exited') ||
-    state?.ownership === 'adopting'
-  );
+  try {
+    const state = await readAgentViewSessionStateStrict(sessionId);
+    return (
+      (state?.ownership === 'managed' && state.processState !== 'exited') ||
+      state?.ownership === 'adopting'
+    );
+  } catch {
+    return true;
+  }
 }
 
 /**

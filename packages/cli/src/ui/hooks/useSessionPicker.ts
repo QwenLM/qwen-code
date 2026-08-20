@@ -157,6 +157,7 @@ export function useSessionPicker({
 
   const hasInitialSessions = initialSessions !== undefined;
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
+  const selectedSessionIdRef = useRef<string | undefined>(undefined);
   const [sessionState, setSessionState] = useState<SessionState>(
     hasInitialSessions
       ? { sessions: initialSessions, hasMore: false, nextCursor: undefined }
@@ -235,13 +236,10 @@ export function useSessionPicker({
       filterSessions(allSessions, filterByBranch, currentBranch, searchQuery),
     [allSessions, filterByBranch, currentBranch, searchQuery],
   );
-  const selectedIndex = useMemo(() => {
-    if (filteredSessions.length === 0) return 0;
-    const index = filteredSessions.findIndex(
-      (session) => session.sessionId === selectedSessionId,
-    );
-    return index >= 0 ? index : 0;
-  }, [filteredSessions, selectedSessionId]);
+  const selectedIndex = useMemo(
+    () => getSelectedSessionIndex(filteredSessions, selectedSessionId),
+    [filteredSessions, selectedSessionId],
+  );
 
   const scrollOffset = useMemo(() => {
     if (centerSelection) {
@@ -318,6 +316,7 @@ export function useSessionPicker({
 
   // Reset selection when any filter changes (branch toggle or text query).
   useEffect(() => {
+    selectedSessionIdRef.current = undefined;
     setSelectedSessionId(undefined);
     setFollowScrollOffset(0);
   }, [filterByBranch, searchQuery]);
@@ -326,6 +325,7 @@ export function useSessionPicker({
   // not move a different row under the user's selection.
   useEffect(() => {
     if (filteredSessions.length === 0) {
+      selectedSessionIdRef.current = undefined;
       setSelectedSessionId(undefined);
       return;
     }
@@ -335,7 +335,9 @@ export function useSessionPicker({
         (session) => session.sessionId === selectedSessionId,
       )
     ) {
-      setSelectedSessionId(filteredSessions[0]?.sessionId);
+      const firstSessionId = filteredSessions[0]?.sessionId;
+      selectedSessionIdRef.current = firstSessionId;
+      setSelectedSessionId(firstSessionId);
     }
   }, [filteredSessions, selectedSessionId]);
 
@@ -375,9 +377,13 @@ export function useSessionPicker({
       // about — share the early-return so a future tweak in either
       // branch can't drift past length 0.
       if (filteredSessions.length === 0) return;
+      const currentIndex = getSelectedSessionIndex(
+        filteredSessions,
+        selectedSessionIdRef.current,
+      );
       const newIndex = Math.min(
         filteredSessions.length - 1,
-        Math.max(0, selectedIndex + delta),
+        Math.max(0, currentIndex + delta),
       );
       if (!centerSelection && newIndex < followScrollOffset) {
         setFollowScrollOffset(newIndex);
@@ -390,7 +396,9 @@ export function useSessionPicker({
       if (!centerSelection && newIndex >= filteredSessions.length - 3) {
         void loadMoreSessions();
       }
-      setSelectedSessionId(filteredSessions[newIndex]?.sessionId);
+      const nextSessionId = filteredSessions[newIndex]?.sessionId;
+      selectedSessionIdRef.current = nextSessionId;
+      setSelectedSessionId(nextSessionId);
     },
     [
       centerSelection,
@@ -398,7 +406,6 @@ export function useSessionPicker({
       followScrollOffset,
       loadMoreSessions,
       maxVisibleItems,
-      selectedIndex,
     ],
   );
 
@@ -408,6 +415,10 @@ export function useSessionPicker({
       // callback only runs in list/search modes — no inline guard
       // needed.
       const { name, sequence, ctrl } = key;
+      const currentSelectedIndex = getSelectedSessionIndex(
+        filteredSessions,
+        selectedSessionIdRef.current,
+      );
 
       if (ctrl && name === 'c') {
         onCancel();
@@ -447,7 +458,7 @@ export function useSessionPicker({
           // footer's "N selected" hint promised.
           return;
         }
-        const session = filteredSessions[selectedIndex];
+        const session = filteredSessions[currentSelectedIndex];
         // Disabled rows render dimmed with a "cannot delete" hint; honor
         // that here so a stray Enter on the active session doesn't close
         // the dialog and leave the receiver to bounce back with an error.
@@ -477,7 +488,7 @@ export function useSessionPicker({
         if (
           delta === -1 &&
           filteredSessions.length > 0 &&
-          selectedIndex === 0
+          currentSelectedIndex === 0
         ) {
           setViewMode('search');
           return;
@@ -525,14 +536,14 @@ export function useSessionPicker({
       if (name === 'space') {
         // The constructor invariant ensures at most one of these is on.
         if (enableMultiSelect) {
-          const session = filteredSessions[selectedIndex];
+          const session = filteredSessions[currentSelectedIndex];
           if (session) {
             toggleChecked(session.sessionId);
           }
           return;
         }
         if (enablePreview) {
-          const session = filteredSessions[selectedIndex];
+          const session = filteredSessions[currentSelectedIndex];
           if (session) {
             setPreviewSessionId(session.sessionId);
             setViewMode('preview');
@@ -587,6 +598,17 @@ export function useSessionPicker({
     searchQuery,
     isSearchActive: viewMode === 'search',
   };
+}
+
+function getSelectedSessionIndex(
+  sessions: SessionListItem[],
+  sessionId: string | undefined,
+): number {
+  if (sessions.length === 0) return 0;
+  const index = sessions.findIndex(
+    (session) => session.sessionId === sessionId,
+  );
+  return index >= 0 ? index : 0;
 }
 
 function mergeSessionItems(

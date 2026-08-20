@@ -18,6 +18,7 @@ import type {
 import {
   filterAgentRosterRows,
   isAgentRosterBlockingWait,
+  orderAgentRosterRows,
   type AgentRosterGroupMode,
   type AgentRosterRow,
 } from './roster-model.js';
@@ -97,7 +98,7 @@ export function AgentViewApp({
     | undefined
   >(undefined);
   const stopRemoveTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
-  const [lastInterruptAt, setLastInterruptAt] = useState(0);
+  const lastInterruptAtRef = useRef(0);
   const dispatchInFlightRef = useRef(false);
   const peekSubmitInFlightRef = useRef(false);
   const pinInFlightRef = useRef(false);
@@ -112,8 +113,12 @@ export function AgentViewApp({
         ? undefined
         : getDisplayFilter(prompt);
   const visibleRows = useMemo(
-    () => filterAgentRosterRows(currentRows, displayFilter),
-    [currentRows, displayFilter],
+    () =>
+      orderAgentRosterRows(
+        filterAgentRosterRows(currentRows, displayFilter),
+        groupMode,
+      ),
+    [currentRows, displayFilter, groupMode],
   );
   const selectedIndex = getSelectedIndex(visibleRows, selectedSessionId);
 
@@ -197,13 +202,16 @@ export function AgentViewApp({
         setSelectedSessionId(undefined);
         return;
       }
-      const nextIndex = Math.min(
-        visibleRows.length - 1,
-        Math.max(0, selectedIndex + delta),
-      );
-      setSelectedSessionId(visibleRows[nextIndex]?.sessionId);
+      setSelectedSessionId((currentSessionId) => {
+        const currentIndex = getSelectedIndex(visibleRows, currentSessionId);
+        const nextIndex = Math.min(
+          visibleRows.length - 1,
+          Math.max(0, currentIndex + delta),
+        );
+        return visibleRows[nextIndex]?.sessionId;
+      });
     },
-    [selectedIndex, visibleRows],
+    [visibleRows],
   );
 
   const dispatch = useCallback(
@@ -334,7 +342,6 @@ export function AgentViewApp({
         sessionId: target.sessionId,
         prompt: submitted,
       });
-      setPeekReplyTarget(undefined);
       setPeekPanel((current) => {
         if (
           current?.kind === 'session' &&
@@ -374,7 +381,7 @@ export function AgentViewApp({
           // was in flight.
           setPeekSubmittedPreview(undefined);
           if (peekGenerationRef.current === generation) {
-            setPeekPrompt(submitted);
+            setPeekPrompt((current) => current || submitted);
             setPeekPanel({
               kind: 'session',
               sessionId: target.sessionId,
@@ -605,28 +612,24 @@ export function AgentViewApp({
     });
   }, []);
 
-  const interrupt = useCallback(() => {
-    if (peekReplyTarget && peekPrompt) {
-      setPeekPrompt('');
-      setLastInterruptAt(Date.now());
-      return;
-    }
-    if (prompt) {
-      promptRevisionRef.current += 1;
-      setPrompt('');
-      setLastInterruptAt(Date.now());
-      return;
-    }
-    const now = Date.now();
-    if (now - lastInterruptAt <= 2000) {
-      onExit();
-      return;
-    }
-    setLastInterruptAt(now);
-    setNotice({
-      lines: ['Press Ctrl+C again to exit.'],
-    });
-  }, [lastInterruptAt, onExit, peekPrompt, peekReplyTarget, prompt]);
+  const interrupt = useCallback(
+    (clearedDraft: boolean) => {
+      const now = Date.now();
+      if (clearedDraft) {
+        lastInterruptAtRef.current = now;
+        return;
+      }
+      if (now - lastInterruptAtRef.current <= 2000) {
+        onExit();
+        return;
+      }
+      lastInterruptAtRef.current = now;
+      setNotice({
+        lines: ['Press Ctrl+C again to exit.'],
+      });
+    },
+    [onExit],
+  );
 
   const cancel = useCallback(() => {
     if (peekPanel) {

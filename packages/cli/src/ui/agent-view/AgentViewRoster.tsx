@@ -70,7 +70,7 @@ export interface AgentViewRosterProps {
   onStopOrRemoveSession: (sessionId: string) => void;
   onToggleGroupMode: () => void;
   onShowHelp: () => void;
-  onInterrupt: () => void;
+  onInterrupt: (clearedDraft: boolean) => void;
   onMoveSelection: (delta: number) => void;
   onCancel: () => void;
 }
@@ -172,8 +172,13 @@ export function AgentViewRoster({
   });
   const currentPrompt = promptInput.buffer.text;
   const hasPrompt = currentPrompt.trim().length > 0;
+  const promptEditedRef = useRef(false);
+  useEffect(() => {
+    promptEditedRef.current = false;
+  }, [currentPrompt]);
   const peekPromptPending = Boolean(peekQueuedPrompts?.length);
-  const selectedRow = rows[selectedIndex];
+  const selectedIndexRef = useRef(selectedIndex);
+  selectedIndexRef.current = selectedIndex;
   const panelSessionId =
     peekPanel?.kind === 'session' ? peekPanel.sessionId : undefined;
   const peekRow = rows.find((row) => row.sessionId === panelSessionId);
@@ -186,7 +191,6 @@ export function AgentViewRoster({
     peekPanel && peekInputMode && (!peekPromptPending || peekBlockingWait),
   );
   const sessionPeekActive = Boolean(peekPanel?.kind === 'session' && peekRow);
-  const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
   // Ink can emit multiple input events within one tick before React
   // re-renders; an imperative mirror keeps peek accumulation from reading a
   // stale prop on the second event.
@@ -196,17 +200,23 @@ export function AgentViewRoster({
   }, [peekPrompt]);
 
   useInput((input, key) => {
-    // The roster uses ink's raw useInput, which bypasses KeypressContext's
-    // FOCUS_EVENT_PATTERN filter, so focus in/out sequences must be dropped
-    // here as well or they would be treated as stray keystrokes.
-    if (isTerminalFocusInput(input)) {
+    // Raw useInput bypasses KeypressContext's terminal-response filters.
+    // Escape-bearing chunks are protocol/control input, never roster text.
+    if (input.includes('\x1b') || isTerminalFocusInput(input)) {
       return;
     }
+
+    const selectedRow = rows[selectedIndexRef.current];
+    const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
 
     if (key.escape) {
       if (promptInput.showSuggestions) {
         promptInput.dismissCompletion();
         return;
+      }
+      if (peekPanel) {
+        peekPromptRef.current = '';
+        onPeekPromptChange('');
       }
       onCancel();
       return;
@@ -243,14 +253,21 @@ export function AgentViewRoster({
     }
 
     if (isCtrlInput(input, key, 'c', '\x03')) {
-      if (!peekInputActive && hasPrompt) {
+      if (peekInputActive && peekPromptRef.current) {
+        peekPromptRef.current = '';
+        onPeekPromptChange('');
+        onInterrupt(true);
+        return;
+      }
+      if (!peekInputActive && (hasPrompt || promptEditedRef.current)) {
+        promptEditedRef.current = false;
         onPromptEdit?.();
         promptInput.buffer.setText('');
         onPromptChange('');
-        onInterrupt();
+        onInterrupt(true);
         return;
       }
-      onInterrupt();
+      onInterrupt(false);
       return;
     }
 
@@ -268,17 +285,23 @@ export function AgentViewRoster({
       promptInput.handleCompletionKey(input, key)
     ) {
       if (key.tab) {
+        promptEditedRef.current = true;
         onPromptEdit?.();
       }
       return;
     }
 
     if (key.upArrow && !sessionPeekActive) {
+      selectedIndexRef.current = Math.max(0, selectedIndexRef.current - 1);
       onMoveSelection(-1);
       return;
     }
 
     if (key.downArrow && !sessionPeekActive) {
+      selectedIndexRef.current = Math.max(
+        0,
+        Math.min(rows.length - 1, selectedIndexRef.current + 1),
+      );
       onMoveSelection(1);
       return;
     }
@@ -361,6 +384,7 @@ export function AgentViewRoster({
         peekPromptRef.current = next;
         onPeekPromptChange(next);
       } else {
+        promptEditedRef.current = true;
         onPromptEdit?.();
         promptInput.handleBufferKey(input, key);
       }
@@ -373,6 +397,7 @@ export function AgentViewRoster({
         peekPromptRef.current = next;
         onPeekPromptChange(next);
       } else {
+        promptEditedRef.current = true;
         onPromptEdit?.();
         promptInput.handleBufferKey(input, key);
       }
@@ -392,7 +417,7 @@ export function AgentViewRoster({
           <Text dimColor>No sessions</Text>
         ) : (
           getRosterSections(rows, groupMode).map((section) => (
-            <Box key={section.label} flexDirection="column">
+            <Box key={section.key} flexDirection="column">
               <Text dimColor>{section.label}</Text>
               {section.rows.map(({ row, index }) => (
                 <RosterRow
@@ -1004,6 +1029,7 @@ function getRosterSections(
   rows: AgentRosterRow[],
   groupMode: AgentRosterGroupMode,
 ): Array<{
+  key: string;
   label: string;
   rows: Array<{ row: AgentRosterRow; index: number }>;
 }> {
@@ -1018,8 +1044,9 @@ function getRosterSections(
     section.push({ row, index });
     sections.set(label, section);
   });
-  return Array.from(sections, ([label, sectionRows]) => ({
-    label,
+  return Array.from(sections, ([key, sectionRows]) => ({
+    key,
+    label: cleanSingleLineText(key),
     rows: sectionRows,
   }));
 }

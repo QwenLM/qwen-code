@@ -1748,23 +1748,16 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const detachAgentViewSession = useCallback(async () => {
-    try {
-      if (readAgentViewWorkerSidebandEnv() !== undefined) {
-        await sendAgentViewWorkerEvent({ type: 'detach' });
-        return;
-      }
-      await detachCurrentSessionToAgentView(config, {
-        terminal: {
-          columns: terminalWidth,
-          rows: terminalHeight,
-        },
-      });
-    } catch (error) {
-      // Callers are fire-and-forget key handlers; surface the failure in the
-      // debug log instead of letting it become an unhandled rejection.
-      debugLogger.warn('Failed to detach agent view session:', error);
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      await sendAgentViewWorkerEvent({ type: 'detach' });
       return;
     }
+    await detachCurrentSessionToAgentView(config, {
+      terminal: {
+        columns: terminalWidth,
+        rows: terminalHeight,
+      },
+    });
     config.getGeminiClient()?.requestShutdown();
     await runExitCleanup();
     process.exit(runAgentViewRosterCommand(config.getProjectRoot()));

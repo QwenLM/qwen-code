@@ -998,6 +998,33 @@ describe('AppContainer State Management', () => {
       expect(runExitCleanup).not.toHaveBeenCalled();
     });
 
+    it('surfaces worker detach failures to the command processor', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+      agentViewHandoffMocks.sendWorkerEvent.mockRejectedValue(
+        new Error('supervisor unavailable'),
+      );
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
+        | { detachAgentViewSession: () => Promise<void> }
+        | undefined;
+
+      await expect(actions?.detachAgentViewSession()).rejects.toThrow(
+        'supervisor unavailable',
+      );
+    });
+
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
       const addItem = vi.fn();
       mockedUseHistory.mockReturnValue({

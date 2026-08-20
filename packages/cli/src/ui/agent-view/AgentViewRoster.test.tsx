@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 import { act } from 'react';
-import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { afterEach, describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   AgentViewRoster,
   type AgentViewRosterProps,
@@ -56,6 +56,10 @@ vi.mock('../hooks/useTerminalSize.js', () => ({
 describe('AgentViewRoster', () => {
   beforeEach(() => {
     inputState.handlers = [];
+  });
+
+  afterEach(() => {
+    cleanup();
   });
 
   it('renders roster rows and the prompt', () => {
@@ -241,16 +245,32 @@ describe('AgentViewRoster', () => {
     expect(onPromptChange).toHaveBeenLastCalledWith('abc\n');
   });
 
-  it('drops real focus sequences but keeps focus-like user text', () => {
+  it('drops terminal escape sequences but keeps focus-like user text', () => {
     const onPromptChange = vi.fn();
 
     renderRoster({ onPromptChange });
 
     press('\x1b[I', {});
+    press('\x1b[?u', {});
+    press('\x1b[10;20R', {});
     expect(onPromptChange).not.toHaveBeenCalled();
 
     press('[Info] check', {});
     expect(onPromptChange).toHaveBeenLastCalledWith('[Info] check');
+  });
+
+  it('does not append terminal responses to peek replies', () => {
+    const onPeekPromptChange = vi.fn();
+
+    renderRoster({
+      peekPanel: sessionPanel(),
+      peekInputMode: 'send',
+      onPeekPromptChange,
+    });
+
+    press('\x1b[?u', {});
+
+    expect(onPeekPromptChange).not.toHaveBeenCalled();
   });
 
   it('moves selection and cancels from keyboard shortcuts', () => {
@@ -323,6 +343,44 @@ describe('AgentViewRoster', () => {
     expect(onToggleGroupMode).toHaveBeenCalledOnce();
     expect(onShowHelp).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledOnce();
+    expect(onInterrupt).toHaveBeenCalledWith(false);
+  });
+
+  it('clears the live peek draft before processing more same-tick input', () => {
+    const onPeekPromptChange = vi.fn();
+    const onInterrupt = vi.fn();
+
+    renderRoster({
+      peekPrompt: 'a',
+      peekPanel: sessionPanel(),
+      peekInputMode: 'send',
+      onPeekPromptChange,
+      onInterrupt,
+    });
+
+    pressTogether([
+      ['c', { ctrl: true }],
+      ['b', {}],
+    ]);
+
+    expect(onInterrupt).toHaveBeenCalledWith(true);
+    expect(onPeekPromptChange).toHaveBeenNthCalledWith(1, '');
+    expect(onPeekPromptChange).toHaveBeenNthCalledWith(2, 'b');
+  });
+
+  it('clears live main input when typing and Ctrl+C arrive together', () => {
+    const onPromptChange = vi.fn();
+    const onInterrupt = vi.fn();
+
+    renderRoster({ onPromptChange, onInterrupt });
+
+    pressTogether([
+      ['a', {}],
+      ['c', { ctrl: true }],
+    ]);
+
+    expect(onPromptChange).toHaveBeenLastCalledWith('');
+    expect(onInterrupt).toHaveBeenCalledWith(true);
   });
 
   it('can group rows by directory', () => {
@@ -337,6 +395,38 @@ describe('AgentViewRoster', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('qwen-code');
     expect(output).toContain('other');
+  });
+
+  it('sanitizes directory group labels', () => {
+    const { lastFrame } = renderRoster({
+      groupMode: 'directory',
+      rows: [
+        row('alpha', {
+          project: 'safe\nInjected\x1b]52;c;Y2xpcGJvYXJk\x07',
+        }),
+      ],
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('safe Injected');
+    expect(output).not.toContain('52;c');
+  });
+
+  it('targets the moved row when Down and Enter arrive together', () => {
+    const onAttachSession = vi.fn();
+
+    renderRoster({
+      rows: [row('alpha'), row('beta')],
+      selectedIndex: 0,
+      onAttachSession,
+    });
+
+    pressTogether([
+      ['', { downArrow: true }],
+      ['', { return: true }],
+    ]);
+
+    expect(onAttachSession).toHaveBeenCalledWith('beta');
   });
 
   it('reports prompt edits for printable input and backspace', async () => {
@@ -785,6 +875,18 @@ function press(input: string, key: TestKey) {
   }
   act(() => {
     handler(input, key);
+  });
+}
+
+function pressTogether(inputs: Array<[string, TestKey]>) {
+  const handler = inputState.handlers.at(-1);
+  if (!handler) {
+    throw new Error('AgentViewRoster did not register an input handler');
+  }
+  act(() => {
+    for (const [input, key] of inputs) {
+      handler(input, key);
+    }
   });
 }
 
