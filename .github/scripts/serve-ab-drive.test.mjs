@@ -457,3 +457,44 @@ test('captureScenarios stages fixtures before it requests', async () => {
   );
   assert.deepEqual(order, ['fixtures', 'request']);
 });
+
+test('captureScenarios aborts when a setup request fails', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'sad-setup-'));
+  const scenarios = [
+    {
+      name: 'health-deep-with-session',
+      path: '/health?deep=1',
+      method: 'GET',
+      setup: [{ method: 'POST', path: '/session', body: () => ({}) }],
+    },
+  ];
+  // A setup that quietly fails leaves the capture describing a daemon where the
+  // session was never created — a masked or faked diff, which is worse than no
+  // diff at all.
+  await assert.rejects(
+    captureScenarios(scenarios, {
+      request: (spec) =>
+        spec.path === '/session'
+          ? { ok: false, status: 400, text: async () => 'workspace_mismatch' }
+          : { ok: true, status: 200, text: async () => '{}' },
+      ctx: {},
+      outDir,
+    }),
+    /setup POST \/session failed \(HTTP 400\) for "health-deep-with-session"/,
+  );
+  // Neither the capture nor the completion marker may exist: the scenario never
+  // ran, and a marker here would certify a truncated baseline as complete.
+  assert.deepEqual(readdirSync(outDir), []);
+
+  // A setup that succeeds runs the scenario as normal.
+  const okDir = mkdtempSync(join(tmpdir(), 'sad-setup-'));
+  await captureScenarios(scenarios, {
+    request: () => ({ ok: true, status: 200, text: async () => '{"ok":true}' }),
+    ctx: {},
+    outDir: okDir,
+  });
+  assert.deepEqual(readdirSync(okDir).sort(), [
+    DRIVE_COMPLETE_MARKER,
+    'health-deep-with-session.json',
+  ]);
+});
