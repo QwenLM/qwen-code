@@ -190,6 +190,19 @@ export function useProviderSetupFlow(
 
   /** Move the on-screen selection without moving the authorship reference. */
   const editModelIds = useCallback((value: string) => {
+    // R12-2: the moment the wizard's fallback pick leaves the buffer, the user
+    // has answered for it and it stops being an untouched suggestion. Holding
+    // the marker past that point makes `recordAuthoredModelIds` blind to
+    // provenance: it strips the id from BOTH halves of the next delta, so a
+    // user who unchecks it and checks it again produces an empty delta and the
+    // re-endorsed model never reaches the baseline — the next pair change
+    // silently drops it. The removal is only ever visible between keystrokes
+    // (by the next commit the id is back), so the marker has to be released
+    // here rather than at the commit.
+    const injected = injectedModelIdRef.current;
+    if (injected !== null && !normalizeModelIds(value).includes(injected)) {
+      injectedModelIdRef.current = null;
+    }
     liveModelIdsRef.current = value;
     setModelIds(value);
   }, []);
@@ -287,15 +300,32 @@ export function useProviderSetupFlow(
       // built-in list are left alone; they may be legitimately unlisted
       // (private deployments, aliases).
       // A lookup can resolve while the user is typing into the step it is
-      // about to replace. The prune reads the baseline and the display swap
-      // below overwrites the buffer, so commit what is on screen first or the
-      // edit disappears with no way back to it.
-      recordAuthoredModelIds();
+      // about to replace, and an edit in progress is not a commit. R12-1:
+      // folding that buffer into the baseline re-opens the R11-1 hazard from
+      // the other side — while a longer custom id is typed the buffer passes
+      // through shorter ids as exact prefixes, so a transient token reads as
+      // BOTH halves of the delta. The user's uncheck never lands, the prune
+      // keeps the id, and the swap below hands the checkbox back ticked over
+      // the top of their half-typed text. Intermediate prefixes of an id that
+      // is not a built-in get banked as authored the same way.
+      const editInProgress =
+        liveModelIdsRef.current !== displayedModelIdsRef.current;
+      if (!editInProgress) {
+        recordAuthoredModelIds();
+      }
       const served = new Set(models.map((model) => model.id));
       const builtIn = new Set(getDefaultModelIds(config));
-      const kept = normalizeModelIds(authoredModelIdsRef.current).filter(
-        (id) => served.has(id) || !builtIn.has(id),
-      );
+      // Prune whatever is on screen. With a settled buffer that IS the
+      // baseline — the pair-change release above puts it back — so the old
+      // guarantee holds: the result depends on the pair in force, not on which
+      // pairs the session visited. With an edit in flight it is the user's own
+      // text, and pruning that rather than the baseline is what keeps their
+      // keystrokes instead of overwriting them with a stale value. Either way
+      // the baseline is left for the step's next real commit to move, which
+      // sees the delta against the reference point set below.
+      const kept = normalizeModelIds(
+        editInProgress ? liveModelIdsRef.current : authoredModelIdsRef.current,
+      ).filter((id) => served.has(id) || !builtIn.has(id));
       // Pruning everything would leave the step with nothing checked and no
       // way to submit; fall back to the provider's first live model. That is
       // the wizard's pick, not the user's, so it stays out of the authored

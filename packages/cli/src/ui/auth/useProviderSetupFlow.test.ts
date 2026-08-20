@@ -740,6 +740,95 @@ describe('useProviderSetupFlow model discovery', () => {
     }
   });
 
+  it('does not overwrite a half-typed buffer when a lookup lands', async () => {
+    // R12-1. The lookup stays pending while the user unchecks a served
+    // built-in and types a LONGER custom id over it, so the buffer passes back
+    // through the unchecked id as an exact prefix. Resolving at that keystroke
+    // used to commit the transient token and then swap the display to the
+    // BASELINE-derived selection: the half-typed text was replaced and the
+    // checkbox the user had just cleared came back ticked, with no way back to
+    // the edit. Prune what is on screen instead, so the keystrokes survive.
+    const UNCHECKED_ID = BUILT_IN_IDS[0]!;
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      UNCHECKED_ID,
+    );
+
+    // Uncheck the first built-in, then type `<UNCHECKED_ID>-latest` into the
+    // custom field. The step composes the still-checked recommendations with
+    // that text, so the buffer reads exactly the unchecked id at one keystroke.
+    const stillChecked = BUILT_IN_IDS.slice(1);
+    const typed = `${UNCHECKED_ID}-latest`;
+    let bufferAtResolve = '';
+    for (let at = 1; at <= typed.length; at += 1) {
+      const buffer = [...stillChecked, typed.slice(0, at)].join(', ');
+      act(() => result.current.changeModelIds(buffer));
+      if (typed.slice(0, at) === UNCHECKED_ID) {
+        bufferAtResolve = buffer;
+        // This endpoint serves every built-in, so the prune is a no-op and the
+        // only thing that can move the buffer is the display swap itself.
+        await act(async () => {
+          resolveLookup(discovered(BUILT_IN_IDS));
+        });
+        await waitFor(() =>
+          expect(result.current.state.discoveryStatus).toBe('success'),
+        );
+        break;
+      }
+    }
+    expect(bufferAtResolve).not.toBe('');
+
+    // The lookup landed, but it did not reach over the user's typing.
+    expect(result.current.state.modelIds).toBe(bufferAtResolve);
+  });
+
+  it('records the fallback pick once the user re-endorses it', async () => {
+    // R12-2. Pair A's catalog is disjoint from the built-ins, so the prune
+    // empties the selection and the wizard injects its own pick. Unchecking
+    // and re-checking that id is an explicit endorsement — but the strip that
+    // keeps a PASSIVELY retained fallback out of the baseline removed the id
+    // from both halves of the delta, so the endorsement netted out to nothing
+    // and the next pair change dropped the model the user had re-selected.
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(['x-preview']));
+    // Pair B serves x-preview AND enough built-ins that the prune leaves a
+    // non-empty selection — otherwise the empty-prune fallback would re-inject
+    // x-preview and hide the drop.
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered([...SERVED_IDS, 'x-preview']),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.modelIds).toBe('x-preview'),
+    );
+
+    // Uncheck the injected fallback, then check it again.
+    act(() => result.current.changeModelIds(''));
+    act(() => result.current.changeModelIds('x-preview'));
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // Pair B serves it and the user asked for it explicitly, so it survives.
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      'x-preview',
+    );
+  });
+
   it('still records an id the user removes before leaving the step', async () => {
     // The control for the test above: deferring authorship to the commit must
     // not make a real removal invisible. Unchecking a served built-in and
