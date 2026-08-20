@@ -266,6 +266,61 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  describe('yielding to active typing (#9571)', () => {
+    let composer: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      // The user is typing in the composer when the approval arrives. In the
+      // app the overlay commit hides the composer in the same render, so the
+      // editable target still holds focus when the focus effect runs (jsdom
+      // mirrors that: display:none never blurs).
+      composer = document.createElement('textarea');
+      document.body.appendChild(composer);
+      composer.focus();
+    });
+
+    afterEach(() => {
+      composer.remove();
+    });
+
+    it('does not grab focus to the default option while an editable target is focused', () => {
+      expect(document.activeElement).toBe(composer);
+      render(undefined);
+      // Stealing focus here redirects the in-progress keystroke (Enter to
+      // send, Space, digits) onto the safe-default option and can confirm it.
+      expect(document.activeElement).toBe(composer);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+    });
+
+    it('does not re-grab focus when a new request arrives mid-typing', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      rerender(true, { ...request, id: 'req-2' });
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('does not grab focus on re-activation while typing', () => {
+      render(false);
+      expect(document.activeElement).toBe(composer);
+      rerender(true);
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('still operates by keyboard once the user tabs in', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      // Explicit tab-in: focusing an option engages the usual roving behavior.
+      const opts = optionButtons();
+      act(() => {
+        opts[0]!.focus();
+      });
+      pressKey(opts[0]!, 'ArrowDown');
+      expect(document.activeElement).toBe(opts[1]);
+    });
+  });
+
   it('confirms the clicked option', () => {
     render(undefined);
     act(() => {

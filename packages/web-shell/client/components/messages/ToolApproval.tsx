@@ -12,6 +12,7 @@ import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -259,6 +260,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
@@ -316,6 +318,18 @@ export function ToolApproval({
     if (!keyboardActive) return;
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
+    // The approval can appear while the user is mid-typing in the composer:
+    // the same commit hides the composer and mounts this overlay, so focus is
+    // still on the editable target when this effect runs. Grabbing it would
+    // redirect the in-progress keystrokes — Enter-to-send, Space, digits — to
+    // the safe-default option and can confirm the request unintentionally.
+    // Yield to the editable target; the dialog stays reachable by Tab/click.
+    // (The composer is hidden via CSS in the same commit, so style recalc —
+    // and its focus drop — has not happened yet when effects run; the active
+    // element still reflects where the user was typing.)
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
@@ -399,6 +413,7 @@ export function ToolApproval({
 
   return (
     <div
+      ref={panelRef}
       className={
         variant === 'floating'
           ? `${styles.approval} ${styles.floating}${
