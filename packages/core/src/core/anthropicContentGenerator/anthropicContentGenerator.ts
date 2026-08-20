@@ -51,7 +51,7 @@ import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { parseToolCallArguments } from '../tool-call-arguments.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
-import { RETRYABLE_STREAM_TRANSPORT_CODES } from '../stream-transport-retry.js';
+import { isRetryableStreamTransportError } from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -1195,6 +1195,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
   }
 
+  private responseHasAssistantPayload(
+    response: GenerateContentResponse,
+  ): boolean {
+    return Boolean(
+      response.candidates?.some((candidate) =>
+        candidate.content?.parts?.some(
+          (part) =>
+            part.text ||
+            part.thought ||
+            part.thoughtSignature ||
+            part.functionCall,
+        ),
+      ),
+    );
+  }
+
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
     telemetryAttempt: GenAiAttemptHandle | undefined,
@@ -1564,11 +1580,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       // Match GeminiChat's replay boundary: only known mid-SSE socket cuts
       // may release an already closed batch before the error is propagated.
       if (
-        upstreamErrorClassification.kind === 'transport' &&
-        upstreamErrorClassification.transportCode !== undefined &&
-        RETRYABLE_STREAM_TRANSPORT_CODES.has(
-          upstreamErrorClassification.transportCode,
-        ) &&
+        isRetryableStreamTransportError(upstreamErrorClassification) &&
         deferredToolCalls.length > 0 &&
         !hasEmptyToolCall &&
         !hasMalformedToolCall &&
@@ -1584,15 +1596,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
 
     const hasAssistantPayload = collectedResponses.some((response) =>
-      response.candidates?.some((candidate) =>
-        candidate.content?.parts?.some(
-          (part) =>
-            part.text ||
-            part.thought ||
-            part.thoughtSignature ||
-            part.functionCall,
-        ),
-      ),
+      this.responseHasAssistantPayload(response),
     );
     if (
       hasMalformedToolCall ||
@@ -1632,15 +1636,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       hasFinishReason ||= candidates.some(
         (candidate) => candidate.finishReason !== undefined,
       );
-      hasAssistantPayload ||= candidates.some((candidate) =>
-        candidate.content?.parts?.some(
-          (part) =>
-            part.text ||
-            part.thought ||
-            part.thoughtSignature ||
-            part.functionCall,
-        ),
-      );
+      hasAssistantPayload ||= this.responseHasAssistantPayload(chunk);
       yield chunk;
     }
 
