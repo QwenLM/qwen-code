@@ -1783,6 +1783,15 @@ jobs:
           # review of this PR a reader can see, which is exactly the state that
           # makes this comment's claim false. What the bot-author and
           # creation-time clauses rule out is silence with NO review at all.
+          #
+          # The account is not this pipeline's alone: finalize-release.yml
+          # approves release PRs under the same CI_BOT_PAT, and
+          # qwen-triage-finalize.yml posts a deferred APPROVE under
+          # QWEN_CODE_BOT_TOKEN || CI_BOT_PAT (the same account whenever that
+          # secret is unset). Such an approval matches the author and window
+          # clauses, so the filter excludes those known bodies by name —
+          # without that, one landing in-window buys silence for a genuinely
+          # dead run, and its visible LGTM actively masks the dead pipeline.
           run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
           posted_reviews=""
           # Three outcomes, and the guard must not be silent about the third:
@@ -1794,7 +1803,7 @@ jobs:
             echo "::warning::already-posted guard unavailable (no run creation time); posting the fallback comment"
             echo "Already-posted guard unavailable (run creation time missing); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
           elif ! posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
-            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | .id" 2>/dev/null)"; then
+            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | select(.body != \"Automated second approval for the release version bump.\") | select(.body != \"LGTM, looks ready to ship — CI landed green after the review. ✅\") | .id" 2>/dev/null)"; then
             echo "::warning::already-posted guard unavailable (reviews listing failed); posting the fallback comment"
             echo "Already-posted guard unavailable (reviews listing failed); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
           elif [ -n "$posted_reviews" ]; then
@@ -2018,6 +2027,15 @@ jobs:
           # review of this PR a reader can see, which is exactly the state that
           # makes this comment's claim false. What the bot-author and
           # creation-time clauses rule out is silence with NO review at all.
+          #
+          # The account is not this pipeline's alone: finalize-release.yml
+          # approves release PRs under the same CI_BOT_PAT, and
+          # qwen-triage-finalize.yml posts a deferred APPROVE under
+          # QWEN_CODE_BOT_TOKEN || CI_BOT_PAT (the same account whenever that
+          # secret is unset). Such an approval matches the author and window
+          # clauses, so the filter excludes those known bodies by name —
+          # without that, one landing in-window buys silence for a genuinely
+          # dead run, and its visible LGTM actively masks the dead pipeline.
           run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
           posted_reviews=""
           # Three outcomes, and the guard must not be silent about the third:
@@ -2029,7 +2047,7 @@ jobs:
             echo "::warning::already-posted guard unavailable (no run creation time); posting the fallback comment"
             echo "Already-posted guard unavailable (run creation time missing); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
           elif ! posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
-            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | .id" 2>/dev/null)"; then
+            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | select(.body != \"Automated second approval for the release version bump.\") | select(.body != \"LGTM, looks ready to ship — CI landed green after the review. ✅\") | .id" 2>/dev/null)"; then
             echo "::warning::already-posted guard unavailable (reviews listing failed); posting the fallback comment"
             echo "Already-posted guard unavailable (reviews listing failed); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
           elif [ -n "$posted_reviews" ]; then
