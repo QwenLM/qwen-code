@@ -1249,9 +1249,13 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate.mock.calls.some(([calls]) => calls.length === 0),
     ).toBe(true);
 
+    const callsBeforeRelease = onToolCallsUpdate.mock.calls.length;
     releaseCompletion();
     // The finally-block notify still fires after the callback resolves.
     await vi.waitFor(() => {
+      expect(onToolCallsUpdate.mock.calls.length).toBeGreaterThan(
+        callsBeforeRelease,
+      );
       expect(onToolCallsUpdate.mock.calls.at(-1)?.[0]).toEqual([]);
     });
   });
