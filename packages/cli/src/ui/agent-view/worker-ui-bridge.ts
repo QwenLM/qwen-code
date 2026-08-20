@@ -217,13 +217,13 @@ export async function applyAgentViewWorkerControlEventForUi(
     return;
   }
 
-  const answeredToolCall = await answerAgentViewPendingToolCall(
+  // An answer without a matching pending confirmation is stale. Soft
+  // questions are converted to prompt controls by the supervisor before
+  // reaching this worker-side path.
+  await answerAgentViewPendingToolCall(
     event,
     getAgentViewAnswerableToolCalls(pendingToolCalls),
   );
-  if (!answeredToolCall && event.text?.trim()) {
-    enqueuePrompt(event.text);
-  }
 }
 
 function getNestedAgentViewWaitingFor(

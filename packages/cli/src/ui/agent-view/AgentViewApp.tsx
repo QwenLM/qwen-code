@@ -12,14 +12,19 @@ import { AgentViewRoster } from './AgentViewRoster.js';
 import type {
   AgentViewHeaderInfo,
   AgentViewNotice,
-  AgentViewPeekPanel,
+  AgentViewPanel,
+  AgentViewSessionPanel,
 } from './AgentViewRoster.js';
-import { filterAgentRosterRows } from './roster-model.js';
-import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
+import {
+  filterAgentRosterRows,
+  isAgentRosterBlockingWait,
+  type AgentRosterGroupMode,
+  type AgentRosterRow,
+} from './roster-model.js';
 
 export interface AgentViewAppActions {
   dispatchPrompt(prompt: string, attach: boolean): Promise<unknown>;
-  peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
+  peekSelected(sessionId: string): Promise<AgentViewSessionPanel>;
   sendToSession(sessionId: string, text: string): Promise<unknown>;
   answerSession(sessionId: string, text: string): Promise<unknown>;
   pinSession(sessionId: string): Promise<unknown>;
@@ -42,7 +47,7 @@ export interface AgentViewAppProps {
   onAttachRequested?: (sessionId: string) => void;
   onResumeRequested?: () => void;
   header?: AgentViewHeaderInfo;
-  initialPeekPanel?: AgentViewPeekPanel;
+  initialPeekPanel?: AgentViewPanel;
   refreshIntervalMs?: number;
 }
 
@@ -75,7 +80,7 @@ export function AgentViewApp({
   const [selectedSessionId, setSelectedSessionId] = useState<
     string | undefined
   >(rows[0]?.sessionId);
-  const [peekPanel, setPeekPanel] = useState<AgentViewPeekPanel | undefined>(
+  const [peekPanel, setPeekPanel] = useState<AgentViewPanel | undefined>(
     initialPeekPanel,
   );
   const [notice, setNotice] = useState<AgentViewNotice>();
@@ -101,9 +106,11 @@ export function AgentViewApp({
   // can never overwrite a newer panel or resurrect a closed one.
   const peekGenerationRef = useRef(0);
   const displayFilter =
-    peekPanel && peekPanel.title !== 'Filter'
-      ? undefined
-      : getDisplayFilter(prompt);
+    peekPanel?.kind === 'filter'
+      ? peekPanel.query
+      : peekPanel
+        ? undefined
+        : getDisplayFilter(prompt);
   const visibleRows = useMemo(
     () => filterAgentRosterRows(currentRows, displayFilter),
     [currentRows, displayFilter],
@@ -130,20 +137,16 @@ export function AgentViewApp({
 
   useEffect(() => {
     if (!peekPanel) return;
-    const row = currentRows.find((item) => item.sessionId === peekPanel.title);
+    if (peekPanel.kind !== 'session') return;
+    const row = currentRows.find(
+      (item) => item.sessionId === peekPanel.sessionId,
+    );
     if (!row) {
-      if (peekPanel.title !== 'Filter') {
-        if (peekPanel.error) {
-          setPeekReplyTarget(undefined);
-          setPeekPrompt('');
-          setPeekSubmittedPreview(undefined);
-          return;
-        }
-        // The peeked session disappeared; close the stale panel instead of
-        // leaving a reply input aimed at a removed session.
+      setPeekReplyTarget(undefined);
+      setPeekPrompt('');
+      setPeekSubmittedPreview(undefined);
+      if (peekPanel.tone !== 'error') {
         peekGenerationRef.current += 1;
-        setPeekReplyTarget(undefined);
-        setPeekSubmittedPreview(undefined);
         setPeekPanel(undefined);
       }
       return;
@@ -229,12 +232,13 @@ export function AgentViewApp({
       if (isBlockingFilterPrompt(promptToSubmit)) {
         const matchingRows = filterAgentRosterRows(currentRows, promptToSubmit);
         setPeekPanel({
-          title: 'Filter',
+          kind: 'filter',
+          query: promptToSubmit,
           lines: [`Showing ${matchingRows.length} matching session(s).`],
         });
         setPeekReplyTarget(undefined);
         setPeekPrompt('');
-        return true;
+        return false;
       }
 
       const submitted = promptToSubmit;
@@ -332,8 +336,18 @@ export function AgentViewApp({
       });
       setPeekReplyTarget(undefined);
       setPeekPanel((current) => {
-        if (current?.title === target.sessionId) return current;
-        return { title: target.sessionId, lines: [] };
+        if (
+          current?.kind === 'session' &&
+          current.sessionId === target.sessionId
+        ) {
+          return current;
+        }
+        return {
+          kind: 'session',
+          sessionId: target.sessionId,
+          content: 'activity',
+          lines: [],
+        };
       });
       peekSubmitInFlightRef.current = true;
       void (async () => {
@@ -362,12 +376,14 @@ export function AgentViewApp({
           if (peekGenerationRef.current === generation) {
             setPeekPrompt(submitted);
             setPeekPanel({
-              title: target.sessionId,
+              kind: 'session',
+              sessionId: target.sessionId,
+              content: 'message',
               lines: [
                 `Prompt: ${submitted}`,
                 error instanceof Error ? error.message : String(error),
               ],
-              error: true,
+              tone: 'error',
             });
           } else {
             setNotice({
@@ -387,11 +403,9 @@ export function AgentViewApp({
     [actions, currentRows, peekPrompt, peekReplyTarget, refreshRows],
   );
 
-  const attachSelected = useCallback(
-    (sessionId?: string) => {
-      const row = sessionId
-        ? visibleRows.find((item) => item.sessionId === sessionId)
-        : visibleRows[selectedIndex];
+  const attachSession = useCallback(
+    (sessionId: string) => {
+      const row = visibleRows.find((item) => item.sessionId === sessionId);
       if (!row) return;
       if (!row.actions.canAttach) {
         setNotice({
@@ -402,60 +416,73 @@ export function AgentViewApp({
       setSelectedSessionId(row.sessionId);
       onAttachRequested?.(row.sessionId);
     },
-    [onAttachRequested, selectedIndex, visibleRows],
+    [onAttachRequested, visibleRows],
   );
 
-  const peekSelected = useCallback(() => {
-    const row = visibleRows[selectedIndex];
-    if (!row) return;
-    setSelectedSessionId(row.sessionId);
-    setNotice(undefined);
-    setPeekSubmittedPreview(undefined);
-    setPeekReplyTarget(getReplyTarget(row));
-    setPeekPrompt('');
-    const generation = ++peekGenerationRef.current;
-    setPeekPanel({ title: row.sessionId, lines: ['Loading...'] });
-    void Promise.resolve(actions.peekSelected(row.sessionId)).then(
-      (panel) => {
-        if (peekGenerationRef.current === generation) {
-          setPeekPanel(panel);
+  const peekSession = useCallback(
+    (sessionId: string) => {
+      const row = visibleRows.find((item) => item.sessionId === sessionId);
+      if (!row) return;
+      setSelectedSessionId(row.sessionId);
+      setNotice(undefined);
+      setPeekSubmittedPreview(undefined);
+      setPeekReplyTarget(getReplyTarget(row));
+      setPeekPrompt('');
+      const generation = ++peekGenerationRef.current;
+      setPeekPanel({
+        kind: 'session',
+        sessionId: row.sessionId,
+        content: 'message',
+        lines: ['Loading...'],
+      });
+      void Promise.resolve(actions.peekSelected(row.sessionId)).then(
+        (panel) => {
+          if (peekGenerationRef.current === generation) {
+            setPeekPanel(panel);
+          }
+        },
+        (error) => {
+          if (peekGenerationRef.current !== generation) return;
+          setPeekPanel({
+            kind: 'session',
+            sessionId: row.sessionId,
+            content: 'message',
+            lines: [error instanceof Error ? error.message : String(error)],
+            tone: 'error',
+          });
+        },
+      );
+    },
+    [actions, visibleRows],
+  );
+
+  const togglePinSession = useCallback(
+    (sessionId: string) => {
+      const row = visibleRows.find((item) => item.sessionId === sessionId);
+      if (!row || pinInFlightRef.current) return;
+      pinInFlightRef.current = true;
+      void (async () => {
+        try {
+          await actions.pinSession(row.sessionId);
+          await refreshRows();
+          setNotice({
+            lines: [row.pinned ? 'Unpinned.' : 'Pinned.'],
+          });
+        } catch (error) {
+          setNotice({
+            lines: [error instanceof Error ? error.message : String(error)],
+          });
+        } finally {
+          pinInFlightRef.current = false;
         }
-      },
-      (error) => {
-        if (peekGenerationRef.current !== generation) return;
-        setPeekPanel({
-          title: row.sessionId,
-          lines: [error instanceof Error ? error.message : String(error)],
-          error: true,
-        });
-      },
-    );
-  }, [actions, selectedIndex, visibleRows]);
+      })();
+    },
+    [actions, refreshRows, visibleRows],
+  );
 
-  const togglePinSelected = useCallback(() => {
-    const row = visibleRows[selectedIndex];
-    if (!row || pinInFlightRef.current) return;
-    pinInFlightRef.current = true;
-    void (async () => {
-      try {
-        await actions.pinSession(row.sessionId);
-        await refreshRows();
-        setNotice({
-          lines: [row.pinned ? 'Unpinned.' : 'Pinned.'],
-        });
-      } catch (error) {
-        setNotice({
-          lines: [error instanceof Error ? error.message : String(error)],
-        });
-      } finally {
-        pinInFlightRef.current = false;
-      }
-    })();
-  }, [actions, refreshRows, selectedIndex, visibleRows]);
-
-  const renameSelected = useCallback(
-    (displayName: string) => {
-      const row = visibleRows[selectedIndex];
+  const renameSession = useCallback(
+    (sessionId: string, displayName: string) => {
+      const row = visibleRows.find((item) => item.sessionId === sessionId);
       if (!row) return;
       const previousPrompt = displayName;
       const restoreRevision = promptRevisionRef.current;
@@ -480,14 +507,12 @@ export function AgentViewApp({
         }
       })();
     },
-    [actions, refreshRows, selectedIndex, visibleRows],
+    [actions, refreshRows, visibleRows],
   );
 
-  const stopOrRemoveSelected = useCallback(
-    (sessionId?: string) => {
-      const row = sessionId
-        ? visibleRows.find((item) => item.sessionId === sessionId)
-        : visibleRows[selectedIndex];
+  const stopOrRemoveSession = useCallback(
+    (sessionId: string) => {
+      const row = visibleRows.find((item) => item.sessionId === sessionId);
       if (!row) return;
       const now = Date.now();
       const pendingStop = lastStopRequestRef.current;
@@ -496,6 +521,7 @@ export function AgentViewApp({
         now - pendingStop.at <= STOP_REMOVE_CONFIRM_MS;
       const showRemoveHint = (message: string) => {
         const hintAt = Date.now();
+        const hint: AgentViewNotice = { lines: [message] };
         lastStopRequestRef.current = { sessionId: row.sessionId, at: hintAt };
         if (stopRemoveTimerRef.current) {
           clearTimeout(stopRemoveTimerRef.current);
@@ -504,10 +530,12 @@ export function AgentViewApp({
           const current = lastStopRequestRef.current;
           if (current?.sessionId === row.sessionId && current.at === hintAt) {
             lastStopRequestRef.current = undefined;
-            setNotice(undefined);
+            setNotice((currentNotice) =>
+              currentNotice === hint ? undefined : currentNotice,
+            );
           }
         }, STOP_REMOVE_CONFIRM_MS);
-        setNotice({ lines: [message] });
+        setNotice(hint);
       };
       lastStopRequestRef.current = remove
         ? undefined
@@ -541,15 +569,13 @@ export function AgentViewApp({
               stopRemoveTimerRef.current = undefined;
             }
           }
-          if (ownsStopRequest) {
-            setNotice({
-              lines: [error instanceof Error ? error.message : String(error)],
-            });
-          }
+          setNotice({
+            lines: [error instanceof Error ? error.message : String(error)],
+          });
         }
       })();
     },
-    [actions, refreshRows, selectedIndex, visibleRows],
+    [actions, refreshRows, visibleRows],
   );
 
   const toggleGroupMode = useCallback(() => {
@@ -635,7 +661,6 @@ export function AgentViewApp({
       peekPanel={peekPanel}
       peekPrompt={peekPrompt}
       peekInputMode={peekReplyTarget?.mode}
-      peekInputTarget={peekReplyTarget?.sessionId}
       peekQueuedPrompts={getPeekQueuedPrompts(
         peekSubmittedPreview,
         visibleRows,
@@ -648,11 +673,11 @@ export function AgentViewApp({
       onPeekPromptChange={setPeekPrompt}
       onDispatch={dispatch}
       onSubmitPeekPrompt={submitPeekPrompt}
-      onAttachSelected={attachSelected}
-      onPeekSelected={peekSelected}
-      onTogglePinSelected={togglePinSelected}
-      onRenameSelected={renameSelected}
-      onStopOrRemoveSelected={stopOrRemoveSelected}
+      onAttachSession={attachSession}
+      onPeekSession={peekSession}
+      onTogglePinSession={togglePinSession}
+      onRenameSession={renameSession}
+      onStopOrRemoveSession={stopOrRemoveSession}
       onToggleGroupMode={toggleGroupMode}
       onShowHelp={showHelp}
       onInterrupt={interrupt}
@@ -669,10 +694,7 @@ function getReplyTarget(row: AgentRosterRow): ReplyTarget | undefined {
   if (!row.actions.canReply && !row.actions.needsBlockingAnswer) {
     return undefined;
   }
-  if (
-    (row.queuedPromptCount ?? 0) > 0 &&
-    !(row.waitingFor && row.waitingFor !== 'response')
-  ) {
+  if ((row.queuedPromptCount ?? 0) > 0 && !isAgentRosterBlockingWait(row)) {
     return undefined;
   }
   return {
@@ -684,14 +706,11 @@ function getReplyTarget(row: AgentRosterRow): ReplyTarget | undefined {
 function getPeekQueuedPrompts(
   preview: PeekSubmittedPreview | undefined,
   rows: AgentRosterRow[],
-  panel: AgentViewPeekPanel | undefined,
+  panel: AgentViewPanel | undefined,
 ): string[] | undefined {
-  const row = rows.find((item) => item.sessionId === panel?.title);
-  if (
-    preview &&
-    preview.sessionId === panel?.title &&
-    (!row || isPending(row))
-  ) {
+  const sessionId = panel?.kind === 'session' ? panel.sessionId : undefined;
+  const row = rows.find((item) => item.sessionId === sessionId);
+  if (preview && preview.sessionId === sessionId && (!row || isPending(row))) {
     return [preview.prompt];
   }
   if (!row || (row.queuedPromptCount ?? 0) <= 0) {
@@ -757,7 +776,7 @@ export async function runAgentViewRosterApp(
   rows: AgentRosterRow[],
   actions: AgentViewAppActions,
   header?: AgentViewHeaderInfo,
-  initialPeekPanel?: AgentViewPeekPanel,
+  initialPeekPanel?: AgentViewPanel,
 ): Promise<AgentViewRosterResult> {
   clearScreen();
 

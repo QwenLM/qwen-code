@@ -143,9 +143,9 @@ export async function showResumeSessionPickerItem(
   const sessionService = new SessionService(cwd);
   const hasSession = await hasResumeSession(sessionService, initialSessions);
   const includeAgentViewSessions = options.includeAgentViewSessions ?? true;
-  const managedSessions = includeAgentViewSessions
-    ? await listManagedAgentViewResumeSessions().catch(() => [])
-    : [];
+  const managedSessions = await listManagedAgentViewResumeSessions().catch(
+    () => [],
+  );
   const displayManagedSessions = includeAgentViewSessions
     ? managedSessions
     : [];

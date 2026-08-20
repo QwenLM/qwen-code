@@ -74,6 +74,13 @@ export interface AgentRosterRow {
   lastHeartbeatAt?: string;
 }
 
+export function isAgentRosterBlockingWait(row: AgentRosterRow): boolean {
+  return (
+    row.actions.needsBlockingAnswer ||
+    Boolean(row.waitingFor && row.waitingFor !== 'response')
+  );
+}
+
 export function buildAgentRosterRows(
   options: BuildAgentRosterRowsOptions,
 ): AgentRosterRow[] {

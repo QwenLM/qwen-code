@@ -10,6 +10,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   AgentViewRoster,
   type AgentViewRosterProps,
+  type AgentViewSessionPanel,
 } from './AgentViewRoster.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { CommandKind, type SlashCommand } from '../commands/types.js';
@@ -164,26 +165,28 @@ describe('AgentViewRoster', () => {
   });
 
   it('attaches the selected session on empty Enter or right arrow', () => {
-    const onAttachSelected = vi.fn();
+    const onAttachSession = vi.fn();
 
     renderRoster({
       prompt: '',
-      onAttachSelected,
+      onAttachSession,
     });
 
     press('', { return: true });
     press('', { rightArrow: true });
 
-    expect(onAttachSelected).toHaveBeenCalledTimes(2);
+    expect(onAttachSession).toHaveBeenCalledTimes(2);
+    expect(onAttachSession).toHaveBeenNthCalledWith(1, 'alpha');
+    expect(onAttachSession).toHaveBeenNthCalledWith(2, 'alpha');
   });
 
   it('moves the cursor right instead of attaching while a prompt is typed', () => {
-    const onAttachSelected = vi.fn();
+    const onAttachSession = vi.fn();
     const onPromptChange = vi.fn();
 
     renderRoster({
       prompt: 'ab',
-      onAttachSelected,
+      onAttachSession,
       onPromptChange,
     });
 
@@ -191,7 +194,7 @@ describe('AgentViewRoster', () => {
     press('', { rightArrow: true });
     press('c', {});
 
-    expect(onAttachSelected).not.toHaveBeenCalled();
+    expect(onAttachSession).not.toHaveBeenCalled();
     expect(onPromptChange).toHaveBeenLastCalledWith('abc');
   });
 
@@ -226,6 +229,18 @@ describe('AgentViewRoster', () => {
     );
   });
 
+  it('keeps a trailing line feed in the prompt without dispatching', () => {
+    const onDispatch = vi.fn(() => true);
+    const onPromptChange = vi.fn();
+
+    renderRoster({ onDispatch, onPromptChange });
+
+    press('abc\n', {});
+
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(onPromptChange).toHaveBeenLastCalledWith('abc\n');
+  });
+
   it('drops real focus sequences but keeps focus-like user text', () => {
     const onPromptChange = vi.fn();
 
@@ -257,37 +272,37 @@ describe('AgentViewRoster', () => {
   });
 
   it('peeks the selected session on Space when prompt is empty', () => {
-    const onPeekSelected = vi.fn();
+    const onPeekSession = vi.fn();
 
     renderRoster({
       prompt: '',
-      onPeekSelected,
+      onPeekSession,
     });
 
     press(' ', {});
 
-    expect(onPeekSelected).toHaveBeenCalledOnce();
+    expect(onPeekSession).toHaveBeenCalledWith('alpha');
   });
 
   it('toggles pin, renames, and stops the selected session from shortcuts', () => {
-    const onTogglePinSelected = vi.fn();
-    const onRenameSelected = vi.fn();
-    const onStopOrRemoveSelected = vi.fn();
+    const onTogglePinSession = vi.fn();
+    const onRenameSession = vi.fn();
+    const onStopOrRemoveSession = vi.fn();
 
     renderRoster({
       prompt: 'Build Fix',
-      onTogglePinSelected,
-      onRenameSelected,
-      onStopOrRemoveSelected,
+      onTogglePinSession,
+      onRenameSession,
+      onStopOrRemoveSession,
     });
 
     press('t', { ctrl: true });
     press('r', { ctrl: true });
     press('x', { ctrl: true });
 
-    expect(onTogglePinSelected).toHaveBeenCalledOnce();
-    expect(onRenameSelected).toHaveBeenCalledWith('Build Fix');
-    expect(onStopOrRemoveSelected).toHaveBeenCalledOnce();
+    expect(onTogglePinSession).toHaveBeenCalledWith('alpha');
+    expect(onRenameSession).toHaveBeenCalledWith('alpha', 'Build Fix');
+    expect(onStopOrRemoveSession).toHaveBeenCalledWith('alpha');
   });
 
   it('toggles grouping, shows help, and reports Ctrl+C', () => {
@@ -370,12 +385,8 @@ describe('AgentViewRoster', () => {
 
     renderRoster({
       prompt: 'new task',
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onPromptChange,
       onPeekPromptChange,
       onSubmitPeekPrompt,
@@ -396,9 +407,8 @@ describe('AgentViewRoster', () => {
     const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
-      peekPanel: { title: 'alpha', lines: ['Result: ready'] },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onPeekPromptChange,
       onSubmitPeekPrompt,
     });
@@ -416,12 +426,8 @@ describe('AgentViewRoster', () => {
 
     renderRoster({
       peekPrompt: 'continue',
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onSubmitPeekPrompt,
     });
 
@@ -434,12 +440,8 @@ describe('AgentViewRoster', () => {
     const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onSubmitPeekPrompt,
     });
 
@@ -453,12 +455,8 @@ describe('AgentViewRoster', () => {
     const onSubmitPeekPrompt = vi.fn(() => true);
 
     renderRoster({
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onPeekPromptChange,
       onSubmitPeekPrompt,
     });
@@ -474,12 +472,8 @@ describe('AgentViewRoster', () => {
 
     renderRoster({
       peekPrompt: 'looks good 👍',
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onPeekPromptChange,
     });
 
@@ -492,12 +486,8 @@ describe('AgentViewRoster', () => {
     const onCancel = vi.fn();
 
     renderRoster({
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onCancel,
     });
 
@@ -511,9 +501,8 @@ describe('AgentViewRoster', () => {
     const onPeekPromptChange = vi.fn();
 
     renderRoster({
-      peekPanel: { title: 'alpha', lines: ['Result: ready'] },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onCancel,
       onPeekPromptChange,
     });
@@ -528,12 +517,10 @@ describe('AgentViewRoster', () => {
   it('renders peek panel details', () => {
     const { lastFrame } = renderRoster({
       rows: [row('alpha', { summary: 'ready' })],
-      peekPanel: {
-        title: 'alpha',
+      peekPanel: sessionPanel({
         lines: ['State: idle / alive', 'Summary: ready'],
-      },
+      }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
     });
 
     const output = lastFrame() ?? '';
@@ -547,13 +534,12 @@ describe('AgentViewRoster', () => {
   it('shows error panel lines over stale row output', () => {
     const { lastFrame } = renderRoster({
       rows: [row('alpha', { summary: 'stale result' })],
-      peekPanel: {
-        title: 'alpha',
+      peekPanel: sessionPanel({
+        content: 'message',
+        tone: 'error',
         lines: ['worker is not responding'],
-        error: true,
-      },
+      }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
     });
 
     const output = lastFrame() ?? '';
@@ -564,42 +550,61 @@ describe('AgentViewRoster', () => {
   it('shows informational panel lines over empty row activity', () => {
     const { lastFrame } = renderRoster({
       rows: [row('alpha', { summary: undefined, lastResult: undefined })],
-      peekPanel: {
-        title: 'alpha',
+      peekPanel: sessionPanel({
+        content: 'message',
         lines: ['Session added to Agent View.'],
-        preferLines: true,
-      },
+      }),
     });
 
     expect(lastFrame()).toContain('Session added to Agent View.');
   });
 
   it('does not attach another row from a stale error panel', () => {
-    const onAttachSelected = vi.fn();
+    const onAttachSession = vi.fn();
+    const onTogglePinSession = vi.fn();
+    const onRenameSession = vi.fn();
+    const onStopOrRemoveSession = vi.fn();
     renderRoster({
       rows: [row('beta')],
-      peekPanel: {
-        title: 'alpha',
+      peekPanel: sessionPanel({
+        content: 'message',
+        tone: 'error',
         lines: ['worker is gone'],
-        error: true,
-      },
+      }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
-      onAttachSelected,
+      onAttachSession,
+      onTogglePinSession,
+      onRenameSession,
+      onStopOrRemoveSession,
     });
 
     press('', { return: true });
+    press('', { rightArrow: true });
+    press('t', { ctrl: true });
+    press('r', { ctrl: true });
+    press('x', { ctrl: true });
 
-    expect(onAttachSelected).not.toHaveBeenCalled();
+    expect(onAttachSession).not.toHaveBeenCalled();
+    expect(onTogglePinSession).not.toHaveBeenCalled();
+    expect(onRenameSession).not.toHaveBeenCalled();
+    expect(onStopOrRemoveSession).not.toHaveBeenCalled();
   });
 
   it('keeps blocking answers visible while follow-up prompts are queued', () => {
     const { lastFrame } = renderRoster({
-      rows: [row('alpha', { waitingFor: 'Edit', queuedPromptCount: 1 })],
-      peekPanel: { title: 'alpha', lines: [] },
+      rows: [
+        row('alpha', {
+          waitingFor: undefined,
+          queuedPromptCount: 1,
+          actions: {
+            ...row('alpha').actions,
+            needsBlockingAnswer: true,
+          },
+        }),
+      ],
+      peekPanel: sessionPanel(),
       peekPrompt: 'yes',
       peekInputMode: 'answer',
-      peekInputTarget: 'alpha',
       peekQueuedPrompts: ['continue'],
     });
 
@@ -615,8 +620,7 @@ describe('AgentViewRoster', () => {
           waitingFor: '\u001b]0;spoof\u0007Edit\nfile',
         }),
       ],
-      peekPanel: { title: 'alpha', lines: [] },
-      peekInputTarget: 'alpha',
+      peekPanel: sessionPanel(),
     });
 
     const output = lastFrame() ?? '';
@@ -645,12 +649,10 @@ describe('AgentViewRoster', () => {
           summary: 'session summary',
         }),
       ],
-      peekPanel: {
-        title: 'alpha',
+      peekPanel: sessionPanel({
         lines: ['Result: old model line', 'Summary: session summary'],
-      },
+      }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
     });
 
     const output = lastFrame() ?? '';
@@ -666,12 +668,8 @@ describe('AgentViewRoster', () => {
         row('alpha', { summary: 'peeked row' }),
       ],
       selectedIndex: 0,
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
     });
 
     const output = lastFrame() ?? '';
@@ -696,42 +694,38 @@ describe('AgentViewRoster', () => {
   });
 
   it('locks Ctrl+X and Enter to the peeked session while a peek is open', () => {
-    const onStopOrRemoveSelected = vi.fn();
-    const onAttachSelected = vi.fn();
+    const onStopOrRemoveSession = vi.fn();
+    const onAttachSession = vi.fn();
 
     renderRoster({
       rows: [row('beta'), row('alpha')],
       selectedIndex: 0,
-      peekPanel: {
-        title: 'alpha',
-        lines: ['Result: ready'],
-      },
-      onStopOrRemoveSelected,
-      onAttachSelected,
+      peekPanel: sessionPanel({ lines: ['Result: ready'] }),
+      onStopOrRemoveSession,
+      onAttachSession,
     });
 
     press('x', { ctrl: true });
-    expect(onStopOrRemoveSelected).toHaveBeenCalledWith('alpha');
+    expect(onStopOrRemoveSession).toHaveBeenCalledWith('alpha');
 
     press('', { return: true });
-    expect(onAttachSelected).toHaveBeenCalledWith('alpha');
+    expect(onAttachSession).toHaveBeenCalledWith('alpha');
   });
 
   it('locks roster selection and rename shortcuts while a peek is open', () => {
     const onMoveSelection = vi.fn();
-    const onRenameSelected = vi.fn();
-    const onTogglePinSelected = vi.fn();
+    const onRenameSession = vi.fn();
+    const onTogglePinSession = vi.fn();
 
     renderRoster({
       rows: [row('beta'), row('alpha')],
       selectedIndex: 0,
       prompt: 'hidden name',
-      peekPanel: { title: 'alpha', lines: [] },
+      peekPanel: sessionPanel(),
       peekInputMode: 'send',
-      peekInputTarget: 'alpha',
       onMoveSelection,
-      onRenameSelected,
-      onTogglePinSelected,
+      onRenameSession,
+      onTogglePinSession,
     });
 
     press('', { upArrow: true });
@@ -739,8 +733,8 @@ describe('AgentViewRoster', () => {
     press('t', { ctrl: true });
 
     expect(onMoveSelection).not.toHaveBeenCalled();
-    expect(onRenameSelected).not.toHaveBeenCalled();
-    expect(onTogglePinSelected).not.toHaveBeenCalled();
+    expect(onRenameSession).not.toHaveBeenCalled();
+    expect(onTogglePinSession).not.toHaveBeenCalled();
   });
 });
 
@@ -756,11 +750,11 @@ function renderRoster(overrides: Partial<AgentViewRosterProps> = {}) {
         onPeekPromptChange={vi.fn()}
         onDispatch={vi.fn(() => true)}
         onSubmitPeekPrompt={vi.fn(() => true)}
-        onAttachSelected={vi.fn()}
-        onPeekSelected={vi.fn()}
-        onTogglePinSelected={vi.fn()}
-        onRenameSelected={vi.fn()}
-        onStopOrRemoveSelected={vi.fn()}
+        onAttachSession={vi.fn()}
+        onPeekSession={vi.fn()}
+        onTogglePinSession={vi.fn()}
+        onRenameSession={vi.fn()}
+        onStopOrRemoveSession={vi.fn()}
         onToggleGroupMode={vi.fn()}
         onShowHelp={vi.fn()}
         onInterrupt={vi.fn()}
@@ -770,6 +764,18 @@ function renderRoster(overrides: Partial<AgentViewRosterProps> = {}) {
       />
     </KeypressProvider>,
   );
+}
+
+function sessionPanel(
+  overrides: Partial<AgentViewSessionPanel> = {},
+): AgentViewSessionPanel {
+  return {
+    kind: 'session',
+    sessionId: 'alpha',
+    content: 'activity',
+    lines: [],
+    ...overrides,
+  };
 }
 
 function press(input: string, key: TestKey) {

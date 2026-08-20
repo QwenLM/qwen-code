@@ -278,6 +278,41 @@ describe('useSessionPicker multi-select state', () => {
 });
 
 describe('useSessionPicker filtering', () => {
+  it('keeps selection on the same session after an async re-sort', () => {
+    const onSelect = vi.fn();
+    const { rerender } = renderHook(
+      ({ extraSessions }) =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect,
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: sessions,
+          extraSessions,
+        }),
+      {
+        wrapper,
+        initialProps: { extraSessions: [] as typeof sessions },
+      },
+    );
+
+    pressKey({ name: 'down', sequence: '\x1b[B' });
+    rerender({
+      extraSessions: [
+        {
+          ...sessions[0],
+          sessionId: 'newer',
+          prompt: 'newer',
+          filePath: '/tmp/newer.json',
+          mtime: 10,
+        },
+      ],
+    });
+    pressKey({ name: 'return', sequence: '\r' });
+
+    expect(onSelect).toHaveBeenCalledWith('s2', sessions[1]);
+  });
+
   it('excludes sessions by id before search and selection', () => {
     const { result } = renderHook(
       () =>

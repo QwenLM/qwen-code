@@ -25,7 +25,8 @@ import { runAgentViewRosterApp } from '../ui/agent-view/AgentViewApp.js';
 import type { AgentViewRosterResult } from '../ui/agent-view/AgentViewApp.js';
 import type {
   AgentViewHeaderInfo,
-  AgentViewPeekPanel,
+  AgentViewPanel,
+  AgentViewSessionPanel,
 } from '../ui/agent-view/AgentViewRoster.js';
 import { showResumeSessionPickerItem } from '../ui/components/StandaloneSessionPicker.js';
 import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
@@ -71,7 +72,7 @@ type AgentsInteractiveSupervisor = Pick<
 
 export interface AgentsInteractiveActions {
   dispatchPrompt(prompt: string, attach: boolean): Promise<unknown>;
-  peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
+  peekSelected(sessionId: string): Promise<AgentViewSessionPanel>;
   sendToSession(sessionId: string, text: string): Promise<unknown>;
   answerSession(sessionId: string, text: string): Promise<unknown>;
   pinSession(sessionId: string): Promise<unknown>;
@@ -89,7 +90,7 @@ export interface RunAgentsInteractiveSessionOptions {
   renderRoster(
     rows: AgentRosterRow[],
     actions: AgentsInteractiveActions,
-    initialPeekPanel?: AgentViewPeekPanel,
+    initialPeekPanel?: AgentViewPanel,
     header?: AgentViewHeaderInfo,
   ): Promise<AgentViewRosterResult | void> | AgentViewRosterResult | void;
   header?: AgentViewHeaderInfo;
@@ -118,8 +119,13 @@ export async function runAgentsInteractiveSession({
   // Cache only discovered transcript titles; a new session may be titled
   // after its first roster poll.
   const titleCache = new Map<string, string>();
+  const transcriptStorageCache = new Map<string, Storage>();
   const loadRows = async () =>
-    toRosterRows(toSnapshots(await supervisor.list(listCwd)), titleCache);
+    toRosterRows(
+      toSnapshots(await supervisor.list(listCwd)),
+      titleCache,
+      transcriptStorageCache,
+    );
   const actions: AgentsInteractiveActions = {
     dispatchPrompt: async (prompt, _attach) => {
       const trimmedPrompt = prompt.trim();
@@ -146,7 +152,7 @@ export async function runAgentsInteractiveSession({
       }),
   };
 
-  let initialPeekPanel: AgentViewPeekPanel | undefined;
+  let initialPeekPanel: AgentViewPanel | undefined;
   const foregroundSubscription = supervisor.subscribe(() => {});
   try {
     while (true) {
@@ -155,9 +161,10 @@ export async function runAgentsInteractiveSession({
         rows = await loadRows();
       } catch (error) {
         initialPeekPanel = {
+          kind: 'message',
           title: 'Agent View',
           lines: [error instanceof Error ? error.message : String(error)],
-          error: true,
+          tone: 'error',
         };
       }
       const result = await renderRoster(
@@ -180,9 +187,10 @@ export async function runAgentsInteractiveSession({
           );
         } catch (error) {
           initialPeekPanel = {
+            kind: 'message',
             title: 'Resume',
             lines: [error instanceof Error ? error.message : String(error)],
-            error: true,
+            tone: 'error',
           };
         }
         resetTerminalForRoster();
@@ -194,9 +202,11 @@ export async function runAgentsInteractiveSession({
           await supervisor.attach(result.sessionId);
         } catch (error) {
           initialPeekPanel = {
-            title: result.sessionId,
+            kind: 'session',
+            sessionId: result.sessionId,
+            content: 'message',
             lines: [error instanceof Error ? error.message : String(error)],
-            error: true,
+            tone: 'error',
           };
         } finally {
           resetTerminalForRoster();
@@ -211,7 +221,7 @@ export async function runAgentsInteractiveSession({
 async function adoptResumeSessionFromPicker(
   cwd: string,
   supervisor: Pick<AgentViewSupervisorClientHandle, 'adopt' | 'peek'>,
-): Promise<AgentViewPeekPanel | undefined> {
+): Promise<AgentViewPanel | undefined> {
   const session = await showResumeSessionPickerItem(cwd, undefined, {
     includeAgentViewSessions: false,
     allowManagedAgentViewSelection: true,
@@ -225,16 +235,17 @@ async function adoptResumeSessionFromPicker(
   try {
     await supervisor.peek(sessionId);
     return {
-      title: sessionId,
+      kind: 'session',
+      sessionId,
+      content: 'message',
       lines: ['Session is already managed by Agent View.'],
-      preferLines: true,
     };
-  } catch {
-    // Not currently managed; adopt it below.
+  } catch (error) {
+    if (!isNotManagedPeekError(error)) throw error;
   }
 
   try {
-    await supervisor.adopt({
+    const result = await supervisor.adopt({
       sessionId,
       projectCwd: sessionCwd,
       activeCwd: sessionCwd,
@@ -243,18 +254,44 @@ async function adoptResumeSessionFromPicker(
         rows: process.stdout.rows ?? 24,
       },
     });
+    if (isAlreadyManagedAdoptResult(result)) {
+      return {
+        kind: 'session',
+        sessionId,
+        content: 'message',
+        lines: ['Session is already managed by Agent View.'],
+      };
+    }
     return {
-      title: sessionId,
+      kind: 'session',
+      sessionId,
+      content: 'message',
       lines: ['Session added to Agent View.'],
-      preferLines: true,
     };
   } catch (error) {
     return {
-      title: sessionId,
+      kind: 'session',
+      sessionId,
+      content: 'message',
       lines: [error instanceof Error ? error.message : String(error)],
-      error: true,
+      tone: 'error',
     };
   }
+}
+
+function isNotManagedPeekError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /^No Agent View session found for .+\.$/.test(message) ||
+    /^Agent View session .+ is not managed\.$/.test(message)
+  );
+}
+
+function isAlreadyManagedAdoptResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value['alreadyManaged'] === true || value['adopted'] === false)
+  );
 }
 
 function resetTerminalForRoster(): void {
@@ -276,11 +313,19 @@ export const agentsInteractiveSession = {
 async function defaultRenderAgentsRoster(
   rows: AgentRosterRow[],
   actions: AgentsInteractiveActions,
-  initialPeekPanel?: AgentViewPeekPanel,
+  initialPeekPanel?: AgentViewPanel,
   header?: AgentViewHeaderInfo,
 ): Promise<AgentViewRosterResult | void> {
   if (process.stdin.isTTY && process.stdout.isTTY) {
     return runAgentViewRosterApp(rows, actions, header, initialPeekPanel);
+  }
+  if (
+    initialPeekPanel?.kind === 'message' &&
+    initialPeekPanel.tone === 'error'
+  ) {
+    writeStderrLine(initialPeekPanel.lines.join(' '));
+    process.exitCode = 1;
+    return;
   }
   writeStdoutLine(formatRosterRowsText(rows));
 }
@@ -288,6 +333,7 @@ async function defaultRenderAgentsRoster(
 function toRosterRows(
   snapshots: AgentViewSessionSnapshot[],
   titleCache: Map<string, string>,
+  transcriptStorageCache: Map<string, Storage>,
 ): AgentRosterRow[] {
   if (snapshots.length === 0) {
     return [];
@@ -304,7 +350,9 @@ function toRosterRows(
       snapshots.map((snapshot) => [snapshot.sessionId, snapshot.worker]),
     ),
     rosterEntries: snapshots
-      .map((snapshot) => getRosterEntryWithTitle(snapshot, titleCache))
+      .map((snapshot) =>
+        getRosterEntryWithTitle(snapshot, titleCache, transcriptStorageCache),
+      )
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
   });
 }
@@ -312,13 +360,14 @@ function toRosterRows(
 function getRosterEntryWithTitle(
   snapshot: AgentViewSessionSnapshot,
   titleCache: Map<string, string>,
+  transcriptStorageCache: Map<string, Storage>,
 ): AgentViewRosterEntry | undefined {
   if (snapshot.rosterEntry?.displayName) {
     return snapshot.rosterEntry;
   }
   let title = titleCache.get(snapshot.sessionId);
   if (title === undefined) {
-    title = readTranscriptTitle(snapshot);
+    title = readTranscriptTitle(snapshot, transcriptStorageCache);
     if (title) {
       titleCache.set(snapshot.sessionId, title);
     }
@@ -339,6 +388,7 @@ function getRosterEntryWithTitle(
 
 function readTranscriptTitle(
   snapshot: AgentViewSessionSnapshot,
+  storageCache: Map<string, Storage>,
 ): string | undefined {
   const cwdCandidates = Array.from(
     new Set([snapshot.state.activeCwd, snapshot.state.projectCwd]),
@@ -346,7 +396,7 @@ function readTranscriptTitle(
   for (const cwd of cwdCandidates) {
     try {
       const filePath = path.join(
-        new Storage(cwd).getProjectDir(),
+        getTranscriptStorage(cwd, storageCache).getProjectDir(),
         'chats',
         `${snapshot.sessionId}.jsonl`,
       );
@@ -363,6 +413,25 @@ function readTranscriptTitle(
     }
   }
   return undefined;
+}
+
+function getTranscriptStorage(
+  cwd: string,
+  cache: Map<string, Storage>,
+): Storage {
+  const resolvedCwd = path.resolve(cwd);
+  const cached = cache.get(resolvedCwd);
+  if (cached) return cached;
+  const runtimeOutputDir = loadSettings(resolvedCwd, {
+    skipLoadEnvironment: true,
+  }).merged.advanced?.runtimeOutputDir;
+  const storage = Storage.runWithRuntimeBaseDir(
+    runtimeOutputDir,
+    resolvedCwd,
+    () => new Storage(resolvedCwd),
+  );
+  cache.set(resolvedCwd, storage);
+  return storage;
 }
 
 function formatRosterRowsText(rows: AgentRosterRow[]): string {
@@ -676,9 +745,14 @@ function formatSessionShortId(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
 
-function formatPeekPanel(value: unknown): AgentViewPeekPanel {
+function formatPeekPanel(value: unknown): AgentViewSessionPanel {
   if (!isRecord(value)) {
-    return { title: 'Agent', lines: ['No details available.'] };
+    return {
+      kind: 'session',
+      sessionId: 'Agent',
+      content: 'message',
+      lines: ['No details available.'],
+    };
   }
 
   const sessionId =
@@ -702,7 +776,9 @@ function formatPeekPanel(value: unknown): AgentViewPeekPanel {
   ].filter((line): line is string => Boolean(line));
 
   return {
-    title: sessionId,
+    kind: 'session',
+    sessionId,
+    content: 'activity',
     lines: lines.length > 0 ? lines : ['No details available.'],
   };
 }

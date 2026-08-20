@@ -384,7 +384,7 @@ describe('answerAgentViewPendingToolCall', () => {
 });
 
 describe('applyAgentViewWorkerControlEventForUi', () => {
-  it('queues normal text answers as prompts when no approval is pending', async () => {
+  it('drops stale answers when no approval is pending', async () => {
     const enqueuePrompt = vi.fn();
 
     await applyAgentViewWorkerControlEventForUi(
@@ -398,7 +398,7 @@ describe('applyAgentViewWorkerControlEventForUi', () => {
       enqueuePrompt,
     );
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('run the focused test');
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('does not queue approval answers as prompts', async () => {

@@ -9,6 +9,7 @@ import type { ComponentProps, ReactElement } from 'react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentViewApp } from './AgentViewApp.js';
+import type { AgentViewSessionPanel } from './AgentViewRoster.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { AgentRosterRow } from './roster-model.js';
 
@@ -188,9 +189,10 @@ describe('AgentViewApp', () => {
         rows={[]}
         actions={actions()}
         initialPeekPanel={{
+          kind: 'message',
           title: 'missing-session',
           lines: ['adopt failed'],
-          error: true,
+          tone: 'error',
         }}
         onExit={vi.fn()}
       />,
@@ -234,10 +236,9 @@ describe('AgentViewApp', () => {
   });
 
   it('shows peek details for the selected row on Space', async () => {
-    const peekSelected = vi.fn(async () => ({
-      title: 'session-1',
-      lines: ['State: idle / alive', 'Summary: done'],
-    }));
+    const peekSelected = vi.fn(async () =>
+      sessionPanel('session-1', ['State: idle / alive', 'Summary: done']),
+    );
     const { stdin } = render(
       <AgentViewApp
         rows={[row('session-1')]}
@@ -286,10 +287,8 @@ describe('AgentViewApp', () => {
         ]}
         actions={actions({
           answerSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Waiting: approval'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Waiting: approval']),
         })}
         onExit={onExit}
       />,
@@ -321,10 +320,8 @@ describe('AgentViewApp', () => {
         rows={[row('session-1')]}
         actions={actions({
           sendToSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Result: ready'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: ready']),
         })}
         onExit={vi.fn()}
       />,
@@ -357,7 +354,7 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('Reply was not sent: worker is gone');
   });
 
-  it('does not target another session from a stale error peek', async () => {
+  it('dispatches typed text without targeting another session from a stale error peek', async () => {
     let notify: (() => void) | undefined;
     const sendToSession = vi.fn(async () => {
       throw new Error('worker is gone');
@@ -371,10 +368,8 @@ describe('AgentViewApp', () => {
           dispatchPrompt,
           sendToSession,
           loadRows: vi.fn(async () => [row('session-2')]),
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Result: ready'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: ready']),
           subscribeToChanges: (onChange) => {
             notify = onChange;
             return { dispose: vi.fn() };
@@ -408,7 +403,7 @@ describe('AgentViewApp', () => {
     await flushInk();
 
     expect(sendToSession).toHaveBeenCalledOnce();
-    expect(dispatchPrompt).not.toHaveBeenCalled();
+    expect(dispatchPrompt).toHaveBeenCalledWith('retry', false);
     expect(onAttachRequested).not.toHaveBeenCalled();
   });
 
@@ -435,10 +430,8 @@ describe('AgentViewApp', () => {
         actions={actions({
           sendToSession,
           answerSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Result: What next?'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: What next?']),
         })}
         onExit={vi.fn()}
       />,
@@ -478,10 +471,7 @@ describe('AgentViewApp', () => {
         actions={actions({
           sendToSession,
           loadRows,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Result: done'],
-          }),
+          peekSelected: async () => sessionPanel('session-1', ['Result: done']),
         })}
         onExit={vi.fn()}
       />,
@@ -520,10 +510,8 @@ describe('AgentViewApp', () => {
         ]}
         actions={actions({
           answerSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Waiting: Edit'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Waiting: Edit']),
         })}
         onExit={vi.fn()}
         onAttachRequested={onAttachRequested}
@@ -574,17 +562,14 @@ describe('AgentViewApp', () => {
         ]}
         actions={actions({
           sendToSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['Result: done'],
-          }),
+          peekSelected: async () => sessionPanel('session-1', ['Result: done']),
         })}
         onExit={vi.fn()}
       />,
     );
 
     stdin.write(' ');
-    await flushInk();
+    await waitForFrame(lastFrame, 'Waiting for response: continue');
 
     expect(lastFrame()).toContain('Waiting for response: continue');
     expect(lastFrame()).not.toContain('> reply');
@@ -602,10 +587,8 @@ describe('AgentViewApp', () => {
     const sendToSession = vi.fn();
     const actionsForTest = actions({
       sendToSession,
-      peekSelected: async () => ({
-        title: 'session-1',
-        lines: ['Result: old output'],
-      }),
+      peekSelected: async () =>
+        sessionPanel('session-1', ['Result: old output']),
     });
     const { stdin, lastFrame, rerender } = render(
       <AgentViewApp
@@ -625,7 +608,7 @@ describe('AgentViewApp', () => {
     );
 
     stdin.write(' ');
-    await flushInk();
+    await waitForFrame(lastFrame, 'Waiting for response: continue');
     expect(lastFrame()).toContain('Waiting for response: continue');
 
     rerender(
@@ -672,10 +655,8 @@ describe('AgentViewApp', () => {
         actions={actions({
           dispatchPrompt,
           sendToSession,
-          peekSelected: async () => ({
-            title: 'session-1',
-            lines: ['State: working / alive'],
-          }),
+          peekSelected: async () =>
+            sessionPanel('session-1', ['State: working / alive']),
         })}
         onExit={vi.fn()}
         onAttachRequested={onAttachRequested}
@@ -819,7 +800,7 @@ describe('AgentViewApp', () => {
         : Promise.resolve({ stopped: true }),
     );
     const removeSession = vi.fn(async () => ({ removed: true }));
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <AgentViewApp
         rows={rows}
         actions={actions({
@@ -838,8 +819,11 @@ describe('AgentViewApp', () => {
     stdin.write('\x18');
     await flushInk();
 
-    rejectFirstStop(new Error('session-a stop failed'));
-    await flushInk();
+    await act(async () => {
+      rejectFirstStop(new Error('session-a stop failed'));
+      await flushInk();
+    });
+    expect(lastFrame()).toContain('session-a stop failed');
     stdin.write('\x18');
     await flushInk();
 
@@ -960,6 +944,8 @@ describe('AgentViewApp', () => {
 
     expect(dispatchPrompt).not.toHaveBeenCalled();
     expect(lastFrame()).toContain('Showing 1 matching session(s).');
+    expect(lastFrame()).toContain('idle-session');
+    expect(lastFrame()).not.toContain('working-session');
   });
 
   it('keeps rows visible while typing a new-session prompt', async () => {
@@ -1234,6 +1220,18 @@ function actions(
     removeSession: vi.fn(),
     loadRows: vi.fn(async () => [row('session-1')]),
     ...overrides,
+  };
+}
+
+function sessionPanel(
+  sessionId: string,
+  lines: string[],
+): AgentViewSessionPanel {
+  return {
+    kind: 'session',
+    sessionId,
+    content: 'activity',
+    lines,
   };
 }
 

@@ -25,7 +25,11 @@ import {
 } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
-import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
+import {
+  isAgentRosterBlockingWait,
+  type AgentRosterGroupMode,
+  type AgentRosterRow,
+} from './roster-model.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 import {
   cleanSingleLineText,
@@ -49,10 +53,9 @@ export interface AgentViewRosterProps {
   groupMode: AgentRosterGroupMode;
   header?: AgentViewHeaderInfo;
   notice?: AgentViewNotice;
-  peekPanel?: AgentViewPeekPanel;
+  peekPanel?: AgentViewPanel;
   peekPrompt?: string;
   peekInputMode?: 'answer' | 'send';
-  peekInputTarget?: string;
   peekQueuedPrompts?: string[];
   slashCommands?: readonly SlashCommand[];
   onPromptChange: (prompt: string) => void;
@@ -60,11 +63,11 @@ export interface AgentViewRosterProps {
   onPeekPromptChange: (prompt: string) => void;
   onDispatch: (attach: boolean, prompt: string) => boolean;
   onSubmitPeekPrompt: (promptOverride?: string) => boolean;
-  onAttachSelected: (sessionId?: string) => void;
-  onPeekSelected: () => void;
-  onTogglePinSelected: () => void;
-  onRenameSelected: (displayName: string) => void;
-  onStopOrRemoveSelected: (sessionId?: string) => void;
+  onAttachSession: (sessionId: string) => void;
+  onPeekSession: (sessionId: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, displayName: string) => void;
+  onStopOrRemoveSession: (sessionId: string) => void;
   onToggleGroupMode: () => void;
   onShowHelp: () => void;
   onInterrupt: () => void;
@@ -72,13 +75,26 @@ export interface AgentViewRosterProps {
   onCancel: () => void;
 }
 
-export interface AgentViewPeekPanel {
-  title: string;
+export type AgentViewPanel =
+  | AgentViewSessionPanel
+  | {
+      kind: 'filter';
+      query: string;
+      lines: string[];
+    }
+  | {
+      kind: 'message';
+      title: string;
+      tone: 'info' | 'error';
+      lines: string[];
+    };
+
+export interface AgentViewSessionPanel {
+  kind: 'session';
+  sessionId: string;
+  content: 'activity' | 'message';
+  tone?: 'error';
   lines: string[];
-  // Error-shaped panels (peek load / reply failures) render their lines
-  // verbatim instead of the row's structured activity fields.
-  error?: boolean;
-  preferLines?: boolean;
 }
 
 export interface AgentViewNotice {
@@ -129,7 +145,6 @@ export function AgentViewRoster({
   peekPanel,
   peekPrompt = '',
   peekInputMode,
-  peekInputTarget,
   peekQueuedPrompts,
   slashCommands = AGENT_VIEW_SLASH_COMMANDS,
   onPromptChange,
@@ -137,11 +152,11 @@ export function AgentViewRoster({
   onPeekPromptChange,
   onDispatch,
   onSubmitPeekPrompt,
-  onAttachSelected,
-  onPeekSelected,
-  onTogglePinSelected,
-  onRenameSelected,
-  onStopOrRemoveSelected,
+  onAttachSession,
+  onPeekSession,
+  onTogglePinSession,
+  onRenameSession,
+  onStopOrRemoveSession,
   onToggleGroupMode,
   onShowHelp,
   onInterrupt,
@@ -158,20 +173,20 @@ export function AgentViewRoster({
   const currentPrompt = promptInput.buffer.text;
   const hasPrompt = currentPrompt.trim().length > 0;
   const peekPromptPending = Boolean(peekQueuedPrompts?.length);
-  const peekRow =
-    rows.find((row) => row.sessionId === peekInputTarget) ??
-    rows.find((row) => row.sessionId === peekPanel?.title);
+  const selectedRow = rows[selectedIndex];
+  const panelSessionId =
+    peekPanel?.kind === 'session' ? peekPanel.sessionId : undefined;
+  const peekRow = rows.find((row) => row.sessionId === panelSessionId);
   // A blocking approval (e.g. 'Waiting: Edit') must stay answerable even
   // while follow-up prompts are queued.
   const peekBlockingWait = Boolean(
-    peekRow?.waitingFor && peekRow.waitingFor !== 'response',
+    peekRow && isAgentRosterBlockingWait(peekRow),
   );
   const peekInputActive = Boolean(
     peekPanel && peekInputMode && (!peekPromptPending || peekBlockingWait),
   );
-  const sessionPeekActive = Boolean(
-    peekPanel && peekRow && peekPanel.title === peekRow.sessionId,
-  );
+  const sessionPeekActive = Boolean(peekPanel?.kind === 'session' && peekRow);
+  const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
   // Ink can emit multiple input events within one tick before React
   // re-renders; an imperative mirror keeps peek accumulation from reading a
   // stale prop on the second event.
@@ -199,31 +214,26 @@ export function AgentViewRoster({
 
     if (
       isCtrlInput(input, key, 't', '\x14') &&
-      rows.length > 0 &&
+      actionRow &&
       !sessionPeekActive
     ) {
-      onTogglePinSelected();
+      onTogglePinSession(actionRow.sessionId);
       return;
     }
 
     if (
       isCtrlInput(input, key, 'r', '\x12') &&
-      rows.length > 0 &&
+      actionRow &&
       !sessionPeekActive
     ) {
       const displayName = currentPrompt.trim();
       promptInput.buffer.setText('');
-      onRenameSelected(displayName);
+      onRenameSession(actionRow.sessionId, displayName);
       return;
     }
 
-    if (isCtrlInput(input, key, 'x', '\x18') && rows.length > 0) {
-      // While a session peek is open the footer directs actions at the
-      // peeked session, so Ctrl+X must not hit whichever row the selection
-      // happens to sit on.
-      onStopOrRemoveSelected(
-        sessionPeekActive ? peekRow?.sessionId : undefined,
-      );
+    if (isCtrlInput(input, key, 'x', '\x18') && actionRow) {
+      onStopOrRemoveSession(actionRow.sessionId);
       return;
     }
 
@@ -277,13 +287,18 @@ export function AgentViewRoster({
     const isReturn = returnPrefix !== undefined;
     const legacyShiftEnter = input === '\\\r';
 
-    if (isReturn && peekPanel?.error && !peekRow) {
+    if (
+      isReturn &&
+      peekPanel?.kind === 'session' &&
+      !peekRow &&
+      !`${currentPrompt}${returnPrefix}`.trim()
+    ) {
       return;
     }
 
-    if (sessionPeekActive && !peekInputActive) {
+    if (sessionPeekActive && peekRow && !peekInputActive) {
       if (isReturn && rows.length > 0) {
-        onAttachSelected(peekRow?.sessionId);
+        onAttachSession(peekRow.sessionId);
       } else if (input === ' ') {
         onCancel();
       }
@@ -298,7 +313,7 @@ export function AgentViewRoster({
             peekPromptRef.current = '';
           }
         } else if (peekRow) {
-          onAttachSelected(peekRow.sessionId);
+          onAttachSession(peekRow.sessionId);
         }
       } else {
         const submittedPrompt = `${currentPrompt}${returnPrefix}`;
@@ -309,17 +324,17 @@ export function AgentViewRoster({
             promptInput.buffer.setText('');
           }
         } else if (rows.length > 0) {
-          onAttachSelected();
+          if (selectedRow) onAttachSession(selectedRow.sessionId);
         }
       }
       return;
     }
 
-    if (key.rightArrow && !hasPrompt && !peekInputActive && rows.length > 0) {
+    if (key.rightArrow && !hasPrompt && !peekInputActive && actionRow) {
       // Only consume Right when it actually attaches; otherwise fall through
       // so the buffer's cursor-right movement keeps working while a prompt
       // is typed.
-      onAttachSelected();
+      onAttachSession(actionRow.sessionId);
       return;
     }
 
@@ -334,7 +349,7 @@ export function AgentViewRoster({
     }
 
     if (input === ' ' && !hasPrompt && !sessionPeekActive && rows.length > 0) {
-      onPeekSelected();
+      if (selectedRow) onPeekSession(selectedRow.sessionId);
       return;
     }
 
@@ -392,7 +407,7 @@ export function AgentViewRoster({
       </Box>
       {peekPanel ? (
         <Box flexDirection="column" marginBottom={1}>
-          {sessionPeekActive && peekRow ? (
+          {peekPanel.kind === 'session' && sessionPeekActive && peekRow ? (
             <SessionPeekBox
               row={peekRow}
               panel={peekPanel}
@@ -402,7 +417,7 @@ export function AgentViewRoster({
             />
           ) : (
             <>
-              <Text bold>{peekPanel.title}</Text>
+              <Text bold>{getPanelTitle(peekPanel)}</Text>
               {peekPanel.lines.map((line, index) => (
                 <Text key={index} dimColor>
                   {line}
@@ -459,6 +474,12 @@ function getReturnInputPrefix(
   }
   if (input === '\\\r') {
     return '';
+  }
+  // Ink reports pasted LF chunks without key.return. Keep them in the
+  // cursor-aware text insertion path instead of treating the paste as a
+  // submit; PTY Enter and legacy VSCode Shift+Enter use CR.
+  if (!key.return && input.includes('\n')) {
+    return undefined;
   }
   const returnIndex = input.search(/[\r\n]/);
   if (returnIndex < 0) {
@@ -835,13 +856,13 @@ function SessionPeekBox({
   queuedPrompts,
 }: {
   row: AgentRosterRow;
-  panel: AgentViewPeekPanel;
+  panel: AgentViewSessionPanel;
   prompt: string;
   inputMode: 'answer' | 'send' | undefined;
   queuedPrompts: string[] | undefined;
 }) {
   const lines = getSessionPeekLines(row, panel, queuedPrompts);
-  const blockingWait = Boolean(row.waitingFor && row.waitingFor !== 'response');
+  const blockingWait = isAgentRosterBlockingWait(row);
   const inputActive = Boolean(
     inputMode && (!queuedPrompts?.length || blockingWait),
   );
@@ -936,12 +957,10 @@ function AgentViewPromptBox({
 
 function getSessionPeekLines(
   row: AgentRosterRow,
-  panel: AgentViewPeekPanel,
+  panel: AgentViewSessionPanel,
   queuedPrompts: readonly string[] | undefined,
 ): string[] {
-  // Error-shaped panels (peek load / reply failures) take precedence over
-  // the row's possibly stale activity fields.
-  if (panel.error || panel.preferLines) {
+  if (panel.content === 'message') {
     return panel.lines.map(stripUnsafeCharacters);
   }
   // Render from the structured row fields; never re-parse rendered text.
@@ -952,6 +971,12 @@ function getSessionPeekLines(
     formatWaitingLine(row.waitingFor),
     getQueuedPromptLine(queuedPrompts),
   ].filter((line): line is string => Boolean(line));
+}
+
+function getPanelTitle(panel: AgentViewPanel): string {
+  if (panel.kind === 'session') return panel.sessionId;
+  if (panel.kind === 'filter') return 'Filter';
+  return panel.title;
 }
 
 function formatWaitingLine(waitingFor: string | undefined): string | undefined {

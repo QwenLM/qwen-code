@@ -156,7 +156,7 @@ export function useSessionPicker({
   }
 
   const hasInitialSessions = initialSessions !== undefined;
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [sessionState, setSessionState] = useState<SessionState>(
     hasInitialSessions
       ? { sessions: initialSessions, hasMore: false, nextCursor: undefined }
@@ -235,6 +235,13 @@ export function useSessionPicker({
       filterSessions(allSessions, filterByBranch, currentBranch, searchQuery),
     [allSessions, filterByBranch, currentBranch, searchQuery],
   );
+  const selectedIndex = useMemo(() => {
+    if (filteredSessions.length === 0) return 0;
+    const index = filteredSessions.findIndex(
+      (session) => session.sessionId === selectedSessionId,
+    );
+    return index >= 0 ? index : 0;
+  }, [filteredSessions, selectedSessionId]);
 
   const scrollOffset = useMemo(() => {
     if (centerSelection) {
@@ -311,19 +318,26 @@ export function useSessionPicker({
 
   // Reset selection when any filter changes (branch toggle or text query).
   useEffect(() => {
-    setSelectedIndex(0);
+    setSelectedSessionId(undefined);
     setFollowScrollOffset(0);
   }, [filterByBranch, searchQuery]);
 
-  // Ensure selectedIndex is valid when filtered sessions change
+  // Anchor the cursor to a session id so async merges and mtime re-sorts do
+  // not move a different row under the user's selection.
   useEffect(() => {
-    if (
-      selectedIndex >= filteredSessions.length &&
-      filteredSessions.length > 0
-    ) {
-      setSelectedIndex(filteredSessions.length - 1);
+    if (filteredSessions.length === 0) {
+      setSelectedSessionId(undefined);
+      return;
     }
-  }, [filteredSessions.length, selectedIndex]);
+    if (
+      !selectedSessionId ||
+      !filteredSessions.some(
+        (session) => session.sessionId === selectedSessionId,
+      )
+    ) {
+      setSelectedSessionId(filteredSessions[0]?.sessionId);
+    }
+  }, [filteredSessions, selectedSessionId]);
 
   // Auto-load more when centered mode hits the sentinel or list is empty.
   useEffect(() => {
@@ -361,36 +375,30 @@ export function useSessionPicker({
       // about — share the early-return so a future tweak in either
       // branch can't drift past length 0.
       if (filteredSessions.length === 0) return;
-      if (delta === -1) {
-        setSelectedIndex((prev) => {
-          const newIndex = Math.max(0, prev - 1);
-          if (!centerSelection && newIndex < followScrollOffset) {
-            setFollowScrollOffset(newIndex);
-          }
-          return newIndex;
-        });
-        return;
+      const newIndex = Math.min(
+        filteredSessions.length - 1,
+        Math.max(0, selectedIndex + delta),
+      );
+      if (!centerSelection && newIndex < followScrollOffset) {
+        setFollowScrollOffset(newIndex);
+      } else if (
+        !centerSelection &&
+        newIndex >= followScrollOffset + maxVisibleItems
+      ) {
+        setFollowScrollOffset(newIndex - maxVisibleItems + 1);
       }
-      setSelectedIndex((prev) => {
-        const newIndex = Math.min(filteredSessions.length - 1, prev + 1);
-        if (
-          !centerSelection &&
-          newIndex >= followScrollOffset + maxVisibleItems
-        ) {
-          setFollowScrollOffset(newIndex - maxVisibleItems + 1);
-        }
-        if (!centerSelection && newIndex >= filteredSessions.length - 3) {
-          void loadMoreSessions();
-        }
-        return newIndex;
-      });
+      if (!centerSelection && newIndex >= filteredSessions.length - 3) {
+        void loadMoreSessions();
+      }
+      setSelectedSessionId(filteredSessions[newIndex]?.sessionId);
     },
     [
       centerSelection,
-      filteredSessions.length,
+      filteredSessions,
       followScrollOffset,
       loadMoreSessions,
       maxVisibleItems,
+      selectedIndex,
     ],
   );
 
