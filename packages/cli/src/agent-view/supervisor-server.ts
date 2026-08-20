@@ -74,6 +74,7 @@ export function createAgentViewSupervisorServer(
   options: AgentViewSupervisorServerOptions,
 ): AgentViewSupervisorServerHandle {
   const sockets = new Set<net.Socket>();
+  const operationGate = new SupervisorOperationGate();
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
@@ -99,6 +100,7 @@ export function createAgentViewSupervisorServer(
         options.authToken,
         options.authorizeSideband,
         remaining,
+        operationGate,
       );
     });
   });
@@ -143,6 +145,10 @@ export async function handleAgentViewSupervisorRequest(
   handler: AgentViewSupervisorHandler,
   authToken?: string,
   authorizeSideband?: AgentViewSidebandAuthorizer,
+  invoke: (
+    op: AgentViewSupervisorOperation,
+    action: () => Promise<unknown> | unknown,
+  ) => Promise<unknown> = async (_op, action) => action(),
 ): Promise<AgentViewSupervisorResponse> {
   if (!isRecord(request) || typeof request['id'] !== 'string') {
     return errorResponse('', 'invalid_request', 'Invalid supervisor request.');
@@ -205,7 +211,7 @@ export async function handleAgentViewSupervisorRequest(
           params: Record<string, unknown> | undefined,
         ) => Promise<unknown> | unknown)
       | undefined;
-    const result = await method?.call(handler, params);
+    const result = await invoke(op, () => method?.call(handler, params));
     return {
       id: request['id'],
       ok: true,
@@ -228,6 +234,50 @@ interface ParsedRequest {
   params?: Record<string, unknown>;
 }
 
+class SupervisorOperationGate {
+  private state: 'running' | 'draining' | 'closed' = 'running';
+  private readonly active = new Set<Promise<unknown>>();
+
+  async run(
+    op: AgentViewSupervisorOperation,
+    action: () => Promise<unknown> | unknown,
+  ): Promise<unknown> {
+    if (op === 'shutdown') {
+      if (this.state !== 'running') {
+        throw new Error('Agent View supervisor is already shutting down.');
+      }
+      this.state = 'draining';
+      await Promise.allSettled(this.active);
+      try {
+        return await action();
+      } finally {
+        this.state = 'closed';
+      }
+    }
+    if (isDrainSafeOperation(op)) {
+      return action();
+    }
+    if (this.state !== 'running') {
+      throw new Error('Agent View supervisor is shutting down.');
+    }
+    const operation = Promise.resolve().then(action);
+    this.active.add(operation);
+    try {
+      return await operation;
+    } finally {
+      this.active.delete(operation);
+    }
+  }
+
+  canStartStream(op: 'attachStream' | 'subscribe'): boolean {
+    return this.state === 'running' || op === 'subscribe';
+  }
+}
+
+function isDrainSafeOperation(op: AgentViewSupervisorOperation): boolean {
+  return op === 'status' || op === 'workerEvent' || op === 'workerControl';
+}
+
 async function respondToLine(
   line: string,
   handler: AgentViewSupervisorHandler,
@@ -235,6 +285,7 @@ async function respondToLine(
   authToken: string | undefined,
   authorizeSideband: AgentViewSidebandAuthorizer | undefined,
   remaining: Buffer,
+  operationGate: SupervisorOperationGate,
 ): Promise<void> {
   const request = parseRequestLine(line);
   if (
@@ -242,6 +293,18 @@ async function respondToLine(
     request.op === 'attachStream' &&
     typeof handler.attachStream === 'function'
   ) {
+    if (!operationGate.canStartStream('attachStream')) {
+      socket.end(
+        `${JSON.stringify(
+          errorResponse(
+            request.id,
+            'internal_error',
+            'Agent View supervisor is shutting down.',
+          ),
+        )}\n`,
+      );
+      return;
+    }
     await handleStreamingOp(
       request,
       socket,
@@ -278,6 +341,7 @@ async function respondToLine(
       handler,
       authToken,
       authorizeSideband,
+      operationGate.run.bind(operationGate),
     );
   } catch {
     response = errorResponse('', 'invalid_json', 'Invalid JSON request.');

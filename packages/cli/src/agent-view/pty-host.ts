@@ -5,13 +5,14 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
-import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { PTY_HOST_AUTH_TOKEN_ENV, PTY_HOST_ID_ENV } from './pty-host-env.js';
 import { AGENT_VIEW_WORKER_ENV_KEYS } from './worker-sideband.js';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
   'TMUX',
   'TMUX_PANE',
   'STY',
@@ -86,6 +87,7 @@ export type AgentViewPtyHostExit =
   | { kind: 'unreachable' };
 
 export interface AgentViewPtyHostHandle {
+  hostId?: string;
   pid: number;
   workerPid: number;
   command: readonly string[];

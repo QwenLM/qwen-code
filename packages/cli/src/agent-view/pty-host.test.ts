@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentViewLaunchFile } from './protocol.js';
-import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { PTY_HOST_AUTH_TOKEN_ENV, PTY_HOST_ID_ENV } from './pty-host-env.js';
 import {
   AgentViewLaunchConfigError,
   AgentViewPtyUnavailableError,
@@ -427,6 +427,7 @@ describe('launchAgentViewPtyHost', () => {
         env: {
           QWEN_AGENT_VIEW_WORKER: '1',
           [PTY_HOST_AUTH_TOKEN_ENV]: 'injected-token',
+          [PTY_HOST_ID_ENV]: 'injected-host-id',
           TMUX: '/tmp/tmux-501/default,456,0',
           TMUX_PANE: '%1',
           STY: '12345.pts-0.host',
@@ -445,6 +446,7 @@ describe('launchAgentViewPtyHost', () => {
     );
     for (const key of [
       PTY_HOST_AUTH_TOKEN_ENV,
+      PTY_HOST_ID_ENV,
       'TMUX',
       'TMUX_PANE',
       'STY',
