@@ -34,6 +34,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
       - name: 'Determine version'
         id: 'version'
         run: |
@@ -69,5 +72,3 @@ jobs:
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
         run: 'npm publish --provenance --access public'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'

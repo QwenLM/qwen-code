@@ -119,11 +119,29 @@ function createHarness() {
     getText: vi.fn(() => ''),
     setText: vi.fn(),
     restoreImages: vi.fn(),
+    restoreFiles: vi.fn(),
+    restoreInputAnnotations: vi.fn(),
     focus: vi.fn(),
   };
   const stableEditorRef = { current: stableEditor } as never;
   const stableT = ((key: string) => key) as never;
   const stableReportError = vi.fn();
+  const stableWorkspaceFileActions = {
+    stat: vi.fn(async () => ({
+      type: 'file',
+      sizeBytes: 5,
+      modifiedMs: 1,
+    })),
+    readFileBytes: vi.fn(async (path: string) => ({
+      kind: 'file_bytes',
+      path,
+      offset: 0,
+      sizeBytes: 5,
+      returnedBytes: 5,
+      truncated: false,
+      contentBase64: btoa('hello'),
+    })),
+  };
 
   function TestComponent(opts: HarnessOptions) {
     latest = useQueuedPrompts({
@@ -135,6 +153,7 @@ function createHarness() {
       canMutateMidTurn: opts.canMutateMidTurn ?? true,
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
       canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
+      workspaceFileActions: stableWorkspaceFileActions as never,
       streamingState: opts.streamingState ?? 'responding',
       holdQueuedPromptsLocally: opts.holdQueuedPromptsLocally ?? false,
       sessionActions: sdkMock.actions as never,
@@ -176,6 +195,7 @@ function createHarness() {
     editor: stableEditor,
     store: stableStore,
     reportError: stableReportError,
+    workspaceFileActions: stableWorkspaceFileActions,
   };
 }
 
@@ -188,12 +208,20 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         Promise.resolve({ accepted: true, messageId: opts?.messageId }),
     );
     sdkMock.actions.uploadAttachment.mockImplementation(
-      async (image: { mimeType?: string }) => ({
-        type: 'image',
-        attachmentId: 'media-1',
-        mimeType: image.mimeType ?? 'image/png',
-        size: 3,
-      }),
+      async (attachment: { name?: string; mimeType?: string }) =>
+        attachment.name
+          ? {
+              type: 'resource',
+              attachmentId: attachment.name,
+              mimeType: attachment.mimeType ?? 'application/octet-stream',
+              size: 5,
+            }
+          : {
+              type: 'image',
+              attachmentId: 'media-1',
+              mimeType: attachment.mimeType ?? 'image/png',
+              size: 3,
+            },
     );
     sdkMock.actions.removeAttachment.mockResolvedValue(true);
     sdkMock.actions.getMidTurnMessages.mockResolvedValue({
@@ -968,6 +996,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
       expect(harness.result().queuedPrompts).toEqual([]);
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
@@ -2353,6 +2382,390 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('uploads @ files and inserts them as session attachments', async () => {
+    const harness = createHarness();
+    const fileText = '@docs/notes.txt';
+    const onAdmitted = vi.fn();
+    let finishAdmission:
+      | ((result: { accepted: true; messageId: string }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string) =>
+        new Promise((resolve) => {
+          finishAdmission = resolve;
+        }),
+    );
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt(
+          `${fileText} explain:\n  key:\t\tvalue`,
+          undefined,
+          undefined,
+          undefined,
+          [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:docs/notes.txt',
+                kind: 'file',
+                value: 'docs/notes.txt',
+              },
+            },
+          ],
+          onAdmitted,
+        );
+        await Promise.resolve();
+      });
+
+      expect(harness.workspaceFileActions.readFileBytes).toHaveBeenCalledWith(
+        'docs/notes.txt',
+        { offset: 0, maxBytes: 100 * 1024 },
+      );
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'notes.txt',
+          mimeType: 'text/plain',
+          data: expect.any(Blob),
+        }),
+        expect.objectContaining({
+          signal: expect.any(AbortSignal),
+          sessionId: 'session-a',
+        }),
+      );
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'explain:\n  key:\t\tvalue',
+        expect.objectContaining({
+          messageId: expect.any(String),
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+        }),
+      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts[0]?.payloadCompleteness).toBe(
+        'summary-only',
+      );
+      await act(async () => {
+        finishAdmission?.({
+          accepted: true,
+          messageId:
+            sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]
+              ?.messageId ?? 'mid-file',
+        });
+        await Promise.resolve();
+      });
+      expect(onAdmitted).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('removes file attachments after deleting their mid-turn message', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-file-delete',
+          text: 'delete this file',
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'attachment-1',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        harness.result().removeQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.removeMidTurnMessage).toHaveBeenCalledWith(
+        'm-file-delete',
+        { sessionId: 'session-a' },
+      );
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'attachment-1',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('removes old-session file attachments when deletion settles after a session switch', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-file-delete-a',
+          text: 'delete from A',
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'attachment-a',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    let finishRemoval: ((result: { removed: true }) => void) | undefined;
+    sdkMock.actions.removeMidTurnMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ sessionId: 'session-a' });
+      const row = harness.result().queuedPrompts[0]!;
+      act(() => harness.result().removeQueuedPrompt(row.id));
+
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      });
+      await harness.render({ sessionId: 'session-b' });
+      await act(async () => {
+        finishRemoval?.({ removed: true });
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'attachment-a',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('uploads attached files and inserts them mid-turn', async () => {
+    const harness = createHarness();
+    const data = new Blob(['hello'], { type: 'text/plain' });
+    const onAdmitted = vi.fn();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt(
+          'explain this',
+          undefined,
+          [
+            {
+              name: 'notes.txt',
+              media_type: 'text/plain',
+              data,
+              size: data.size,
+            },
+          ],
+          undefined,
+          undefined,
+          onAdmitted,
+        );
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledWith(
+        {
+          name: 'notes.txt',
+          data,
+          text: undefined,
+          mimeType: 'text/plain',
+        },
+        expect.objectContaining({
+          signal: expect.any(AbortSignal),
+          sessionId: 'session-a',
+        }),
+      );
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'explain this',
+        expect.objectContaining({
+          messageId: expect.any(String),
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 5,
+            },
+          ],
+        }),
+      );
+      expect(onAdmitted).toHaveBeenCalledOnce();
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores an attached file when its mid-turn upload fails', async () => {
+    const harness = createHarness();
+    const file = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      data: new Blob(['hello'], { type: 'text/plain' }),
+    };
+    sdkMock.actions.uploadAttachment.mockRejectedValueOnce(
+      new Error('upload failed'),
+    );
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('explain this', undefined, [file]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith('explain this');
+      expect(harness.editor.restoreFiles).toHaveBeenCalledWith([file]);
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps attached files on the ordinary queue without attachment support', async () => {
+    const harness = createHarness();
+    const file = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      data: new Blob(['hello'], { type: 'text/plain' }),
+    };
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        canInjectMidTurnMedia: false,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('explain this', undefined, [file]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.uploadAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'explain this',
+        expect.objectContaining({ files: [file] }),
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores an @ file reference when its upload fails', async () => {
+    const harness = createHarness();
+    const fileText = '@docs/notes.txt';
+    const onAdmitted = vi.fn();
+    const annotation = {
+      type: 'reference' as const,
+      start: 0,
+      end: fileText.length,
+      text: fileText,
+      reference: {
+        id: 'file:docs/notes.txt',
+        kind: 'file' as const,
+        value: 'docs/notes.txt',
+      },
+    };
+    sdkMock.actions.uploadAttachment.mockRejectedValueOnce(
+      new Error('upload failed'),
+    );
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(
+            `${fileText} explain this`,
+            undefined,
+            undefined,
+            undefined,
+            [annotation],
+            onAdmitted,
+          );
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith(
+        `${fileText} explain this`,
+      );
+      expect(harness.editor.restoreInputAnnotations).toHaveBeenCalledWith([
+        annotation,
+      ]);
+      expect(onAdmitted).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps @ directory references on the ordinary pending path', async () => {
+    const harness = createHarness();
+    const directoryText = '@docs/';
+    const annotation = {
+      type: 'reference' as const,
+      start: 0,
+      end: directoryText.length,
+      text: directoryText,
+      reference: {
+        id: 'file:docs',
+        kind: 'file' as const,
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+      },
+    };
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(
+            `${directoryText} summarize`,
+            undefined,
+            undefined,
+            undefined,
+            [annotation],
+          );
+        await Promise.resolve();
+      });
+
+      expect(harness.workspaceFileActions.readFileBytes).not.toHaveBeenCalled();
+      expect(sdkMock.actions.uploadAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        `${directoryText} summarize`,
+        expect.objectContaining({ inputAnnotations: [annotation] }),
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('removes uploaded media when mid-turn admission is rejected', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
@@ -2890,7 +3303,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.result().queuedPrompts[0]).toMatchObject({
         text: 'refreshed file prompt',
         serverPromptId: 'p-file-refresh',
-        files: [{ name: 'notes.txt', media_type: 'text/plain', size: 5 }],
+        files: [
+          {
+            name: 'notes.txt',
+            media_type: 'text/plain',
+            size: 5,
+            attachmentId: 'notes.txt',
+          },
+        ],
         payloadCompleteness: 'summary-only',
       });
     } finally {

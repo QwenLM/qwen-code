@@ -793,7 +793,7 @@ describe('DaemonSessionClient', () => {
     await expect(
       session.uploadAttachment(
         new Blob([Uint8Array.of(1, 2, 3)]),
-        'image.png',
+        'image 你好.png',
         'image/png',
       ),
     ).resolves.toEqual(reference);
@@ -804,7 +804,10 @@ describe('DaemonSessionClient', () => {
         'x-qwen-client-id': 'client-1',
       }),
     });
-    expect(calls[0]?.url).toContain('/session/s-1/attachments');
+    expect(calls[0]?.headers).not.toHaveProperty('x-qwen-attachment-name');
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/s-1/attachments?name=image%20%E4%BD%A0%E5%A5%BD.png',
+    );
   });
 
   it('removes session attachment through the authenticated session route', async () => {

@@ -97,6 +97,7 @@ import type {
   TurnOutputOpenRequest,
 } from './artifacts/TurnOutputs';
 import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -251,6 +252,9 @@ export function ChatPane({
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -589,6 +593,7 @@ export function ChatPane({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
     holdQueuedPromptsLocally: isGoalGateBlocked(connection),
     sessionActions: actions,
@@ -1337,6 +1342,7 @@ export function ChatPane({
                 onInsert={insertQueuedPrompt}
                 onEdit={editQueuedPrompt}
                 onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
               />
               {liveGoalSnapshot?.goal && (
                 <GoalStatusStrip

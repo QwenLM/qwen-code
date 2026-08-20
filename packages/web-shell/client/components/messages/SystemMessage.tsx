@@ -28,10 +28,20 @@ interface SystemMessageProps {
   source?: string;
   data?: unknown;
   images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    attachmentId?: string;
+  }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: {
+    name: string;
+    mimeType?: string;
+    attachmentId?: string;
+  }) => void;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
 }
@@ -42,8 +52,10 @@ export const SystemMessage = memo(function SystemMessage({
   source,
   data,
   images,
+  files,
   onShowContextDetail,
   onImagePreview,
+  onAttachmentPreview,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
@@ -53,7 +65,9 @@ export const SystemMessage = memo(function SystemMessage({
       <UserMessage
         content={content}
         images={images}
+        files={files}
         onImagePreview={onImagePreview}
+        onAttachmentPreview={onAttachmentPreview}
       />
     );
   }

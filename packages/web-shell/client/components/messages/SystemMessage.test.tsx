@@ -406,4 +406,32 @@ describe('SystemMessage — inline images', () => {
     expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
     expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
   });
+
+  it('renders injected files with the ordinary user attachment row', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="explain this"
+        variant="info"
+        source="mid_turn_message_injected"
+        files={[
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    const file = container.querySelector('[role="button"]') as HTMLElement;
+    expect(file.textContent).toContain('notes.txt');
+    act(() => file.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'notes.txt',
+    });
+  });
 });

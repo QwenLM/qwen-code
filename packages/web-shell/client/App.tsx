@@ -6277,6 +6277,7 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: artifactWorkspaceActions,
     streamingState,
     holdQueuedPromptsLocally:
       connection.sessionId !== undefined &&
@@ -7388,7 +7389,7 @@ export function App({
           : undefined;
       if (workspaceCwd) {
         sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
-        if (!connectionRef.current.displayName) {
+        if (!sessionDisplayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
             workspaceCwd,
@@ -7414,6 +7415,7 @@ export function App({
     connection.workspaceCwd,
     scheduleDelayedActiveSessionDisplayNameRefresh,
     sessionCatalogController,
+    sessionDisplayName,
     streamingState,
   ]);
 
@@ -12734,7 +12736,8 @@ export function App({
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
                               onEdit={editQueuedPrompt}
-                                                              onImagePreview={openImagePanel}
+                              onImagePreview={openImagePanel}
+                              onAttachmentPreview={openAttachmentPanel}
                             />
                             {liveGoalSnapshot?.goal && (
                               <GoalStatusStrip
