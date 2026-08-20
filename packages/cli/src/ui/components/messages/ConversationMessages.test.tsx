@@ -323,6 +323,54 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Thought for 5s');
     expect(output).not.toContain('Thinking');
   });
+
+  it('should render the completed style while pending but finalized (expanded)', () => {
+    // Expanded variant: pins the label ternary, the collapse hint, and the
+    // icon branch in the expanded path — the only state where
+    // treatAsCompleted diverges from !isPending there is a
+    // finalized-but-pending deferred thought the user expands.
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={true}
+        durationMs={5000}
+        finalized={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
+    expect(output).not.toContain('Thinking');
+    // Expanded still shows the body.
+    expect(output).toContain('Analyzing the code structure');
+  });
+
+  it('should not slice a finalized thought body as streaming content', () => {
+    // While the merge deferral holds a FINALIZED thought in the pending
+    // area, the body must not get streaming-only MarkdownDisplay treatment:
+    // fitPendingSlice would slice the complete content to the viewport
+    // budget while the truncation cue stays suppressed (it only shows for
+    // complete content), silently hiding the tail of finished reasoning.
+    const lines = Array.from({ length: 20 }, (_, i) => `Step ${i + 1}`);
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={lines.join('\n')}
+        isPending={true}
+        expanded={true}
+        durationMs={5000}
+        finalized={true}
+        availableTerminalHeight={6}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).toContain('Step 1');
+    // The tail must survive: with the raw isPending forwarded to the body
+    // the pending slice drops it.
+    expect(output).toContain('Step 20');
+  });
 });
 
 describe('<ThinkMessageContent />', () => {

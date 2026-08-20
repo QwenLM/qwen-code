@@ -284,6 +284,118 @@ describe('useHistoryManager', () => {
       expect(result.current.history).toHaveLength(15);
     });
 
+    // A merged tool_group renders nothing outside full detail — its main-view
+    // representation is the thought line it folded into. When compaction
+    // drops that thought, the group must be un-suppressed so the tool batch
+    // keeps its collapsed summary line instead of disappearing entirely.
+    it('un-suppresses a merged tool_group whose paired thought is dropped', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Oldest pair: merged thought immediately followed by its group.
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'gemini_thought',
+            text: 'oldest thought',
+            durationMs: 9000,
+            toolSummary: 'Read /foo',
+          } as HistoryItemWithoutId,
+          ts,
+        );
+      });
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'tool_group',
+            display: { mergedIntoThought: true },
+            tools: [
+              {
+                callId: 'merged-1',
+                name: 'read_file',
+                description: '/foo',
+                resultDisplay: 'file contents',
+                status: ToolCallStatus.Success,
+                confirmationDetails: undefined,
+              },
+            ],
+          } as unknown as HistoryItemWithoutId,
+          ts,
+        );
+      });
+      // 20 more thoughts: the merged thought becomes the drop target
+      // (21 thoughts > keep-recent-20).
+      addThoughts(result, 20, ts + 1000);
+      expect(result.current.history).toHaveLength(22);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      expect(result.current.history).toHaveLength(21);
+      const group = result.current.history.find(
+        (item) => item.type === 'tool_group',
+      );
+      expect(group).toBeDefined();
+      expect(group?.display?.mergedIntoThought).toBeUndefined();
+      // The orphaned toolSummary line must be gone with its thought.
+      expect(
+        result.current.history.some(
+          (item) => item.type === 'gemini_thought' && item.toolSummary,
+        ),
+      ).toBe(false);
+    });
+
+    it('keeps mergedIntoThought when the paired thought survives compaction', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'gemini_thought',
+            text: 'newest merged thought',
+            durationMs: 9000,
+            toolSummary: 'Read /foo',
+          } as HistoryItemWithoutId,
+          ts,
+        );
+      });
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'tool_group',
+            display: { mergedIntoThought: true },
+            tools: [
+              {
+                callId: 'merged-1',
+                name: 'read_file',
+                description: '/foo',
+                resultDisplay: 'file contents',
+                status: ToolCallStatus.Success,
+                confirmationDetails: undefined,
+              },
+            ],
+          } as unknown as HistoryItemWithoutId,
+          ts,
+        );
+      });
+      // 19 more thoughts: 20 thoughts total == keep-recent-20, so nothing
+      // is dropped and the merge pair stays intact.
+      addThoughts(result, 19, ts + 1000);
+      expect(result.current.history).toHaveLength(21);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const group = result.current.history.find(
+        (item) => item.type === 'tool_group',
+      );
+      expect(group).toBeDefined();
+      expect(group?.display?.mergedIntoThought).toBe(true);
+    });
+
     it('should clear string resultDisplay on old tool_group items', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();

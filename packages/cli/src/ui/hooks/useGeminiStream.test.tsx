@@ -11431,6 +11431,93 @@ describe('useGeminiStream', () => {
   });
 
   describe('Thought Reset', () => {
+    // Same inline hook wiring as the deferral tests below; used by the
+    // deferral-active resolution tests.
+    const renderDeferredTestHook = () =>
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+    // Capture the scheduler's onComplete without completing any batch;
+    // returns an accessor (the capture happens during the hook render).
+    const captureSchedulerOnComplete = () => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+      return () => capturedOnComplete;
+    };
+
+    // Waits until the merge deferral is established: the finalized thought
+    // sits in pendingHistoryItems and nothing has been committed yet.
+    const waitForDeferralEstablished = async (result: {
+      current: {
+        pendingHistoryItems: ArrayLike<{ type?: string }>;
+        thought: unknown;
+      };
+    }) => {
+      await waitFor(() => expect(result.current.thought).toBeNull());
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'gemini_thought' }),
+        expect.any(Number),
+      );
+    };
+
+    // A successful read_file completion for a single 'tc1' call.
+    const successfulReadToolCall = (): TrackedToolCall =>
+      ({
+        request: {
+          callId: 'tc1',
+          name: 'read_file',
+          args: { file_path: '/foo' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'tc1',
+          responseParts: [{ text: 'file contents' }],
+        },
+        tool: { displayName: 'ReadFile' },
+        invocation: {
+          getDescription: () => '/foo',
+        } as unknown as AnyToolInvocation,
+      }) as TrackedCompletedToolCall;
+
     it('should reset thought to null when starting a new prompt', async () => {
       // First, simulate a response with a thought
       mockSendMessageStream.mockReturnValue(
@@ -12006,6 +12093,15 @@ describe('useGeminiStream', () => {
         expect.any(Number),
       );
 
+      // The deferral freezes the duration at ToolCallRequest time so tool
+      // execution is not charged to the thought. Capture the frozen value
+      // BEFORE completion; let real time pass, then pin it on the commit.
+      const deferredItem = result.current.pendingHistoryItems.find(
+        (item) => item.type === 'gemini_thought',
+      );
+      const frozenDurationMs = deferredItem?.durationMs;
+      expect(frozenDurationMs).toBeDefined();
+
       const completedToolCalls: TrackedToolCall[] = [
         {
           request: {
@@ -12028,6 +12124,8 @@ describe('useGeminiStream', () => {
         } as TrackedCompletedToolCall,
       ];
 
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
       await act(async () => {
         await capturedOnComplete?.(completedToolCalls);
       });
@@ -12036,7 +12134,9 @@ describe('useGeminiStream', () => {
         expect.objectContaining({
           type: 'gemini_thought',
           text: expect.stringContaining('planning tool usage'),
-          durationMs: expect.any(Number),
+          // Equality (not expect.any(Number)): recomputing the duration at
+          // commit time would add the ~30ms tool-execution window.
+          durationMs: frozenDurationMs,
           toolSummary: 'Read /foo',
         }),
         expect.any(Number),
@@ -12048,6 +12148,16 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
+      // The deferred pending item must be cleared once the deferral
+      // resolves — otherwise the merged line double-renders (history line
+      // plus a stranded finalized pending item rendered by MainContent).
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'gemini_thought' }),
+          ]),
+        );
+      });
     });
 
     it('should commit the deferred thought without merging when the batch contains a non-collapsible tool', async () => {
@@ -12161,6 +12271,14 @@ describe('useGeminiStream', () => {
         ([item]) => item.type === 'tool_group',
       );
       expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+      // No-merge resolution must also clear the deferred pending item.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'gemini_thought' }),
+          ]),
+        );
+      });
     });
 
     it('should commit the deferred thought without merging when a tool in the batch was cancelled', async () => {
@@ -12228,6 +12346,23 @@ describe('useGeminiStream', () => {
 
       await waitFor(() => expect(result.current.thought).toBeNull());
 
+      // Wait for the merge deferral to actually be established before
+      // completing the batch. The thought-null wait above is vacuous here
+      // (description-only Thought events never call setThought), and
+      // without this sync point onComplete can race deferral setup if
+      // stream-loop timing ever shifts — turning a contract test into an
+      // intermittent failure.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+      });
+
       const cancelledToolCalls: TrackedToolCall[] = [
         {
           request: {
@@ -12261,18 +12396,36 @@ describe('useGeminiStream', () => {
         ([item]) => item.type === 'gemini_thought',
       );
       expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      // Assert the group EXISTS first: without this, the mergedIntoThought
+      // absence check below passes vacuously when no tool_group was ever
+      // committed, and a dropped group commit would silently delete the
+      // tool batch from the rendered history.
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'tool_group' }),
+        expect.any(Number),
+      );
       const groupCommit = mockAddItem.mock.calls.find(
         ([item]) => item.type === 'tool_group',
       );
       expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+      // The deferred pending item must be cleared after resolution.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'gemini_thought' }),
+          ]),
+        );
+      });
     });
 
     it('should commit the deferred thought on local cancel instead of stranding it', async () => {
-      mockUseReactToolScheduler.mockImplementation(() => [
-        [],
-        mockScheduleToolCalls,
-        mockMarkToolsAsSubmitted,
-      ]);
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
 
       let releaseStream: (() => void) | undefined;
       const holdStream = new Promise<void>((resolve) => {
@@ -12365,7 +12518,933 @@ describe('useGeminiStream', () => {
       expect(infoIdx).toBeGreaterThan(thoughtIdx);
       expect(calls[thoughtIdx][0].text).toContain('planning before cancel');
 
+      // Late completion: in real usage the scheduler still invokes
+      // onComplete after a cancel ('cancelled' is a terminal status) — the
+      // case the cancelOngoingRequest deferral comment explicitly defends.
+      // The deferral is already resolved, so the batch must commit its
+      // group unmerged below the info item and must NOT re-commit the
+      // thought.
+      const lateCancelledToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'tc1',
+            name: 'read_file',
+            args: { file_path: '/foo' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          status: 'cancelled',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'tc1',
+            responseParts: [],
+          },
+        } as TrackedCancelledToolCall,
+      ];
+
+      await act(async () => {
+        await capturedOnComplete?.(lateCancelledToolCalls);
+      });
+
+      const thoughtCommits = calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      const groupIdx = calls.findIndex(([item]) => item.type === 'tool_group');
+      expect(groupIdx).toBeGreaterThan(infoIdx);
+      expect(calls[groupIdx][0].display?.mergedIntoThought).toBeUndefined();
+
       releaseStream?.();
+    });
+
+    // Deferral-ACTIVE resolution tests: with no deferral active,
+    // abortThoughtMergeDeferral behaves identically to the old
+    // commitPendingThought, so every site below must be exercised with a
+    // live deferral or reverting it stays green.
+
+    it('should commit the deferred thought above the warning when the finish is abnormal', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning a read' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then abnormal finish');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The abnormal finish (one that adds a ⚠ info item) must end the
+      // deferral BEFORE the info item lands, keeping thought-first order.
+      await waitFor(() => {
+        const calls = mockAddItem.mock.calls;
+        const thoughtIdx = calls.findIndex(
+          ([item]) => item.type === 'gemini_thought',
+        );
+        const infoIdx = calls.findIndex(
+          ([item]) =>
+            item.type === 'info' &&
+            typeof item.text === 'string' &&
+            item.text.includes('Response truncated'),
+        );
+        expect(thoughtIdx).toBeGreaterThanOrEqual(0);
+        expect(infoIdx).toBeGreaterThan(thoughtIdx);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+
+      // The aborted deferral must not be resurrected when the batch
+      // finally completes: group unmerged, thought not re-committed.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall()]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(1);
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit).toBeDefined();
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+    });
+
+    it('should commit the deferred thought as-is on UserCancelled', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before cancel' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield { type: ServerGeminiEventType.UserCancelled };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then user cancelled');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before cancel'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const calls = mockAddItem.mock.calls;
+      expect(
+        calls.filter(([item]) => item.type === 'gemini_thought'),
+      ).toHaveLength(1);
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(calls[thoughtIdx][0].toolSummary).toBeUndefined();
+      // Thought-first ordering above the cancel info item.
+      const infoIdx = calls.findIndex(
+        ([item]) =>
+          item.type === 'info' && item.text === 'User cancelled the request.',
+      );
+      expect(infoIdx).toBeGreaterThan(thoughtIdx);
+    });
+
+    it('should commit the deferred thought as-is on Error', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before error' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { message: 'Something went wrong', retryable: false },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then error mid batch');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before error'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+    });
+
+    it('should commit the deferred thought as-is on non-continuation Retry', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before retry' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: false,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'retried response',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then retry mid batch');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before retry'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const calls = mockAddItem.mock.calls;
+      expect(
+        calls.filter(([item]) => item.type === 'gemini_thought'),
+      ).toHaveLength(1);
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(calls[thoughtIdx][0].toolSummary).toBeUndefined();
+      // The retried answer lands below the thought.
+      const geminiIdx = calls.findIndex(
+        ([item]) =>
+          (item.type === 'gemini' || item.type === 'gemini_content') &&
+          typeof item.text === 'string' &&
+          item.text.includes('retried response'),
+      );
+      expect(geminiIdx).toBeGreaterThan(thoughtIdx);
+    });
+
+    it('should commit the deferred thought as-is on ModelFallback', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before fallback' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then fallback');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before fallback'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const calls = mockAddItem.mock.calls;
+      expect(
+        calls.filter(([item]) => item.type === 'gemini_thought'),
+      ).toHaveLength(1);
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(calls[thoughtIdx][0].toolSummary).toBeUndefined();
+      // Thought-first ordering above the fallback notification.
+      const notificationIdx = calls.findIndex(
+        ([item]) => item.type === 'notification',
+      );
+      expect(notificationIdx).toBeGreaterThan(thoughtIdx);
+    });
+
+    it('should commit the deferred thought as-is when Content arrives mid deferral', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before content' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'direct answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then content');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before content'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const calls = mockAddItem.mock.calls;
+      expect(
+        calls.filter(([item]) => item.type === 'gemini_thought'),
+      ).toHaveLength(1);
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(calls[thoughtIdx][0].toolSummary).toBeUndefined();
+      // Thought stays above the answer it precedes.
+      const geminiIdx = calls.findIndex(
+        ([item]) =>
+          (item.type === 'gemini' || item.type === 'gemini_content') &&
+          typeof item.text === 'string' &&
+          item.text.includes('direct answer'),
+      );
+      expect(geminiIdx).toBeGreaterThan(thoughtIdx);
+    });
+
+    it('should commit the deferred thought as-is when loop detection prevents scheduling', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before loop halt' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield { type: ServerGeminiEventType.LoopDetected };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then loop halt');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before loop halt'),
+          }),
+          expect.any(Number),
+        );
+      });
+      // No batch ran: nothing scheduled, no group, no merge.
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+      expect(
+        mockAddItem.mock.calls.some(([item]) => item.type === 'tool_group'),
+      ).toBe(false);
+    });
+
+    it('should commit the deferred thought as-is when a repeated duplicate provider id drops the batch', async () => {
+      captureSchedulerOnComplete();
+      const client = new MockedGeminiClientClass(mockConfig);
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'tool-history',
+              getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+            ],
+          ]),
+        );
+
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-history',
+                providerCallId: 'tool-history',
+                name: 'shell',
+                args: { command: 'echo duplicate' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-deferral-dup',
+              },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: {
+                subject: '',
+                description: 'reasoning before duplicate drop',
+              },
+            };
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-history',
+                providerCallId: 'tool-history',
+                name: 'shell',
+                // Exact replay of the handled call trips the
+                // repeated-duplicate circuit breaker and drops the batch.
+                args: { command: 'echo duplicate' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-deferral-dup',
+              },
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: undefined, usageMetadata: undefined },
+            };
+          })(),
+        );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('run shell');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before duplicate drop'),
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+    });
+
+    it('should commit the deferred thought above the new prompt when a second query arrives mid deferral', async () => {
+      captureSchedulerOnComplete();
+      let releaseMainStream: (() => void) | undefined;
+      const holdMainStream = new Promise<void>((resolve) => {
+        releaseMainStream = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'planning before btw' },
+            };
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            // Keep the main stream open so the deferral stays active
+            // while the concurrent prompt is submitted.
+            await holdMainStream;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+      await waitForDeferralEstablished(result);
+
+      await act(async () => {
+        await result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+      });
+
+      const calls = mockAddItem.mock.calls;
+      const thoughtCommits = calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('planning before btw');
+      expect(thoughtCommits[0][0].toolSummary).toBeUndefined();
+      // The deferred thought belongs to the PREVIOUS turn: it must land
+      // between the two user items, not below the new prompt.
+      const userIdxs = calls
+        .map(([item], index) => (item.type === 'user' ? index : -1))
+        .filter((index) => index >= 0);
+      expect(userIdxs.length).toBeGreaterThanOrEqual(2);
+      const thoughtIdx = calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtIdx).toBeGreaterThan(userIdxs[0]);
+      expect(thoughtIdx).toBeLessThan(userIdxs[1]);
+      // The deferred pending item is cleared by the resolution.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'gemini_thought' }),
+          ]),
+        );
+      });
+
+      releaseMainStream?.();
+    });
+
+    it('should commit the finalized deferred thought exactly once when the stream throws', async () => {
+      captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before throw' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          throw new Error('stream blew up mid deferral');
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then throw');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before throw'),
+            finalized: true,
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(1);
+    });
+
+    // Merge-predicate clauses that tool-name/status variations never
+    // exercise: inline images, omitted-image overflow, memory ops.
+
+    it('should not merge a read batch whose result carries inline images', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning an image read' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo.png' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then image read');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      const imageToolCall = {
+        ...successfulReadToolCall(),
+        response: {
+          callId: 'tc1',
+          responseParts: [
+            { text: 'file contents' },
+            { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+          ],
+        },
+      } as unknown as TrackedCompletedToolCall;
+
+      await act(async () => {
+        await getOnComplete()?.([imageToolCall]);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning an image read'),
+        }),
+        expect.any(Number),
+      );
+      const thoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'tool_group' }),
+        expect.any(Number),
+      );
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+      // The images stay visible in the transcript via the group line.
+      expect(groupCommit?.[0].tools?.[0]?.images).toHaveLength(1);
+    });
+
+    it('should not merge a read batch with omitted-image overflow', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning an overflow read' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then overflow read');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // More than MAX_INLINE_IMAGES_PER_ITEM images: the overflow marker
+      // alone must block the merge.
+      const overflowToolCall = {
+        ...successfulReadToolCall(),
+        response: {
+          callId: 'tc1',
+          responseParts: Array.from({ length: 5 }, () => ({
+            inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+          })),
+        },
+      } as unknown as TrackedCompletedToolCall;
+
+      await act(async () => {
+        await getOnComplete()?.([overflowToolCall]);
+      });
+
+      const thoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit).toBeDefined();
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+      expect(groupCommit?.[0].tools?.[0]?.omittedImageCount).toBeGreaterThan(0);
+    });
+
+    it('should not merge a read batch operating on memory files', async () => {
+      // Local-memory mode so '<projectRoot>/.qwen/memory' is a managed
+      // auto-memory root (detectMemoryOp keys off it); unstubbed by
+      // afterEach.
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+      const getOnComplete = captureSchedulerOnComplete();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning a memory read' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { file_path: '/test/dir/.qwen/memory/notes.md' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then memory read');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      const memoryToolCall = {
+        ...successfulReadToolCall(),
+        request: {
+          callId: 'tc1',
+          name: 'read_file',
+          args: { file_path: '/test/dir/.qwen/memory/notes.md' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      } as unknown as TrackedCompletedToolCall;
+
+      await act(async () => {
+        await getOnComplete()?.([memoryToolCall]);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning a memory read'),
+        }),
+        expect.any(Number),
+      );
+      const thoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommit?.[0].toolSummary).toBeUndefined();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'tool_group' }),
+        expect.any(Number),
+      );
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+      // The 'Recalled/Wrote N memories' badge keeps its group line to
+      // render from.
+      expect(groupCommit?.[0].tools?.[0]?.isMemoryOp).toBe('read');
     });
 
     it('should commit thought to history on non-continuation Retry', async () => {

@@ -27,6 +27,19 @@ const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+// Controllable imperative handle for the mocked ScrollableList: lets VP
+// tests simulate the pre-toggle scroll anchor (getScrollIndex/getScrollState
+// report the values the real VirtualizedList committed before the re-render)
+// and observe MainContent's anchor restore (scrollToItem).
+const scrollableListRefMock = {
+  getScrollIndex: vi.fn<() => number>(() => 0),
+  getScrollState: vi.fn(() => ({
+    scrollTop: 0,
+    scrollHeight: 0,
+    innerHeight: 0,
+  })),
+  scrollToItem: vi.fn(),
+};
 // Records every <Box> render's props so tests can assert layout props
 // (e.g. the pending-region maxHeight backstop) without coupling to ink's
 // Yoga internals.
@@ -106,13 +119,18 @@ vi.mock('./shared/ScrollableList.js', async () => {
   const actual = await vi.importActual<
     typeof import('./shared/ScrollableList.js')
   >('./shared/ScrollableList.js');
-  return {
-    ...actual,
-    ScrollableList: (props: {
-      data: Array<{ id: number }>;
-      renderItem: (info: { item: { id: number }; index: number }) => unknown;
-    }) => {
+  const { forwardRef, useImperativeHandle } =
+    await vi.importActual<typeof import('react')>('react');
+  const MockScrollableList = forwardRef(
+    (
+      props: {
+        data: Array<{ id: number }>;
+        renderItem: (info: { item: { id: number }; index: number }) => unknown;
+      },
+      ref: React.Ref<unknown>,
+    ) => {
       scrollableListPropsSpy(props);
+      useImperativeHandle(ref, () => scrollableListRefMock, []);
       // Drive renderItem once per item so historyItemDisplayPropsSpy fires —
       // mirrors what the real VirtualizedList does for the visible window.
       return (
@@ -124,6 +142,10 @@ vi.mock('./shared/ScrollableList.js', async () => {
         </>
       );
     },
+  );
+  return {
+    ...actual,
+    ScrollableList: MockScrollableList,
   };
 });
 
@@ -681,29 +703,37 @@ describe('<MainContent />', () => {
       },
     ];
 
+    const thoughtExpandedTree = (
+      history: UIState['history'],
+      allExpanded: boolean,
+      uiStateOverrides: Partial<UIState> = {},
+    ) => (
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history, ...uiStateOverrides })}
+          >
+            <OverflowProvider>
+              <ThoughtExpandedProvider
+                value={{
+                  allExpanded,
+                  expandedHeadIds: new Set<number>(),
+                  toggle: () => {},
+                }}
+              >
+                <MainContent />
+              </ThoughtExpandedProvider>
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
+      </AppContext.Provider>
+    );
+
     const renderWithThoughtExpanded = (
       history: UIState['history'],
       allExpanded: boolean,
-    ) =>
-      render(
-        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider value={createUIState({ history })}>
-              <OverflowProvider>
-                <ThoughtExpandedProvider
-                  value={{
-                    allExpanded,
-                    expandedHeadIds: new Set<number>(),
-                    toggle: () => {},
-                  }}
-                >
-                  <MainContent />
-                </ThoughtExpandedProvider>
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </AppContext.Provider>,
-      );
+      uiStateOverrides: Partial<UIState> = {},
+    ) => render(thoughtExpandedTree(history, allExpanded, uiStateOverrides));
 
     it('forwards allExpanded=true from ThoughtExpandedContext as fullDetail', () => {
       historyItemDisplayPropsSpy.mockClear();
@@ -728,6 +758,132 @@ describe('<MainContent />', () => {
       const toolGroup = calls.find((c) => c?.item?.id === 1);
       expect(toolGroup).toBeDefined();
       expect(toolGroup.fullDetail).toBe(false);
+    });
+
+    it('hides merged tool groups outside full detail and re-admits them in full detail', () => {
+      // A tool_group folded into its thought line renders nothing outside
+      // full detail; Ctrl+O is the only place its tool results stay
+      // reachable, so the filter must re-run when fullDetail flips.
+      historyItemDisplayPropsSpy.mockClear();
+      const history = [
+        { id: 1, type: 'user' as const, text: 'read /foo' },
+        {
+          id: 2,
+          type: 'gemini_thought' as const,
+          text: 'thinking',
+          durationMs: 9000,
+          toolSummary: 'Read /foo',
+        },
+        {
+          id: 3,
+          type: 'tool_group' as const,
+          display: { mergedIntoThought: true },
+          tools: [
+            {
+              callId: 'merged-1',
+              name: 'read_file',
+              description: '/foo',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+
+      const { rerender } = renderWithThoughtExpanded(history, false);
+      const renderedIdsOff = historyItemDisplayPropsSpy.mock.calls.map(
+        (c) => c[0]?.item?.id,
+      );
+      expect(renderedIdsOff).toContain(2);
+      expect(renderedIdsOff).not.toContain(3);
+
+      historyItemDisplayPropsSpy.mockClear();
+      rerender(thoughtExpandedTree(history, true));
+      const renderedIdsOn = historyItemDisplayPropsSpy.mock.calls.map(
+        (c) => c[0]?.item?.id,
+      );
+      expect(renderedIdsOn).toContain(2);
+      expect(renderedIdsOn).toContain(3);
+    });
+
+    describe('fullDetail toggle scroll anchor (virtual viewport)', () => {
+      const anchorHistory = [
+        { id: 1, type: 'user' as const, text: 'read /foo' },
+        {
+          id: 2,
+          type: 'gemini_thought' as const,
+          text: 'thinking',
+          durationMs: 9000,
+          toolSummary: 'Read /foo',
+        },
+        {
+          id: 3,
+          type: 'tool_group' as const,
+          display: { mergedIntoThought: true },
+          tools: [
+            {
+              callId: 'merged-1',
+              name: 'read_file',
+              description: '/foo',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        { id: 4, type: 'gemini' as const, text: 'answer part 1' },
+        { id: 5, type: 'gemini_content' as const, text: 'answer part 2' },
+        { id: 6, type: 'gemini_content' as const, text: 'answer part 3' },
+      ];
+
+      it('restores the anchored item after the toggle inserts merged groups', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        // fullDetail off: the merged group is filtered out, so the list is
+        // [banner, 1, 2, 4, 5, 6] and item 5 sits at index 4.
+        const { rerender } = renderWithThoughtExpanded(anchorHistory, false, {
+          useTerminalBuffer: true,
+        });
+        // The user is scrolled up (not at the bottom), anchored on item 5.
+        // Once-consumed: read exactly once during the fullDetail-flip render.
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 10,
+          scrollHeight: 100,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollIndex.mockReturnValueOnce(4);
+
+        // Ctrl+O flips fullDetail on; the merged group re-enters the list
+        // ABOVE the anchor, shifting item 5 to index 5.
+        rerender(
+          thoughtExpandedTree(anchorHistory, true, { useTerminalBuffer: true }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledWith({
+          item: expect.objectContaining({ id: 5 }),
+        });
+      });
+
+      it('does not fight the bottom-stuck re-anchor on the toggle', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        const { rerender } = renderWithThoughtExpanded(anchorHistory, false, {
+          useTerminalBuffer: true,
+        });
+        // Anchored at the last item with the viewport at the bottom.
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 80,
+          scrollHeight: 100,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollIndex.mockReturnValueOnce(5);
+
+        rerender(
+          thoughtExpandedTree(anchorHistory, true, { useTerminalBuffer: true }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).not.toHaveBeenCalled();
+      });
     });
   });
 
