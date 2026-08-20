@@ -424,7 +424,7 @@ export async function startTelemetrySdk(
       ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
       : [],
     logRecordProcessors: logExporter
-      ? [new BatchLogRecordProcessor(logExporter)]
+      ? [new BatchLogRecordProcessor({ exporter: logExporter })]
       : logToSpanProcessor
         ? [logToSpanProcessor]
         : [],
