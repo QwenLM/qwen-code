@@ -1573,8 +1573,8 @@ describe('latestLedger — the split trust surface', () => {
     // parseable marker at a round at-or-above this account's blind the
     // trend for that round with a good count in hand.
     const own =
-      'x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[' +
-      '{"id":"R7-1","sev":"C","file":"a.ts","title":"certified"}' +
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-9","sev":"C","file":"a.ts","title":"certified"}' +
       '],"posted":6,"fresh":4,"floor":"c"} -->';
     // The foreign counts are a SUPERSET of the own ones in every field, so
     // a strip that silently failed would be indistinguishable from one that
@@ -1605,7 +1605,7 @@ describe('latestLedger — the split trust surface', () => {
     // be one. Gated on the list, any stranger's parseable marker blinded the
     // trend for that round with a good count in hand.
     const own =
-      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[],' +
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":8,"findings":[],' +
       '"posted":0,"fresh":0,"floor":"o"} -->';
     const foreign =
       'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
@@ -1623,6 +1623,34 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.posted).toBe(0);
     expect(found?.ledger.fresh).toBe(0);
     expect(found?.ledger.floor).toBe('o');
+  });
+
+  it('will not pair own counts with a round the own marker does not describe', () => {
+    // The side file pairs ONE round number with ONE set of counts. Spread
+    // onto a higher-round winner, own round-7 numbers are attributed to a
+    // round this account never ran — and the next body says "the previous
+    // round posted 0 (0 new)" in the same paragraph as a cluster citing
+    // round 8, which plainly did post.
+    const own =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[],' +
+      '"posted":0,"fresh":0,"floor":"o"} -->';
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":99,"fresh":97,"floor":"c"} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    expect(found?.ledger.round).toBe(8);
+    // The stranger's counts are stripped and the own ones are not adopted:
+    // absence already reads as "not recorded", which beats a wrong pairing.
+    expect(found?.ledger.posted).toBeUndefined();
+    expect(found?.ledger.fresh).toBeUndefined();
+    expect(found?.ledger.floor).toBeUndefined();
   });
 
   it('merges a foreign winner OVER the own findings — displacement is dead', () => {

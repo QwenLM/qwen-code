@@ -279,6 +279,46 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('does not make an EMPTY prior list sticky — nothing could be carried', () => {
+    // A stranger's empty LGTM marker adopted before this account's first
+    // finding recorded `foreign: true` over a list holding nothing. Keyed on
+    // the NEW list's length, the flag then re-fired forever over a provably
+    // all-own work list — and the cost is mechanical as well as prose: the
+    // cluster sort drops its depth key over a list with zero fabrication
+    // risk.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 1, findings: [] },
+          commitId: null,
+          reviewId: 10,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(true);
+      // This account's own round 2, with findings of its own.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 2 },
+          commitId: null,
+          reviewId: 20,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).foreign).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a recovery that THREW strips the age reference but keeps round and sha', () => {
     // A transient failure must not reset the id space or lose the anchor;
     // it must also not keep an age reference this run could not re-vouch —

@@ -984,10 +984,20 @@ export function recoverLedger(
     // — lost its true-zero baseline to any stranger's parseable marker, and
     // zero survives the whole persistence chain precisely so it can be one.
     // Derived from the shared list, not re-enumerated — see `pickVolume`.
-    ledger = {
-      ...ledger,
-      ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
-    };
+    // ...but ONLY when the own marker describes the SAME round the winner
+    // does. The side file pairs one round number with one set of counts, so
+    // spreading round M's counts onto a round-N winner attributes own
+    // numbers to a round this account never ran — and the next body says
+    // "the previous round posted 0 (0 new)" in the same paragraph as a
+    // cluster citing round N, which plainly did post. A round the counts do
+    // not describe is worse than no counts: absence already reads as "not
+    // recorded".
+    if (bestOwn.ledger.round === ledger.round) {
+      ledger = {
+        ...ledger,
+        ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
+      };
+    }
   }
   if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
     mergedOverOwn = true;
@@ -1257,9 +1267,19 @@ export function persistRecoveredLedger(
             //   That over-discloses on a list whose foreign entries are gone
             //   but whose own entries are not; over-disclosing a caveat is
             //   the safe direction.
+            // Keyed on the PREVIOUS list — the one that could carry an id
+            // forward — not on the new one. An empty prior list can carry
+            // nothing, so re-firing the flag off the new list's length
+            // stamped a provably all-own work list foreign forever: one
+            // stranger's empty LGTM marker adopted before this account's
+            // first finding was enough, and the cost is mechanical as well
+            // as prose — `trustDepth` drops the depth key over a list with
+            // zero fabrication risk.
             foreign:
               (identityKnown && recovered.foreign) ||
               (existing?.['foreign'] === true &&
+                Array.isArray(existing['findings']) &&
+                (existing['findings'] as unknown[]).length > 0 &&
                 recovered.ledger.findings.length > 0),
             // Whether that foreign winner was MERGED over this account's own
             // findings. `renderLedgerSection` already draws this line for the

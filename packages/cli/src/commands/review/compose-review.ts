@@ -72,6 +72,7 @@ import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
+  LEDGER_MAX_ID,
   isLedgerFinding,
   isStandInName,
   normalizeLedgerFinding,
@@ -449,8 +450,20 @@ export function criticalFloorKind(
   // module had to guess at is the direction that loses work; the fail-open
   // there is pre-existing and stays.
   const raw = normalizeSeverityFloor(severityFloor);
+  // Only genuine ABSENCE folds. A present-but-unrecognisable value is a
+  // state this module cannot read, and folding it made the body contradict
+  // itself: the volume advice said the round "already resolves to a critical
+  // posting floor" while the deferral-licence clause in the same body said
+  // the floor carried no recognisable value and the enforcement backstop —
+  // strict on purpose — moved nothing. The wrong stamp then became the next
+  // round's comparison baseline.
+  const absent = severityFloor === undefined || severityFloor === null;
   const floor =
-    raw === 'critical' || raw === 'suggestion' || raw === 'auto' ? raw : 'auto';
+    raw === 'critical' || raw === 'suggestion' || raw === 'auto'
+      ? raw
+      : absent
+        ? 'auto'
+        : undefined;
   return floorResolvesCritical(floor, contextUnavailable, prevRound);
 }
 
@@ -4836,10 +4849,26 @@ export function buildLedger(
   const taken = new Set<string>();
   let next = 0;
   /** Is this claimed id one the previous round actually recorded? */
-  const isCarry = (claimed: string): boolean =>
-    carriedWorkList === undefined ||
-    !carriedWorkList.complete ||
-    carriedWorkList.ids.has(claimed);
+  const isCarry = (claimed: string): boolean => {
+    // The admission bounds come first, and continuity does not override
+    // them. An id past `LEDGER_MAX_ID`, at round 0, or claiming a round
+    // ahead of this one could never have been in any list this pipeline
+    // wrote — so keeping it is not continuity, it is emitting an entry the
+    // serializer's own filter then refuses WHOLE: a posted finding exits the
+    // work list owing no ruling, the round is mislabelled budget-truncated,
+    // and the anchor is withheld. Re-minting costs the entry its cross-round
+    // id and nothing else — the same trade the integer-line guard makes.
+    if (claimed.length > LEDGER_MAX_ID) return false;
+    const minted = Number(claimed.slice(1).split('-')[0]);
+    if (!Number.isSafeInteger(minted) || minted < 1 || minted > round) {
+      return false;
+    }
+    return (
+      carriedWorkList === undefined ||
+      !carriedWorkList.complete ||
+      carriedWorkList.ids.has(claimed)
+    );
+  };
   /** A carried id if it is free, else the next unused id of THIS round. */
   const idFor = (claimed: string | undefined): string => {
     const carried =

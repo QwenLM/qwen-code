@@ -9763,6 +9763,60 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.findings.map((x) => x.id)).toEqual(['R2-1']);
   });
 
+  it('re-mints a claimed id the serializer would refuse, keeping the finding', () => {
+    // Continuity keeps an id a shortened list may have shed — it cannot keep
+    // one no list this pipeline wrote could have held. Kept, the serializer
+    // refuses the WHOLE entry: a posted finding exits the work list owing no
+    // ruling, the round is mislabelled budget-truncated, and the anchor goes.
+    for (const claimed of ['R7-1', 'R0-1', `R2-${'9'.repeat(24)}`]) {
+      const l = buildLedger(
+        5,
+        [{ path: 'a.ts', line: 1, body: `**[Critical]** ${claimed}: boom` }],
+        [],
+      );
+      expect(l.findings.map((x) => x.id)).toEqual(['R5-1']);
+      const parsed = parseLedger(
+        serializeLedger({ ...l, sha: 'deadbeef00112233' }),
+      )!;
+      expect(parsed.findings).toHaveLength(1);
+      expect(parsed.dropped).toBeUndefined();
+      expect(parsed.sha).toBe('deadbeef00112233');
+    }
+    // A well-formed id from an earlier round is still kept when the list is
+    // unknown — that is the continuity the bounds must not override.
+    const kept = buildLedger(
+      5,
+      [{ path: 'a.ts', line: 1, body: '**[Critical]** R2-1: still open' }],
+      [],
+    );
+    expect(kept.findings.map((x) => x.id)).toEqual(['R2-1']);
+  });
+
+  it('will not claim a floor it could not read', () => {
+    // A present-but-unrecognisable value is a state this module cannot read.
+    // Folded to `auto`, the body said the round "already resolves to a
+    // critical posting floor" while its own deferral-licence clause said the
+    // floor carried no recognisable value and the enforcement backstop moved
+    // nothing.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      // The point of the finding: this arrives from model-written JSON, so
+      // the runtime can see a value the type says is impossible.
+      severityFloor: 'crit' as unknown as ComposeReviewInput['severityFloor'],
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** nit' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('already resolve to a critical posting floor');
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body

@@ -775,9 +775,10 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
 
   it('qualifies each reading by the evidence that reading rests on', () => {
     // Truncation qualifies BOTH readings: the work list IS the carried-id
-    // set that defines freshness, so a re-post of a shed entry reads as
-    // first-time work and can manufacture the very trend it goes
-    // undisclosed beside. Provenance is broader still: the previous round's
+    // set that defines freshness, and over a shortened one a genuinely new
+    // finding written under an earlier round's id cannot be rescued from
+    // reading as a re-post — an UNDERcount, which is the direction the
+    // gating actually produces. Provenance is broader still: the previous round's
     // counts come from the same marker, and the volume reading cites them
     // as this loop's own baseline — the branch an attacker-supplied count
     // controls.
@@ -791,9 +792,9 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(volumeOnly.en).toContain(
       "the previous round's work list was truncated to fit the marker",
     );
-    expect(volumeOnly.en).toContain('may be overstated');
+    expect(volumeOnly.en).toContain('may be understated');
     expect(volumeOnly.zh).toContain('上一轮的工作清单为放进标记而被截断');
-    expect(volumeOnly.zh).toContain('首次提出的条数可能高估');
+    expect(volumeOnly.zh).toContain('首次提出的条数可能少计');
     expect(volumeOnly.en).toContain('those counts');
     expect(volumeOnly.en).toContain('a marker this account did not post');
     expect(volumeOnly.zh).toContain('该计数');
@@ -812,7 +813,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       foreignEvidence: true,
       mergedEvidence: false,
     });
-    expect(noCitations.en).toContain('may be overstated');
+    expect(noCitations.en).toContain('may be understated');
     expect(noCitations.en).not.toContain('this account did not post');
 
     const nothingAtAll = renderConvergenceDiagnosis({

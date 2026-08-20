@@ -541,24 +541,26 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   const caveatsEn: string[] = [];
   const caveatsZh: string[] = [];
   // Truncation qualifies BOTH readings, not only the recurrence one: the
-  // work list IS the carried-id set that defines freshness, so a re-post of
-  // a shed entry takes the stray-id branch and counts as first-time work.
-  // The gate that named it a work-list-only concern was mechanically false.
+  // work list IS the carried-id set that defines freshness. The direction it
+  // moves the count is UNDER, not over — the stray-id rescue is gated on the
+  // list being whole, so over a shortened one a genuinely new finding the
+  // model prefixed with an earlier round's id cannot be rescued and is read
+  // as a re-post. (A re-post of a SHED entry is read as carried too, which
+  // is correct: it is one.)
   if (d.truncatedEvidence) {
-    // The overcount clause is unconditional, because the facts clause cites
-    // this round's fresh count unconditionally — and a shortened carried
-    // list inflates exactly that number through the stray-id branch. Only
-    // the undercount half depends on rounds being named.
-    const overstated = {
-      en: `re-posts of findings shed from that list read as first-time reports, so the new-finding count may be overstated`,
-      zh: `被舍弃条目的重发会被读作首次提出，首次提出的条数可能高估`,
+    // The count clause is unconditional, because the facts clause cites this
+    // round's fresh count unconditionally. Only the rounds half depends on
+    // rounds being named.
+    const understated = {
+      en: `a new finding written under an earlier round's id cannot be told from a re-post over a partial list, so the new-finding count may be understated`,
+      zh: `在不完整的清单上，冠以早先轮次 id 的新发现无法与重发区分，首次提出的条数可能少计`,
     };
     const what = citesWorkList
       ? {
-          en: `the rounds named above may be an undercount, and ${overstated.en}`,
-          zh: `上述轮次可能少计；${overstated.zh}`,
+          en: `the rounds named above may be an undercount, and ${understated.en}`,
+          zh: `上述轮次可能少计；${understated.zh}`,
         }
-      : overstated;
+      : understated;
     caveatsEn.push(
       `the previous round's work list was truncated to fit the marker, so ${what.en}`,
     );
