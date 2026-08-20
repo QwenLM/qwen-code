@@ -27,6 +27,9 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
+
+export { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
 
 export interface CreateSubSessionParams {
   prompt: string;
@@ -39,12 +42,6 @@ const DAEMON_ONLY_MESSAGE =
   'create_sub_session is only available when running under `qwen serve` ' +
   '(daemon mode). There is no session bridge in this environment, so a ' +
   'sub-session cannot be spawned.';
-
-/** Ceiling on the delegated prompt. Mirrors the scheduled-task REST route's
- * `MAX_PROMPT_LENGTH`: both hand a model-authored prompt to a fresh session, so
- * they cap it the same way. Rejected here (a clear tool error the model can act
- * on) as well as at the bridge boundary, which cannot trust this side. */
-export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
 
 /** Sentinel for "the caller's turn was cancelled while the spawn was in
  * flight". A symbol, so it can never collide with a spawner result. */

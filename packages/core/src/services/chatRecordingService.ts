@@ -416,11 +416,11 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
-  mediaReferences?: UserPromptMediaReference[];
+  attachmentReferences?: UserPromptAttachmentReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell';
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
@@ -438,13 +438,13 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
-  /** Daemon-owned media references used to restore prompt previews. */
-  mediaReferences?: UserPromptMediaReference[];
+  /** Daemon-owned attachment references used to restore prompt previews. */
+  attachmentReferences?: UserPromptAttachmentReference[];
 }
 
-export interface UserPromptMediaReference {
-  type: 'image' | 'audio';
-  mediaId: string;
+export interface UserPromptAttachmentReference {
+  type: 'image' | 'resource';
+  attachmentId: string;
   mimeType: string;
   size: number;
 }
@@ -478,6 +478,15 @@ export interface AgentRetryRecordPayload {
 /**
  * Stored payload for chat compression checkpoints. This allows us to rebuild the
  * effective chat history on resume while keeping the original UI-visible history.
+ *
+ * NOTE: the payload carries `ChatCompressionInfo`, which has no
+ * `compressionKind` — the 'summarize' vs 'fast' distinction (see
+ * `CompressionProps.compressionKind` in cli's ui/types.ts) exists only on
+ * ephemeral UI items today. If resume ever reconstructs compression markers
+ * from this record, it must re-derive the kind; rebuilding every marker
+ * kind-less and falling back to 'summarize' would misclassify fast markers
+ * as truncation boundaries and re-introduce the silent pre-marker history
+ * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
@@ -1788,7 +1797,7 @@ export class ChatRecordingService {
     message: PartListUnion,
     displayText: string,
     goalContext?: GoalTurnPermit,
-    mediaReferences?: UserPromptMediaReference[],
+    attachmentReferences?: UserPromptAttachmentReference[],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1798,7 +1807,7 @@ export class ChatRecordingService {
         message: createUserContent(message),
         systemPayload: {
           displayText,
-          ...(mediaReferences ? { mediaReferences } : {}),
+          ...(attachmentReferences ? { attachmentReferences } : {}),
         },
       };
       this.appendRecord(record);

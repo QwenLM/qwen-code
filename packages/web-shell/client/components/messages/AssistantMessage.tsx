@@ -237,13 +237,17 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const sawActiveRef = useRef(thinkingActive);
   const [now, setNow] = useState(() => Date.now());
   const [finishedAt, setFinishedAt] = useState<number | null>(null);
+  // `content` grows on every streamed chunk; keying on the boolean instead of
+  // the string keeps the timer effect from tearing down and re-creating the
+  // interval per chunk, while still starting once content first appears.
+  const hasContent = Boolean(content);
 
   useEffect(() => {
-    if (!content || !thinkingActive) return;
+    if (!hasContent || !thinkingActive) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [content, thinkingActive]);
+  }, [hasContent, thinkingActive]);
 
   useEffect(() => {
     if (!content) return;
