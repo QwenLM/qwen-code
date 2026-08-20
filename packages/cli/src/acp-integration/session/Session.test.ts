@@ -2173,6 +2173,94 @@ describe('Session', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('fails closed on a mixed marked/unmarked retry strip and records a fresh turn', async () => {
+    // A failed UserQuery leaves a marked orphan; an unrelated unmarked
+    // orphan stacks on top. The marked identity must NOT be donated to the
+    // different resent content.
+    const markedOrphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(markedOrphan, 'original-prompt');
+    const unmarkedOrphan: Content = {
+      role: 'user',
+      parts: [{ text: 'notification text' }],
+    };
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([markedOrphan, unmarkedOrphan]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'notification text' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'test-session-id########1' },
+    );
+  });
+
+  it('records and marks an orphan-less retry with the fresh promptId', async () => {
+    // The original send failed before any user content was pushed, so the
+    // strip finds nothing: the resend must not commit unmarked.
+    mockChat.stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'token-limit retry' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'test-session-id########1' },
+    );
+  });
+
+  it('fails closed when a retry strips multiple marked orphans', async () => {
+    const orphanA: Content = {
+      role: 'user',
+      parts: [{ text: 'first failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanA, 'original-a');
+    const orphanB: Content = {
+      role: 'user',
+      parts: [{ text: 'second failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanB, 'original-b');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphanA, orphanB]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'second failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'test-session-id########1' },
+    );
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()
@@ -3272,6 +3360,57 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(session.getRewindableUserTurnCount()).toBe(1);
+    });
+
+    it('keeps identity-less legacy turns rewindable after a marked prompt lands', () => {
+      // Resuming a session recorded before stable identities existed and
+      // sending one new prompt must not collapse the rewind target space to
+      // just the new turn: the older unmarked turns keep positional rewind.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'legacy one' }] },
+        { role: 'model', parts: [{ text: 'legacy reply one' }] },
+        { role: 'user', parts: [{ text: 'legacy two' }] },
+        { role: 'model', parts: [{ text: 'legacy reply two' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+      ];
+      core.markApiHistoryPrompt(history[4]!, 'prompt-new');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+        'prompt-new',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'snap-0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'snap-1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-new',
+          timestamp: new Date('2026-06-13T00:02:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(3);
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+        { promptId: 'snap-1', turnIndex: 1 },
+        { promptId: 'prompt-new', turnIndex: 2 },
+      ]);
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'snap-0',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
     });
 
     it('uses stable identities instead of classifying user-shaped entries', () => {

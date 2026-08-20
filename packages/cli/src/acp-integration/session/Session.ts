@@ -3637,13 +3637,10 @@ export class Session implements SessionContext {
     const recordingPromptIds = this.config
       .getChatRecordingService()
       ?.getRewindableTurnPromptIds();
-    if (apiPromptIndexes.length === 0) {
-      if (recordingPromptIds?.some(Boolean)) {
-        return { mode: 'identified', turns: [] };
-      }
-      const startIndex = getStartupContextLength(apiHistory, {
-        includeCompressed: true,
-      });
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
+    const positionalTurns = (): RewindTurnCoordinates[] => {
       const turns: RewindTurnCoordinates[] = [];
       for (let index = startIndex; index < apiHistory.length; index++) {
         if (!this.#isUserTextContent(apiHistory[index]!)) continue;
@@ -3653,7 +3650,39 @@ export class Session implements SessionContext {
           recordingTurnIndex: turns.length,
         });
       }
-      return { mode: 'legacy', turns };
+      return turns;
+    };
+    if (apiPromptIndexes.length === 0) {
+      if (recordingPromptIds?.some(Boolean)) {
+        return { mode: 'identified', turns: [] };
+      }
+      return { mode: 'legacy', turns: positionalTurns() };
+    }
+    // Partial identity coverage: a session resumed from before stable
+    // identities existed gains one marked entry as soon as a new prompt
+    // lands, and entering identified mode then would silently drop every
+    // older (unmarked) turn from the rewind target space. While any
+    // identity-less user turn exists, keep the positional enumeration —
+    // the same fallback the TUI twin computeApiTruncationIndex retains.
+    // Microcompaction media-clear placeholders are the exception: they are
+    // structural replacements inside an identified session, not legacy
+    // turns (mirrors MICROCOMPACT_CLEARED_IMAGE_PREFIX in
+    // packages/core/src/services/microcompaction/microcompact.ts).
+    for (let index = startIndex; index < apiHistory.length; index++) {
+      const content = apiHistory[index]!;
+      if (!this.#isUserTextContent(content)) continue;
+      if (getApiHistoryPromptId(content)) continue;
+      if (
+        content.parts?.some(
+          (part) =>
+            'text' in part &&
+            typeof part.text === 'string' &&
+            part.text.startsWith('[Old inline media cleared:'),
+        )
+      ) {
+        continue;
+      }
+      return { mode: 'legacy', turns: positionalTurns() };
     }
 
     const apiTurns = apiPromptIndexes.map((apiTruncateIndex) => ({
@@ -4714,7 +4743,11 @@ export class Session implements SessionContext {
                     ?.map(getApiHistoryPromptId)
                     .filter((value): value is string => value !== undefined) ??
                   [];
+                // Fail closed unless EXACTLY ONE entry was stripped and it
+                // is marked (see the retry guard below for the mixed-strip
+                // identity-theft scenario).
                 resubmittedPromptIdentity =
+                  strippedOrphanEntries?.length === 1 &&
                   promptIdentities.length === 1
                     ? promptIdentities[0]
                     : undefined;
@@ -4739,8 +4772,50 @@ export class Session implements SessionContext {
               const promptIdentities = strippedRetryEntries
                 .map(getApiHistoryPromptId)
                 .filter((value): value is string => value !== undefined);
+              // Fail closed unless EXACTLY ONE entry was stripped and it is
+              // marked: a mixed strip ([marked, unmarked]) must not donate
+              // the marked identity to different resent content.
               resubmittedPromptIdentity =
-                promptIdentities.length === 1 ? promptIdentities[0] : undefined;
+                strippedRetryEntries.length === 1 &&
+                promptIdentities.length === 1
+                  ? promptIdentities[0]
+                  : undefined;
+              if (resubmittedPromptIdentity === undefined) {
+                // No adoptable identity (orphan-less or multi-orphan strip):
+                // the resend cannot reuse the original attempt's record.
+                // Record it as a fresh turn so it commits to API history
+                // marked (below) and stays in the rewind projection.
+                const mediaReferences = readDaemonMediaReferences(
+                  promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+                );
+                const recorder = this.config.getChatRecordingService();
+                if (promptDisplayText !== undefined || mediaReferences) {
+                  recorder?.recordUserMessage(
+                    promptText,
+                    goalTurn?.permit,
+                    {
+                      displayText: promptDisplayText ?? promptText,
+                      hookContext: '',
+                      ...(mediaReferences ? { mediaReferences } : {}),
+                    },
+                    promptId,
+                  );
+                } else if (goalTurn) {
+                  recorder?.recordUserMessage(
+                    promptText,
+                    goalTurn.permit,
+                    undefined,
+                    promptId,
+                  );
+                } else {
+                  recorder?.recordUserMessage(
+                    promptText,
+                    undefined,
+                    undefined,
+                    promptId,
+                  );
+                }
+              }
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -5091,7 +5166,14 @@ export class Session implements SessionContext {
             if (goalTurn?.origin !== 'runtime') {
               markApiHistoryPrompt(
                 nextMessage,
-                isContinue || isRetry ? resubmittedPromptIdentity : promptId,
+                isContinue
+                  ? resubmittedPromptIdentity
+                  : isRetry
+                    ? // A retry with no adoptable stripped identity was
+                      // recorded fresh above — mark it with the new promptId
+                      // so it stays in the identified rewind projection.
+                      (resubmittedPromptIdentity ?? promptId)
+                    : promptId,
               );
             }
             let turnCount = 0;

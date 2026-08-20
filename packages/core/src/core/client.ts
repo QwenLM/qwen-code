@@ -2578,7 +2578,11 @@ export class GeminiClient {
       const strippedPromptIdentities = strippedRetryEntries
         .map(getApiHistoryPromptId)
         .filter((identity): identity is string => identity !== undefined);
+      // Fail closed unless EXACTLY ONE entry was stripped and it is marked:
+      // a mixed strip ([marked, unmarked]) must not donate the marked
+      // identity to different resent content.
       retryPromptIdentity =
+        strippedRetryEntries.length === 1 &&
         strippedPromptIdentities.length === 1
           ? strippedPromptIdentities[0]
           : undefined;

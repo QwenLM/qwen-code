@@ -365,7 +365,14 @@ function convertToHistoryItems(
         pendingAtCommands.push(payload);
       }
       if (record.subtype === 'rewind') {
-        items.push({ type: 'info', text: 'Conversation rewound.' });
+        // A fully rolled-back rewind truncated nothing — the divider would
+        // claim the conversation was cut while every turn is intact.
+        const truncatedCount = (
+          record.systemPayload as { truncatedCount?: number } | undefined
+        )?.truncatedCount;
+        if (truncatedCount !== 0) {
+          items.push({ type: 'info', text: 'Conversation rewound.' });
+        }
       }
       continue;
     }
