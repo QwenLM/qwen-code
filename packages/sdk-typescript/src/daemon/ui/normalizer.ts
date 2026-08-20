@@ -63,7 +63,7 @@ const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
-const MEDIA_UNAVAILABLE_TEXT = '[Attached media is no longer available]';
+const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -589,9 +589,9 @@ function normalizeMidTurnMessageInjected(
       : [];
   const items = data['items'];
   // An injected message is renderable when its text is non-empty OR its
-  // content carries an image or a non-empty text block. The drain's
+  // content carries an image, resource, or non-empty text block. The drain's
   // degraded-media path publishes `messages: ['']` whose items hold only the
-  // '[Attached media is no longer available]' text block — dropping that
+  // '[Attachment is no longer available]' text block — dropping that
   // frame as malformed would erase the echo of the user's message.
   const hasRenderableItemContent =
     Array.isArray(items) &&
@@ -603,6 +603,7 @@ function normalizeMidTurnMessageInjected(
           (block) =>
             isRecord(block) &&
             (block['type'] === 'image' ||
+              block['type'] === 'resource' ||
               (block['type'] === 'text' &&
                 typeof block['text'] === 'string' &&
                 (block['text'] as string).length > 0)),
@@ -738,17 +739,17 @@ function parseTimestamp(value: unknown): number | undefined {
 }
 
 /**
- * True for the session-media reference shape (`mediaId` instead of inline
+ * True for the session-attachment reference shape (`attachmentId` instead of inline
  * data/url/source) that replay producers persist for uploaded attachments.
  * `extractContentPart` cannot render it; see the `user_message_chunk` case
  * below for how it degrades instead of vanishing.
  */
-function isMediaReferenceContent(value: unknown): boolean {
+function isAttachmentReferenceContent(value: unknown): boolean {
   return (
     isRecord(value) &&
-    value['type'] === 'image' &&
-    typeof value['mediaId'] === 'string' &&
-    (value['mediaId'] as string).length > 0 &&
+    (value['type'] === 'image' || value['type'] === 'resource') &&
+    typeof value['attachmentId'] === 'string' &&
+    (value['attachmentId'] as string).length > 0 &&
     value['data'] === undefined &&
     value['url'] === undefined &&
     value['source'] === undefined
@@ -830,12 +831,28 @@ function normalizeSessionUpdate(
       // Live consumers hydrate reference blocks before normalization; a path
       // that reaches this point with one (offline record projection, failed
       // hydrate) keeps the user's message visible via the placeholder.
-      if (isMediaReferenceContent(content)) {
+      if (isAttachmentReferenceContent(content)) {
+        if ((content as Record<string, unknown>)['type'] === 'resource') {
+          const attachmentId = (content as Record<string, unknown>)[
+            'attachmentId'
+          ] as string;
+          const mimeType = (content as Record<string, unknown>)['mimeType'];
+          return [
+            {
+              ...base,
+              type: 'user.file.delta',
+              name: attachmentId,
+              attachmentId,
+              mimeType: typeof mimeType === 'string' ? mimeType : '',
+              ...(meta ? { meta } : {}),
+            },
+          ];
+        }
         return [
           {
             ...base,
             type: 'user.text.delta',
-            text: MEDIA_UNAVAILABLE_TEXT,
+            text: ATTACHMENT_UNAVAILABLE_TEXT,
             ...(meta ? { meta } : {}),
           },
         ];

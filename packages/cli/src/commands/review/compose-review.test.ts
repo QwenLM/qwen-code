@@ -28,7 +28,11 @@ import {
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
-import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
+import {
+  LEDGER_MAX_ROUND,
+  LEDGER_MAX_VOLUME,
+  parseLedger,
+} from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
@@ -478,6 +482,17 @@ function blindPlan(): string {
   transcript('a2', blindPrompt(2), { toolCalls: 0 });
   return plan();
 }
+
+function findingsFile(content: string): string {
+  const f = join(dir, 'qwen-review-findings.md');
+  writeFileSync(f, content);
+  return f;
+}
+
+const TAGGED =
+  '- **File:** src/pay.ts:42\n' +
+  '- **Issue:** off-by-one in the retry cap\n' +
+  '- **Severity:** Critical — [unverified]\n';
 
 const FOOTER = `_— ${MODEL} via Qwen Code /review (vunknown)_`;
 
@@ -1003,7 +1018,7 @@ describe('repository context proof boundary', () => {
   });
 
   it('caps the unverified-dimension disclosure at five entries', () => {
-    // The schema admits 128 dimensions x 512 chars; joined into one
+    // The schema admits 256 dimensions x 512 chars; joined into one
     // disclosure that outruns the review body's own size budget — the same
     // cap discipline testPlanGate applies to its notes.
     const planPath = join(dir, 'capped-plan.json');
@@ -1876,6 +1891,28 @@ describe('composeReview — presubmit downgrades', () => {
     );
   });
 
+  it('keeps the presubmit downgrade reasons when a cap softens the Approve first', () => {
+    // The APPROVE→COMMENT cap runs before the presubmit arms, so a capped
+    // zero-finding Approve reached arm 1 as COMMENT — its `event === 'APPROVE'`
+    // gate failed, arm 2's REQUEST_CHANGES gate failed too, and the presubmit
+    // reasons vanished from the body and the verdict line while the identical
+    // uncapped run rendered both. The gate is derived from `baseEvent` — the
+    // row before every cap — exactly like its RC sibling.
+    const r = composeReview(
+      base({
+        contextUnavailable: true,
+        presubmit: { downgradeApprove: true, downgradeReasons: ['self-PR'] },
+      }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('context-unavailable');
+    expect(r.downgraded).toBe(true);
+    expect(r.downgradedFrom).toBe('Approve');
+    expect(r.body).toContain('⚠️ Downgraded from Approve to Comment: self-PR.');
+    expect(verdictLine(r)).toContain('a presubmit check failed');
+  });
+
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
     const r = composeReview(
       base({
@@ -2626,6 +2663,78 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     });
     expect(written.floorEnforced).toEqual([]);
     expect(stderrHasOverride).toBe(false);
+  });
+
+  it('states the round volume on stderr, with and without a predecessor', async () => {
+    // The line is the operator's only view of this round's contribution to
+    // the PR's comment volume; both branches of its ternary are
+    // user-visible, and neither reddened anything before this test.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-volume-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** one' },
+        { path: 'b.ts', line: 4, body: '**[Suggestion]** two' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    try {
+      // No side file: no predecessor, so the line carries no parenthetical.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain('VOLUME: 2 inline comment(s) this round');
+
+      // With a recorded predecessor the previous round rides along.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({ v: 1, round: 4, findings: [], posted: 9 }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain(
+        'VOLUME: 2 inline comment(s) this round (previous round: 9)',
+      );
+
+      // A CONVERGED predecessor: zero is a recorded value, not an absence.
+      // A falsy check here would drop the one observation a convergence
+      // trend most wants — the round that posted nothing — from the
+      // operator's only view of it.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({ v: 1, round: 5, findings: [], posted: 0 }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr()).toContain(
+        'VOLUME: 2 inline comment(s) this round (previous round: 0)',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('honours review.attribution=false through the handler (wiring)', async () => {
@@ -3871,6 +3980,32 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(verdictLine(r)).toContain('its blockers were never verified');
   });
 
+  it('keeps the presubmit downgrade reasons when the findings-tag cap also holds', () => {
+    // The tag cap softens the event while setting NEITHER legacy flag, so the
+    // recovery arm's enumeration missed it: the presubmit reasons vanished
+    // from the body — the silent loss the arm's own comment forbids. Verdict
+    // keeps the tag sentence; the body's downgrade clause carries the reasons.
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      findingsPath: findingsFile(TAGGED),
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['self-PR'],
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      'Downgraded from Request changes to Comment: self-PR',
+    );
+    expect(verdictLine(r)).toContain(
+      'findings were still unverified when the loop ended',
+    );
+  });
+
   it('verify on record with the reverse audit absent still blocks — softening gates on verify alone', () => {
     const r = composeReview({
       criticalsInline: 1,
@@ -3894,6 +4029,31 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
+  it('keeps the body Criticals when the FINDINGS-TAG cap softens the event', () => {
+    // The third softening path, and the one the enumerated condition missed:
+    // coverage is proven and the verifier ran, so `criticalsUnverified` is
+    // false and no presubmit downgrade fired — the cap comes from the
+    // findings file still carrying `— [unverified]` at compose time. The
+    // posted body was 239 characters of opener and disclosure with the
+    // blocker — its only copy — nowhere in it.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+      findingsPath: findingsFile(TAGGED),
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    // Neither flag the old condition listed is set on this path.
+    expect(r.downgradedFrom).toBeNull();
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -4069,6 +4229,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      postedInline: 0,
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
@@ -7229,9 +7390,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // that qualify the verdict before it spent a single blocker.
     //
     // The cap here is the absent verifier, which still POSTS the blockers
-    // (clause 7 rides on `criticalsUnverified`); the findings-file tag route
-    // caps without that flag, so its body carries no blocker and cannot
-    // reach the cut at all.
+    // (clause 7 rides on the softened RC→COMMENT transition); the
+    // findings-file tag route softens the same way, so its body carries the
+    // blocker too and can reach the cut.
     const r = composeReview({
       planPath: coveredPlan(['reverse-audit']),
       env: ENV,
@@ -7488,16 +7649,6 @@ describe('composeReview — the findings file tag check', () => {
   // round's findings digest — so compose-review reads the cumulative
   // findings file itself and caps on any surviving tag.
 
-  function findingsFile(content: string): string {
-    const f = join(dir, 'qwen-review-findings.md');
-    writeFileSync(f, content);
-    return f;
-  }
-
-  const TAGGED =
-    '- **File:** src/pay.ts:42\n' +
-    '- **Issue:** off-by-one in the retry cap\n' +
-    '- **Severity:** Critical — [unverified]\n';
   const CLEAN =
     '- **File:** src/pay.ts:42\n' +
     '- **Issue:** off-by-one in the retry cap\n' +
@@ -8634,5 +8785,185 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.floorEnforced).toEqual([0]);
     expect(r.body).not.toContain('c.ts:2.5');
     expect(r.body).toContain('fractional line');
+  });
+});
+
+describe('convergence telemetry — volume, carried in the marker', () => {
+  // The fields decide nothing, so every test here is about one property:
+  // the number a round records is the number it actually posts, and it
+  // survives the trip to the next round intact. A trend built on a count
+  // that disagrees with the comment list is worse than no trend.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'telemetry-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (prev: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...prev }),
+    );
+  const drafts = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      path: `f${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** finding ${i}`,
+    }));
+
+  it('records the posting count in the marker and on the result', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 3,
+      draftedComments: drafts(3),
+    });
+    expect(r.postedInline).toBe(3);
+    expect(parseLedger(r.body)?.posted).toBe(3);
+  });
+
+  it('clamps the count at its origin, so every surface agrees', () => {
+    // The terminal line, the marker and the artifact must never disagree
+    // about one round's count. This is the defensive over-cap case: the
+    // reader is applied where the number is derived, not only where it is
+    // written, so no surface can see the raw value.
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: LEDGER_MAX_VOLUME + 5,
+      draftedComments: drafts(LEDGER_MAX_VOLUME + 5),
+    });
+    expect(r.postedInline).toBe(LEDGER_MAX_VOLUME);
+    expect(parseLedger(r.body)?.posted).toBe(LEDGER_MAX_VOLUME);
+  });
+
+  it('counts the POST-enforcement set — what submit actually sends', () => {
+    // The floor moves two of the three out of the posting set, so the
+    // recorded volume is one. Counting the drafts would record a number no
+    // comment list on the PR could corroborate.
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        ...drafts(2),
+      ],
+    });
+    expect(r.floorEnforced).toHaveLength(2);
+    expect(r.postedInline).toBe(1);
+    expect(parseLedger(r.body)?.posted).toBe(1);
+  });
+
+  it('carries the previous round forward, giving one marker a two-round window', () => {
+    sideFile({ round: 4, posted: 7 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts(2),
+    });
+    expect(r.prevPostedInline).toBe(7);
+    const l = parseLedger(r.body)!;
+    expect(l.round).toBe(5);
+    expect(l.posted).toBe(2);
+    expect(l.prevPosted).toBe(7);
+  });
+
+  it('records zero rather than dropping it — a converged round is the observation', () => {
+    sideFile({ round: 2, posted: 0 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [],
+    });
+    expect(r.postedInline).toBe(0);
+    expect(r.prevPostedInline).toBe(0);
+    const l = parseLedger(r.body)!;
+    expect(l.posted).toBe(0);
+    expect(l.prevPosted).toBe(0);
+  });
+
+  it('distinguishes "recorded nothing" from "posted nothing"', () => {
+    // Every round before the field shipped has no volume; reading that as
+    // zero would invent a trend point the predecessor never claimed.
+    sideFile({ round: 3 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: drafts(1),
+    });
+    expect(r.prevPostedInline).toBeUndefined();
+    expect(parseLedger(r.body)?.prevPosted).toBeUndefined();
+    expect(parseLedger(r.body)?.posted).toBe(1);
+  });
+
+  it('refuses a side-file volume that is not one, without losing the round', () => {
+    // The side file is a JSON pr-context wrote, not a marker the parser
+    // already normalised — a malformed volume costs the trend point and
+    // must not cost the posture's round.
+    for (const bad of [-1, 2.5, 'seven', null]) {
+      sideFile({ round: 6, posted: bad });
+      const r = composeReview({
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 0,
+        suggestionsInline: 1,
+        draftedComments: drafts(1),
+      });
+      expect(r.prevPostedInline).toBeUndefined();
+      expect(parseLedger(r.body)?.round).toBe(7);
+    }
+  });
+
+  it('will not pair a volume with a round that does not exist', () => {
+    // A side file carrying a volume but no usable round (partially written,
+    // hand-edited) must not attribute it to round 0: the round-1 marker
+    // this compose posts is permanent, and `prevPosted` on it would assert
+    // a volume for a round that never ran.
+    sideFile({ posted: 7 });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: drafts(1),
+    });
+    expect(r.prevPostedInline).toBeUndefined();
+    const l = parseLedger(r.body)!;
+    expect(l.round).toBe(1);
+    expect(l.prevPosted).toBeUndefined();
+    expect(l.posted).toBe(1);
+  });
+
+  it('keeps the volume on a round whose anchor is withheld', () => {
+    // The anchor pair falls on a fail-closed round; the volume does not.
+    // A trend that goes blank exactly when a PR starts capping would be
+    // blind on the rounds it exists to describe.
+    const r = composeReview({
+      planPath: plan({ fetchedSha: 'deadbeef00112233' }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts(2),
+      cannotTellCriticals: ['a.ts:1 — could not decide'],
+    });
+    const l = parseLedger(r.body)!;
+    expect(l.sha).toBeUndefined();
+    expect(l.posted).toBe(2);
   });
 });

@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -39,6 +40,7 @@ import {
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -216,23 +218,17 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
-// 256 matches the session media store's item cap, so a message can still
-// reference every stored item.
+// Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
 
-// SVG can carry scripts; this origin also hosts the daemon API and Web
-// Shell UI, and stored bytes are served back to browsers — raster formats
-// only. Compare the normalized media type: standards-conformant spelling
-// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
-// past an exact-string match.
+// SVG is allowed as an ordinary file resource but never as an inline image.
+// Compare the normalized media type so spelling variants cannot bypass the
+// image-block check.
 function isSvgMimeType(mimeType: string | undefined): boolean {
   return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
 }
 
-// Shared per-block validation for the prompt and mid-turn routes. SVG can
-// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
-// stored bytes are served back to browsers — raster formats only, matching
-// the upload route's policy.
+// Shared per-block validation for the prompt and mid-turn routes.
 type MediaBlockParseResult =
   | { valid: true; block: BridgePromptContentBlock }
   | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
@@ -244,32 +240,50 @@ function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
   const record = block as Record<string, unknown>;
   const type = record['type'];
   const data = record['data'];
-  const mediaId = record['mediaId'];
+  const attachmentId = record['attachmentId'];
   const mimeType = record['mimeType'];
   const size = record['size'];
   const inline = typeof data === 'string' && data.length > 0;
   const reference =
-    typeof mediaId === 'string' &&
-    mediaId.length > 0 &&
+    typeof attachmentId === 'string' &&
+    attachmentId.length > 0 &&
     typeof size === 'number' &&
     Number.isSafeInteger(size) &&
-    size > 0;
+    size >= 0 &&
+    (type !== 'image' || size > 0);
+  if (type === 'resource' && !reference) {
+    const resource = record['resource'];
+    if (typeof resource !== 'object' || resource === null) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    const value = resource as Record<string, unknown>;
+    const hasText = typeof value['text'] === 'string';
+    const hasBlob = typeof value['blob'] === 'string';
+    if (
+      typeof value['uri'] !== 'string' ||
+      value['uri'].length === 0 ||
+      hasText === hasBlob
+    ) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    return { valid: true, block: block as BridgePromptContentBlock };
+  }
   if (
-    type !== 'image' ||
-    inline === reference ||
+    (type !== 'image' && type !== 'resource') ||
+    (type === 'image' ? inline === reference : inline || !reference) ||
     typeof mimeType !== 'string' ||
-    !mimeType.startsWith(`${type}/`)
+    (type === 'image' && !mimeType.startsWith('image/'))
   ) {
     return { valid: false, code: 'invalid-shape' };
   }
-  if (isSvgMimeType(mimeType)) {
+  if (type === 'image' && isSvgMimeType(mimeType)) {
     return { valid: false, code: 'svg' };
   }
   return {
     valid: true,
     block: inline
       ? ({ type, data, mimeType } as BridgePromptContentBlock)
-      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+      : ({ type, attachmentId, mimeType, size } as BridgePromptContentBlock),
   };
 }
 
@@ -283,7 +297,7 @@ function mediaBlockParseError(
   if (code === 'svg') {
     return 'SVG images are not supported';
   }
-  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+  return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
@@ -1146,7 +1160,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) throw new SessionNotFoundError(sessionId);
     }
@@ -1631,9 +1645,8 @@ export function registerSessionRoutes(
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, (candidateId) =>
-          service.readCreationMetadata(candidateId),
-        )) !== undefined
+        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
+        undefined
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -1870,7 +1883,7 @@ export function registerSessionRoutes(
       if (!exists) continue;
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
@@ -1966,7 +1979,7 @@ export function registerSessionRoutes(
         if (!exists) continue;
         const metadata = await readLoadableLiveConversationMetadata(
           sessionId,
-          (candidateId) => service.readCreationMetadata(candidateId),
+          service,
         );
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
@@ -2021,7 +2034,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) {
         throw new SessionNotFoundError(sessionId);
@@ -2303,6 +2316,21 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    if (
+      isReservedStandaloneSessionSource({
+        sourceType:
+          typeof body['sourceType'] === 'string'
+            ? body['sourceType']
+            : undefined,
+      })
+    ) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned standalone sessions.',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
     const source = parseSessionSource(body['sourceType'], body['sourceId']);
     if ('error' in source) {
       res.status(400).json({
@@ -3073,13 +3101,54 @@ export function registerSessionRoutes(
           throw error;
         }
       }
+      let restoredStorageSessionId = sessionId;
       try {
+        // The coordinator canonicalizes lock keys (every case variant of a
+        // caller id contends on one key), so the request spelling alone
+        // covers the raw-spelled batch delete/archive/unarchive locks.
+        const guardSessionService =
+          createWorkspaceRuntimeSessionService(runtime);
+        try {
+          await guardSessionService.findSessionIdIgnoringCase(sessionId);
+        } catch (error) {
+          if (
+            error instanceof SessionIdCaseConflictError &&
+            (await guardSessionService.getSessionLocation(
+              error.candidateSessionId ?? sessionId,
+            )) === 'conflict'
+          ) {
+            throw new SessionConflictError(sessionId);
+          }
+          throw error;
+        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
+            let persistedSessionId: string | undefined;
+            try {
+              persistedSessionId =
+                await sessionService.findSessionIdIgnoringCase(sessionId);
+            } catch (error) {
+              if (
+                error instanceof SessionIdCaseConflictError &&
+                (await sessionService.getSessionLocation(
+                  error.candidateSessionId ?? sessionId,
+                )) === 'conflict'
+              ) {
+                throw new SessionConflictError(sessionId);
+              }
+              throw error;
+            }
+            if (persistedSessionId) {
+              restoredStorageSessionId = persistedSessionId;
+            } else if (isInternalWorkspaceRuntime(runtime)) {
+              throw new SessionNotFoundError(sessionId);
+            }
             const location = await assertSessionLoadable(
               workspaceCwd,
-              sessionId,
+              restoredStorageSessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -3088,17 +3157,26 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
               runtime.provenance === 'live-conversation'
                 ? await readLoadableLiveConversationMetadata(
-                    sessionId,
-                    (candidateId) =>
-                      sessionService.readCreationMetadata(candidateId),
+                    restoredStorageSessionId,
+                    sessionService,
                   )
-                : await sessionService.readCreationMetadata(sessionId);
-            if (metadata === undefined) {
+                : await sessionService.readCreationMetadata(
+                    restoredStorageSessionId,
+                  );
+            // The reserved standalone source is hidden only on the internal
+            // Conversations runtime. Ordinary workspace restores keep
+            // loading legacy transcripts that happen to carry the reserved
+            // source string — create-side admission already blocks new ones,
+            // so every such transcript on an ordinary store predates the
+            // gate and must not become unreachable.
+            if (
+              metadata === undefined ||
+              (isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata))
+            ) {
               throw new SessionNotFoundError(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3119,6 +3197,10 @@ export function registerSessionRoutes(
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
               }
+              // Keyed on the canonical id, not the persisted spelling: the
+              // bridge registers the live entry under the canonical id, and
+              // every later materialize/discard call derives the directory
+              // from that same id.
               liveConversationCwd = await materialize(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3259,7 +3341,7 @@ export function registerSessionRoutes(
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
-            ).getWorktreeSessionPath(sessionId),
+            ).getWorktreeSessionPath(restoredStorageSessionId),
           ).catch(() => null);
           if (sidecar) {
             // Defense-in-depth: resolve symlinks on both the target and
@@ -4281,9 +4363,9 @@ export function registerSessionRoutes(
   );
 
   app.post(
-    '/session/:id/media',
+    '/session/:id/attachments',
     mutate(),
-    express.raw({ type: 'image/*', limit: '8mb' }),
+    express.raw({ type: '*/*', limit: '8mb' }),
     ((error, _req, res, next) => {
       if (
         error &&
@@ -4297,44 +4379,62 @@ export function registerSessionRoutes(
       next(error);
     }) satisfies ErrorRequestHandler,
     withOwnerMutableSession(
-      'POST /session/:id/media',
+      'POST /session/:id/attachments',
       async (req, res, sessionId, runtime) => {
+        const encodedName = req.headers['x-qwen-attachment-name'];
         const contentType = req.headers['content-type']
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
-        // SVG can carry scripts; this origin also hosts the daemon API and
-        // Web Shell UI, and the bytes are served back to browsers, so an
-        // inline SVG would run same-origin. Raster formats only.
-        if (isSvgMimeType(contentType)) {
-          res.status(415).json({ error: 'SVG uploads are not supported' });
-          return;
-        }
         if (
+          typeof encodedName !== 'string' ||
           !contentType ||
-          !contentType.startsWith('image/') ||
-          !Buffer.isBuffer(req.body) ||
-          req.body.byteLength === 0
+          !Buffer.isBuffer(req.body)
         ) {
           res.status(400).json({
             error:
-              'request body must contain image/* bytes with a matching Content-Type',
+              'request body, Content-Type, and X-Qwen-Attachment-Name are required',
           });
+          return;
+        }
+        let name: string;
+        try {
+          name = decodeURIComponent(encodedName);
+        } catch {
+          res.status(400).json({ error: 'attachment name is invalid' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (
+          req.body.length === 0 &&
+          [
+            'image/bmp',
+            'image/gif',
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+          ].includes(contentType)
+        ) {
+          res.status(400).json({ error: 'Image attachments cannot be empty' });
+          return;
+        }
         try {
-          const reference = await runtime.bridge.storeSessionMedia(
+          const reference = await runtime.bridge.storeSessionAttachment(
             sessionId,
             req.body,
             contentType,
             clientId !== undefined ? { clientId } : undefined,
+            name,
           );
           res.status(201).json(reference);
         } catch (error) {
           if (error instanceof RangeError) {
             res.status(413).json({ error: error.message });
+            return;
+          }
+          if (error instanceof TypeError) {
+            res.status(400).json({ error: error.message });
             return;
           }
           throw error;
@@ -4344,52 +4444,52 @@ export function registerSessionRoutes(
   );
 
   app.get(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     withOwnerReadSession(
-      'GET /session/:id/media/:mediaId',
+      'GET /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const media = await runtime.bridge.readSessionMedia(
+        const attachment = await runtime.bridge.readSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
-        if (!media) {
-          res.status(404).json({ error: 'session media not found' });
+        if (!attachment) {
+          res.status(404).json({ error: 'session attachment not found' });
           return;
         }
-        res.setHeader('Content-Type', media.mimeType);
-        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Content-Type', attachment.mimeType);
+        res.setHeader('Content-Length', String(attachment.data.byteLength));
         res.setHeader('Cache-Control', 'private, max-age=300');
         res.setHeader('Content-Disposition', 'attachment');
         res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.status(200).send(media.data);
+        res.status(200).send(attachment.data);
       },
     ),
   );
 
   app.delete(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     mutate(),
     withOwnerMutableSession(
-      'DELETE /session/:id/media/:mediaId',
+      'DELETE /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const removed = await runtime.bridge.removeSessionMedia(
+        const removed = await runtime.bridge.removeSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json({ removed });
@@ -5831,6 +5931,12 @@ export function registerSessionRoutes(
           hasActivePrompt: session.hasActivePrompt,
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+          // Bridge-local activity watermark, absent until a running prompt in
+          // this bridge publishes its first terminal. Reading it costs nothing
+          // extra: the summary is already in memory.
+          ...(session.updatedAt !== undefined
+            ? { updatedAt: session.updatedAt }
+            : {}),
         }));
       assertRuntimeOpen?.();
       lastExposedCatalogVersions.set(bridge, catalogVersion);

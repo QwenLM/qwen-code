@@ -38,7 +38,7 @@ import { parseSessionRef, buildSessionRef } from './session-mention-ref.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
-  getExtensionDisplayName,
+  getSanitizedExtensionDisplayName,
 } from '../../utils/extension-mention.js';
 import {
   buildMcpServerContextText,
@@ -638,7 +638,7 @@ export async function resolveAtCommandQuery({
   }> = [];
   for (let i = 0; i < extensionMentions.length; i++) {
     const { originalAtPath, extension } = extensionMentions[i];
-    const displayName = getExtensionDisplayName(extension);
+    const displayName = getSanitizedExtensionDisplayName(extension);
     const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
     const context = await buildExtensionMentionContext(extension, {

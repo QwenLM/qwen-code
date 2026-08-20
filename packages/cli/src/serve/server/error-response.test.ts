@@ -8,6 +8,7 @@ import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  SessionIdCaseConflictError,
   SessionTranscriptChangedError,
   SessionWriterConflictError,
   SessionWriterLostError,
@@ -61,6 +62,20 @@ describe('sendBridgeError session writer errors', () => {
         'The daemon is draining and no longer accepts session maintenance.',
       code: 'daemon_draining',
       errorKind: 'daemon_draining',
+    });
+  });
+
+  it('maps case-only persisted conflicts without active/archive guidance', () => {
+    const { response, status, json } = responseMock();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+
+    sendBridgeError(response, new SessionIdCaseConflictError(sessionId));
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: `Multiple persisted sessions match "${sessionId}" by case.`,
+      code: 'session_conflict',
+      sessionId,
     });
   });
 
@@ -124,8 +139,8 @@ describe('sendBridgeError session writer errors', () => {
   });
 
   it.each([
-    ['invalid_session_media_reference', 400],
-    ['session_media_gone', 410],
+    ['invalid_session_attachment_reference', 400],
+    ['session_attachment_gone', 410],
   ] as const)('maps %s to %i', (code, expectedStatus) => {
     const { response, status, json } = responseMock();
     const error = Object.assign(new Error('media reference failed'), { code });
