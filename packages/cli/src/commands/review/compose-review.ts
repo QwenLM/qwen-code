@@ -1320,11 +1320,23 @@ function prevLedgerFacts(planPath: string | undefined): {
    * recovered — "no prior work-list" is not "no prior Critical"; the
    * signal's guard (`!== true`) suppresses both alike, and this reader only
    * ever yields `true | undefined`. A missing or corrupt work-list degrades
-   * the signal OPEN to silence, and that is the whole guarantee: recovery
-   * adopts another account's marker findings by design (see `recoverLedger`),
-   * so a hostile marker within the recovery headroom can spoof this half
-   * and the volume half — the firing conjuncts that stay unforgeable are
-   * this round's own standing Critical and the floor's engagement.
+   * the signal OPEN to silence — but absence-degrades-open is the only
+   * guarantee: recovery adopts another account's marker by design (see
+   * `recoverLedger`), and within the recovery headroom the FOREIGN round
+   * number wins, its findings merge into the work-list, and its volume
+   * rides — so a hostile marker can spoof the persistence half (this
+   * field), the volume half, and, under the default `auto` floor, the
+   * engagement half as well: engagement keys on this carried round
+   * (`prevRound + 1 >= 6`), so a forged round-5 marker engages the floor
+   * the advisory's "will not converge it" claim then rests on. The one
+   * conjunct no foreign marker can touch is this round's own standing
+   * Critical (an explicit `critical` floor is likewise operator-set, not
+   * ledger-carried). The targeted abuse — any account posts a forged
+   * marker, and a later round carrying one genuine own Critical then
+   * publishes the `land-with-residual-risk` nudge inside the very review
+   * requesting changes over it — is bounded to exactly that nudge: the
+   * advisory is self-disclaiming, still requires a genuine own Critical,
+   * moves no event, and the land decision stays with a maintainer.
    */
   hadCritical?: boolean;
 } {
@@ -2609,6 +2621,10 @@ function composeReviewBody(
   const RANK_NAMES: Record<number, { en: string; zh: string }> = {
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
     2: {
+      en: 'the persistently-critical convergence advisory',
+      zh: 'persistently-critical 收敛建议',
+    },
+    3: {
       en: 'the not-reviewed and non-blocking disclosures',
       zh: '未审查范围与非阻断披露',
     },
@@ -2626,7 +2642,7 @@ function composeReviewBody(
     const named = ranks.map((r) => RANK_NAMES[r]).filter(Boolean);
     const en = named.map((n) => n.en).join(' and ');
     const zh = named.map((n) => n.zh).join('与');
-    // "Nothing blocking was trimmed" is true of the RANKS — both are
+    // "Nothing blocking was trimmed" is true of the RANKS — all are
     // non-blocking by construction. It is not true of the tail cut below,
     // which can reach blocker text, so the claim is dropped exactly when a
     // cut happened and the truncation notice takes over the subject.
@@ -2640,9 +2656,10 @@ function composeReviewBody(
           zh: '被裁剪的均非阻断内容。',
         };
     // The artifact pointer is about the deferral list, so it rides only when
-    // that list is what went. Rank 2 can drop alone — it does, on any run
-    // with disclosures and no posture deferrals — and the unconditional
-    // pointer then sent the author to read a list that does not exist.
+    // that list is what went. Ranks 2 and 3 can drop alone — rank 3 does on
+    // any run with disclosures and no posture deferrals, rank 2 on a fired
+    // zero-deferral round — and the unconditional pointer then sent the
+    // author to read a list that does not exist.
     const artifact = ranks.includes(1)
       ? {
           en: `, and deferred findings in this run's findings artifact`,
@@ -2665,8 +2682,9 @@ function composeReviewBody(
    * degrade, and the ORDER of the degradation is the policy: the bilingual
    * fold yields FIRST (it is a translation of the English above it, so it
    * costs the author nothing the body does not still say), then parts by
-   * ascending `trim` rank (the deferral display before the not-reviewed
-   * disclosures), the blockers and the caps never, and every drop is
+   * ascending `trim` rank (the deferral display, then the convergence
+   * advisory, then the not-reviewed disclosures), the blockers and the caps
+   * never, and every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
    *
@@ -2686,10 +2704,12 @@ function composeReviewBody(
    * Every exit of `render` that dropped a rank owes this line — the
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
-   * Only rank 1 has a second durable copy (each deferral is a
-   * `D<round>-<n>` entry in the findings artifact); a trimmed disclosure
-   * section survives nowhere but the terminal summary, so ask for it there
-   * rather than pointing at an artifact that does not carry it.
+   * Rank 1's deferrals keep a second durable copy (each is a
+   * `D<round>-<n>` entry in the findings artifact) and rank 2's advisory
+   * keeps two (the terminal CONVERGENCE line and the composed JSON); a
+   * trimmed rank-3 disclosure section survives nowhere but the terminal
+   * summary, so ask for it there rather than pointing at an artifact that
+   * does not carry it.
    */
   const noteTrimmedRanks = (droppedRanks: number[]): void => {
     if (droppedRanks.length === 0) return;
@@ -2703,7 +2723,9 @@ function composeReviewBody(
           ? `the deferred findings are in the findings artifact; `
           : '') +
         `repeat the trimmed sections in your terminal summary, which is ` +
-        `their only other copy`,
+        (droppedRanks.includes(2)
+          ? `another copy — the advisory also rides the composed JSON`
+          : `their only other copy`),
     );
   };
   const render = (parts: Bi[], sep: string): string => {
@@ -3244,7 +3266,7 @@ function composeReviewBody(
   const deferredBlock: Bi[] = gateDisclosed.length
     ? [
         {
-          trim: 2,
+          trim: 3,
           en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
           zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
         },
@@ -3257,7 +3279,7 @@ function composeReviewBody(
   const testPlanBlock: Bi[] = testPlanNotes.length
     ? [
         {
-          trim: 2,
+          trim: 3,
           en: `Test Plan (not a blocker): ${testPlanNotes.join('; ')}.`,
           zh: `Test Plan（非阻断）：${testPlanNotes.join('; ')}。`,
         },
@@ -3289,7 +3311,7 @@ function composeReviewBody(
   const repositoryContextBlock: Bi[] = repositoryContextNotes.length
     ? [
         {
-          trim: 2,
+          trim: 3,
           en: `Repository proof boundary (not a blocker): ${repositoryContextNotes.join('; ')}.`,
           zh: `仓库验证边界（非阻断）：${repositoryContextNotes.join('; ')}。`,
         },
@@ -3393,28 +3415,34 @@ function composeReviewBody(
   // two branches render the block and the composed-JSON field rides every
   // branch's return object. Non-capping and advisory-only — it never
   // moves the event, never caps, and its own text disclaims it ("does not
-  // block"). Rank 1 trim like the deferral display: it is guidance the
-  // operator also receives on the terminal and in the composed JSON, so it
-  // is the first thing to yield when the body overflows — the verdict and
-  // the findings outrank it. Bounded by construction: fixed prose plus a
-  // count, no model text, so it cannot balloon the body it rides.
+  // block"). Its OWN trim rank, not the deferral display's: the trim
+  // notice names what a rank drops, and rank 1's name and findings-artifact
+  // pointer are true only of the deferral list — sharing the rank made a
+  // dropped advisory post a notice naming a deferral list that never
+  // existed. It yields after the deferral display and before the
+  // not-reviewed disclosures: it is guidance the operator also receives
+  // whole on the terminal CONVERGENCE line and in the composed JSON, so the
+  // verdict and the findings outrank it. Bounded by construction: fixed
+  // prose plus a count, no model text, so it cannot balloon the body it
+  // rides.
   const convergenceBlock: Bi[] = convergence
     ? [
         {
-          trim: 1,
+          trim: 2,
           ...convergenceAdvisory(convergence),
         },
       ]
     : [];
 
-  // The not-reviewed disclosures yield after the deferral display and before
+  // The not-reviewed disclosures yield last of the trimmable sections —
+  // after the deferral display and the convergence advisory — and before
   // nothing else: they say what the review could not certify, which the
   // verdict's own cap already carries, so trimming them costs detail rather
   // than the claim. (`notReviewedParts` itself stays untagged — the length
   // checks below ask about presence, not about rank.)
   const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
     ...p,
-    trim: 2,
+    trim: 3,
   }));
 
   // The resumed-run continuity note: the run reused certified work from an
@@ -3872,9 +3900,11 @@ interface Bi {
    * GitHub's limit — LOWER goes first, absent never goes. The order is a
    * policy, not a convenience: a body that cannot post loses its blockers,
    * so the display of findings the review deliberately did NOT request
-   * (the deferral list, rank 1) yields before the disclosures of what went
-   * unreviewed (rank 2), and the blockers, the caps, and the sentences that
-   * qualify the verdict never yield at all.
+   * (the deferral list, rank 1) yields before the persistently-critical
+   * advisory (rank 2 — it keeps two whole copies elsewhere), which yields
+   * before the disclosures of what went unreviewed (rank 3), and the
+   * blockers, the caps, and the sentences that qualify the verdict never
+   * yield at all.
    */
   trim?: number;
 }

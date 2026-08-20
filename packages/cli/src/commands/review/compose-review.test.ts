@@ -3038,6 +3038,101 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it('counts a relocated Critical toward the advisory (#9410)', async () => {
+    // This round's only Critical arrives through the deferral channel's
+    // RELOCATED arm — a deferred entry with severity Critical is relocated
+    // back into the posting set. The relocated term of `thisCriticals` is
+    // load-bearing here: deleting `+ relocatedCriticals.length` from the
+    // sum un-fires the advisory, and every earlier firing fixture composed
+    // rounds with `relocatedCriticals === 0`, so the mutant shipped green.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-reloc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: MODEL,
+        planPath,
+        severityFloor: 'auto',
+        deferredSuggestions: [
+          {
+            file: 'src/auth.ts',
+            line: 88,
+            // Deterministic source: the relocated Critical blocks without a
+            // verifier record, keeping the round REQUEST_CHANGES like the
+            // sibling [build] fixture.
+            source: 'test',
+            severity: 'Critical',
+            title: 'red on the merge',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        convergence?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          posted: number;
+          prevPosted: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the relocated blocker rides the body) — flat, not
+      // shrinking. Round 7 of `auto`: the floor is engaged.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.convergence).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 0,
+        prevPosted: 0,
+      });
+      // The relocated blocker and the advisory both ride the body; the
+      // terminal carries the advisory line.
+      expect(composed.body).toContain('relocated from the deferral channel');
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('CONVERGENCE: ')),
+      ).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -7176,9 +7271,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   it('trims the deferral display ALONE when that is enough — the order is observable', () => {
     // Without this shape the ordering policy has no guard: a mutant that
     // makes the not-reviewed disclosures yield WITH the deferral display
-    // (trim 2 → 1) leaves a byte-identical body whenever both must go, so
+    // (trim 3 → 1) leaves a byte-identical body whenever both must go, so
     // the whole suite passed under it. Here dropping rank 1 alone fits, so
-    // rank 2 must survive.
+    // rank 3 must survive.
     const blocker = 'B'.repeat(64_200);
     const r = composeReview(
       base({
@@ -7658,7 +7753,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   });
 
   it('points at the findings artifact only when the deferral list is what went', () => {
-    // Rank 2 drops alone on any run with disclosures and no posture
+    // Rank 3 drops alone on any run with disclosures and no posture
     // deferrals. The unconditional pointer then told the author to read
     // "deferred findings in this run's findings artifact" — of which there
     // are none. The sibling stderr line had the condition all along.
@@ -7682,6 +7777,89 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // operator sent to a list that does not exist is the same false record
     // in the channel the operator actually reads.
     expect(r.remediation.join('\n')).not.toContain('findings artifact');
+  });
+
+  it('names the trimmed advisory for itself — never a deferral list that does not exist (#9410)', () => {
+    // The fired advisory shape with ZERO deferrals: the advisory is the
+    // only trimmable section, so the posted notice must name IT. Sharing
+    // the deferral display's rank posted "the deferred-findings list did
+    // not fit ... and deferred findings in this run's findings artifact" —
+    // asserting a list that never existed while the dropped advisory went
+    // unnamed (R1-3) — and the advisory's body-budget yield at rung 2 had
+    // no oracle at all (R1-9).
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 6,
+        findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+        posted: 0,
+      }),
+    );
+    // Sized against the PR-named budget (65,536 − margin − marker
+    // reserve): the body overflows WITH the advisory and fits once the
+    // advisory yields — the rung-2 exit under test.
+    const blocker = 'B'.repeat(56_200);
+    // Direct input, not `base()`: its default `planPath: coveredPlan()`
+    // re-writes this very plan file and erases the prNumber the side file
+    // hangs off.
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      bodyCriticals: [blocker],
+      unreviewedDimensions: ['security'],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    // The shape fired — round 7 of `auto`, a carried Critical stands
+    // again, the window is flat at 0/0.
+    expect(r.convergence).toMatchObject({
+      shape: 'persistently-critical',
+      recommendation: 'land-with-residual-risk',
+      criticals: 1,
+      posted: 0,
+      prevPosted: 0,
+    });
+    // The advisory yielded to the budget, and the notice names what
+    // actually went — the advisory, by its own name.
+    expect(r.body).not.toContain('land-with-residual-risk');
+    expect(r.body).toContain(
+      'the persistently-critical convergence advisory did not fit',
+    );
+    expect(r.body).toContain('(1 section(s))');
+    expect(r.body).toContain('Nothing blocking was trimmed.');
+    // No false record: no deferral-list name, no artifact pointer, no
+    // deferralList flag — the body this notice describes held no
+    // deferrals at all.
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.body).not.toContain('findings artifact');
+    expect(r.remediation.join('\n')).not.toContain('findings artifact');
+    expect(r.bodyTrim).toEqual({
+      sections: 1,
+      deferralList: false,
+      fold: false,
+      truncated: false,
+    });
+    // The advisory yields BEFORE the not-reviewed disclosures, which keep
+    // their place in the body — the ranks are distinct, in this order.
+    expect(r.body).toContain('Not reviewed: security');
+    // The operator's copy names the loss too, on the same channel the
+    // other budget lines ride.
+    expect(
+      r.remediation.some(
+        (l) =>
+          l.startsWith('body budget:') &&
+          l.includes('persistently-critical convergence advisory'),
+      ),
+    ).toBe(true);
   });
 
   it('keeps the verdict-qualifying opener through a truncation', () => {
@@ -7780,8 +7958,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
 
   it('ranks the plan-gate disclosures with the not-reviewed ones, not with the deferral list', () => {
     // `deferredBlock`, `testPlanBlock` and `repositoryContextBlock` all
-    // carry `trim: 2`, and no overflow fixture carried any of them — so
-    // both mutations shipped green: `2 → 1` drops the disclosure WITH the
+    // carry `trim: 3`, and no overflow fixture carried any of them — so
+    // both mutations shipped green: `3 → 1` drops the disclosure WITH the
     // deferral display (inverting the documented order), and deleting the
     // tag makes it un-trimmable, sending a borderline body to the cut.
     const withContext = (blocker: string) =>
@@ -7810,7 +7988,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       });
 
     // Self-calibrating rather than pinned to a byte size: scan a range and
-    // require BOTH shapes to exist. `trim: 2 → 1` removes the first (the
+    // require BOTH shapes to exist. `trim: 3 → 1` removes the first (the
     // block would go with the deferral display); deleting the tag removes
     // the second (the block would never yield).
     // Fine-grained on purpose: the rank-1-only window is as wide as the
@@ -7825,7 +8003,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
         !r.bodyTrim.truncated &&
         r.body.includes('Repository proof boundary'),
     );
-    const goesWithRank2 = runs.find(
+    const goesWithRank3 = runs.find(
       (r) =>
         r.bodyTrim.deferralList &&
         !r.body.includes('Repository proof boundary'),
@@ -7834,8 +8012,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(runs[0].bodyTrim.sections).toBe(0);
     expect(runs[0].body).toContain('Repository proof boundary');
     expect(survivesRank1).toBeDefined();
-    expect(goesWithRank2).toBeDefined();
-    expect(goesWithRank2!.bodyTrim.sections).toBeGreaterThan(
+    expect(goesWithRank3).toBeDefined();
+    expect(goesWithRank3!.bodyTrim.sections).toBeGreaterThan(
       survivesRank1!.bodyTrim.sections,
     );
   });
