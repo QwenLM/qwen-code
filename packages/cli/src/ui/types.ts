@@ -324,8 +324,9 @@ export type HistoryItemToolGroup = HistoryItemBase & {
    * Minted when the batch is scheduled and stamped on both the live
    * pending copy and the committed copy, so the transient double render
    * of one batch collapses by identity — never by callIds, which collide
-   * across unrelated batches. Absent on restored/adapter-built groups,
-   * which are never collapsed.
+   * across unrelated batches. Unique per mount, so ids persisted in
+   * checkpoints can never match newly minted ones; adapter-built groups
+   * carry no id. Neither is ever collapsed.
    */
   batchId?: string;
 };

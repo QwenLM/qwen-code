@@ -305,7 +305,8 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     // callIds are NOT an identity (ids are re-minted after core-history
     // compaction and providers can reuse wire ids), so unrelated batches
     // whose callIds collide keep rendering. Groups without a batchId
-    // (restored sessions, adapters) are never collapsed.
+    // (adapters) are never collapsed; restored-history ids are unique per
+    // mount, so they can never match a live pending batch either.
     const livePendingBatchIds = new Set<string>();
     for (const item of pendingHistoryItems) {
       if (item.type === 'tool_group' && item.batchId !== undefined) {

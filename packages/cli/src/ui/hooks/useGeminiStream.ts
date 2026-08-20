@@ -890,9 +890,15 @@ export const useGeminiStream = (
   // providers can reuse wire ids across turns).
   const toolBatchIdByCallIdRef = useRef(new Map<string, string>());
   const toolBatchCounterRef = useRef(0);
+  // Per-mount nonce: checkpoint JSON persists stamped history and /restore
+  // loads it into a session whose counter restarts at 0 — without it, a
+  // restored committed row would collide with a freshly minted batch and
+  // the collapse would drop the wrong row.
+  const toolBatchNonceRef = useRef(Math.random().toString(36).slice(2));
   const registerToolBatch = useCallback(
     (requests: ToolCallRequestInfo | ToolCallRequestInfo[]) => {
-      const batchId = `tool-batch-${++toolBatchCounterRef.current}`;
+      const batchNumber = ++toolBatchCounterRef.current;
+      const batchId = `tool-batch-${toolBatchNonceRef.current}-${batchNumber}`;
       for (const request of Array.isArray(requests) ? requests : [requests]) {
         toolBatchIdByCallIdRef.current.set(request.callId, batchId);
       }
