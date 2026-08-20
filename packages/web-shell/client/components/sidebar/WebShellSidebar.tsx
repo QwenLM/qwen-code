@@ -159,6 +159,35 @@ function getSessionIdentity(
   return `${workspaceCwd ?? ''}\0${sessionId}`;
 }
 
+/** A pin toggle applied optimistically before the daemon RPC settles. */
+interface OptimisticPinEntry {
+  /** Session snapshot captured at toggle time, for rendering the row. */
+  session: DaemonSessionSummary;
+  pinned: boolean;
+  /** Pin timestamp assigned optimistically (present when pinning). */
+  pinnedAt?: string;
+}
+
+function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
+  const pinnedAt = Date.parse(session.pinnedAt ?? '');
+  if (Number.isFinite(pinnedAt)) return pinnedAt;
+  // Pins recorded before pinnedAt existed: fall back to activity so the
+  // order stays deterministic.
+  const activity = Date.parse(session.updatedAt ?? session.createdAt ?? '');
+  return Number.isFinite(activity) ? activity : 0;
+}
+
+// Pin order is stable: sessions sort by when they were pinned (new pins
+// append at the bottom), never by last activity.
+function comparePinnedSectionSessions(
+  a: DaemonSessionSummary,
+  b: DaemonSessionSummary,
+): number {
+  const byPinTime = getPinnedSectionOrderTime(a) - getPinnedSectionOrderTime(b);
+  if (byPinTime !== 0) return byPinTime;
+  return a.sessionId.localeCompare(b.sessionId);
+}
+
 export type WebShellSidebarFooterItem =
   | 'settings'
   | 'version'
@@ -1043,6 +1072,12 @@ export function WebShellSidebar({
   });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
+  // Pin toggles applied optimistically while the daemon organization RPC
+  // is in flight; entries are dropped once the authoritative catalog reflects
+  // the target state, or rolled back when the RPC fails.
+  const [optimisticPins, setOptimisticPins] = useState<
+    ReadonlyMap<string, OptimisticPinEntry>
+  >(() => new Map());
   const {
     sessions: archivedSessions,
     loading: archivedLoading,
@@ -1424,13 +1459,88 @@ export function WebShellSidebar({
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
   );
-  const pinnedSessions = useMemo(() => {
-    const byId = new Map<string, DaemonSessionSummary>();
-    for (const session of [
+  const applyOptimisticPin = useCallback(
+    (session: DaemonSessionSummary): DaemonSessionSummary => {
+      if (optimisticPins.size === 0) return session;
+      const entry = optimisticPins.get(
+        getSessionIdentity(
+          session.sessionId,
+          session.workspaceCwd || primaryWorkspaceCwd,
+        ),
+      );
+      if (!entry || entry.pinned === (session.isPinned === true)) {
+        return session;
+      }
+      const next: DaemonSessionSummary = {
+        ...session,
+        isPinned: entry.pinned,
+      };
+      if (entry.pinned) {
+        if (entry.pinnedAt !== undefined) next.pinnedAt = entry.pinnedAt;
+      } else {
+        delete next.pinnedAt;
+      }
+      return next;
+    },
+    [optimisticPins, primaryWorkspaceCwd],
+  );
+  // Drop optimistic entries once an authoritative list agrees with the
+  // target state (the post-toggle catalog refresh has landed).
+  useEffect(() => {
+    if (optimisticPins.size === 0) return;
+    const authoritative = [
       ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
       ...secondaryPinnedSessions,
-    ]) {
-      if (!matchesSessionSource(session, selectedSessionSource)) continue;
+      ...sessions,
+    ];
+    const staleIdentities: string[] = [];
+    for (const [identity, entry] of optimisticPins) {
+      const current = authoritative.find(
+        (session) =>
+          getSessionIdentity(
+            session.sessionId,
+            session.workspaceCwd || primaryWorkspaceCwd,
+          ) === identity,
+      );
+      // A pin reconciles once an authoritative list carries the target
+      // state. An unpin additionally reconciles when the row disappears
+      // from every list: the pinned page drops it after the refresh, and
+      // secondary-workspace rows never appear in the all-sessions page, so
+      // absence is the only reconciliation signal they get. (An unpin entry
+      // is only ever created while its row is rendered from a list, so
+      // disappearance cannot race the toggle itself.)
+      const reconciled = current
+        ? current.isPinned === entry.pinned
+        : entry.pinned === false;
+      if (reconciled) {
+        staleIdentities.push(identity);
+      }
+    }
+    if (staleIdentities.length === 0) return;
+    setOptimisticPins((previous) => {
+      const next = new Map(previous);
+      for (const identity of staleIdentities) next.delete(identity);
+      return next;
+    });
+  }, [
+    optimisticPins,
+    includePrimaryWorkspaceSessions,
+    primaryPinnedSessions,
+    secondaryPinnedSessions,
+    sessions,
+    primaryWorkspaceCwd,
+  ]);
+  const pinnedSessions = useMemo(() => {
+    const byId = new Map<string, DaemonSessionSummary>();
+    const addCandidate = (
+      session: DaemonSessionSummary,
+      options: { requirePinned: boolean },
+    ): void => {
+      if (!matchesSessionSource(session, selectedSessionSource)) return;
+      // Rows fetched through the pinned filter stay unless an optimistic
+      // unpin flips them; rows merged from other pages must be pinned.
+      if (session.isPinned === false) return;
+      if (options.requirePinned && session.isPinned !== true) return;
       byId.set(
         getSessionIdentity(
           session.sessionId,
@@ -1438,14 +1548,34 @@ export function WebShellSidebar({
         ),
         session,
       );
+    };
+    for (const rawSession of [
+      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
+      ...secondaryPinnedSessions,
+    ]) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: false });
     }
-    return [...byId.values()];
+    // The all-sessions page carries optimistic pins before the pinned page
+    // refetch lands.
+    for (const rawSession of sessions) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: true });
+    }
+    // A row pinned from a workspace section that no loaded page carries yet
+    // renders from its optimistic snapshot so the pin still feels instant.
+    for (const [identity, entry] of optimisticPins) {
+      if (!entry.pinned || byId.has(identity)) continue;
+      addCandidate(applyOptimisticPin(entry.session), { requirePinned: true });
+    }
+    return [...byId.values()].sort(comparePinnedSectionSessions);
   }, [
+    applyOptimisticPin,
     includePrimaryWorkspaceSessions,
+    optimisticPins,
     primaryWorkspaceCwd,
     primaryPinnedSessions,
     selectedSessionSource,
     secondaryPinnedSessions,
+    sessions,
   ]);
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
@@ -2999,20 +3129,47 @@ export function WebShellSidebar({
       ) {
         return;
       }
+      const targetPinned = !session.isPinned;
+      const applyOptimistic = (): void => {
+        setOptimisticPins((previous) => {
+          const next = new Map(previous);
+          next.set(sessionIdentity, {
+            session,
+            pinned: targetPinned,
+            ...(targetPinned ? { pinnedAt: new Date().toISOString() } : {}),
+          });
+          return next;
+        });
+      };
+      const rollbackOptimistic = (): void => {
+        setOptimisticPins((previous) => {
+          if (!previous.has(sessionIdentity)) return previous;
+          const next = new Map(previous);
+          next.delete(sessionIdentity);
+          return next;
+        });
+      };
+      // Reflect the toggle immediately; the catalog refresh below reconciles
+      // authoritative state when it lands.
+      applyOptimistic();
       setSessionBusy(sessionId, true, session.workspaceCwd);
       const sessionActions = getSessionWorkspaceActions(session);
       if (!sessionActions) {
+        rollbackOptimistic();
         setSessionBusy(sessionId, false, session.workspaceCwd);
         return;
       }
       sessionActions
         .updateSessionOrganization(sessionId, {
-          isPinned: !session.isPinned,
+          isPinned: targetPinned,
         })
         .then(() => {
           bumpWorkspaceReload();
         })
-        .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
+        .catch((err: unknown) => {
+          rollbackOptimistic();
+          onError(err, t('sidebar.organizationFailed'));
+        })
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
@@ -3287,9 +3444,11 @@ export function WebShellSidebar({
 
   const filteredSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const sourceScopedSessions = sessions.filter((session) =>
-      matchesSessionSource(session, selectedSessionSource),
-    );
+    const sourceScopedSessions = sessions
+      .map(applyOptimisticPin)
+      .filter((session) =>
+        matchesSessionSource(session, selectedSessionSource),
+      );
     const unpinnedSessions =
       selectedSessionSource === 'channel'
         ? sourceScopedSessions
@@ -3317,7 +3476,13 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchQuery, selectedSessionSource, sessions]);
+  }, [
+    applyOptimisticPin,
+    organizationEnabled,
+    searchQuery,
+    selectedSessionSource,
+    sessions,
+  ]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
