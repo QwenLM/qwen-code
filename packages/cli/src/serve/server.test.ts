@@ -15188,6 +15188,55 @@ describe('createServeApp', () => {
       },
     );
 
+    it('reads the newest legacy organization alias for a uniquely persisted session', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+      const legacyOrganizationId = sessionId.toUpperCase();
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'legacy organization alias',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+      const organizationService = new qwenCore.SessionOrganizationService(
+        WS_BOUND,
+      );
+      const group = await organizationService.createGroup({
+        name: 'Legacy organization',
+        color: 'blue',
+      });
+      await organizationService.updateSessionOrganization(sessionId, {
+        isPinned: false,
+        groupId: null,
+        color: 'red',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      await organizationService.updateSessionOrganization(
+        legacyOrganizationId,
+        {
+          isPinned: true,
+          groupId: group.id,
+          color: 'purple',
+        },
+      );
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { view: 'organized', group: 'pinned' },
+        { runtimeBaseDir: runtimeDir },
+      );
+
+      expect(result.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          isPinned: true,
+          groupId: group.id,
+          color: 'purple',
+        }),
+      ]);
+    });
+
     it('preserves organization when an exact lookup aliases a mixed-case persisted identity', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440009';
       const persistedSessionId = sessionId.toUpperCase();

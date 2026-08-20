@@ -877,15 +877,30 @@ function organizationForListedSession(
   sessions: ReadonlyMap<string, ListedSessionOrganization>,
   sessionId: string,
   persistedSessionIdByCanonicalId: ReadonlyMap<string, string | undefined>,
+  organizationByCanonicalId: ReadonlyMap<string, ListedSessionOrganization>,
 ): ListedSessionOrganization | undefined {
   const canonicalId = normalizeSessionIdForLookup(sessionId);
   if (persistedSessionIdByCanonicalId.get(canonicalId) === sessionId) {
     const exact = sessions.get(sessionId);
-    const canonical = sessions.get(canonicalId);
-    if (!exact || !canonical) return exact ?? canonical;
-    return exact.updatedAt >= canonical.updatedAt ? exact : canonical;
+    const alias = organizationByCanonicalId.get(canonicalId);
+    if (!exact || !alias) return exact ?? alias;
+    return exact.updatedAt >= alias.updatedAt ? exact : alias;
   }
   return sessions.get(sessionId);
+}
+
+function indexNewestOrganizationByCanonicalId(
+  sessions: ReadonlyMap<string, ListedSessionOrganization>,
+): Map<string, ListedSessionOrganization> {
+  const byCanonicalId = new Map<string, ListedSessionOrganization>();
+  for (const [sessionId, organization] of sessions) {
+    const canonicalId = normalizeSessionIdForLookup(sessionId);
+    const existing = byCanonicalId.get(canonicalId);
+    if (!existing || organization.updatedAt > existing.updatedAt) {
+      byCanonicalId.set(canonicalId, organization);
+    }
+  }
+  return byCanonicalId;
 }
 
 function applyOrganization(
@@ -916,6 +931,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions.signal?.throwIfAborted();
   const snapshot = await organizationService.readSnapshot();
   readOptions.signal?.throwIfAborted();
+  const organizationByCanonicalId = indexNewestOrganizationByCanonicalId(
+    snapshot.sessions,
+  );
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
   if (
@@ -976,6 +994,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           snapshot.sessions,
           sessionId,
           persistedSessionIdByCanonicalId,
+          organizationByCanonicalId,
         ),
       ),
     );
@@ -1012,6 +1031,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           snapshot.sessions,
           listedSessionId,
           persistedSessionIdByCanonicalId,
+          organizationByCanonicalId,
         );
         if (existing) {
           // Merged on every page, not just the first: the page-1 cursor is

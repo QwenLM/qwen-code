@@ -1160,6 +1160,116 @@ describe('LiveTaskService', () => {
     });
   });
 
+  it('rejects a mixed-case persisted owner outside the canonical live runtime', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440020';
+    const storageSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/project');
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: storageSessionId },
+      }),
+    ).rejects.toThrow(`Task id is ambiguous: ${storageSessionId}`);
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: { threadId: storageSessionId, prompt: 'continue' },
+      }),
+    ).rejects.toThrow(`Task id is ambiguous: ${storageSessionId}`);
+    expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('batches mixed-case owner arbitration across live and persisted runtimes', async () => {
+    const harness = makeHarness();
+    const sessionIds = Array.from(
+      { length: 8 },
+      (_, index) => `550e8400-e29b-41d4-a716-44665544010${index}`,
+    );
+    const storageSessionIds = sessionIds.map((sessionId) =>
+      sessionId.toUpperCase(),
+    );
+    for (const [index, sessionId] of sessionIds.entries()) {
+      harness.summaries.set(sessionId, {
+        sessionId,
+        workspaceCwd: '/conversations',
+        createdAt: '2026-07-30T00:00:00.000Z',
+        displayName: `Resident task ${index}`,
+        clientCount: 1,
+        hasActivePrompt: false,
+      });
+      harness.resident.add(sessionId);
+      persistedSessions.set(
+        storageSessionIds[index]!,
+        persisted(storageSessionIds[index]!),
+      );
+      persistedSessionOwners.set(storageSessionIds[index]!, '/project');
+    }
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'wait_threads',
+        arguments: {
+          targets: storageSessionIds.map((threadId) => ({ threadId })),
+          timeoutMs: 0,
+        },
+      }),
+    ).resolves.toMatchObject({
+      polls: [],
+      errors: storageSessionIds.map((threadId) => ({
+        threadId,
+        message: `Task id is ambiguous: ${threadId}`,
+      })),
+    });
+    expect(sessionIdBatchLookups).toEqual([
+      { cwd: '/conversations', sessionIds: storageSessionIds },
+      { cwd: '/project', sessionIds: storageSessionIds },
+    ]);
+    expect(sessionIdLookups).toEqual([]);
+  });
+
+  it('fails closed when a mixed-case live owner cannot exclude another runtime', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440108';
+    const storageSessionId = sessionId.toUpperCase();
+    const error = Object.assign(new Error('EIO: project catalog unavailable'), {
+      code: 'EIO',
+    });
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    sessionIdLookupErrors.set(`/project:${storageSessionId}`, error);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: storageSessionId },
+      }),
+    ).rejects.toBe(error);
+    expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('keeps a resident task usable when its persisted alias scan fails', async () => {
     const harness = makeHarness();
     const sessionId = '550e8400-e29b-41d4-a716-446655440019';

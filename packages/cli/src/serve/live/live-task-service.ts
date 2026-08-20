@@ -1168,15 +1168,17 @@ export class LiveTaskService {
       }
     };
     for (const threadId of threadIds) {
+      const liveSessionId = normalizeSessionIdForLookup(threadId);
       let live: ReturnType<WorkspaceRegistry['resolveLiveSessionOwner']>;
       try {
-        live = this.options.workspaceRegistry.resolveLiveSessionOwner(
-          normalizeSessionIdForLookup(threadId),
-        );
+        live =
+          this.options.workspaceRegistry.resolveLiveSessionOwner(liveSessionId);
       } catch {
         continue;
       }
       if (live.kind === 'not_found') {
+        for (const runtime of allRuntimes) addTarget(runtime, threadId);
+      } else if (live.kind === 'found' && threadId !== liveSessionId) {
         for (const runtime of allRuntimes) addTarget(runtime, threadId);
       }
     }
@@ -1252,6 +1254,44 @@ export class LiveTaskService {
         // The resident bridge entry remains authoritative when its optional
         // persisted-history lookup is temporarily unavailable.
         persistedSessionId = undefined;
+      }
+      if (threadId !== liveSessionId) {
+        const persistedAliases = await Promise.all(
+          (
+            this.options.workspaceRegistry.listAll?.() ??
+            this.options.workspaceRegistry.list()
+          )
+            .filter((candidateRuntime) => candidateRuntime !== runtime)
+            .map(async (candidateRuntime) => {
+              try {
+                return {
+                  persistedSessionId:
+                    await resolvePersistedSessionId(candidateRuntime),
+                };
+              } catch (error) {
+                return { error };
+              }
+            }),
+        );
+        const conflict = persistedAliases.find(
+          (candidate) =>
+            'error' in candidate &&
+            candidate.error instanceof SessionIdCaseConflictError,
+        );
+        if (conflict && 'error' in conflict) throw conflict.error;
+        const failed = persistedAliases.find(
+          (candidate) => 'error' in candidate,
+        );
+        if (failed && 'error' in failed) throw failed.error;
+        if (
+          persistedAliases.some(
+            (candidate) =>
+              'persistedSessionId' in candidate &&
+              candidate.persistedSessionId !== undefined,
+          )
+        ) {
+          throw new Error(`Task id is ambiguous: ${threadId}`);
+        }
       }
     } else {
       const candidates = await Promise.all(
