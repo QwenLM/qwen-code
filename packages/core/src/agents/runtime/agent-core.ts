@@ -101,6 +101,7 @@ import type {
   AgentUsageEvent,
   AgentHooks,
   AgentExternalMessageEvent,
+  AgentApprovalRequestEvent,
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
@@ -127,6 +128,18 @@ import {
 
 const EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS = 8;
 const EXECUTION_ALLOWLIST_ERROR_MAX_CHARS = 240;
+const APPROVAL_DELIVERY_MAX_ATTEMPTS = 3;
+
+interface ApprovalDeliveryState {
+  readonly callId: string;
+  readonly confirmationDetails: ToolCallConfirmationDetails;
+  event: AgentApprovalRequestEvent;
+  attempts: number;
+  delivered: boolean;
+  responded: boolean;
+  active: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
+}
 
 function summarizeExecutionAllowlist(
   executionAllowedTools: readonly string[],
@@ -1728,10 +1741,64 @@ export class AgentCore {
     // onToolCallsUpdate only fires the transition event once per callId even
     // though the callback runs repeatedly while the tool executes.
     const executionStartedEmitted = new Set<string>();
-    const emittedApprovalDetails = new Map<
-      string,
-      ToolCallConfirmationDetails
+    const approvalDeliveryByDetails = new WeakMap<
+      ToolCallConfirmationDetails,
+      ApprovalDeliveryState
     >();
+    const currentApprovalDeliveries = new Map<string, ApprovalDeliveryState>();
+    const retireApprovalDelivery = (state: ApprovalDeliveryState) => {
+      state.active = false;
+      if (state.retryTimer !== undefined) {
+        clearTimeout(state.retryTimer);
+        state.retryTimer = undefined;
+      }
+    };
+    const clearApprovalDeliveries = () => {
+      for (const state of currentApprovalDeliveries.values()) {
+        retireApprovalDelivery(state);
+      }
+      currentApprovalDeliveries.clear();
+    };
+    const deliverApproval = (state: ApprovalDeliveryState) => {
+      if (
+        !state.active ||
+        state.delivered ||
+        state.responded ||
+        state.attempts >= APPROVAL_DELIVERY_MAX_ATTEMPTS ||
+        currentApprovalDeliveries.get(state.callId) !== state
+      ) {
+        return;
+      }
+      state.attempts++;
+      try {
+        this.eventEmitter.emit(
+          AgentEventType.TOOL_WAITING_APPROVAL,
+          state.event,
+        );
+        state.delivered = true;
+      } catch (error) {
+        const canRetry =
+          state.active &&
+          !state.responded &&
+          state.attempts < APPROVAL_DELIVERY_MAX_ATTEMPTS;
+        this.runtimeContext
+          .getDebugLogger()
+          ?.error(
+            `Approval event delivery failed for ${state.callId}; ${
+              canRetry
+                ? 'retrying automatically'
+                : 'automatic retries exhausted'
+            }`,
+            error,
+          );
+        if (canRetry) {
+          state.retryTimer = setTimeout(() => {
+            state.retryTimer = undefined;
+            deliverApproval(state);
+          }, 0);
+        }
+      }
+    };
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
@@ -1751,6 +1818,7 @@ export class AgentCore {
         } as AgentToolOutputUpdateEvent);
       },
       onAllToolCallsComplete: async (completedCalls) => {
+        clearApprovalDeliveries();
         for (const call of completedCalls) {
           if (emittedCallIds.has(call.request.callId)) continue;
           emittedCallIds.add(call.request.callId);
@@ -1812,6 +1880,21 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        const awaitingByCallId = new Map(
+          calls
+            .filter(
+              (call): call is WaitingToolCall =>
+                call.status === 'awaiting_approval',
+            )
+            .map((call) => [call.request.callId, call.confirmationDetails]),
+        );
+        for (const [callId, state] of currentApprovalDeliveries) {
+          if (awaitingByCallId.get(callId) !== state.confirmationDetails) {
+            retireApprovalDelivery(state);
+            currentApprovalDeliveries.delete(callId);
+          }
+        }
+
         for (const call of calls) {
           // Track PTY PIDs so TOOL_OUTPUT_UPDATE events can carry them.
           if (call.status === 'executing') {
@@ -1853,11 +1936,10 @@ export class AgentCore {
 
           // Emit approval request event for UI visibility
           const callId = waiting.request.callId;
-          try {
-            const { confirmationDetails } = waiting;
-            if (emittedApprovalDetails.get(callId) === confirmationDetails) {
-              continue;
-            }
+          const { confirmationDetails } = waiting;
+          let deliveryState =
+            approvalDeliveryByDetails.get(confirmationDetails);
+          if (!deliveryState || !deliveryState.active) {
             const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
             // Snapshot the ambient runtime view here, while the loop frame
             // is still live. For inheriting agents (no own runtimeView)
@@ -1875,50 +1957,68 @@ export class AgentCore {
             // can restore it. See `runInAgentFrames` for why this matters
             // (mis-attributed `from="leader"` + leader-guard bypass).
             const inheritedTeammateIdentity = getTeammateContext();
-            let responded = false;
-            this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
-              subagentId: this.subagentId,
-              round: currentRound,
-              callId: waiting.request.callId,
-              name: waiting.request.name,
-              description: this.getToolDescription(
-                waiting.request.name,
-                waiting.request.args,
-              ),
-              args: waiting.request.args,
-              confirmationDetails: rest,
-              respond: async (
-                outcome: ToolConfirmationOutcome,
-                payload?: Parameters<
-                  ToolCallConfirmationDetails['onConfirm']
-                >[1],
-              ) => {
-                if (responded) return;
-                responded = true;
-                // UI invokes this from its own async chain (outside the
-                // reasoning-loop ALS frames), so re-enter both the agent's
-                // runtime view AND its name context before the resumed
-                // tool body runs. See `runInAgentFrames` for rationale.
-                // Also restore the logical owner agent id when present so
-                // approved tools such as Monitor keep owner routing.
-                await this.runInAgentFrames(
-                  () => waiting.confirmationDetails.onConfirm(outcome, payload),
-                  inheritedView,
-                  inheritedAgentId ?? undefined,
-                  inheritedTeammateIdentity,
-                  inheritedAgentDepth,
-                );
+            const newDeliveryState: ApprovalDeliveryState = {
+              callId,
+              confirmationDetails,
+              attempts: 0,
+              delivered: false,
+              responded: false,
+              active: true,
+              event: {
+                subagentId: this.subagentId,
+                round: currentRound,
+                callId: waiting.request.callId,
+                name: waiting.request.name,
+                description: this.getToolDescription(
+                  waiting.request.name,
+                  waiting.request.args,
+                ),
+                args: waiting.request.args,
+                confirmationDetails: rest,
+                respond: async (
+                  outcome: ToolConfirmationOutcome,
+                  payload?: Parameters<
+                    ToolCallConfirmationDetails['onConfirm']
+                  >[1],
+                ) => {
+                  if (
+                    newDeliveryState.responded ||
+                    !newDeliveryState.active ||
+                    currentApprovalDeliveries.get(callId) !==
+                      newDeliveryState ||
+                    awaitingByCallId.get(callId) !== confirmationDetails
+                  ) {
+                    return;
+                  }
+                  newDeliveryState.responded = true;
+                  if (newDeliveryState.retryTimer !== undefined) {
+                    clearTimeout(newDeliveryState.retryTimer);
+                    newDeliveryState.retryTimer = undefined;
+                  }
+                  // UI invokes this from its own async chain (outside the
+                  // reasoning-loop ALS frames), so re-enter both the agent's
+                  // runtime view AND its name context before the resumed
+                  // tool body runs. See `runInAgentFrames` for rationale.
+                  // Also restore the logical owner agent id when present so
+                  // approved tools such as Monitor keep owner routing.
+                  await this.runInAgentFrames(
+                    () =>
+                      waiting.confirmationDetails.onConfirm(outcome, payload),
+                    inheritedView,
+                    inheritedAgentId ?? undefined,
+                    inheritedTeammateIdentity,
+                    inheritedAgentDepth,
+                  );
+                },
+                timestamp: Date.now(),
               },
-              timestamp: Date.now(),
-            });
-            emittedApprovalDetails.set(callId, confirmationDetails);
-          } catch (error) {
-            this.runtimeContext
-              .getDebugLogger()
-              ?.error(
-                `Approval event delivery failed for ${callId}; will retry on next tool update`,
-                error,
-              );
+            };
+            deliveryState = newDeliveryState;
+            approvalDeliveryByDetails.set(confirmationDetails, deliveryState);
+          }
+          currentApprovalDeliveries.set(callId, deliveryState);
+          if (deliveryState.retryTimer === undefined) {
+            deliverApproval(deliveryState);
           }
         }
       },
@@ -1980,6 +2080,7 @@ export class AgentCore {
       // Auto-resolve on abort so processFunctionCalls doesn't block forever
       // when tools are awaiting approval or executing without abort support.
       const onAbort = () => {
+        clearApprovalDeliveries();
         resolveBatch?.();
         for (const req of requests) {
           if (emittedCallIds.has(req.callId)) continue;
