@@ -75,6 +75,62 @@ if [[ -f "${WORKDIR}/failure.md" ]]; then
   exit 1
 fi
 
+# A handoff claims the round changed NOTHING — dirt beside it is a
+# brake-violating partial patch (otherwise reported as a clean stop and
+# discarded silently with the runner), and untracked leftovers would trip
+# the NEXT round's dirty assert on the persistent pool. The ref-level
+# commit diff below is blind to both. Non-retryable like failure.md+dirty
+# above (a retryable rejection would engage the repair pass, which deletes
+# handoff.md and may commit against the brake), but under its OWN outcome:
+# outcome=failed would make the report step dress the rejection as a
+# failed FIX ("could not produce a passing fix", or a stale-base retry
+# promise) when no fix existed — the report step gives this shape its own
+# honest headline.
+if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" ]]; then
+  echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
+  git status --short
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
+# The committed sibling of the brake violation above: the round HAS a commit
+# beside handoff.md. Judged by dirt alone it slips both guards — the dirty
+# check sees a clean tree, and the no-commit handoff branch below requires
+# an unchanged ref — so it would reach the structural checks, where
+# reject_fix defaults to retryable and the repair pass deletes
+# handoff.md and may commit AGAIN against the brake's stop. Non-retryable
+# under its OWN outcome: a commit DID happen, so the dirty-handoff headline
+# claiming nothing was committed would misreport it. Same reasoning as the
+# dirty guard otherwise.
+if [[ -s "${WORKDIR}/handoff.md" && "${committed_rc:-0}" -eq 1 ]]; then
+  echo "❌ Agent wrote handoff.md but the round HAS a commit — a brake violation:"
+  git log --oneline "origin/${BRANCH}..${BRANCH}"
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=committed_handoff" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
+# No-commit brake handoff, classified BEFORE the structural checks below:
+# those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
+# and reject_fix on failure, and the growth brake fires on exactly the red
+# PRs whose diff trips them. A compliant handoff commits nothing, so
+# running the checks first would reclassify it as a retryable failure —
+# the repair pass would delete handoff.md and commit against the brake's
+# stop. A handoff claims nothing (acted=false, deferred to a human), so
+# the checks' false-no-action rationale does not apply. failure.md
+# coexistence keeps the failed classification via the exits above.
+if git diff --quiet "origin/${BRANCH}...${BRANCH}" \
+  && [[ -s "${WORKDIR}/handoff.md" ]]; then
+  echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
+  # Agent-written content: a line-start `::` would be parsed as a workflow
+  # command (::error::, ::add-mask::), the same reason 'Show run artifacts'
+  # neutralizes these files.
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 # Convention: hooks are severed at EVERY host checkout of the PR
 # branch (no secret sits in this step's env, but a post-checkout
 # hook still runs branch code on the host).
@@ -337,7 +393,8 @@ fi
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
 # feedback as evaluated (acted=false) while CI stays red — the exact bug
-# this PR fixes. So it runs on EVERY path. The gate is shared with the
+# this PR fixes. So it runs on every path but the no-commit handoff,
+# which claims nothing and exits above. The gate is shared with the
 # issue-fix verify step (rationale + the generator crash guard live in
 # the script); the write is on a tracked file compared by `git status`,
 # not the commit-level no-op git-diff below, and it is restored on
@@ -354,7 +411,8 @@ run_check_no_ab 'cross-package contract verification failed' \
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-  # No new commit. That is only legitimate as a deliberate no-action.
+  # No new commit. That is only legitimate as a deliberate no-action; the
+  # no-commit handoff was classified before the structural checks above.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
     cat "${WORKDIR}/no-action.md"

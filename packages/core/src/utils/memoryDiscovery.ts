@@ -14,7 +14,8 @@ import {
 } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
-import { isSubpath, QWEN_DIR } from './paths.js';
+import { isSubpath, QWEN_DIR, tildeifyPath } from './paths.js';
+import { stripAnsiAndControl } from './textUtils.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
 import { findProjectRoot } from './projectRoot.js';
@@ -314,30 +315,79 @@ async function readGeminiMdFiles(
   return results;
 }
 
+/**
+ * Renders a context file path for display: relative to the CWD when the
+ * file is inside the CWD tree, otherwise a `~/...` shortcut when the file
+ * lives under the user home (instead of a long `../../..` chain). Output
+ * is sanitized because directory names are attacker-influenceable.
+ */
+export function formatContextFileDisplayPath(
+  filePath: string,
+  currentWorkingDirectory: string,
+  // Same home the loader used for discovery, so display and discovery agree.
+  userHomePath = homedir(),
+): string {
+  if (!path.isAbsolute(filePath)) {
+    return stripAnsiAndControl(filePath);
+  }
+  const relativePath = path.relative(currentWorkingDirectory, filePath);
+  // isSubpath rejects real `..` segments (not mere `..`-prefixed names like
+  // `..cfg`) and absolute relatives, which is what Windows cross-drive
+  // targets produce. That arm is consciously untested: POSIX `path.relative`
+  // never returns an absolute path and the fixtures share one volume.
+  if (!isSubpath(currentWorkingDirectory, filePath)) {
+    const tildeified = tildeifyPath(filePath, userHomePath);
+    if (tildeified !== filePath) {
+      return stripAnsiAndControl(tildeified);
+    }
+  }
+  return stripAnsiAndControl(relativePath);
+}
+
+// The attachment rule for the system prompt: only non-blank string content
+// reaches it. Shared by concatenateInstructions and contextFilePaths so the
+// "displayed = attached" property holds by construction.
+function hasAttachedContent(item: GeminiFileContent): boolean {
+  return typeof item.content === 'string' && item.content.trim().length > 0;
+}
+
 function concatenateInstructions(
   instructionContents: GeminiFileContent[],
   // CWD is needed to resolve relative paths for display markers
   currentWorkingDirectoryForDisplay: string,
 ): string {
   return instructionContents
-    .filter((item) => typeof item.content === 'string')
+    .filter(hasAttachedContent)
     .map((item) => {
       const trimmedContent = (item.content as string).trim();
-      if (trimmedContent.length === 0) {
-        return null;
-      }
-      const displayPath = path.isAbsolute(item.filePath)
-        ? path.relative(currentWorkingDirectoryForDisplay, item.filePath)
-        : item.filePath;
+      // Sanitize the marker path: paths under attacker-influenceable
+      // directory names could otherwise forge or hide entries in the
+      // `/context` parser (newline/control chars break its line-oriented
+      // markers), contradicting the sanitized announcement surface.
+      const displayPath = stripAnsiAndControl(
+        path.isAbsolute(item.filePath)
+          ? path.relative(currentWorkingDirectoryForDisplay, item.filePath)
+          : item.filePath,
+      );
       return `--- Context from: ${displayPath} ---\n${trimmedContent}\n--- End of Context from: ${displayPath} ---`;
     })
-    .filter((block): block is string => block !== null)
     .join('\n\n');
 }
 
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  /**
+   * Display paths of the loaded context (memory) files: CWD-relative when
+   * inside the CWD tree, `~/...` shortcuts for files under the user home.
+   * Display-only — do not resolve them against the CWD.
+   * Lets callers tell users which files were actually attached (see #5267).
+   * Top-level files only: content pulled in via `@import` is inlined into
+   * the importing file and is not listed separately.
+   * Baseline rules (`.qwen/rules/`) are injected separately and deliberately
+   * not listed here (see `ruleCount`).
+   */
+  contextFilePaths: string[];
   /** Number of baseline rules injected at session start. */
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
@@ -476,6 +526,7 @@ export async function loadServerHierarchicalMemory(
 
   let combinedInstructions = '';
   let fileCount = 0;
+  let contextFilePaths: string[] = [];
 
   if (filePaths.length > 0) {
     const loadReason = options.loadReason ?? 'session_start';
@@ -497,14 +548,33 @@ export async function loadServerHierarchicalMemory(
     );
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
-    // excluding system context files like output-language.md
+    // excluding system context files like output-language.md. Note: this is
+    // intentionally different from contextFilePaths below, which is
+    // content-based and includes non-memory-named files. The two surfaces
+    // (/memory count vs announcement list) may differ; aligning them at
+    // the display site is deferred as a follow-up.
     const memoryFilenames = new Set([
       ...getAllGeminiMdFilenames(),
       LOCAL_CONTEXT_FILENAME,
     ]);
-    fileCount = contentsWithPaths.filter((item) =>
+    const memoryItems = contentsWithPaths.filter((item) =>
       memoryFilenames.has(path.basename(item.filePath)),
-    ).length;
+    );
+    fileCount = memoryItems.length;
+    // Announce every top-level file whose content actually reached the
+    // system prompt (see hasAttachedContent) — not just memory-named files —
+    // so the list matches what concatenateInstructions attached. Files
+    // pulled in via @import are inlined into their importer's content and
+    // are not listed separately.
+    contextFilePaths = contentsWithPaths
+      .filter(hasAttachedContent)
+      .map((item) =>
+        formatContextFileDisplayPath(
+          item.filePath,
+          currentWorkingDirectory,
+          userHomePath,
+        ),
+      );
   }
 
   // Load path-based context rules from .qwen/rules/ directories.
@@ -531,6 +601,7 @@ export async function loadServerHierarchicalMemory(
   return {
     memoryContent,
     fileCount,
+    contextFilePaths,
     ruleCount,
     conditionalRules,
     projectRoot: effectiveRoot,
