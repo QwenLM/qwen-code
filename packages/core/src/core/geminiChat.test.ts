@@ -7286,6 +7286,88 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('stamps fallback-served counts under the request route key (#9454)', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['fallback-b']);
+
+      const fallbackBGenerateContentStream = vi.fn();
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: {
+          generateContent: vi.fn(),
+          generateContentStream: fallbackBGenerateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        } as unknown as ContentGenerator,
+        contentGeneratorConfig: { modalities: {} },
+        retryAuthType: AuthType.USE_GEMINI,
+        retryErrorCodes: undefined,
+        model: 'fallback-b',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'gemini-pro@test0001',
+      );
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            usageMetadata: { promptTokenCount: 10, totalTokenCount: 10 },
+          } as GenerateContentResponse;
+          throw capacityError;
+        })(),
+      );
+      fallbackBGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'fallback-b ok' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: { promptTokenCount: 99_999 },
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: [{ text: 'test' }] },
+        'prompt-fallback-route-stamp',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // The session-token-limit gate in Client reads the count keyed by the
+      // REQUEST route. A fallback serves on behalf of the same request (the
+      // session model never changes), so its count must survive that keyed
+      // read instead of being invalidated as a foreign route's (#9454).
+      expect(chat.getLastPromptTokenCount('test-model@route')).toBe(99_999);
+      // The count still belongs to the serving turn's request route: a read
+      // for a different route invalidates it as before.
+      expect(chat.getLastPromptTokenCount('other-model@route')).toBe(0);
+    });
+
     it('skips a fallback alias that resolves to the current model', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,

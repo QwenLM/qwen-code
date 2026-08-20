@@ -3882,7 +3882,6 @@ export class GeminiChat {
                 let fallbackRetryErrorCodes: readonly number[] | undefined;
                 let resolvedFallbackModel: string;
                 let fallbackModalities: InputModalities | undefined;
-                let fallbackRouteKey: string;
                 try {
                   const resolved = await self.config
                     .getBaseLlmClient()
@@ -3893,10 +3892,6 @@ export class GeminiChat {
                   resolvedFallbackModel = resolved.model;
                   fallbackModalities =
                     resolved.contentGeneratorConfig?.modalities;
-                  fallbackRouteKey = self.config.getModelRouteIdentity(
-                    resolved.model,
-                    resolved.contentGeneratorConfig,
-                  );
                 } catch (resolveError) {
                   if (isAbortError(resolveError)) throw resolveError;
                   const resolveErrorMessage =
@@ -3953,6 +3948,14 @@ export class GeminiChat {
                       currentUserContent,
                       fallbackModalities ?? {},
                     );
+                  // Stamp the fallback-served counts under the REQUEST route
+                  // key: a fallback serves on behalf of the same session
+                  // request (the session model never changes), and the
+                  // session-token-limit gate in Client reads the count keyed
+                  // by the request route. Attributing the count to the
+                  // fallback's own route would make every later gate read
+                  // invalidate it, silently disabling the limit for any
+                  // session ever served through fallback (#9454).
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
@@ -3961,7 +3964,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
-                    fallbackRouteKey,
+                    requestRouteKey,
                     turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
