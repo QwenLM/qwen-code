@@ -3258,6 +3258,70 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('replays an allowed catch-up mention after a denied turn was in flight', async () => {
+    const client = new FakeDwsClient();
+    let releasePairing!: () => void;
+    const pairing = new Promise<void>((resolve) => {
+      releasePairing = resolve;
+    });
+    client.sendImMessage.mockImplementation(async () => {
+      await pairing;
+    });
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        senderPolicy: 'pairing',
+        allowedUsers: ['open-bob'],
+      }),
+    );
+    const catchUp = message(
+      'user_im_message_receive_o2o_all',
+      'allowed-catch-up',
+      documentMentionCard('doc-1', 'comment-1'),
+      {
+        senderId: 'open-bob',
+        senderName: 'Bob',
+        eventTime: Date.now() - 100_000,
+      },
+    );
+
+    await client.emit(1, catchUp);
+    client.directMessages = [catchUp];
+    const denied = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'denied-live',
+        documentMentionCard('doc-1', 'comment-1'),
+      ),
+    );
+    await vi.waitFor(() => expect(client.sendImMessage).toHaveBeenCalledOnce());
+    const catchUpPoll = channel.poll();
+    await vi.waitFor(() =>
+      expect(client.listDirectMessages).toHaveBeenCalled(),
+    );
+    releasePairing();
+    await Promise.all([denied, catchUpPoll]);
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(channel.pendingDocumentNotifications()).toContainEqual(
+      expect.objectContaining({ messageId: 'allowed-catch-up' }),
+    );
+    expect(channel.notificationWatermark()).toBeGreaterThan(
+      catchUp.eventTime! + 5_000,
+    );
+
+    client.directMessages = [];
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('doc-1'),
+      expect.any(Object),
+    );
+  });
+
   it('deduplicates a successful message across restarts', async () => {
     const client = new FakeDwsClient();
     const first = await readyChannel(client, makeConfig(), 'persistent-dws');

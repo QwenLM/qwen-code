@@ -1674,6 +1674,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           !this.gate.isAllowed(message.senderId))
       ) {
         this.markProcessedMessage(key);
+      } else {
+        this.rememberPendingDocumentNotification(message, notification);
       }
       this.saveCursor();
       return;
