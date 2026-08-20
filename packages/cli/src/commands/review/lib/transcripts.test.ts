@@ -301,6 +301,11 @@ describe('readTranscripts — defensive parsing', () => {
     // the tally — with nothing to rule on. The denied read's [41, 80] is
     // absent, pinning the success gate on `diffReads` as well.
     expect(rec.diffReads).toEqual([[1, 40]]);
+    // The same gate guards the evidence lists the certification atoms read
+    // (`openedBrief`, `readBrief`, `readFindingsPointer`): the denied read
+    // must stay out of them too, not only out of the diff fields.
+    expect(rec.successfulCallArgs).toHaveLength(3);
+    expect(rec.successfulReadFileArgs).toHaveLength(2);
     // And with no diffPath the field stays 0, whatever was read.
     expect(readTranscripts(undefined, ENV)[0].diffToolCalls).toBe(0);
   });
