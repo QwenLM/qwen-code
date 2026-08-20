@@ -1833,8 +1833,21 @@ export function useQueuedPrompts({
           // dropping the prompt silently. Bail and leave the rows alone — the
           // owner-change effect has already stashed them for the session they
           // were typed in, and touching state here would fight it.
-          unreleasedPromptIdsRef.current.delete(prompt.id);
+          //
+          // The id must stay in `unreleasedPromptIdsRef` on this path. The
+          // token is replaced in the render body while the stash is a passive
+          // effect flushed after commit, so a link firing in that window would
+          // otherwise leave a row that is neither locally held (it is stamped
+          // `submitting`) nor unreleased — and the stash drops exactly those.
           if (!isCurrentOwnerTokenRef.current(chainOwner)) {
+            return Promise.resolve();
+          }
+          unreleasedPromptIdsRef.current.delete(prompt.id);
+          // Every path that removes a stamped row means cancellation: a queue
+          // clear mid-drain aborts the in-flight link's controller, but the
+          // links still pending have no controller yet, so only the row's
+          // absence tells them the user cleared what they were about to POST.
+          if (!queuedPromptsRef.current.some((item) => item.id === prompt.id)) {
             return Promise.resolve();
           }
           if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {

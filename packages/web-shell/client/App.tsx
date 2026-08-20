@@ -4023,10 +4023,19 @@ export function App({
   const goalSnapshotRef = useRef<GoalSnapshotV2 | null>(null);
   goalSnapshotRef.current = goalSnapshot;
   const [goalControlBusy, setGoalControlBusy] = useState(false);
+  // Which control operation owns the busy latch, mirroring ChatPane's twin. A
+  // finishing operation must not release the latch under a newer one that is
+  // still in flight, or the strip re-enables mid-control and a second dispatch
+  // races the first against the same expected revision.
+  const goalControlOpSeqRef = useRef(0);
+  const goalControlOwnerRef = useRef<
+    { opId: number; sessionId: string | undefined } | undefined
+  >(undefined);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
   const [goalEditError, setGoalEditError] = useState<string | null>(null);
   useLayoutEffect(() => {
     setGoalSnapshot(null);
+    goalControlOwnerRef.current = undefined;
     setGoalControlBusy(false);
     setGoalEditOpen(false);
     setGoalEditError(null);
@@ -8486,6 +8495,8 @@ export function App({
       const busyOwner = sessionOwnerGuard.capture();
       const busySessionId = connectionRef.current.sessionId;
       const expectedGoalId = goalSnapshotRef.current?.goal?.goalId;
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId: busySessionId };
       setGoalControlBusy(true);
       try {
         const snapshot = await refreshGoal();
@@ -8514,8 +8525,13 @@ export function App({
           throw error;
         }
       } finally {
-        if (connectionRef.current.sessionId === busySessionId) {
-          setGoalControlBusy(false);
+        // A newer operation (or a session change) owns the latch now; leave it
+        // to whoever owns it rather than releasing it under them.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          if (connectionRef.current.sessionId === busySessionId) {
+            setGoalControlBusy(false);
+          }
         }
       }
     },
@@ -8524,6 +8540,8 @@ export function App({
 
   const createGoalForAllocatedSession = useCallback(
     async (sessionId: string, objective: string) => {
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId };
       setGoalControlBusy(true);
       try {
         const response = await workspaceActions.controlGoal(sessionId, {
@@ -8548,7 +8566,14 @@ export function App({
         }
         return response.snapshot;
       } finally {
-        setGoalControlBusy(false);
+        // Same ownership rule as `controlCurrentGoal`: a create that settles
+        // after the user switched sessions must not release a latch a newer
+        // control now holds, or the strip re-enables mid-control and a second
+        // dispatch loses the daemon's CAS with a 409.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          setGoalControlBusy(false);
+        }
       }
     },
     [refreshGoal, sessionActions, workspaceActions],
@@ -8599,6 +8624,14 @@ export function App({
       // without a session would otherwise lose its text to a toast.
       if (!connectionRef.current.sessionId && operation.kind !== 'set') {
         pushToast('error', t('localCommand.noSession'));
+        return false;
+      }
+      // The strip disables its buttons while a control is in flight; the
+      // composer has no disabled state, so it has to refuse here. Two controls
+      // read the same snapshot and stamp the same `expectedGoalId`/
+      // `expectedRevision`, and the daemon rejects the loser with a 409.
+      if (goalControlOwnerRef.current) {
+        pushToast('error', t('goals.error.controlBusy'));
         return false;
       }
 

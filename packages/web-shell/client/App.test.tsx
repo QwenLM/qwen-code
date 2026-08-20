@@ -19827,6 +19827,38 @@ describe('App /goal command', () => {
     );
   });
 
+  it('refuses a composer control while another goal control is in flight', async () => {
+    // The strip disables its buttons while a control runs; the composer has no
+    // disabled state, so without this refusal both controls read the same
+    // snapshot, stamp the same expected revision, and the daemon rejects the
+    // loser with a 409 surfaced as "Failed to …the goal".
+    const pendingControl = deferred<{
+      snapshot: ReturnType<typeof activeGoalSnapshot>;
+    }>();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingControl.promise);
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal ship it';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(1);
+    });
+
+    testState.prompt = '/goal ship something else';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(1);
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingControl.resolve({ snapshot: activeGoalSnapshot('ship it') });
+      await flush();
+    });
+  });
+
   it('creates a goal as the first command while the new session is still committing', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockResolvedValueOnce({
@@ -20319,6 +20351,64 @@ describe('App /goal command', () => {
 
     await act(async () => {
       pendingB.resolve({ snapshot: goalB });
+      await flush();
+    });
+  });
+
+  it('keeps the busy latch when an allocated-session create settles late', async () => {
+    // `createGoalForAllocatedSession` shares the latch with `controlCurrentGoal`
+    // but used to release it unconditionally, so a create that settles after
+    // the user moved on re-enabled the strip under the new session's control.
+    const created = activeGoalSnapshot('first objective');
+    const goalB = activeGoalSnapshot('goal B', 1);
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    const pendingCreate = deferred<{ snapshot: typeof created }>();
+    const pendingPause = deferred<{ snapshot: typeof goalB }>();
+    mockWorkspaceActions.controlGoal.mockReturnValueOnce(pendingCreate.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal first objective';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledTimes(1);
+    });
+
+    // The user leaves for a session that already has a Goal and pauses it.
+    mockSessionActions.getGoal.mockReturnValueOnce(pendingPause.promise);
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = goalB;
+      rerender({});
+    });
+    const pause = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('session B pause control was not rendered');
+    act(() => pause.click());
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      pendingCreate.resolve({ snapshot: created });
+      await flush();
+    });
+
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      pendingPause.resolve({ snapshot: goalB });
       await flush();
     });
   });

@@ -761,6 +761,77 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ).toEqual(['first with media', 'second plain']);
   });
 
+  it('stashes a chain link that bails before the owner change commits', async () => {
+    // The owner token is replaced in the render body while the stash is a
+    // passive effect flushed after commit. A link firing in that window used
+    // to delete its id from the unreleased set before the owner check, so the
+    // stash -- which saves a stamped row only while its id is still there --
+    // discarded a prompt the chain never POSTed.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'second' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first with media'));
+    act(() => latest.enqueuePrompt('second plain'));
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    // Token replaced, stash not flushed yet -- link 2 runs inside the window.
+    sdk.ownerVersion += 1;
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+      await Promise.resolve();
+    });
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    // The commit that follows must still find the row stashable.
+    render('idle', 'session-2', false, false, false);
+    render('idle', 'session-1', false, false, false);
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'second plain' }]);
+  });
+
+  it('drops the undrained release chain when the queue is cleared mid-drain', async () => {
+    // Before the serial chain, every `submitting` row had its abort controller
+    // created synchronously with the stamp, so clearing the queue aborted it.
+    // The chain defers submission past the stamp, so the links it has not
+    // fired yet are reachable only through the row's absence from the queue.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'second' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first with media'));
+    act(() => latest.enqueuePrompt('second plain'));
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    act(() => {
+      latest.clearQueuedPrompts();
+    });
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+      await Promise.resolve();
+    });
+
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
   it('keeps locally held Goal follow-ups isolated across session switches', () => {
     const { actions } = createActions();
     const { render } = mount('responding', actions, true, false, false, true);

@@ -2100,6 +2100,8 @@ const EN: Messages = {
   'goals.error.pauseFailed': 'Failed to pause the goal',
   'goals.error.resumeFailed': 'Failed to resume the goal',
   'goals.error.clearFailed': 'Failed to clear the goal',
+  'goals.error.controlBusy':
+    'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
   'memory.autoDream': (v) =>
@@ -5014,6 +5016,7 @@ const ZH: Messages = {
   'goals.error.pauseFailed': '暂停目标失败',
   'goals.error.resumeFailed': '继续目标失败',
   'goals.error.clearFailed': '清除目标失败',
+  'goals.error.controlBusy': '还有一个目标操作正在进行，请等它完成后再试。',
   'memory.add': '添加',
   'memory.add.desc': '写入一条持久 memory',
   'memory.autoDream': (v) =>
