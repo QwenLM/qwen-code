@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
@@ -22,6 +22,7 @@ import {
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { ReadonlyComposerTag } from './messages/UserMessage';
+import { isSafeImageSrc } from './messages/Markdown';
 import styles from '../App.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
@@ -122,8 +123,10 @@ export interface QueuedPrompt {
   sessionId?: string;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
+  onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
   midTurnState?: 'submitting' | 'queued';
@@ -131,6 +134,7 @@ export interface QueuedPrompt {
   midTurnFailedAction?: 'delete' | 'edit';
   isEditing?: boolean;
   isRemoving?: boolean;
+  payloadCompleteness?: 'complete' | 'summary-only';
 }
 
 export function QueuedPromptDisplay({
@@ -139,12 +143,14 @@ export function QueuedPromptDisplay({
   canMutateMidTurn = false,
   onDelete,
   onEdit,
+  onImagePreview,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
   onDelete: (id: number) => void;
   onEdit: (id: number) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -161,7 +167,8 @@ export function QueuedPromptDisplay({
     latestPrompt.serverState !== 'submitting' &&
     latestPrompt.serverState !== 'running' &&
     !latestPrompt.isEditing &&
-    !latestPrompt.isRemoving;
+    !latestPrompt.isRemoving &&
+    latestPrompt.payloadCompleteness !== 'summary-only';
 
   return (
     <div className={styles.queuedPrompts}>
@@ -169,7 +176,12 @@ export function QueuedPromptDisplay({
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
-        const imageCount = prompt.images?.length ?? 0;
+        const safeImages = (prompt.images ?? []).flatMap((image, index) => {
+          const src = `data:${image.media_type};base64,${image.data}`;
+          return isSafeImageSrc(src) ? [{ index, src }] : [];
+        });
+        const imageCount = safeImages.length;
+        const fileCount = prompt.files?.length ?? 0;
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
@@ -177,6 +189,7 @@ export function QueuedPromptDisplay({
         const isMidTurnLocked =
           prompt.midTurnState === 'submitting' ||
           (prompt.midTurnState === 'queued' && !prompt.midTurnMessageId);
+        const isSummaryOnly = prompt.payloadCompleteness === 'summary-only';
         const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
         const hasStateSpinner =
@@ -190,9 +203,12 @@ export function QueuedPromptDisplay({
           isMidTurnLocked ||
           prompt.isEditing === true ||
           isRemoving;
+        const isEditDisabled = isBusy || isSummaryOnly;
         let editTitle = t('queue.editTip');
-        if (isBusy) {
-          editTitle = t('queue.submittingDisabled');
+        if (isEditDisabled) {
+          editTitle = isSummaryOnly
+            ? t('queue.summaryEditDisabled')
+            : t('queue.submittingDisabled');
         }
         const deleteTitle = isBusy
           ? t('queue.submittingDisabled')
@@ -222,10 +238,50 @@ export function QueuedPromptDisplay({
                 ),
               )}
               {preview.truncated ? '...' : null}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
+              {fileCount > 0
+                ? ` ${t('queue.fileCount', { count: fileCount })}`
                 : ''}
             </span>
+            {imageCount > 0 ? (
+              <span
+                className={styles.queuedPromptImages}
+                aria-label={t('queue.imageCount', { count: imageCount })}
+                title={t('queue.imageCount', { count: imageCount })}
+              >
+                {safeImages.map(({ index, src }) => {
+                  const alt = t('user.uploadedImage', { index: index + 1 });
+                  return (
+                    <img
+                      key={index}
+                      className={`${styles.queuedPromptImage}${
+                        onImagePreview
+                          ? ` ${styles.queuedPromptImageInteractive}`
+                          : ''
+                      }`}
+                      src={src}
+                      alt={alt}
+                      role={onImagePreview ? 'button' : undefined}
+                      tabIndex={onImagePreview ? 0 : undefined}
+                      onClick={
+                        onImagePreview
+                          ? () => onImagePreview(src, alt)
+                          : undefined
+                      }
+                      onKeyDown={
+                        onImagePreview
+                          ? (event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ')
+                                return;
+                              event.preventDefault();
+                              onImagePreview(src, alt);
+                            }
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+              </span>
+            ) : null}
             {isSubmitting ||
             isQueued ||
             isMidTurnPending ||
@@ -274,7 +330,7 @@ export function QueuedPromptDisplay({
                     type="button"
                     className={styles.queuedPromptAction}
                     onClick={() => onEdit(prompt.id)}
-                    disabled={isBusy}
+                    disabled={isEditDisabled}
                     aria-label={t('queue.edit')}
                     title={editTitle}
                   >

@@ -1,21 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
+import { ChevronRightIcon } from 'lucide-react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
+import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
-import {
-  formatElapsed,
-  formatLiveElapsed,
-  StatusIcon,
-  truncateText,
-} from './toolDisplay';
+import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
+  isDefaultAgentType,
   getAgentDescription,
   getAgentCurrentToolHint,
   formatTokenCount,
   getAgentCancellationReason,
   getAgentDisplayStatus,
+  isActiveToolStatus,
   localizeAgentTypeName,
   toolContainsCallId,
 } from '../toolFormatting';
@@ -24,7 +23,22 @@ import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
   agents: ACPToolCall[];
+  autoManageExpansion?: boolean;
+  automaticCollapseDelayMs?: number;
+  deferAutomaticCollapse?: boolean;
+  expandActiveWhenLive?: boolean;
+  onAutomaticExpansionChange?: (expanded: boolean) => void;
   pendingApproval?: PermissionRequest | null;
+}
+
+const AUTO_COLLAPSE_DELAY_MS = 1_500;
+const AUTO_COLLAPSE_ANIMATION_MS = 180;
+
+function automaticCollapseAnimationMs(): number {
+  return typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ? 0
+    : AUTO_COLLAPSE_ANIMATION_MS;
 }
 
 function formatDuration(ms: number): string {
@@ -35,78 +49,14 @@ function formatDuration(ms: number): string {
   return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
 }
 
-export interface TimelineRow {
-  leftPct: number;
-  widthPct: number;
-  running: boolean;
-}
-
-export interface TimelineTick {
-  leftPct: number;
-  label: string;
-}
-
-export interface AgentsTimeline {
-  rows: Map<string, TimelineRow>;
-  ticks: TimelineTick[];
-}
-
-/**
- * Geometry for the shared-axis mini timeline: one bar per agent against
- * the group's combined wall-clock span, so overlap and relative duration
- * read at a glance. Returns null when the bars would not be comparable
- * (an agent without a start time) or carry no information (single agent,
- * sub-second span) — the list then renders without a timeline.
- */
-export function computeAgentsTimeline(
-  agents: ACPToolCall[],
+function getAgentStats(
+  agent: ACPToolCall,
   now: number,
-): AgentsTimeline | null {
-  if (agents.length < 2) return null;
-  const starts: number[] = [];
-  for (const agent of agents) {
-    if (typeof agent.startTime !== 'number') return null;
-    starts.push(agent.startTime);
-  }
-  const ends = agents.map((agent, i) =>
-    agent.status === 'in_progress'
-      ? Math.max(now, starts[i])
-      : Math.max(agent.endTime ?? starts[i], starts[i]),
-  );
-  const t0 = Math.min(...starts);
-  const span = Math.max(...ends) - t0;
-  if (span < 1000) return null;
-
-  const rows = new Map<string, TimelineRow>();
-  agents.forEach((agent, i) => {
-    // Keep a visible sliver for near-instant agents, clamped so it never
-    // overflows the right edge.
-    const width = Math.max((ends[i] - starts[i]) / span, 0.02);
-    const left = Math.min((starts[i] - t0) / span, 1 - width);
-    rows.set(agent.callId, {
-      leftPct: left * 100,
-      widthPct: width * 100,
-      running: agent.status === 'in_progress',
-    });
-  });
-
-  // Ruler at 0 / step / 2·step… with a "nice" step (1-2-5 × 10ᵏ seconds),
-  // stopping short of the right edge so labels don't collide with it.
-  const targetSec = Math.max(span / 1000 / 2.2, 1);
-  const pow = Math.pow(10, Math.floor(Math.log10(targetSec)));
-  const stepSec =
-    [5, 2, 1].map((m) => m * pow).find((s) => s <= targetSec) ?? pow;
-  const ticks: TimelineTick[] = [];
-  for (let m = 0; ticks.length < 4; m++) {
-    const atMs = m * stepSec * 1000;
-    if (atMs > span * 0.92) break;
-    ticks.push({ leftPct: (atMs / span) * 100, label: formatDuration(atMs) });
-  }
-  return { rows, ticks };
-}
-
-function getAgentStats(agent: ACPToolCall, now: number): string {
-  const parts: string[] = [];
+): {
+  duration: string;
+  tokens: string;
+  cancellationReason: string;
+} {
   const taskExec = getTaskExecutionRecord(agent.rawOutput);
   const stats = taskExec?.['executionSummary'] as
     | Record<string, unknown>
@@ -118,8 +68,7 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
           agent.startTime,
           agent.endTime ?? (agent.status === 'in_progress' ? now : undefined),
         );
-  if (elapsed) parts.push(elapsed);
-  const tokens =
+  const tokenCount =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
@@ -129,12 +78,11 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
           stats['outputTokens'] > 0
         ? (stats['outputTokens'] as number)
         : 0;
-  if (tokens > 0) {
-    parts.push(formatTokenCount(tokens));
-  }
-  const reason = getAgentCancellationReason(agent);
-  if (reason) parts.push(truncateText(reason, 80));
-  return parts.join(' · ');
+  return {
+    duration: elapsed,
+    tokens: tokenCount > 0 ? formatTokenCount(tokenCount) : '',
+    cancellationReason: truncateText(getAgentCancellationReason(agent), 80),
+  };
 }
 
 function ToolGroupIcon() {
@@ -159,77 +107,306 @@ function ToolGroupIcon() {
 
 export function ParallelAgentsGroup({
   agents,
+  autoManageExpansion = false,
+  automaticCollapseDelayMs = AUTO_COLLAPSE_DELAY_MS,
+  deferAutomaticCollapse = false,
+  expandActiveWhenLive = false,
+  onAutomaticExpansionChange,
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
+  const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
+    useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
+  const expansionOwnerRef = useRef<'none' | 'automatic' | 'manual'>('none');
+  const groupExpandedRef = useRef(groupExpanded);
+  groupExpandedRef.current = groupExpanded;
+  const automaticExpansionChangeRef = useRef(onAutomaticExpansionChange);
+  automaticExpansionChangeRef.current = onAutomaticExpansionChange;
+  const autoCollapseTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
+  const autoCollapseAnimationTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
 
-  const hasRunning = agents.some((a) => a.status === 'in_progress');
+  const hasActive = hasActiveAgents(agents);
+  const activeStartedAt = agents.reduce<number | undefined>(
+    (earliest, agent) => {
+      if (
+        !isActiveToolStatus(agent.status) ||
+        typeof agent.startTime !== 'number'
+      ) {
+        return earliest;
+      }
+      return earliest === undefined
+        ? agent.startTime
+        : Math.min(earliest, agent.startTime);
+    },
+    undefined,
+  );
+  const approvalAgent = pendingApproval?.toolCallId
+    ? agents.find((agent) =>
+        toolContainsCallId(agent, pendingApproval.toolCallId!),
+      )
+    : undefined;
+  const hasApprovalAgent = !!approvalAgent;
+  const approvalAgentRef = useRef(approvalAgent);
+  approvalAgentRef.current = approvalAgent;
+  const deferAutomaticCollapseRef = useRef(deferAutomaticCollapse);
+  deferAutomaticCollapseRef.current = deferAutomaticCollapse;
+  const autoManageExpansionRef = useRef(autoManageExpansion);
+  autoManageExpansionRef.current = autoManageExpansion;
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const summaryRef = useRef<HTMLButtonElement | null>(null);
+
+  const wasActiveRef = useRef(false);
+  const wasAutoManageExpansionRef = useRef(autoManageExpansion);
+  const wasExpandActiveWhenLiveRef = useRef(expandActiveWhenLive);
+  const previousAutomaticCollapseDelayRef = useRef(automaticCollapseDelayMs);
+  const wasDeferringAutomaticCollapseRef = useRef(deferAutomaticCollapse);
+  useEffect(() => {
+    const wasActive = wasActiveRef.current;
+    const wasAutoManaging = wasAutoManageExpansionRef.current;
+    const wasExpandActiveWhenLive = wasExpandActiveWhenLiveRef.current;
+    const collapseDelayChanged =
+      previousAutomaticCollapseDelayRef.current !== automaticCollapseDelayMs;
+    const wasDeferringAutomaticCollapse =
+      wasDeferringAutomaticCollapseRef.current;
+    // Latch the anchor on the false->true edge: re-anchoring while agents
+    // finish would rewind the header clock to a later start time.
+    if (hasActive && !wasActive) {
+      liveStartedAtRef.current = activeStartedAt ?? Date.now();
+      setNow(Date.now());
+    }
+
+    if (
+      hasActive ||
+      !autoManageExpansion ||
+      deferAutomaticCollapse ||
+      collapseDelayChanged
+    ) {
+      clearTimeout(autoCollapseTimerRef.current);
+      autoCollapseTimerRef.current = undefined;
+    }
+    if (hasActive || !autoManageExpansion || deferAutomaticCollapse) {
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      autoCollapseAnimationTimerRef.current = undefined;
+      if (
+        automaticCollapseAnimating &&
+        expansionOwnerRef.current === 'automatic'
+      ) {
+        setAutomaticCollapseAnimating(false);
+        setGroupExpanded(true);
+      }
+    }
+    if (
+      hasApprovalAgent &&
+      automaticCollapseAnimating &&
+      expansionOwnerRef.current === 'automatic'
+    ) {
+      // The approval takes over visibility and releases automatic expansion;
+      // resolving it later removes the panel outright because there is no
+      // automatic expansion left to animate out.
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      autoCollapseAnimationTimerRef.current = undefined;
+      expansionOwnerRef.current = 'none';
+      setAutomaticCollapseAnimating(false);
+      automaticExpansionChangeRef.current?.(false);
+    }
+    if (autoManageExpansion && expansionOwnerRef.current !== 'manual') {
+      if (
+        hasActive &&
+        (!wasActive ||
+          (expandActiveWhenLive &&
+            (!wasAutoManaging || !wasExpandActiveWhenLive)))
+      ) {
+        expansionOwnerRef.current = 'automatic';
+        setGroupExpanded(true);
+        automaticExpansionChangeRef.current?.(true);
+      } else if (
+        !hasActive &&
+        !automaticCollapseAnimating &&
+        !deferAutomaticCollapse &&
+        (wasActive ||
+          !wasAutoManaging ||
+          wasDeferringAutomaticCollapse ||
+          collapseDelayChanged) &&
+        expansionOwnerRef.current === 'automatic'
+      ) {
+        autoCollapseTimerRef.current = setTimeout(function attemptCollapse() {
+          // The timer can fire between the parent's commit and the effect
+          // that clears it; only the render-time refs reflect the new props.
+          if (
+            deferAutomaticCollapseRef.current ||
+            !autoManageExpansionRef.current
+          ) {
+            return;
+          }
+          if (
+            !wasActiveRef.current &&
+            expansionOwnerRef.current === 'automatic'
+          ) {
+            if (!groupExpandedRef.current) {
+              // The user collapsed while auto-management was suspended
+              // (which intentionally does not latch 'manual'): finalize
+              // ownership without playing the exit sequence against an
+              // already-collapsed panel.
+              expansionOwnerRef.current = 'none';
+              automaticExpansionChangeRef.current?.(false);
+              return;
+            }
+            if (approvalAgentRef.current) {
+              // The approval keeps the group visible; retry later so its
+              // resolution still gets the normal delayed exit animation.
+              autoCollapseTimerRef.current = setTimeout(
+                attemptCollapse,
+                automaticCollapseDelayMs,
+              );
+              return;
+            }
+            const focusedElement = document.activeElement;
+            if (
+              wrapRef.current &&
+              focusedElement instanceof HTMLElement &&
+              wrapRef.current.contains(focusedElement)
+            ) {
+              // The exit neutralizes every focusable element in the group;
+              // hand focus to the summary so it is not silently lost.
+              summaryRef.current?.focus();
+            }
+            setGroupExpanded(false);
+            const animationMs = automaticCollapseAnimationMs();
+            if (animationMs === 0) {
+              expansionOwnerRef.current = 'none';
+              automaticExpansionChangeRef.current?.(false);
+              return;
+            }
+            setAutomaticCollapseAnimating(true);
+            autoCollapseAnimationTimerRef.current = setTimeout(() => {
+              autoCollapseAnimationTimerRef.current = undefined;
+              // Same commit-vs-flush race as above: the deferral effect's
+              // rescue only fires while the animation is still pending, so
+              // finalizing on stale state would make it unrecoverable.
+              if (
+                deferAutomaticCollapseRef.current ||
+                !autoManageExpansionRef.current
+              ) {
+                return;
+              }
+              if (
+                !wasActiveRef.current &&
+                expansionOwnerRef.current === 'automatic'
+              ) {
+                expansionOwnerRef.current = 'none';
+                setAutomaticCollapseAnimating(false);
+                automaticExpansionChangeRef.current?.(false);
+              }
+            }, animationMs);
+          }
+        }, automaticCollapseDelayMs);
+      }
+    }
+    wasActiveRef.current = hasActive;
+    wasAutoManageExpansionRef.current = autoManageExpansion;
+    wasExpandActiveWhenLiveRef.current = expandActiveWhenLive;
+    previousAutomaticCollapseDelayRef.current = automaticCollapseDelayMs;
+    wasDeferringAutomaticCollapseRef.current = deferAutomaticCollapse;
+  }, [
+    activeStartedAt,
+    automaticCollapseAnimating,
+    autoManageExpansion,
+    automaticCollapseDelayMs,
+    deferAutomaticCollapse,
+    expandActiveWhenLive,
+    hasApprovalAgent,
+    hasActive,
+  ]);
 
   useEffect(() => {
-    if (!hasRunning) return;
-    liveStartedAtRef.current = Date.now();
-    setNow(Date.now());
-  }, [hasRunning]);
+    if (expansionOwnerRef.current === 'automatic') {
+      automaticExpansionChangeRef.current?.(true);
+    }
+    return () => {
+      clearTimeout(autoCollapseTimerRef.current);
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      if (expansionOwnerRef.current === 'automatic') {
+        automaticExpansionChangeRef.current?.(false);
+      }
+    };
+  }, []);
 
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasActive) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [hasRunning]);
-  const runningDuration = hasRunning
+  }, [hasActive]);
+  const runningDuration = hasActive
     ? formatLiveElapsed(now - liveStartedAtRef.current)
     : '';
 
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
   ).length;
+  const failedCount = agents.filter(
+    (a) => getAgentDisplayStatus(a) === 'failed',
+  ).length;
   const total = agents.length;
 
-  const approvalAgent = pendingApproval?.toolCallId
-    ? agents.find((a) => toolContainsCallId(a, pendingApproval.toolCallId!))
-    : undefined;
   const showGroup = groupExpanded || !!approvalAgent;
-  const timeline = showGroup ? computeAgentsTimeline(agents, now) : null;
-  const summaryStatus = agents.some(
-    (a) => getAgentDisplayStatus(a) === 'failed',
-  )
-    ? 'failed'
-    : hasRunning
-      ? 'in_progress'
-      : 'completed';
+  const renderGroup = showGroup || automaticCollapseAnimating;
+  const automaticCollapseClosing =
+    automaticCollapseAnimating && !hasApprovalAgent;
 
   return (
-    <div className={styles.wrap}>
+    <div className={styles.wrap} ref={wrapRef}>
       <button
         type="button"
+        ref={summaryRef}
         className={styles.summary}
-        onClick={() => setGroupExpanded((value) => !value)}
+        onClick={() => {
+          if (automaticCollapseClosing) return;
+          clearTimeout(autoCollapseTimerRef.current);
+          autoCollapseTimerRef.current = undefined;
+          clearTimeout(autoCollapseAnimationTimerRef.current);
+          autoCollapseAnimationTimerRef.current = undefined;
+          if (expansionOwnerRef.current === 'automatic') {
+            automaticExpansionChangeRef.current?.(false);
+          }
+          if (autoManageExpansion) {
+            expansionOwnerRef.current = 'manual';
+          }
+          setAutomaticCollapseAnimating(false);
+          setGroupExpanded((value) => !value);
+        }}
+        aria-disabled={automaticCollapseClosing || undefined}
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        {summaryStatus === 'failed' ? (
-          <span className={styles.summaryStatus}>
-            <StatusIcon status={summaryStatus} />
-          </span>
-        ) : (
-          <span className={styles.summaryIcon} aria-hidden="true">
-            <ToolGroupIcon />
-          </span>
-        )}
+        <span className={styles.summaryIcon} aria-hidden="true">
+          <ToolGroupIcon />
+        </span>
         <span
           className={
-            hasRunning
+            hasActive
               ? `${styles.summaryText} ${styles.summaryTextActive}`
               : styles.summaryText
           }
         >
           {t('parallelAgents.title')}
           {runningDuration && <> {runningDuration}</>}
+          {/* Ahead of the done counter so it survives the summaryText
+              tail truncation in narrow layouts. */}
+          {failedCount > 0 && (
+            <>
+              <span className={styles.summaryDot}>·</span>
+              {t('parallelAgents.failed', { count: failedCount })}
+            </>
+          )}
           <span className={styles.summaryDot}>·</span>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>
@@ -238,79 +415,153 @@ export function ParallelAgentsGroup({
           aria-hidden="true"
         />
       </button>
-      {showGroup && (
-        <div className={styles.group}>
-          <div className={styles.list}>
-            {agents.map((agent) => {
-              const agentType = getAgentType(agent);
-              const desc = getAgentDescription(agent);
-              const toolHint = getAgentCurrentToolHint(agent, t);
-              const stats = getAgentStats(agent, now);
-              const status = getAgentDisplayStatus(agent);
-              const isExpanded = expandedId === agent.callId;
-              const track = timeline?.rows.get(agent.callId);
-              return (
-                <div key={agent.callId}>
-                  <button
-                    type="button"
-                    className={styles.row}
-                    aria-expanded={subagentDetails ? undefined : isExpanded}
-                    onClick={() => {
-                      if (subagentDetails) subagentDetails.onOpen(agent);
-                      else setExpandedId(isExpanded ? null : agent.callId);
-                    }}
-                  >
-                    <StatusIcon status={status} />
-                    <span className={styles.rowDesc}>
-                      {truncateText(
-                        desc || localizeAgentTypeName(agentType, t),
-                        50,
-                      )}
-                      {toolHint && (
-                        <span
-                          className={styles.rowTool}
-                        >{` (${toolHint})`}</span>
-                      )}
-                    </span>
-                    {stats && <span className={styles.rowStats}>{stats}</span>}
-                  </button>
-                  {track && (
-                    <div className={styles.track} aria-hidden="true">
+      {renderGroup && (
+        <div
+          ref={(element) => {
+            element?.toggleAttribute('inert', automaticCollapseClosing);
+          }}
+          className={`${styles.groupViewport} ${
+            automaticCollapseClosing ? styles.groupViewportClosing : ''
+          }`}
+          data-agent-collapse-exit={
+            automaticCollapseClosing ? 'true' : undefined
+          }
+          aria-hidden={automaticCollapseClosing || undefined}
+        >
+          <div className={styles.groupViewportInner}>
+            <div className={styles.group}>
+              <div className={styles.list}>
+                {agents.map((agent) => {
+                  const agentType = getAgentType(agent);
+                  const desc = getAgentDescription(agent);
+                  const toolHint = getAgentCurrentToolHint(agent, t);
+                  const stats = getAgentStats(agent, now);
+                  const activity = toolHint || stats.cancellationReason;
+                  const status = getAgentDisplayStatus(agent);
+                  const rowStatus =
+                    status === 'failed'
+                      ? 'failed'
+                      : isActiveToolStatus(agent.status)
+                        ? 'active'
+                        : 'completed';
+                  const rowStatusLabel =
+                    rowStatus === 'active'
+                      ? t('subagent.running')
+                      : rowStatus === 'failed'
+                        ? t('subagent.failed')
+                        : t('subagent.completed');
+                  const isExpanded = expandedId === agent.callId;
+                  // While the agent's own launch approval is unanswered there
+                  // is nothing to show yet — keep the row compact and
+                  // non-interactive, mirroring ToolLine's pending guard.
+                  const approvalPending =
+                    pendingApproval?.toolCallId === agent.callId;
+                  const statusLabel = approvalPending
+                    ? t('subagent.pending')
+                    : rowStatusLabel;
+                  const localizedAgentType = localizeAgentTypeName(
+                    agentType,
+                    t,
+                  );
+                  const showAgentType =
+                    !!desc && !isDefaultAgentType(agentType);
+                  const rowContent = (
+                    <>
                       <span
-                        className={
-                          track.running
-                            ? `${styles.bar} ${styles.barRunning}`
-                            : styles.bar
-                        }
-                        style={{
-                          left: `${track.leftPct}%`,
-                          width: `${track.widthPct}%`,
-                        }}
-                      />
+                        className={styles.rowStatus}
+                        // role="img" makes the span nameable; aria-label on a
+                        // bare <span> (generic role) is not exposed to
+                        // assistive tech (see ChatPane's workspace tag).
+                        role="img"
+                        aria-label={statusLabel}
+                        title={statusLabel}
+                      >
+                        {rowStatus === 'active'
+                          ? '●'
+                          : rowStatus === 'failed'
+                            ? '×'
+                            : '✓'}
+                      </span>
+                      <span className={styles.rowText}>
+                        {showAgentType && (
+                          <span className={styles.rowType}>
+                            {truncateText(localizedAgentType, 50)}:
+                          </span>
+                        )}
+                        <span className={styles.rowTask}>
+                          {truncateText(desc || localizedAgentType, 50)}
+                        </span>
+                        {activity && (
+                          <span className={styles.rowActivity}>
+                            ({activity})
+                          </span>
+                        )}
+                      </span>
+                      {(stats.duration || stats.tokens) && (
+                        <span className={styles.rowStats}>
+                          {stats.duration && <span>{stats.duration}</span>}
+                          {stats.duration && stats.tokens && (
+                            <span aria-hidden="true"> · </span>
+                          )}
+                          {stats.tokens && <span>{stats.tokens}</span>}
+                        </span>
+                      )}
+                    </>
+                  );
+                  return (
+                    <div key={agent.callId}>
+                      {approvalPending ? (
+                        <div
+                          className={styles.row}
+                          data-agent-status={rowStatus}
+                          aria-disabled="true"
+                        >
+                          {rowContent}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className={
+                            rowStatus === 'active'
+                              ? `${styles.row} ${styles.rowActive}`
+                              : styles.row
+                          }
+                          data-agent-status={rowStatus}
+                          data-detail-mode={
+                            subagentDetails ? 'panel' : 'inline'
+                          }
+                          aria-expanded={
+                            subagentDetails ? undefined : isExpanded
+                          }
+                          title={
+                            subagentDetails
+                              ? t('planExecution.openDetails')
+                              : t('subagent.toggleStream')
+                          }
+                          onClick={() => {
+                            if (subagentDetails) subagentDetails.onOpen(agent);
+                            else
+                              setExpandedId(isExpanded ? null : agent.callId);
+                          }}
+                        >
+                          {rowContent}
+                          <ChevronRightIcon
+                            className={styles.rowAction}
+                            aria-hidden="true"
+                          />
+                        </button>
+                      )}
+                      {!subagentDetails && isExpanded && (
+                        <div className={styles.detail}>
+                          <SubAgentPanel tool={agent} hideHeader />
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {!subagentDetails && isExpanded && (
-                    <div className={styles.detail}>
-                      <SubAgentPanel tool={agent} hideHeader />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {timeline && timeline.ticks.length >= 2 && (
-            <div className={styles.ruler} aria-hidden="true">
-              {timeline.ticks.map((tick) => (
-                <span
-                  key={tick.label}
-                  className={styles.tick}
-                  style={{ left: `${tick.leftPct}%` }}
-                >
-                  {tick.label}
-                </span>
-              ))}
+                  );
+                })}
+              </div>
             </div>
-          )}
+          </div>
         </div>
       )}
     </div>

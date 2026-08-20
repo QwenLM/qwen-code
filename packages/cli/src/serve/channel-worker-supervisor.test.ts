@@ -6,6 +6,7 @@ import {
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
+import { isChannelWorkerPromptAuthorized } from './channel-worker-prompt-authorization.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
 import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
 import {
@@ -187,6 +188,7 @@ describe('createChannelWorkerSupervisor', () => {
   it('passes daemon connection details through env without putting token in argv', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'aws-secret');
@@ -233,6 +235,7 @@ describe('createChannelWorkerSupervisor', () => {
           QWEN_DAEMON_TOKEN: 'secret-token',
           QWEN_DAEMON_WORKSPACE: '/workspace',
           QWEN_CODE_NO_RELAUNCH: 'true',
+          QWEN_CODE_SERVE: '1',
           QWEN_CHANNEL_DAEMON_WORKER: expect.any(String),
         }),
         cwd: '/workspace',
@@ -242,6 +245,7 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(env).not.toHaveProperty('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN');
     expect(env).toHaveProperty('CUSTOM', 'value');
     expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
     expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');
@@ -251,6 +255,13 @@ describe('createChannelWorkerSupervisor', () => {
     expect(env).toHaveProperty('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     expect(env).toHaveProperty('HTTPS_PROXY', 'http://proxy.example.com:8080');
     expect(env['QWEN_CHANNEL_DAEMON_WORKER']).not.toBe('1');
+    const promptAuthorization = env['QWEN_CHANNEL_DAEMON_WORKER']!;
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(true);
+    expect(isChannelWorkerPromptAuthorized(promptAuthorization, '/other')).toBe(
+      false,
+    );
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
     expect(supervisor.snapshot()).toMatchObject({
@@ -260,6 +271,10 @@ describe('createChannelWorkerSupervisor', () => {
       channels: ['telegram', 'feishu'],
       requestedChannels: ['telegram', 'feishu'],
     });
+    supervisor.killAllSync();
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(false);
   });
 
   it('ignores non-ready IPC messages before the ready message', async () => {
@@ -940,6 +955,61 @@ describe('createChannelWorkerSupervisor', () => {
         signal: null,
       }),
     );
+  });
+
+  it('revokes the worker prompt authorization when the worker exits naturally', async () => {
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', { type: 'ready', channels: ['telegram'] });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    const promptAuthorization = env['QWEN_CHANNEL_DAEMON_WORKER']!;
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(true);
+
+    child.emit('exit', 1, null);
+
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('revokes the worker prompt authorization when spawn throws', async () => {
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(
+        (_execPath: string, _argv: string[], options: unknown) => {
+          capturedEnv = (options as { env: NodeJS.ProcessEnv }).env;
+          throw new Error('spawn ENOENT');
+        },
+      ),
+    });
+
+    await expect(supervisor.start()).rejects.toThrow('spawn ENOENT');
+
+    const promptAuthorization = capturedEnv?.['QWEN_CHANNEL_DAEMON_WORKER'];
+    expect(promptAuthorization).toBeDefined();
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization!, '/workspace'),
+    ).toBe(false);
   });
 
   it('restarts a ready worker after unexpected exit within budget', async () => {

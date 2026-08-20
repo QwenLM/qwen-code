@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
-import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
+import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
 import {
@@ -355,6 +355,7 @@ export async function runCliEntry(
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {
     delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     const { installManagedNpmUpdate } = await import(
       './utils/managed-npm-update.js'
     );
@@ -364,6 +365,13 @@ export async function runCliEntry(
 
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
+  if (route !== 'serve') {
+    // This credential belongs only to `qwen serve`. Scrub it before any other
+    // subcommand handler can start a child process during yargs parsing. The
+    // serve route keeps it until either the fast path or full serve handler
+    // has captured it into daemon-local options.
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+  }
 
   if (route === 'version') {
     await printBootstrapVersion();

@@ -6,10 +6,11 @@
 
 import { useState, useCallback } from 'react';
 import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
+import { applyReasoningEffort } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { formatEffortChangeMessage } from '../commands/effort-utils.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -37,42 +38,28 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
-        config.setReasoningEffort(effort);
+        applyReasoningEffort(config, effort);
         loadedSettings.setValue(
           getPersistScopeForModelSelection(loadedSettings),
           'model.reasoningEffort',
           effort,
         );
-        // Mirror the slash-command path's read-back so the dialog reports the
-        // outcome in-chat instead of silently closing (the status line is the
-        // only other signal). `setReasoningEffort` is a no-op when thinking is
+        // Report the outcome in-chat instead of silently closing (the status
+        // line is the only other signal). The setter no-ops when thinking is
         // explicitly disabled (`reasoning: false`): the tier is still persisted
         // for future sessions, but say it won't take effect until thinking is
-        // re-enabled; otherwise confirm the requested tier.
+        // re-enabled.
         if (addItem) {
-          if (config.getReasoningEffort() !== effort) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          } else {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          }
+          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+            type: MessageType.INFO,
+            text: formatEffortChangeMessage(config, effort),
+          };
+          addItem(feedbackItem, Date.now());
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/effort',
+            outputHistoryItems: [feedbackItem],
+          });
         }
       } finally {
         setIsEffortDialogOpen(false);

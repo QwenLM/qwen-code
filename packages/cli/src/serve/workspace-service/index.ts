@@ -13,6 +13,7 @@
  * takes no direct reference to the bridge.
  */
 
+import { randomUUID } from 'node:crypto';
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 
@@ -69,6 +70,7 @@ import {
 } from '../workspace-skill-management.js';
 
 import {
+  mapWorkspaceSkillToggleError,
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSkillNotToggleableError,
@@ -84,7 +86,11 @@ import type {
   WorkspaceVoiceSettingsUpdate,
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
+  WorkspaceSkillBatchToggleResult,
+  WorkspaceSkillToggleError,
   WorkspaceSkillToggleResult,
+  WorkspaceSkillToggleActivation,
+  PersistDisabledSkillsBatchResult,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -103,6 +109,10 @@ export type {
   WorkspaceVoiceSettingsUpdate,
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
+  WorkspaceSkillBatchToggleResult,
+  WorkspaceSkillBatchToggleItem,
+  WorkspaceSkillToggleError,
+  WorkspaceSkillToggleErrorCode,
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
   EnvReloadResult,
@@ -113,6 +123,7 @@ export {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSkillNotToggleableError,
+  mapWorkspaceSkillToggleError,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -120,6 +131,25 @@ export {
 // ---------------------------------------------------------------------------
 
 const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
+
+function createSkillToggleMutation(input: {
+  skills: ReadonlyArray<{ name: string; enabled: boolean }>;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}) {
+  return {
+    id: randomUUID(),
+    kind: 'skill_toggle' as const,
+    skills: input.skills.map((skill) => ({
+      name: skill.name,
+      enabled: skill.enabled,
+    })),
+    activation: input.activation,
+    sessionsRefreshed: input.sessionsRefreshed,
+    sessionsFailed: input.sessionsFailed,
+  };
+}
 
 /**
  * Walk up from `inputPath` until we find an ancestor that exists on disk,
@@ -221,6 +251,7 @@ export function createDaemonWorkspaceService(
     isChannelLive,
     persistDisabledTools,
     persistDisabledSkills,
+    persistDisabledSkillsBatch,
     persistSetting,
     persistSettings,
     skillInstallEnv,
@@ -898,6 +929,12 @@ export function createDaemonWorkspaceService(
               persisted.disabled.length > 0 ? persisted.disabled : undefined,
           },
         ];
+        const mutation = createSkillToggleMutation({
+          skills: [{ name: skill.name, enabled }],
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
         for (const change of settingsChanges) {
           publishWorkspaceEvent({
             type: 'settings_changed',
@@ -905,6 +942,7 @@ export function createDaemonWorkspaceService(
               key: change.key,
               value: change.value,
               scope: 'workspace',
+              mutation,
             },
             originatorClientId: ctx.originatorClientId,
           });
@@ -918,6 +956,187 @@ export function createDaemonWorkspaceService(
         activation,
         sessionsRefreshed,
         sessionsFailed,
+      };
+    },
+
+    async setWorkspaceSkillsEnabled(
+      ctx: WorkspaceRequestContext,
+      requestedSkillNames: readonly string[],
+      enabled: boolean,
+    ): Promise<WorkspaceSkillBatchToggleResult> {
+      assertActiveGeneration();
+      const status = await getWorkspaceSkillsStatus();
+      const skillsByName = new Map<
+        string,
+        ServeWorkspaceSkillsStatus['skills'][number]
+      >();
+      for (const skill of status.skills) {
+        const normalizedName = skill.name.trim().toLowerCase();
+        if (!skillsByName.has(normalizedName)) {
+          skillsByName.set(normalizedName, skill);
+        }
+      }
+      const disabledNames = resolveSkillSettings(
+        loadBoundSettings(true),
+      ).disabledNames;
+      const targets: Array<
+        | { requestedName: string; skillName: string }
+        | { requestedName: string; error: WorkspaceSkillToggleError }
+      > = [];
+
+      for (const requestedName of requestedSkillNames) {
+        const normalizedName = requestedName.trim().toLowerCase();
+        const skill = skillsByName.get(normalizedName);
+        if (!skill) {
+          targets.push({ requestedName, skillName: requestedName });
+          continue;
+        }
+        let domainError: unknown;
+        if (skill.userInvocable === false) {
+          domainError = new WorkspaceSkillNotToggleableError(
+            skill.name,
+            'not_user_invocable',
+          );
+        } else {
+          const legacyInactive =
+            skill.level === 'extension' &&
+            skill.status === 'disabled' &&
+            skill.disabledReason === undefined &&
+            !disabledNames.has(normalizedName);
+          if (
+            skill.level === 'extension' &&
+            skill.status === 'disabled' &&
+            (skill.disabledReason === 'inactive_extension' || legacyInactive)
+          ) {
+            domainError = new WorkspaceSkillNotToggleableError(
+              skill.name,
+              'inactive_extension',
+            );
+          }
+        }
+
+        if (domainError) {
+          const error = mapWorkspaceSkillToggleError(domainError);
+          if (!error) throw domainError;
+          targets.push({ requestedName, error });
+        } else {
+          targets.push({ requestedName, skillName: skill.name });
+        }
+      }
+
+      const validSkillNames = targets.flatMap((target) =>
+        'skillName' in target ? [target.skillName] : [],
+      );
+      const persisted: PersistDisabledSkillsBatchResult =
+        validSkillNames.length > 0
+          ? await persistDisabledSkillsBatch(
+              boundWorkspace,
+              validSkillNames,
+              enabled,
+              assertGenerationOpen,
+            )
+          : { outcomes: [], settingsChanges: [] };
+      assertActiveGeneration();
+      const persistedByName = new Map(
+        persisted.outcomes.map((outcome) => [
+          outcome.skillName.trim().toLowerCase(),
+          outcome,
+        ]),
+      );
+      const results: WorkspaceSkillBatchToggleResult['results'] = [];
+      const errors: WorkspaceSkillBatchToggleResult['errors'] = [];
+      for (const target of targets) {
+        if ('error' in target) {
+          errors.push(target.error);
+          continue;
+        }
+        const outcome = persistedByName.get(
+          target.skillName.trim().toLowerCase(),
+        );
+        if (!outcome) {
+          throw new Error(
+            `Missing persisted Skill batch outcome: ${target.skillName}`,
+          );
+        }
+        if ('error' in outcome) {
+          const error = mapWorkspaceSkillToggleError(outcome.error);
+          if (!error) throw outcome.error;
+          errors.push(error);
+        } else {
+          results.push({
+            skillName: outcome.skillName,
+            enabled,
+            changed: outcome.changed,
+          });
+        }
+      }
+
+      const changed = results.some((result) => result.changed);
+      const channelLive = isChannelLive?.() ?? false;
+      let activation: WorkspaceSkillBatchToggleResult['activation'] =
+        channelLive ? 'applied' : 'deferred';
+      let sessionsRefreshed = 0;
+      let sessionsFailed = 0;
+      if (changed) {
+        invalidateWorkspaceSkillsSnapshot();
+        if (channelLive) {
+          try {
+            const refreshed =
+              await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: boundWorkspace, reason: 'settings' },
+              );
+            assertActiveGeneration();
+            sessionsRefreshed = refreshed.sessionsRefreshed;
+            // `reason: 'settings'` never touches skill caches, so
+            // `configsFailed` is structurally 0 here — folding it in would only
+            // conflate two different failures behind one count.
+            sessionsFailed = refreshed.sessionsFailed;
+            if (sessionsFailed > 0) activation = 'partial';
+          } catch (err) {
+            if (
+              err instanceof SessionNotFoundError ||
+              err instanceof BridgeChannelClosedError
+            ) {
+              activation = 'deferred';
+            } else {
+              activation = 'partial';
+              sessionsFailed = 1;
+              writeStderrLine(
+                `qwen serve: workspace skill refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+          invalidateWorkspaceSkillsSnapshot();
+        }
+        assertActiveGeneration();
+        const mutation = createSkillToggleMutation({
+          skills: results
+            .filter((result) => result.changed)
+            .map((result) => ({
+              name: result.skillName,
+              enabled: result.enabled,
+            })),
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
+        for (const change of persisted.settingsChanges) {
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: { ...change, scope: 'workspace', mutation },
+            originatorClientId: ctx.originatorClientId,
+          });
+        }
+      }
+
+      return {
+        enabled,
+        activation,
+        sessionsRefreshed,
+        sessionsFailed,
+        results,
+        errors,
       };
     },
 

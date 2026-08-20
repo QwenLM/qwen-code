@@ -1,5 +1,7 @@
 import type { ACPToolCall } from '../../adapters/types';
 
+export { isActiveToolStatus } from '../../adapters/toolClassification';
+
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
  * core's `ToolDisplayNames` (mapped to wire names, as the CLI's shared
@@ -510,6 +512,13 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
 }
 
 /**

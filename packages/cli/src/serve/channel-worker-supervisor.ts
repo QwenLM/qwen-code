@@ -18,6 +18,7 @@ import {
   CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
   CHANNEL_WORKER_STOP_GRACE_MS,
 } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
@@ -53,6 +54,10 @@ import {
   type ChannelAdapterSnapshot,
   type ChannelStartupFailure,
 } from './channel-worker-startup-ipc.js';
+import {
+  registerChannelWorkerPromptAuthorization,
+  revokeChannelWorkerPromptAuthorization,
+} from './channel-worker-prompt-authorization.js';
 import {
   CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS,
   createChannelLoopMcpRequest,
@@ -375,11 +380,16 @@ function createWorkerEnv(opts: {
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+  // Marks the worker (and the ACP children it spawns) as daemon-spawned so
+  // the ACP channel fallback reports channel=daemon in usage statistics
+  // (see cli/src/config/acp-channel-fallback.ts).
+  env['QWEN_CODE_SERVE'] = '1';
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
   delete env[QWEN_SERVER_TOKEN_ENV];
   delete env[QWEN_DAEMON_TOKEN_ENV];
+  delete env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   if (opts.daemonToken) {
     env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
   }
@@ -486,6 +496,7 @@ export function createChannelWorkerSupervisor(
     );
   }
   let child: ChannelWorkerChild | undefined;
+  let activePromptAuthorization: string | undefined;
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
     state: 'disabled',
@@ -781,6 +792,18 @@ export function createChannelWorkerSupervisor(
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
     });
+    const promptAuthorization = env[CHANNEL_DAEMON_WORKER_SENTINEL]!;
+    registerChannelWorkerPromptAuthorization(
+      promptAuthorization,
+      opts.workspace,
+    );
+    activePromptAuthorization = promptAuthorization;
+    const revokePromptAuthorization = () => {
+      revokeChannelWorkerPromptAuthorization(promptAuthorization);
+      if (activePromptAuthorization === promptAuthorization) {
+        activePromptAuthorization = undefined;
+      }
+    };
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
     const requestedChannels = requestedChannelNames(opts.selection);
     const startedAt = new Date().toISOString();
@@ -826,6 +849,7 @@ export function createChannelWorkerSupervisor(
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
     } catch (err) {
+      revokePromptAuthorization();
       const message = err instanceof Error ? err.message : String(err);
       const error = sanitizeWorkerError(message, redaction);
       if (kind === 'initial') {
@@ -1241,6 +1265,7 @@ export function createChannelWorkerSupervisor(
       }
       function settleExit(code: number | null, signal: NodeJS.Signals | null) {
         if (child !== startedChild) return;
+        revokePromptAuthorization();
         exitObserved = true;
         cleanupLaunch();
         const state = ready ? 'exited' : 'failed';
@@ -1430,6 +1455,10 @@ export function createChannelWorkerSupervisor(
       clearRestartTimer();
       clearStaleHeartbeatTimer();
       stopping = true;
+      if (activePromptAuthorization) {
+        revokeChannelWorkerPromptAuthorization(activePromptAuthorization);
+        activePromptAuthorization = undefined;
+      }
       child.kill('SIGKILL');
       child = undefined;
       if (!preserveFailure) {

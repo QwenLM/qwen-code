@@ -331,7 +331,7 @@ async function initSession(
     'cron job fires and streams results via sessionUpdate after prompt returns',
     async () => {
       const rig = new TestRig();
-      rig.setup('acp-cron-e2e');
+      await rig.setup('acp-cron-e2e');
 
       // Only requestIndex 0 is load-bearing: it returns the cron_create
       // tool call. The CLI makes internal model calls (tool-call
@@ -382,8 +382,6 @@ async function initSession(
             'requestIndex 0 was not the cron_create prompt — dispatch shifted',
           ).toContain('CRONFIRE7742');
 
-          const promptDoneAt = Date.now();
-
           // --- Part 2: Session stays responsive while cron is pending ---
           const interactiveResult = (await sendRequest('session/prompt', {
             sessionId,
@@ -402,28 +400,34 @@ async function initSession(
           // sessionUpdate notifications after the originating prompt has
           // already returned.
 
-          // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
+          // 3a: Check for the user_message_chunk echoing the cron prompt.
+          // Select it by _meta.source === 'cron' rather than a wall-clock
+          // comparison: the Part 1 prompt text also contains CRONFIRE7742,
+          // and the cron notification races the Part 1 RPC response over the
+          // same stdout pipe, so a timestamp guard can non-deterministically
+          // exclude the one fast fire. The cron-sourced echo is the only
+          // user_message_chunk carrying _meta.source === 'cron'
+          // (see Session.#executeCronPromptInner).
           const cronUserMsg = await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'user_message_chunk' &&
-              (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
-              u.receivedAt > promptDoneAt,
-            'cron-fired user_message_chunk with CRONFIRE7742',
+              u.update?._meta?.source === 'cron',
+            "cron-sourced user_message_chunk (_meta.source === 'cron')",
             75_000,
           );
-          expect(cronUserMsg.update?._meta).toBeDefined();
-          expect(cronUserMsg.update?._meta?.source).toBe('cron');
+          expect(cronUserMsg.update?.content?.text).toContain('CRONFIRE7742');
 
           // 3b: Check for agent_message_chunk after the cron user message
-          // (the model's response to the cron prompt)
-          const cronAgentMsg = await waitForSessionUpdate(
+          // (the model's response to the cron prompt). The predicate matches
+          // any agent_message_chunk after cronUserMsg; ordering is safe
+          // because the fast fire lands ~5s in, well after Part 2 completes.
+          await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'agent_message_chunk' &&
               u.receivedAt > cronUserMsg.receivedAt,
             'agent_message_chunk after cron fire',
             15_000, // should already be here by now
           );
-          expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
         } catch (e) {
           if (stderr.length) console.error('Agent stderr:', stderr.join(''));
           console.error(

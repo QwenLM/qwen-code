@@ -1,10 +1,22 @@
-import type { ACPToolCall } from './types';
+import type { ACPToolCall } from './types.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+export function isActiveToolStatus(
+  status: ACPToolCall['status'] | string,
+): boolean {
+  return (
+    status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
+  return agents.some((agent) => isActiveToolStatus(agent.status));
 }
 
 export function isTaskExecutionRaw(raw: unknown): boolean {
@@ -38,6 +50,7 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     name === 'agent' && tool.parentToolCallId === undefined;
   const defaultsToBackground =
     isTopLevelQwenAgent &&
+    args !== undefined &&
     args?.run_in_background === undefined &&
     args?.working_dir === undefined &&
     args?.name === undefined &&

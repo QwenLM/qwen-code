@@ -16,7 +16,7 @@ import type {
   DaemonToolGroupMessage,
   DaemonUserMessage,
   DaemonUserShellMessage,
-} from './messageTypes';
+} from './messageTypes.js';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 
 export type Message = DaemonMessage;
@@ -108,6 +108,10 @@ export interface PermissionRequest {
   toolKind?: string;
   /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
   toolName?: string;
+  todoPlan?: {
+    planId: string;
+    sourceCallId: string;
+  };
   content: ContentBlock[];
   options: PermissionOption[];
   rawInput?: Record<string, unknown>;

@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useContext,
   useEffect,
@@ -12,7 +13,9 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
+import type { SessionContentGenerator } from './AssistantMessage';
 import {
+  hasActiveAgents,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../../adapters/toolClassification';
@@ -31,10 +34,10 @@ import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { Markdown } from './Markdown';
+import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
   formatDurationMs,
   formatElapsed,
-  formatLiveElapsed,
   localizeToolDisplayName,
   StatusIcon,
   truncateText,
@@ -52,6 +55,7 @@ import {
   getToolSummaryDescription,
   getToolResultSummary,
   isAskUserQuestionToolName,
+  isActiveToolStatus,
   isSkillToolName,
   isShellToolName,
   localizeAgentTypeName,
@@ -59,7 +63,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
-import { CompactModeContext, TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -70,9 +74,21 @@ import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
+  /**
+   * Thinking aggregated with the tools in this summary (compact mode), in
+   * the original order. Streaming entries drive the "Thinking…" summary;
+   * each entry renders as a click-to-expand row.
+   */
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>;
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   isLocateFlashing?: boolean;
+  /** Powers the translate action on completed thinking rows (zh-CN). */
+  generateContent?: SessionContentGenerator;
 }
 
 function openMonitorDetailsOnce(
@@ -347,16 +363,21 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
 function ToolExpandedCard({
   title,
   detail,
+  status,
   children,
 }: {
   title: string;
   detail?: string;
+  status?: ACPToolCall['status'];
   children?: ReactNode;
 }) {
   return (
     <div className={styles.expandedCard}>
       <div className={styles.expandedCardHeader}>
-        <span className={styles.expandedCardTitle}>{title}</span>
+        <span className={styles.expandedCardTitleRow}>
+          {status && <StatusIcon status={status} />}
+          <span className={styles.expandedCardTitle}>{title}</span>
+        </span>
         {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
@@ -396,7 +417,7 @@ function TodoToolBody({
   const timeline = useContext(TodoTimelineContext);
   const events = timeline.get(tool.callId)?.events ?? [];
   return expanded ? (
-    <ToolExpandedCard title={title}>
+    <ToolExpandedCard title={title} status={tool.status}>
       <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
       </div>
@@ -566,7 +587,11 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   return (
     <DefaultToolHeaderExtra
       description={info.description}
-      elapsed={info.elapsed}
+      elapsed={
+        info.kind === 'agent' || isActiveToolStatus(info.tool.status)
+          ? info.elapsed
+          : ''
+      }
     />
   );
 }
@@ -575,14 +600,6 @@ function isDescriptionExpandable(description: string): boolean {
   return (
     description.length > DESCRIPTION_EXPAND_THRESHOLD ||
     description.includes('\n')
-  );
-}
-
-export function isActiveToolStatus(
-  status: ACPToolCall['status'] | string,
-): boolean {
-  return (
-    status === 'in_progress' || status === 'pending' || status === 'running'
   );
 }
 
@@ -596,24 +613,30 @@ export function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
 export function formatToolGroupSummary(
   tools: ACPToolCall[],
   t: ReturnType<typeof useI18n>['t'],
-  duration?: string,
+  workspaceCwd?: string,
 ): string {
-  if (hasActiveTool(tools)) {
-    const foregroundActiveTool = tools.find(
+  if (hasActiveAgents(tools)) {
+    const foregroundActiveTools = tools.filter(
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
     );
-    const activeTool = foregroundActiveTool ?? getActiveTool(tools);
-    if (isAskUserQuestionToolName(activeTool.toolName)) {
-      return t('toolGroup.summary.provideInformation');
-    }
-    if (!foregroundActiveTool && isBackgroundSubAgentToolCall(activeTool)) {
+    if (foregroundActiveTools.length === 0) {
       return t('subagent.background');
     }
+    if (
+      foregroundActiveTools.length === 1 &&
+      isAskUserQuestionToolName(foregroundActiveTools[0].toolName)
+    ) {
+      return t('toolGroup.summary.provideInformation');
+    }
+    const activeSummaries = foregroundActiveTools.map((tool) =>
+      isAskUserQuestionToolName(tool.toolName)
+        ? t('toolGroup.summary.provideInformation')
+        : formatSingleToolSummary(tool, t, workspaceCwd),
+    );
     return t('toolGroup.running', {
-      name: localizeToolDisplayName(activeTool.toolName, t),
-      count: tools.length,
-      duration: duration ?? '',
+      name: activeSummaries.join(' · '),
+      count: foregroundActiveTools.length,
     });
   }
 
@@ -671,11 +694,9 @@ function getSingleToolSummaryInfo(
 
 function SingleToolSummary({
   tool,
-  runningDuration,
   workspaceCwd,
 }: {
   tool: ACPToolCall;
-  runningDuration?: string;
   workspaceCwd?: string;
 }) {
   const { t } = useI18n();
@@ -693,7 +714,6 @@ function SingleToolSummary({
       <>
         {runningPrefix && <span>{runningPrefix} </span>}
         {formatSingleToolSummary(tool, t, workspaceCwd)}
-        {runningDuration && <span> {runningDuration}</span>}
       </>
     );
   }
@@ -709,7 +729,6 @@ function SingleToolSummary({
         )}
         <ToolHeaderExtra info={info} />
       </span>
-      {runningDuration && <span> {runningDuration}</span>}
     </>
   );
 }
@@ -778,10 +797,6 @@ function getAskUserQuestionCount(tool: ACPToolCall): number {
   return Array.isArray(questions) && questions.length > 0
     ? questions.length
     : 1;
-}
-
-export function hasActiveTool(tools: ACPToolCall[]): boolean {
-  return tools.some((tool) => isActiveToolStatus(tool.status));
 }
 
 function PencilIcon() {
@@ -969,61 +984,6 @@ export function isWebFetchToolName(toolName: string): boolean {
   return name === 'web_fetch' || name === 'webfetch' || name === 'fetch';
 }
 
-const getCompactDisplayStatus = getAgentDisplayStatus;
-
-function CompactToolGroup({
-  tools,
-  workspaceCwd,
-  isLocateFlashing = false,
-}: {
-  tools: ACPToolCall[];
-  workspaceCwd?: string;
-  isLocateFlashing?: boolean;
-}) {
-  const { t } = useI18n();
-  const activeTool = getActiveTool(tools);
-  const displayName = localizeToolDisplayName(activeTool.toolName, t);
-  const overallStatus = getCompactDisplayStatus(activeTool);
-  const description = getToolDescription(activeTool, workspaceCwd);
-  const elapsed =
-    (isActiveToolStatus(activeTool.status) &&
-      isBackgroundSubAgentToolCall(activeTool)) ||
-    isShellToolName(activeTool.toolName) ||
-    isWebFetchToolName(activeTool.toolName)
-      ? ''
-      : formatElapsed(activeTool.startTime, activeTool.endTime);
-
-  return (
-    <div
-      className={`${styles.compactGroup}${
-        isLocateFlashing ? ` ${flashStyles.flash}` : ''
-      }`}
-    >
-      <div className={styles.compactHeader}>
-        <StatusIcon status={overallStatus} />
-        <span className={styles.lineName}>{displayName}</span>
-        {tools.length > 1 && (
-          <span className={styles.compactCount}>
-            {'× '}
-            {tools.length}
-          </span>
-        )}
-        <ToolHeaderExtra
-          info={{
-            kind: getToolHeaderKind(activeTool),
-            tool: activeTool,
-            displayName,
-            description,
-            elapsed,
-            workspaceCwd,
-          }}
-        />
-      </div>
-      <div className={styles.compactHint}>{t('compact.hint')}</div>
-    </div>
-  );
-}
-
 function areToolLinePropsEqual(
   prev: ToolLineProps,
   next: ToolLineProps,
@@ -1138,14 +1098,13 @@ export const ToolLine = memo(function ToolLine({
 }: ToolLineProps) {
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
-  const compactMode = useContext(CompactModeContext);
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
+    () => forceExpanded || shouldAutoExpand(tool),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1154,22 +1113,14 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(
-        forceExpanded || (compactMode ? false : shouldAutoExpand(tool)),
-      );
+      setExpanded(forceExpanded || shouldAutoExpand(tool));
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
-      // A new tool identity (or compact-mode toggle) resets the manual latch.
+      // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      compactMode,
-      forceExpanded,
-      monitorDetailsAvailable,
-      tool.callId,
-      tool.toolName,
-    ],
+    [forceExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1178,8 +1129,12 @@ export const ToolLine = memo(function ToolLine({
     approval?.toolCallId &&
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
-  const isRunningAgent = isAgent && tool.status === 'in_progress';
-  const now = useSharedNow(isRunningAgent);
+  const isRunningTool = isActiveToolStatus(tool.status);
+  const showsLiveElapsed =
+    isRunningTool &&
+    !isShellToolName(tool.toolName) &&
+    !isWebFetchToolName(tool.toolName);
+  const now = useSharedNow(showsLiveElapsed);
 
   // Collapse a regular tool to its one-line summary once it completes
   // successfully — unless the user explicitly toggled this row, in which case
@@ -1226,36 +1181,53 @@ export const ToolLine = memo(function ToolLine({
     ]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded =
-      forceExpanded || expanded || !!hasApproval || !!hasSubToolApproval;
+    const showExpanded = forceExpanded || expanded || !!hasSubToolApproval;
+    // While the agent's own launch approval is pending there is nothing to
+    // show yet — keep the row compact and non-openable; the approval dialog
+    // is the single source of interaction.
+    const approvalPending = !!hasApproval;
     const panel = (
       <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
     );
     if (subagentDetails && !hideHeader) {
+      const rowContent = (
+        <>
+          <AgentIcon />
+          <StatusIcon status={isComplete ? info.status : tool.status} />
+          <span className={styles.lineName}>{displayName}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: 'agent',
+              tool,
+              displayName,
+              description: info.description
+                ? truncateText(info.description, 60)
+                : '',
+              elapsed: isComplete ? completeMeta : runningMeta,
+              workspaceCwd,
+            }}
+          />
+        </>
+      );
       return (
         <div className={styles.line}>
-          <button
-            type="button"
-            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-            onClick={() => subagentDetails.onOpen(tool)}
-          >
-            <AgentIcon />
-            <StatusIcon status={isComplete ? info.status : tool.status} />
-            <span className={styles.lineName}>{displayName}</span>
-            <ToolHeaderExtra
-              info={{
-                kind: 'agent',
-                tool,
-                displayName,
-                description: info.description
-                  ? truncateText(info.description, 60)
-                  : '',
-                elapsed: isComplete ? completeMeta : runningMeta,
-                workspaceCwd,
-              }}
-            />
-            <span className={styles.lineChevronRight} aria-hidden="true" />
-          </button>
+          {approvalPending ? (
+            <div
+              className={`${styles.lineMain} ${styles.lineButton}`}
+              aria-disabled="true"
+            >
+              {rowContent}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+              onClick={() => subagentDetails.onOpen(tool)}
+            >
+              {rowContent}
+              <span className={styles.lineChevronRight} aria-hidden="true" />
+            </button>
+          )}
         </div>
       );
     }
@@ -1263,8 +1235,10 @@ export const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         {!hideHeader && (
           <div
-            className={`${styles.lineMain} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
+            className={`${styles.lineMain} ${
+              approvalPending ? '' : styles.lineExpandable
+            }`}
+            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1281,12 +1255,14 @@ export const ToolLine = memo(function ToolLine({
                 workspaceCwd,
               }}
             />
-            <span
-              className={
-                expanded ? styles.lineChevronDown : styles.lineChevronRight
-              }
-              aria-hidden="true"
-            />
+            {!approvalPending && (
+              <span
+                className={
+                  expanded ? styles.lineChevronDown : styles.lineChevronRight
+                }
+                aria-hidden="true"
+              />
+            )}
           </div>
         )}
         {showExpanded && (
@@ -1312,7 +1288,7 @@ export const ToolLine = memo(function ToolLine({
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
-      : formatElapsed(tool.startTime, tool.endTime);
+      : formatElapsed(tool.startTime, isRunningTool ? now : tool.endTime);
 
   const name = tool.toolName.toLowerCase();
   const opensMonitorDetails =
@@ -1366,11 +1342,30 @@ export const ToolLine = memo(function ToolLine({
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
+  // A failed tool with no result text still gets the titled card so its
+  // title-row error icon remains visible when expanded.
   const showExpandedSummaryPanel =
-    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
+    !isTodo &&
+    expanded &&
+    !detailView &&
+    (showDescriptionInDetail || result || tool.status === 'failed');
 
   return (
     <div className={styles.line}>
+      {hideHeader && isRunningTool && elapsed && (
+        <div className={styles.lineMain}>
+          <ToolHeaderExtra
+            info={{
+              kind: getToolHeaderKind(tool),
+              tool,
+              displayName,
+              description: '',
+              elapsed,
+              workspaceCwd,
+            }}
+          />
+        </div>
+      )}
       {!hideHeader && (
         <div
           className={`${styles.lineMain} ${interactive ? styles.lineExpandable : ''}`}
@@ -1415,6 +1410,7 @@ export const ToolLine = memo(function ToolLine({
               : undefined
           }
         >
+          <ToolSummaryIcon tool={tool} />
           <StatusIcon status={tool.status} />
           <span className={styles.lineName}>{displayName}</span>
           {isTodo && hasTodoList && (
@@ -1463,7 +1459,11 @@ export const ToolLine = memo(function ToolLine({
         </div>
       )}
       {showExpandedSummaryPanel && (
-        <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+        <ToolExpandedCard
+          title={displayName}
+          detail={expandedCardDetail}
+          status={tool.status}
+        >
           {result && (
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
@@ -1498,9 +1498,15 @@ export const ToolLine = memo(function ToolLine({
           }
         >
           {isRead ? (
-            <ExpandedReadContent tool={tool} />
+            <ToolExpandedCard title={displayName} status={tool.status}>
+              <ExpandedReadContent tool={tool} />
+            </ToolExpandedCard>
           ) : (
-            <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+            <ToolExpandedCard
+              title={displayName}
+              detail={expandedCardDetail}
+              status={tool.status}
+            >
               {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
               {(name === 'write_file' || name === 'writefile') && (
                 <ExpandedEditContent tool={tool} />
@@ -1520,14 +1526,80 @@ export const ToolLine = memo(function ToolLine({
   );
 }, areToolLinePropsEqual);
 
+function ThoughtLine({
+  content,
+  isStreaming,
+  generateContent,
+}: {
+  content: string;
+  isStreaming?: boolean;
+  generateContent?: SessionContentGenerator;
+}) {
+  const { language, t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={styles.chatSummaryThought}>
+      <div
+        className={`${styles.chatSummaryThoughtHeader}${
+          expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+        }`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        onKeyDown={(event) => {
+          // Only the container itself toggles; keys pressed inside nested
+          // controls (the translate button) keep their own behavior.
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }}
+      >
+        <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
+          <ThinkingDoneIcon />
+        </span>
+        <span
+          className={`${styles.chatSummaryThoughtLabel}${
+            isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
+          }`}
+        >
+          {t(isStreaming ? 'thinking.running' : 'thinking.done')}
+        </span>
+        {language === 'zh-CN' && !isStreaming && generateContent && (
+          <ThinkingTranslateButton
+            content={content}
+            generateContent={generateContent}
+            className={styles.chatSummaryThoughtTranslate}
+          />
+        )}
+        <span
+          className={
+            expanded
+              ? styles.chatSummaryThoughtChevronDown
+              : styles.chatSummaryThoughtChevronRight
+          }
+          aria-hidden="true"
+        />
+      </div>
+      {expanded && (
+        <div className={styles.chatSummaryThoughtContent}>
+          <Markdown content={content} source="thinking" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const ToolGroup = memo(function ToolGroup({
   tools,
+  thoughts,
   pendingApproval,
   workspaceCwd,
   isLocateFlashing = false,
+  generateContent,
 }: ToolGroupProps) {
   const { t } = useI18n();
-  const compactMode = useContext(CompactModeContext);
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
@@ -1535,10 +1607,17 @@ export const ToolGroup = memo(function ToolGroup({
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  const hasRunningTool = hasActiveTool(tools);
-  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
-  const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
+  const hasRunningTool = hasActiveAgents(tools);
+  const activeTool =
+    tools.find(
+      (tool) =>
+        isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+    ) ?? (tools.length > 0 ? getActiveTool(tools) : undefined);
+  // Single-tool identity stays available for the compact summary and the
+  // subagent/monitor drawer shortcut even when thoughts are folded in; only
+  // the force-expanded content dump is suppressed for thought groups.
   const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const compactToolLines = !!thoughts?.length;
   const singleSubagent =
     singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
   const singleMonitor =
@@ -1549,28 +1628,20 @@ export const ToolGroup = memo(function ToolGroup({
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
   );
-  const animateSummary = hasRunningTool && hasForegroundActiveTool;
+  const streamingThought = thoughts?.find((thought) => thought.isStreaming);
+  const animateSummary =
+    hasRunningTool && hasForegroundActiveTool
+      ? true
+      : streamingThought !== undefined;
   const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
   const opensMonitorDetails = Boolean(
     singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
-  const summaryIconTool = tools[0] ?? activeTool;
-  const liveStartedAtRef = useRef(Date.now());
-  const summaryNow = useSharedNow(animateSummary);
+  const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
-  const showCompact = compactMode && !hasApprovalTool;
-  const runningDuration = animateSummary
-    ? formatLiveElapsed(summaryNow - liveStartedAtRef.current)
-    : undefined;
-
-  useEffect(() => {
-    if (!animateSummary) return;
-    liveStartedAtRef.current = Date.now();
-  }, [animateSummary, activeTool?.callId]);
-
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
     setChatExpanded(false);
@@ -1588,16 +1659,6 @@ export const ToolGroup = memo(function ToolGroup({
       },
     );
   };
-
-  if (showCompact) {
-    return (
-      <CompactToolGroup
-        tools={tools}
-        workspaceCwd={workspaceCwd}
-        isLocateFlashing={isLocateFlashing}
-      />
-    );
-  }
 
   if (!hasApprovalTool) {
     return (
@@ -1626,13 +1687,14 @@ export const ToolGroup = memo(function ToolGroup({
           }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
-            {summaryIconTool ? (
+            {streamingThought ? (
+              <ThinkingDoneIcon />
+            ) : summaryIconTool ? (
               <ToolSummaryIcon tool={summaryIconTool} />
             ) : (
               <ToolGroupIcon />
             )}
           </span>
-          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
               animateSummary
@@ -1640,14 +1702,15 @@ export const ToolGroup = memo(function ToolGroup({
                 : styles.chatSummaryText
             }
           >
-            {singleTool ? (
+            {streamingThought ? (
+              t('thinking.running')
+            ) : singleTool ? (
               <SingleToolSummary
                 tool={singleTool}
-                runningDuration={runningDuration}
                 workspaceCwd={workspaceCwd}
               />
             ) : (
-              formatToolGroupSummary(tools, t, runningDuration)
+              formatToolGroupSummary(tools, t, workspaceCwd)
             )}
           </span>
           <span
@@ -1667,16 +1730,39 @@ export const ToolGroup = memo(function ToolGroup({
           <div className={styles.chatSummaryContentInner}>
             <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
               {tools.map((tool) => (
-                <ToolLine
-                  key={tool.callId}
-                  tool={tool}
-                  approval={pendingApproval}
-                  workspaceCwd={workspaceCwd}
-                  summaryOnly={!singleTool}
-                  forceExpanded={!!singleTool}
-                  hideHeader={!!singleTool}
-                />
+                <Fragment key={tool.callId}>
+                  {thoughts
+                    ?.filter(
+                      (thought) => thought.beforeToolCallId === tool.callId,
+                    )
+                    .map((thought, index) => (
+                      <ThoughtLine
+                        key={`thought-${tool.callId}-${index}`}
+                        content={thought.content}
+                        isStreaming={thought.isStreaming}
+                        generateContent={generateContent}
+                      />
+                    ))}
+                  <ToolLine
+                    tool={tool}
+                    approval={pendingApproval}
+                    workspaceCwd={workspaceCwd}
+                    summaryOnly={!singleTool || compactToolLines}
+                    forceExpanded={!!singleTool && !compactToolLines}
+                    hideHeader={!!singleTool && !compactToolLines}
+                  />
+                </Fragment>
               ))}
+              {thoughts
+                ?.filter((thought) => thought.beforeToolCallId === undefined)
+                .map((thought, index) => (
+                  <ThoughtLine
+                    key={`thought-trailing-${index}`}
+                    content={thought.content}
+                    isStreaming={thought.isStreaming}
+                    generateContent={generateContent}
+                  />
+                ))}
             </div>
           </div>
         </div>

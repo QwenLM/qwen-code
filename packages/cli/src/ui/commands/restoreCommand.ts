@@ -144,6 +144,7 @@ async function restoreAction(
           content: 'loadHistory function is not available.',
         };
       }
+      context.ui.clearPendingState?.();
       loadHistory(toolCallData.history);
     }
 

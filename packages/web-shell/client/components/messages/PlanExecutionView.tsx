@@ -228,7 +228,7 @@ function getPlanNodeStateFromIndex(
     return { status: 'paused', attention };
   if (todo.status === 'completed') return { status: 'completed', attention };
   const blocked = (todo.blockedBy ?? []).some(
-    (id) => todosById.get(id)?.status !== 'completed',
+    (id) => todosById.has(id) && todosById.get(id)?.status !== 'completed',
   );
   if (blocked) return { status: 'blocked', attention };
   if (todo.status === 'in_progress')

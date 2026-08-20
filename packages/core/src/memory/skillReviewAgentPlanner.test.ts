@@ -22,6 +22,7 @@ import {
   AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
   createSkillScopedAgentConfig,
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
   DEFAULT_AUTO_SKILL_TIMEOUT_MS,
   listExistingSkillDirNames,
   runSkillReviewByAgent,
@@ -415,18 +416,21 @@ describe('buildTaskPrompt', () => {
     expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
-  it('excludes archived directory names carrying control bytes from the prompt', async () => {
-    // Mirrors the curator's charset guard: a crafted archived directory name
-    // with ANSI/control bytes must not reach the task prompt verbatim.
-    const directoryName = 'auto-skill-evil\u001b[31m';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
-    );
+  it.skipIf(process.platform === 'win32')(
+    'excludes archived directory names carrying control bytes from the prompt',
+    async () => {
+      // Mirrors the curator's charset guard: a crafted archived directory name
+      // with ANSI/control bytes must not reach the task prompt verbatim.
+      const directoryName = 'auto-skill-evil\u001b[31m';
+      await fs.mkdir(
+        path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+        { recursive: true },
+      );
 
-    const prompt = await buildTaskPrompt(projectRoot);
-    expect(prompt).not.toContain('\u001b[31m');
-  });
+      const prompt = await buildTaskPrompt(projectRoot);
+      expect(prompt).not.toContain('\u001b[31m');
+    },
+  );
 
   it('falls back to a placeholder line when no skills exist yet', async () => {
     const prompt = await buildTaskPrompt(projectRoot);
@@ -468,15 +472,23 @@ describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
   });
 });
 
-describe('runSkillReviewByAgent timeout wiring', () => {
+describe('runSkillReviewByAgent limit wiring', () => {
   let tempDir: string;
   let projectRoot: string;
 
-  function makeConfig(timeoutMinutes: number | undefined): Config {
+  function makeConfig(
+    options: {
+      timeoutMinutes?: number;
+      maxTurns?: number;
+    } = {},
+  ): Config {
     return {
       getProjectRoot: () => projectRoot,
       getPermissionManager: () => undefined,
-      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(timeoutMinutes),
+      getMemoryAgentTimeoutMinutes: vi
+        .fn()
+        .mockReturnValue(options.timeoutMinutes),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(options.maxTurns),
     } as unknown as Config;
   }
 
@@ -498,7 +510,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('uses the configured memory agent timeout when no timeoutMs param is passed', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
     });
@@ -508,9 +520,46 @@ describe('runSkillReviewByAgent timeout wiring', () => {
     );
   });
 
+  it('uses the configured memory agent turn limit when maxTurns is omitted', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 25 }),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 0 }),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('lets an explicit maxTurns param override the configured value', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 25 }),
+      projectRoot,
+      history: [],
+      maxTurns: 3,
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 3 }),
+    );
+  });
+
   it('lets an explicit timeoutMs param override the configured value', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
       timeoutMs: 60_000,
@@ -523,13 +572,14 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('falls back to the built-in default when neither is set', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(undefined),
+      config: makeConfig(),
       projectRoot,
       history: [],
     });
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
       }),
     );

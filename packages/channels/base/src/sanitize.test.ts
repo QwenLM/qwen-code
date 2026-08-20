@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   sanitizeSenderName,
   sanitizePromptText,
+  sanitizeDisplayText,
   sanitizeQuotedText,
   sanitizePromptPath,
   sanitizeLogText,
+  truncateCodePoints,
 } from './sanitize.js';
 
 // Unicode line/paragraph separators and bidi override/isolate controls, built
@@ -36,6 +38,16 @@ const EMOJI = String.fromCharCode(0xd83c, 0xdf89);
 function isHighSurrogate(unit: number): boolean {
   return unit >= 0xd800 && unit <= 0xdbff;
 }
+
+describe('truncateCodePoints', () => {
+  it('truncates astral characters without splitting surrogate pairs', () => {
+    const out = truncateCodePoints('a' + EMOJI.repeat(10), 8);
+
+    expect(out).toBe('a' + EMOJI.repeat(7));
+    expect(Array.from(out)).toHaveLength(8);
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
+  });
+});
 
 describe('sanitizeSenderName', () => {
   it('passes through a plain name unchanged', () => {
@@ -281,6 +293,27 @@ describe('sanitizeLogText', () => {
     expect(Array.from(out)).toHaveLength(5);
     expect(out).toBe(EMOJI.repeat(5));
     // No dangling high surrogate at the end.
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
+  });
+});
+
+describe('sanitizeDisplayText', () => {
+  it('neutralizes bidi, zero-width, and C0 controls but keeps newlines', () => {
+    const out = sanitizeDisplayText(
+      `a${RLO}b${ZWSP}c${NEL}d\u0007e\rf\ng[h]`,
+      100,
+    );
+    expect(out).toBe('a b c d e f\ng[h]');
+  });
+
+  it('keeps brackets and multi-line structure that sanitizePromptText folds', () => {
+    const out = sanitizeDisplayText('[BUG] title:\n- one\n- two', 100);
+    expect(out).toBe('[BUG] title:\n- one\n- two');
+  });
+
+  it('caps to maxLen code points without splitting a surrogate pair', () => {
+    const out = sanitizeDisplayText('a'.repeat(399) + EMOJI + 'tail', 400);
+    expect(out).toBe('a'.repeat(399) + EMOJI);
     expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
   });
 });

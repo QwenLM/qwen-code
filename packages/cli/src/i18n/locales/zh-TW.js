@@ -1300,6 +1300,13 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，請等待上一個請求完成',
   'No conversation found to summarize.': '未找到要總結的對話',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路徑已存在且非產生的摘要：{{path}}',
+  'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
+  'Summary path resolves to an existing directory: {{path}}':
+    '摘要路徑解析為一個已存在的目錄：{{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路徑以分隔符結尾，但是一個已存在的檔案：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1653,6 +1660,7 @@ export default {
     'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  '{{count}} queued': '{{count}} 條已排隊',
   'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':
@@ -2052,6 +2060,17 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
+  'Consulting advisor...': '正在諮詢審查模型...',
+  'Advisor review failed: {{error}}': '審查失敗：{{error}}',
+  'No conversation context available for /advisor':
+    '沒有可供 /advisor 使用的對話上下文',
+  'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一個操作正在進行中，請等待其完成後再執行 /advisor',
+  'No response received.': '未收到回覆。',
+  'No model configured.': '未設定模型。',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
@@ -2109,7 +2128,16 @@ export default {
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',
+  Pausing: '暫停中',
   Paused: '已暫停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暫停是協作式的；在工作流暫停之前，進行中的工作可能會先完成。等待工具審批的 agent 呼叫會讓執行保持在此狀態，且在審批得到回應前仍會計入活躍時間上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暫停：不會啟動新的 agent；agent 呼叫之間的指令碼會繼續執行。按 p 恢復。/clear、/branch 以及切換會話會取消已暫停的執行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暫停/恢復被拒絕；工作流狀態已變更。請重試。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在背景任務中按 p 協作暫停/恢復；使用 `/workflows <runId>` 檢視詳情。',
   Completed: '已完成',
   Failed: '失敗',
   Stopped: '已停止',
@@ -2389,4 +2417,5 @@ export default {
     '安全模式下禁止變更自動技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
+  'Kept model as {{model}}': '模型保持為 {{model}}',
 };

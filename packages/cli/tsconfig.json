@@ -8,6 +8,9 @@
     "types": ["node", "vitest/globals"],
     "paths": {
       "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/subSessionConstants": [
+        "../core/src/tools/sub-session-constants.ts"
+      ],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
       ],
@@ -15,6 +18,9 @@
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/transcriptReplay": [
         "../acp-bridge/src/transcript-replay.ts"
+      ],
+      "@qwen-code/acp-bridge/daemonMemoryBudget": [
+        "../acp-bridge/src/daemon-memory-budget.ts"
       ],
       "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
       "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],

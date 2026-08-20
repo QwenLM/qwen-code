@@ -134,6 +134,37 @@ describe('resolveChannelWorkspaceGroups', () => {
     });
   });
 
+  it('excludes the Conversations runtime from channel ownership', () => {
+    const live = path.resolve('/ws/conversations');
+    const loadChannelsConfig = loader({
+      [PRIMARY]: { telegram: { type: 'telegram' } },
+      [live]: { telegram: { type: 'telegram' } },
+    });
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: [
+        { workspaceCwd: PRIMARY, primary: true, trusted: true },
+        {
+          workspaceCwd: live,
+          primary: false,
+          trusted: true,
+          provenance: 'live-conversation',
+        },
+      ],
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+    });
+  });
+
   it('groups distinct channels by their owning workspace', () => {
     const result = resolveChannelWorkspaceGroups({
       workspaces: workspaces(),

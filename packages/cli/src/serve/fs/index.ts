@@ -21,6 +21,7 @@ export {
 export {
   MAX_READ_BYTES,
   MAX_WRITE_BYTES,
+  MAX_UPLOAD_BYTES,
   BINARY_PROBE_BYTES,
   assertTrustedForIntent,
   detectBinary,
@@ -42,10 +43,13 @@ export {
   type FsDeniedAuditPayload,
 } from './audit.js';
 export {
+  OWNER_ONLY_NEW_FILE_MODE,
   createWorkspaceFileSystemFactory,
   isContentHash,
+  resolveNewFileModeBits,
   type ContentHash,
   type CreateWorkspaceFileSystemFactoryDeps,
+  type NewFileModePolicy,
   type FsEntry,
   type FsStat,
   type GlobOptions,
@@ -55,6 +59,7 @@ export {
   type ReadMeta,
   type ReadTextOptions,
   type RequestContext,
+  type SameHostToolTextWriteRequest,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
   type WriteMode,

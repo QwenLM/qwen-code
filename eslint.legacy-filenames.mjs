@@ -515,7 +515,6 @@ export const legacyFilenames = [
   'clearContextDefaults',
   'combinedAbortSignal',
   'compressFastCommand',
-  'concurrencyLimiter',
   'configHash',
   'corruptFile',
   'cronTasksFile',

@@ -482,6 +482,69 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it('validates settings_changed optional fields', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled' },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          scope: 'workspace',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            skills: [{ name: 'review', enabled: false }],
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled', scope: 1 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
   it('reduces permission, model, and terminal events into a session view', () => {
     const state = reduceDaemonSessionEvents([
       {
@@ -2852,6 +2915,8 @@ describe('PR 21 — auth device-flow events', () => {
           truncatedEvents: 4,
           retainedEvents: 2,
           maxBytes: 512,
+          scope: 'live_journal',
+          maxEvents: 10_000,
           truncatedTurns: 2,
           fullTranscriptAvailable: true,
         },
@@ -2891,6 +2956,27 @@ describe('PR 21 — auth device-flow events', () => {
           },
         }),
       ).toBeUndefined();
+      for (const extra of [
+        { scope: '' },
+        { scope: 42 },
+        { maxEvents: -1 },
+        { maxEvents: 1.5 },
+      ]) {
+        expect(
+          asKnownDaemonEvent({
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+              ...extra,
+            },
+          }),
+        ).toBeUndefined();
+      }
       expect(
         asKnownDaemonEvent({
           v: 1,

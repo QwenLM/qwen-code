@@ -58,9 +58,17 @@ checked between reads. A future scan-cost policy needs a cursor or equivalent
 continuation contract instead of silently making valid deep offsets
 unreachable.
 
-Serve derives `lineEnding` from the returned content, matching its existing
-full-snapshot behavior. Core can continue reporting file-level metadata for its
-other consumers.
+Serve's full-snapshot reads derive `lineEnding` from the whole decoded file.
+The large-file window paths still derive it from the returned window, except
+that a byte-cursor page also counts a terminator outside its returned slice —
+the one it resumes after, and, when its first line is cut by the byte budget,
+the one the re-snap walks over — so an unterminated tail page agrees with the
+page before it, and a byte-truncated page with the page after it, in a file
+with uniform line endings (mixed-ending files can still flip between pages,
+and a large-file line window of a uniform file can disagree with a
+byte-cursor page of the same bytes; unifying the paths is a candidate
+follow-up — no tracking issue exists yet). Core can continue reporting
+file-level metadata for its other consumers.
 
 Every large-file window keeps `truncated: true`, even when the scan happens to
 reach EOF. This boundary uses the flag to distinguish a window without a
@@ -74,15 +82,23 @@ reaching this boundary:
 
 - `GET /file`
 - ACP HTTP `_qwen/file/read`
-- the injected ACP `readTextFile` adapter
+
+The injected ACP `readTextFile` adapter is no longer a production consumer:
+same-host daemon runtimes advertise `readTextFile: false`, so agent text reads
+are served by the child's regular CLI filesystem service and never reach this
+boundary. The adapter's read path is kept as a fail-closed guard for an
+unexpected or capability-violating delegated read, but the concurrent-append,
+truncation, and symlink-replacement guarantees verified below no longer apply
+to any agent read. See [daemon local text reads](./daemon-local-text-reads.md).
 
 Windowless reads used by workspace setup retain the existing 256 KiB
 full-snapshot refusal.
 
 ## Verification
 
-- A mixed-EOL large file reports the ending style present in the returned
-  slice.
+- A mixed-EOL large file's line window reports the ending style present in
+  the returned slice; a byte-cursor page may also report a terminator
+  outside its returned slice (see Decision).
 - Concurrent append, truncation, pathname replacement, and symlink replacement
   are rejected. A same-size in-place rewrite is rejected whenever the change
   lands in a later timestamp quantum: the checks compare modification time and

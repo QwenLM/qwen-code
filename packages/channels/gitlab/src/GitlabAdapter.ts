@@ -76,9 +76,13 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
 
-    if (cfg.groupPolicy !== 'open' && cfg.groupPolicy !== 'allowlist') {
+    if (
+      cfg.groupPolicy !== 'open' &&
+      cfg.groupPolicy !== 'allowlist' &&
+      cfg.groupPolicy !== 'pairing'
+    ) {
       process.stderr.write(
-        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open" (or "allowlist" with the project listed) for todos to be dispatched\n`,
+        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the project listed), or "pairing" (after one-time group approval) for todos to be dispatched\n`,
       );
     }
 

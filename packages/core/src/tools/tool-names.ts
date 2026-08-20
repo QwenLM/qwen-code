@@ -136,6 +136,18 @@ export const ToolNamesMigration = {
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
 } as const;
 
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep_search`) to its canonical form. The single
+ * alias-resolution site: every caller that classifies or keys tool calls by
+ * name — the scheduler, loop detection, plan redaction, memory refresh, the
+ * headless partitioner in nonInteractiveCli, the daemon/ACP session — must
+ * use this so an aliased call is treated identically everywhere.
+ */
+export function canonicalToolName(toolName: string): string {
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
 // Migration from old tool display names to new tool display names
 // These legacy display names were used before the tool naming standardization
 export const ToolDisplayNamesMigration = {

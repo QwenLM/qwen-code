@@ -272,6 +272,27 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           buildOnly: true,
         });
 
+    // A build the whole-call budget truncated is NOT available: rerunning the
+    // PR's failing files against packages that were never compiled
+    // manufactures failures that read as "fails on base too" — pre-existing
+    // by measurement — and waves a real regression through. But it is not a
+    // settled answer about this SHA either (with more budget it may build
+    // fully), so NO marker is written — a later shard may repay and succeed.
+    if ((build.notBuilt?.length ?? 0) > 0) {
+      return {
+        available: false,
+        path: tree,
+        baseSha,
+        build,
+        note:
+          `the base tree build at ${baseSha.slice(0, 9)} was cut short by the ` +
+          `whole-call budget (${build.notBuilt!.join(', ')} not built), so a ` +
+          'rerun against it would manufacture pre-existing failures; an A/B ' +
+          'is not available for this review (this is an infrastructure ' +
+          'result, never a finding against the PR)',
+      };
+    }
+
     // `ok: true` is not enough: `runBuildTest` returns `ok: true` for a handoff
     // that built nothing — an `unsupported` toolchain (a changed dir the merge
     // base maps to no package, e.g. a package this PR adds), or an npm scope with

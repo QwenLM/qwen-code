@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -530,6 +530,12 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.description).toContain(
         'Nested agents run in the foreground unless run_in_background is explicitly true',
       );
+      expect(properties.properties.run_in_background.description).toContain(
+        'Named teammates are always concurrent',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'an explicit false is rejected',
+      );
     });
 
     it('declares the optional todo association', () => {
@@ -662,6 +668,12 @@ describe('AgentTool', () => {
       };
 
       expect(parameters.properties.name?.description).toContain('active team');
+      expect(parameters.properties.name?.description).toContain(
+        'always run concurrently',
+      );
+      expect(parameters.properties.name?.description).toContain(
+        'run_in_background: false instead',
+      );
     });
 
     it('exposes plan_mode_required only when teams are enabled', async () => {
@@ -817,6 +829,46 @@ describe('AgentTool', () => {
           model: 'high',
         }),
       ).toMatch(/not supported for a named teammate/i);
+    });
+
+    it('rejects run_in_background: false for a named teammate with an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toMatch(/cannot be false for a named teammate/i);
+    });
+
+    it('accepts run_in_background: true for a named teammate', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: true,
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts run_in_background: false with a name when no team is active', () => {
+      // Without an active team the name falls through to a regular agent,
+      // where the foreground request stays valid.
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toBeNull();
     });
 
     it.each(['all', '1', '12'] as const)(
@@ -1109,6 +1161,16 @@ describe('AgentTool', () => {
       ).toBeNull();
     });
 
+    it('accepts worktree isolation with an empty name placeholder', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: '',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
     it('rejects isolation values other than "worktree"', () => {
       expect(
         agentTool.validateToolParams({
@@ -1333,6 +1395,31 @@ describe('AgentTool', () => {
         }),
       ).toBeNull();
     });
+
+    it('accepts redundant isolation for a named worktree teammate', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({} as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'writer',
+          working_dir: '.qwen/tmp/writer',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('allows named isolation to fall back without an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -1495,6 +1582,29 @@ describe('AgentTool', () => {
       );
     });
 
+    it('passes enforced read-only mode through to TeamManager', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Inspect implementation',
+        prompt: 'Inspect the coordination boundary',
+        name: 'reader',
+        read_only: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'reader',
+          readOnly: true,
+        }),
+      );
+    });
+
     it('blocks a model grade if a team becomes active after validation', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
@@ -1513,6 +1623,51 @@ describe('AgentTool', () => {
 
       expect(partToString(result.llmContent)).toMatch(
         /not supported for a named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
+    it('blocks isolation if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Change files',
+        prompt: 'Implement the fix',
+        subagent_type: 'file-search',
+        name: 'writer',
+        isolation: 'worktree',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /isolation.*named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
+    it('blocks run_in_background: false if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find the config',
+        name: 'searcher',
+        run_in_background: false,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /cannot be false for a named teammate/i,
       );
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
@@ -1538,26 +1693,126 @@ describe('AgentTool', () => {
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
-    it('rejects working_dir when a named teammate would spawn (worktree pin would be silently ignored)', async () => {
+    it('rejects read_only direct execution from a subagent context', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
         spawnTeammate,
       } as never);
 
       const invocation = agentTool.build({
-        description: 'Review',
-        prompt: 'Review the diff',
-        subagent_type: 'file-search',
-        name: 'reviewer',
-        working_dir: '.qwen/tmp/review-pr-1',
+        description: 'Inspect implementation',
+        prompt: 'Inspect the coordination boundary',
+        name: 'reader',
+        read_only: true,
       });
 
-      const result = await invocation.execute(new AbortController().signal);
-
-      expect(partToString(result.llmContent)).toMatch(
-        /not supported for a named teammate/i,
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
       );
+
+      expect(result.llmContent).toContain('from the team leader');
       expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
+    it('pins a named teammate to a validated caller-owned worktree', async () => {
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
+      );
+      const spies = [
+        vi
+          .spyOn(GitWorktreeService.prototype, 'checkGitAvailable')
+          .mockResolvedValue({ available: true }),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isGitRepository')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRepoTopLevel')
+          .mockResolvedValue('/test/project'),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isRegisteredLinkedWorktree')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRegisteredWorktreeBranch')
+          .mockResolvedValue({
+            branch: 'worktree-writer',
+            headCommit: 'abc123',
+          }),
+      ];
+      try {
+        const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+        vi.mocked(config.getTeamManager).mockReturnValue({
+          spawnTeammate,
+        } as never);
+
+        const invocation = agentTool.build({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+          working_dir: '.qwen/tmp/review-pr-1',
+          isolation: 'worktree',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        expect(spawnTeammate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'reviewer',
+            cwd: '/test/project/.qwen/tmp/review-pr-1',
+          }),
+        );
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+    });
+
+    it('aborts a named teammate after working_dir validation', async () => {
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
+      );
+      const controller = new AbortController();
+      const spies = [
+        vi
+          .spyOn(GitWorktreeService.prototype, 'checkGitAvailable')
+          .mockResolvedValue({ available: true }),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isGitRepository')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRepoTopLevel')
+          .mockResolvedValue('/test/project'),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isRegisteredLinkedWorktree')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRegisteredWorktreeBranch')
+          .mockImplementation(async () => {
+            controller.abort();
+            return { branch: 'writer', headCommit: 'abc123' };
+          }),
+      ];
+      try {
+        const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+        vi.mocked(config.getTeamManager).mockReturnValue({
+          spawnTeammate,
+        } as never);
+
+        const invocation = agentTool.build({
+          description: 'Write',
+          prompt: 'Make the change',
+          subagent_type: 'file-search',
+          name: 'writer',
+          working_dir: '.qwen/tmp/writer',
+        });
+        const result = await invocation.execute(controller.signal);
+
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(partToString(result.llmContent)).toContain(
+          'spawn aborted before "writer" was registered',
+        );
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
     });
   });
 
@@ -2369,6 +2624,54 @@ describe('AgentTool', () => {
         expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('accepts a registered sibling worktree of this repo', async () => {
+      vi.useRealTimers();
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-sibling-')),
+      );
+      const repo = path.join(root, 'repo');
+      const wt = path.join(root, 'review-pr-1');
+      try {
+        fs.mkdirSync(repo);
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['worktree', 'add', '-b', 'review-pr-1', wt], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        expect((createCall[1] as Config).getProjectRoot()).toBe(wt);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
         vi.useFakeTimers();
       }
     }, 20000);
@@ -3701,6 +4004,78 @@ describe('AgentTool', () => {
       );
     });
 
+    it("does not seed a fork with its siblings' directives", async () => {
+      // When the model launches several forks in one response, the last model
+      // message holds one functionCall per sibling, each carrying that
+      // sibling's directive in `args.prompt`. Replaying it verbatim would leak
+      // every sibling directive into this fork's seed history. Pin the
+      // end-to-end path: the seed must not contain a sibling's directive.
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'launch two forks' }],
+      };
+      const forkLaunch = {
+        role: 'model' as const,
+        parts: [
+          { text: 'Launching two forks.' },
+          {
+            functionCall: {
+              id: 'call-a',
+              name: 'agent',
+              args: { subagent_type: 'fork', prompt: 'do the thing' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call-b',
+              name: 'agent',
+              args: {
+                subagent_type: 'fork',
+                prompt: 'SIBLING_SECRET_DIRECTIVE',
+              },
+            },
+          },
+        ],
+      };
+      const getHistoryShallow = vi
+        .fn()
+        .mockReturnValue([startup, firstUser, forkLaunch]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow,
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: 'all',
+      });
+
+      await invocation.execute();
+
+      const promptConfig = vi.mocked(AgentHeadless.create).mock
+        .calls[0]?.[2] as { initialMessages?: Content[] } | undefined;
+      const initialMessages = promptConfig?.initialMessages ?? [];
+      // The sibling's directive must appear nowhere in the fork's seed history.
+      expect(JSON.stringify(initialMessages)).not.toContain(
+        'SIBLING_SECRET_DIRECTIVE',
+      );
+      // The seed still ends on a model message so the task_prompt can follow.
+      expect(initialMessages.at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: 'Understood. Executing directive now.' }],
+      });
+    });
+
     it('falls back to uncurated getHistory() when getHistoryForForkWindow is unavailable', async () => {
       // The numeric branch reads its bounded window via
       // getHistoryForForkWindow?.() ?? getHistory(). When the client does
@@ -4964,6 +5339,7 @@ describe('AgentTool', () => {
           name: 'read_file',
           success: true,
           responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -4983,6 +5359,10 @@ describe('AgentTool', () => {
       );
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
+      expect(toolCall?.boundaryArtifact).toEqual({
+        state: 'reusable',
+        kinds: ['file'],
+      });
     });
 
     it('omits subagent protocol payloads from interactive display state', async () => {
@@ -5009,6 +5389,7 @@ describe('AgentTool', () => {
           success: true,
           responseParts,
           resultDisplay: 'Rendered result',
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5030,6 +5411,7 @@ describe('AgentTool', () => {
       expect(toolCall?.resultDisplay).toBe('Rendered result');
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
+      expect(toolCall).not.toHaveProperty('boundaryArtifact');
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
@@ -5365,6 +5747,7 @@ describe('AgentTool', () => {
 
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -5423,7 +5806,15 @@ describe('AgentTool', () => {
         }),
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      // Pin the launch-metadata extras at the background attach site too —
+      // the mutation probe in review showed both sites could drop
+      // initialUserPrompt while the suite stayed green.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Watch for changes',
+        agentName: 'monitor',
+      });
       writeMetaSpy.mockRestore();
+      attachSpy.mockRestore();
     });
 
     it('uses the resolved model grade for background slot selection and launch', async () => {
@@ -6399,6 +6790,13 @@ describe('AgentTool', () => {
       // Writer attached to the AgentTool's emitter so foreground tool
       // calls / round text get recorded into the JSONL.
       expect(attachSpy).toHaveBeenCalled();
+      // Pin the launch-metadata extras at this attach site — dropping
+      // initialUserPrompt here silently loses the launch `user` record
+      // that transcript readers recover the prompt from.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Find all TypeScript files',
+        agentName: 'file-search',
+      });
       // Meta sidecar is seeded eagerly at register time so resume
       // discovery can surface paused foreground runs.
       expect(writeMetaSpy).toHaveBeenCalledWith(

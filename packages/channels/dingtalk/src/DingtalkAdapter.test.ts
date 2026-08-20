@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelOutputSegmentContext,
@@ -1565,19 +1572,21 @@ describe('DingtalkChannel status cards', () => {
     ).toBeDefined();
   });
 
-  it('registers only the matching real inbound owner without creating output', () => {
+  it('starts a status card only for the matching real inbound owner', () => {
     const channel = createChannel();
     const registerRun = vi.fn();
+    const startStatusCard = vi.fn();
     const appendOutput = vi.fn();
     (
       channel as unknown as {
         interactionPresenter: {
           registerRun: typeof registerRun;
+          startStatusCard: typeof startStatusCard;
           appendOutput: typeof appendOutput;
         };
         inboundCardOwners: Map<string, unknown>;
       }
-    ).interactionPresenter = { registerRun, appendOutput };
+    ).interactionPresenter = { registerRun, startStatusCard, appendOutput };
     (
       channel as unknown as {
         inboundCardOwners: Map<string, unknown>;
@@ -1597,6 +1606,7 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'other-owner' },
     });
     expect(registerRun).not.toHaveBeenCalled();
+    expect(startStatusCard).not.toHaveBeenCalled();
     expect(appendOutput).not.toHaveBeenCalled();
 
     (
@@ -1606,6 +1616,7 @@ describe('DingtalkChannel status cards', () => {
     ).inboundCardOwners.set('message-2', {
       ownerId: 'owner-1',
       target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
     });
     getLifecycleHook(channel)({
       type: 'started',
@@ -1618,10 +1629,21 @@ describe('DingtalkChannel status cards', () => {
     });
 
     expect(registerRun).toHaveBeenCalledOnce();
-    expect(registerRun).toHaveBeenCalledWith('run-2', 'owner-1', {
-      chatId: 'cid-1',
-      isGroup: true,
-    });
+    expect(registerRun).toHaveBeenCalledWith(
+      'run-2',
+      'owner-1',
+      {
+        chatId: 'cid-1',
+        isGroup: true,
+      },
+      'session-1',
+      { senderName: 'Alice' },
+    );
+    expect(startStatusCard).toHaveBeenCalledOnce();
+    expect(startStatusCard).toHaveBeenCalledWith('run-2');
+    expect(startStatusCard.mock.invocationCallOrder[0]).toBeGreaterThan(
+      registerRun.mock.invocationCallOrder[0],
+    );
     expect(appendOutput).not.toHaveBeenCalled();
   });
 
@@ -1650,6 +1672,83 @@ describe('DingtalkChannel status cards', () => {
     ).toEqual({
       ownerId: 'owner-1',
       target: { chatId: 'conversation-1', isGroup: false },
+    });
+  });
+
+  it('captures the group sender for card attribution when atSender is enabled', async () => {
+    const channel = createChannel({ atSender: true });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+  });
+
+  it('omits the group sender from card attribution when atSender is disabled', async () => {
+    const channel = createChannel({ atSender: false });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
     });
   });
 
@@ -2281,6 +2380,631 @@ describe('DingtalkChannel parsed-message logging', () => {
   });
 });
 
+describe('DingtalkChannel quoted media', () => {
+  const tempDirs = new Set<string>();
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.clear();
+    vi.restoreAllMocks();
+  });
+
+  function mockMediaDownload(mimeType: string, bytes: Uint8Array): string[] {
+    const downloadCodes: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (
+          url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+        ) {
+          const request = JSON.parse(String(init?.body)) as {
+            downloadCode: string;
+          };
+          downloadCodes.push(request.downloadCode);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ downloadUrl: 'https://example.com/media' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(bytes, {
+            status: 200,
+            headers: { 'content-type': mimeType },
+          }),
+        );
+      },
+    );
+    return downloadCodes;
+  }
+
+  function replyToMedia(
+    channel: DingtalkChannelInstance,
+    msgType: string,
+    content: Record<string, unknown>,
+  ): void {
+    replyToMediaWithText(channel, msgType, 'inspect this', content);
+  }
+
+  function replyToMediaWithText(
+    channel: DingtalkChannelInstance,
+    msgType: string,
+    replyText: string,
+    content: Record<string, unknown>,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: `quoted-${msgType}`,
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: `@DingTalkTest ${replyText}`,
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: `media-${msgType}`,
+            msgType,
+            senderId: 'sender-1',
+            content,
+          },
+        },
+      }),
+      headers: { messageId: `quoted-${msgType}` },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  function sendDirectMedia(
+    channel: DingtalkChannelInstance,
+    msgtype: string,
+    content: Record<string, unknown>,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: `direct-${msgtype}`,
+        conversationType: '1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        msgtype,
+        content,
+      }),
+      headers: { messageId: `direct-${msgtype}` },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  it('downloads a replied picture and attaches it to the prompt', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    replyToMedia(channel, 'picture', { downloadCode: 'quoted-picture-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['quoted-picture-code']);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[image]',
+        attachments: [
+          {
+            type: 'image',
+            data: Buffer.from([1, 2, 3]).toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      }),
+    );
+  });
+
+  it('downloads a replied file and attaches its local path to the prompt', async () => {
+    const downloadCodes = mockMediaDownload(
+      'application/json',
+      new TextEncoder().encode('{"name":"demo"}'),
+    );
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName: 'package.json',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['quoted-file-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope).toMatchObject({
+      text: 'inspect this',
+      referencedText: '[file: package.json]',
+      attachments: [
+        {
+          type: 'file',
+          mimeType: 'application/json',
+          fileName: 'package.json',
+        },
+      ],
+    });
+    expect(filePath).toBeTruthy();
+    expect(existsSync(filePath!)).toBe(true);
+    expect(readFileSync(filePath!, 'utf8')).toBe('{"name":"demo"}');
+  });
+
+  // R5-1: DingTalk audio/video content carries no fileName (the audio wire
+  // shape is {downloadCode, duration}), so the store name is generated. It
+  // must carry a mimeType-derived extension: the agent reaches the file via
+  // `read_file`, whose type detection is extension-first, and an extensionless
+  // name is refused as binary.
+  it.each([
+    ['audio', 'audio/ogg', { duration: 5 }, /^dingtalk_audio_\d+\.ogg$/],
+    ['video', 'video/mp4', {}, /^dingtalk_video_\d+\.mp4$/],
+  ] as const)(
+    'downloads replied %s media and attaches its local path to the prompt',
+    async (msgType, mimeType, extraContent, expectedName) => {
+      const downloadCodes = mockMediaDownload(
+        mimeType,
+        new Uint8Array([4, 5, 6]),
+      );
+      const channel = createChannel();
+
+      replyToMedia(channel, msgType, {
+        downloadCode: `quoted-${msgType}-code`,
+        ...extraContent,
+      });
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      expect(downloadCodes).toEqual([`quoted-${msgType}-code`]);
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope).toMatchObject({
+        text: 'inspect this',
+        referencedText: `[${msgType}]`,
+        attachments: [{ type: msgType, mimeType }],
+      });
+      expect(envelope.attachments?.[0]?.fileName).toMatch(expectedName);
+      expect(filePath).toBeTruthy();
+      expect(existsSync(filePath!)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['picture', {}, '[image]'],
+    ['file', { fileName: 'missing.pdf' }, '[file: missing.pdf]'],
+  ])(
+    'keeps the quoted %s placeholder without downloading when the code is absent',
+    async (msgType, content, referencedText) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('unexpected download'));
+      const channel = createChannel();
+
+      replyToMedia(channel, msgType, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(channel.handleInbound).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'inspect this',
+          referencedText,
+        }),
+      );
+      expect(
+        vi.mocked(channel.handleInbound).mock.calls[0]![0],
+      ).not.toHaveProperty('attachments');
+    },
+  );
+
+  it('does not download a quoted message with an unmapped msgType even when it carries a downloadCode', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected download'));
+    const channel = createChannel();
+
+    replyToMedia(channel, 'richText', { downloadCode: 'quoted-rt-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+  });
+
+  it('attaches both the own media and the quoted media of one message', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'quoted-combo',
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        msgtype: 'picture',
+        content: { downloadCode: 'own-picture-code' },
+        text: {
+          content: '@DingTalkTest inspect both',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'media-file',
+            msgType: 'file',
+            senderId: 'sender-1',
+            content: {
+              downloadCode: 'quoted-file-code',
+              fileName: 'report.pdf',
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'quoted-combo' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['own-picture-code', 'quoted-file-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.attachments).toHaveLength(2);
+    expect(envelope.attachments?.[0]).toEqual({
+      type: 'image',
+      data: Buffer.from([1, 2, 3]).toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(envelope.attachments?.[1]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    const filePath = envelope.attachments?.[1]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+  });
+
+  // R4-1: ChannelBase resolves a single inline image per envelope (the first
+  // data-only image attachment fills imageBase64) and silently drops every
+  // later data-only attachment, so the quoted image must be file-backed when
+  // the message's own image already occupies the slot.
+  it('file-backs a quoted image when the message already carries its own image', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'quoted-two-images',
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        msgtype: 'picture',
+        content: { downloadCode: 'own-picture-code' },
+        text: {
+          content: '@DingTalkTest inspect both',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'media-picture',
+            msgType: 'picture',
+            senderId: 'sender-1',
+            content: { downloadCode: 'quoted-picture-code' },
+          },
+        },
+      }),
+      headers: { messageId: 'quoted-two-images' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['own-picture-code', 'quoted-picture-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    // extractContent yields the '(image)' placeholder for a picture msgtype.
+    expect(envelope).toMatchObject({
+      text: '(image)',
+      referencedText: '[image]',
+    });
+    expect(envelope.attachments).toHaveLength(2);
+    // The own image keeps the single inline slot ChannelBase resolves.
+    expect(envelope.attachments?.[0]).toEqual({
+      type: 'image',
+      data: Buffer.from([1, 2, 3]).toString('base64'),
+      mimeType: 'image/png',
+    });
+    // The quoted image must not be a second data-only attachment — that shape
+    // is silently dropped by ChannelBase's single-image resolution.
+    const quotedAttachment = envelope.attachments?.[1];
+    expect(quotedAttachment).toMatchObject({
+      type: 'image',
+      mimeType: 'image/png',
+    });
+    expect(quotedAttachment).not.toHaveProperty('data');
+    const filePath = quotedAttachment?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(filePath).toBeTruthy();
+    expect(existsSync(filePath!)).toBe(true);
+    expect(readFileSync(filePath!)).toEqual(Buffer.from([1, 2, 3]));
+    expect(quotedAttachment?.fileName).toMatch(/^dingtalk_image_\d+\.png$/);
+  });
+
+  it('cleans the generated placeholder for a direct file message', async () => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'file', {
+      downloadCode: 'direct-file-code',
+      fileName: 'notes.txt',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments).toMatchObject([
+      { type: 'file', fileName: 'notes.txt' },
+    ]);
+  });
+
+  it('cleans the generated placeholder for a direct audio message', async () => {
+    mockMediaDownload('audio/ogg', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'audio', { downloadCode: 'direct-audio-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_audio_\d+\.ogg$/,
+    );
+  });
+
+  it('cleans the generated placeholder for a direct video message', async () => {
+    mockMediaDownload('video/mp4', new Uint8Array([7, 8, 9]));
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'video', { downloadCode: 'direct-video-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe('');
+    expect(envelope.attachments).toMatchObject([{ type: 'video' }]);
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_video_\d+\.mp4$/,
+    );
+  });
+
+  // R1-1: the placeholder cleanup was written for the DIRECT-media path,
+  // where `extractContent` generates `(audio)` / `(file: name)` itself. On the
+  // quoted path `envelope.text` is the user's own reply, so a reply reading
+  // exactly like a placeholder was blanked and the agent got an attachment
+  // with no prompt. A group `@Bot (audio)` arrives here as exactly `(audio)`.
+  it.each([
+    ['audio', {}, '(audio)'],
+    ['video', {}, '(video)'],
+    ['file', { fileName: 'report.pdf' }, '(file: report.pdf)'],
+  ])(
+    'keeps a quoted-%s reply whose text looks like a placeholder',
+    async (msgType, extra, replyText) => {
+      mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+      const channel = createChannel();
+
+      replyToMediaWithText(channel, msgType, replyText, {
+        downloadCode: `quoted-${msgType}-code`,
+        ...extra,
+      });
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope.text).toBe(replyText);
+      expect(envelope.attachments).toHaveLength(1);
+    },
+  );
+
+  // R1-2: these are synchronous throw sites. An escape rejected
+  // `processMessage`, whose catch sends the generic error reply and never
+  // calls `handleInbound` — and the msgId is already deduped, so the retry is
+  // dropped and the prompt is lost for good.
+  it('still delivers the text when an over-long quoted file name fails the store', async () => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = createChannel();
+    const channelFilesRoot = join(tmpdir(), 'channel-files');
+    const dirsBefore = new Set(
+      existsSync(channelFilesRoot) ? readdirSync(channelFilesRoot) : [],
+    );
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName: 'a'.repeat(300),
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('inspect this');
+    expect(envelope).not.toHaveProperty('attachments');
+    // The failed store must not leak its store directory into tmpdir.
+    const leaked = (
+      existsSync(channelFilesRoot) ? readdirSync(channelFilesRoot) : []
+    ).filter((entry) => !dirsBefore.has(entry));
+    expect(leaked).toEqual([]);
+  });
+
+  it('still delivers the text when the quoted file name is not a string', async () => {
+    mockMediaDownload('application/octet-stream', new Uint8Array([1, 2, 3]));
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName: 12345,
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('inspect this');
+    // The attachment is still delivered, under a generated name.
+    expect(envelope.attachments?.[0]?.fileName).toMatch(
+      /^dingtalk_file_\d+\.bin$/,
+    );
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+  });
+
+  it('keeps processing the prompt when a quoted-media download fails', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'unavailable-file-code',
+      fileName: 'offline.pdf',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[file: offline.pdf]',
+      }),
+    );
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
+    );
+  });
+
+  it('keeps processing the prompt when the media download API fails', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response('unavailable', { status: 503 }));
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'unavailable-file-code',
+      fileName: 'unavailable.pdf',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[file: unavailable.pdf]',
+      }),
+    );
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk] downloadMedia API failed: HTTP 503 unavailable\n',
+    );
+  });
+});
+
 describe('DingtalkChannel downstream logging', () => {
   it('replaces raw SDK Buffer logging with a structured downstream summary', () => {
     createChannel();
@@ -2718,7 +3442,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['member-staff'],
         isMentioned: true,
       }),
     );
@@ -2783,13 +3508,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 2 other group members]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['user-a', 'user-b'],
         isMentioned: true,
       }),
     );
   });
 
-  it('falls back to staffId when dingtalkId is absent', () => {
+  it('uses staffId when dingtalkId is absent', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -2815,7 +3541,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nhello',
+        text: 'hello',
+        mentionedMemberIds: ['only-staff'],
         isMentioned: true,
       }),
     );
@@ -2847,6 +3574,9 @@ describe('DingtalkChannel sender attribution', () => {
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'hello', isMentioned: true }),
     );
+    // The guard skips collection entirely, so the key must be absent.
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
   it('returns context only when text is empty after mention stripping', () => {
@@ -2875,7 +3605,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]',
+        text: '',
+        mentionedMemberIds: ['user-a'],
         isMentioned: true,
       }),
     );
@@ -2984,8 +3715,8 @@ describe('DingtalkChannel reply mentions', () => {
         String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
       );
       expect(body).toMatchObject({
-        msgtype: 'text',
-        text: { content: '@staff-1\n\nhello' },
+        msgtype: 'markdown',
+        markdown: { text: '@staff-1\n\nhello' },
         at: { atUserIds: ['staff-1'] },
       });
     } finally {
@@ -3036,8 +3767,8 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
     ).toMatchObject({
-      msgtype: 'text',
-      text: { content: '@staff-1\n\nhello' },
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nhello' },
       at: { atUserIds: ['staff-1'] },
     });
   });
@@ -3103,7 +3834,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
-  it('reserves the mention prefix within the first text chunk limit', async () => {
+  it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
     seedMentionTarget(channel, 'm1', 'staff-1');
@@ -3120,18 +3851,18 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({
-      msgtype: 'text',
+      msgtype: 'markdown',
       at: { atUserIds: ['staff-1'] },
     });
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
-    expect(bodies.map((body) => body.text.content.length)).toEqual([3800, 10]);
+    expect(bodies.map((body) => body.markdown.text.length)).toEqual([3800, 10]);
     expect(
       bodies
         .map((body, index) =>
           index === 0
-            ? body.text.content.slice('@staff-1\n\n'.length)
-            : body.text.content,
+            ? body.markdown.text.slice('@staff-1\n\n'.length)
+            : body.markdown.text,
         )
         .join(''),
     ).toBe(text);
@@ -3152,14 +3883,18 @@ describe('DingtalkChannel reply mentions', () => {
     const contents = fetchSpy.mock.calls.map(([, init], index) => {
       const body = JSON.parse(String((init as RequestInit).body));
       return index === 0
-        ? body.text.content.slice('@staff-1\n\n'.length)
-        : body.text.content;
+        ? body.markdown.text.slice('@staff-1\n\n'.length)
+        : body.markdown.text;
     });
-    expect(contents.join('')).toBe(text);
+    expect(contents[0]).toMatch(/^```/u);
+    expect(contents.at(-1)).toMatch(/```$/u);
+    expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
+      text.replace(/[`\n]/gu, ''),
+    );
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.text.content.length <= 3800;
+        return body.markdown.text.length <= 3800;
       }),
     ).toBe(true);
   });
@@ -3180,9 +3915,128 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
-    expect(bodies[0].msgtype).toBe('text');
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[0].msgtype).toBe('markdown');
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
+  });
+
+  it('keeps the mention available to the final reply after a mid-run fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await (
+      channel as unknown as {
+        sendFallbackReply(
+          chatId: string,
+          text: string,
+          sessionId: string,
+        ): Promise<void>;
+      }
+    ).sendFallbackReply('cid123', 'intermediate result', 'session-1');
+    await getResponseHook(channel)('cid123', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
+  });
+
+  it('keeps the final answer mention after a mid-run card fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid-1');
+    seedMentionTarget(channel, 'message-1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+
+    getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'message-1');
+    (
+      channel as unknown as { inboundCardOwners: Map<string, unknown> }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+    });
+
+    const segmentContext = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'staff-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    getChunkHook(channel)(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+      segmentContext,
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid-1',
+      'session-1',
+      segmentContext,
+      'response_boundary',
+    );
+    await getResponseHook(channel)('cid-1', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
   });
 });
 
@@ -3438,7 +4292,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     const internals = channel as unknown as {
       mentionTargets: Map<string, string>;
       sessionMentionTargets: Map<string, string>;
-      textReplySessions: Set<string>;
       bufferedMentionTargets: Set<string>;
       bufferedMentionTargetsBySession: Map<string, Set<string>>;
       onPromptBuffered(
@@ -3455,8 +4308,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
     internals.sessionMentionTargets.set('session-1', 'staff-active');
     internals.sessionMentionTargets.set('session-2', 'staff-other-active');
-    internals.textReplySessions.add('session-1');
-    internals.textReplySessions.add('session-2');
 
     channel.onSessionDied('session-1');
 
@@ -3468,7 +4319,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
       false,
     );
     expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
-    expect(internals.textReplySessions.has('session-1')).toBe(false);
     expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
     expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
     expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
@@ -3477,7 +4327,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     expect(internals.sessionMentionTargets.get('session-2')).toBe(
       'staff-other-active',
     );
-    expect(internals.textReplySessions.has('session-2')).toBe(true);
   });
 });
 

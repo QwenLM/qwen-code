@@ -80,6 +80,12 @@ export interface ChannelPairingApprovalResult
 
 export interface ChannelPairingApprovalsSnapshot {
   senderIds: string[];
+  groupIds: string[];
+}
+
+export interface ChannelPairingApprovalSubject {
+  type: 'user' | 'group';
+  id: string;
 }
 
 export interface ChannelPairingRevocationResult
@@ -112,7 +118,7 @@ export interface ChannelManagementService {
   pairingApprovals(name: string): Promise<ChannelPairingApprovalsSnapshot>;
   revokePairingApproval(
     name: string,
-    senderId: string,
+    subject: ChannelPairingApprovalSubject,
   ): Promise<ChannelPairingRevocationResult>;
 }
 
@@ -398,7 +404,10 @@ export function createChannelManagementService(
     }
     const config = channels[name]!;
     assertWorkspaceConfig(config);
-    if (config['senderPolicy'] !== 'pairing') {
+    if (
+      config['senderPolicy'] !== 'pairing' &&
+      config['groupPolicy'] !== 'pairing'
+    ) {
       throw new ChannelManagementError(
         'channel_pairing_not_enabled',
         `Channel "${name}" does not use pairing mode.`,
@@ -555,17 +564,29 @@ export function createChannelManagementService(
       return { approved, requests: store.listPending() };
     },
     async pairingApprovals(name) {
-      return { senderIds: pairingStoreFor(name).getAllowlist() };
-    },
-    async revokePairingApproval(name, senderId) {
       const store = pairingStoreFor(name);
-      if (!store.revoke(senderId)) {
+      return {
+        senderIds: store.getAllowlist(),
+        groupIds: store.getGroupAllowlist(),
+      };
+    },
+    async revokePairingApproval(name, subject) {
+      const store = pairingStoreFor(name);
+      const revoked =
+        subject.type === 'group'
+          ? store.revokeGroup(subject.id)
+          : store.revoke(subject.id);
+      if (!revoked) {
         throw new ChannelManagementError(
           'channel_pairing_approval_not_found',
           'Pairing approval was not found.',
         );
       }
-      return { revoked: senderId, senderIds: store.getAllowlist() };
+      return {
+        revoked: subject.id,
+        senderIds: store.getAllowlist(),
+        groupIds: store.getGroupAllowlist(),
+      };
     },
   };
   return {
@@ -583,7 +604,7 @@ export function createChannelManagementService(
     approvePairing: (name, code) =>
       inMutationLane(() => service.approvePairing(name, code)),
     pairingApprovals: (name) => service.pairingApprovals(name),
-    revokePairingApproval: (name, senderId) =>
-      inMutationLane(() => service.revokePairingApproval(name, senderId)),
+    revokePairingApproval: (name, subject) =>
+      inMutationLane(() => service.revokePairingApproval(name, subject)),
   };
 }

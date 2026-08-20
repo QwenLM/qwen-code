@@ -15,9 +15,13 @@
  *     node packages/cli/src/serve/cdp-tunnel/acceptance/cdp-mcp-smoke.mjs
  */
 import { spawn } from 'node:child_process';
+import {
+  cdpEndpoint,
+  isCdpSmokePassed,
+  stopChild,
+} from './acceptance-helpers.mjs';
 
-const ENDPOINT =
-  process.env.WS || `ws://127.0.0.1:${process.env.PORT || 4170}/cdp`;
+const ENDPOINT = cdpEndpoint();
 const command = process.env.QWEN_CDP_MCP_COMMAND;
 if (!command) {
   console.error(
@@ -106,14 +110,15 @@ try {
 } catch (e) {
   out.error = e.message;
 }
-mcp.kill('SIGTERM');
+await stopChild(mcp);
 
 console.log('\n=== LAYER C: external CDP MCP over /cdp ===');
 console.log(JSON.stringify(out, null, 2));
+const passed = isCdpSmokePassed(out);
 console.log(
   '\nC-LAYER:',
-  out.tools >= 20 && out.listPages && !out.error
+  passed
     ? 'PASS — external CDP MCP toolset drives the real browser via the tunnel'
     : `FAIL${out.error ? ' — ' + out.error : ''}`,
 );
-process.exit(0);
+process.exitCode = passed ? 0 : 1;

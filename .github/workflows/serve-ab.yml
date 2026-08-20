@@ -7,12 +7,21 @@ name: 'Serve A/B'
 # the daemon analog of the web-shell visual before/after preview.
 #
 # Security model: this workflow BUILDS AND RUNS untrusted PR code, so it runs on
-# the `pull_request` trigger (fork PRs get a read-only token and NO secrets), on
-# an ephemeral runner, with `contents: read`. It produces only JSON captures +
-# a markdown body as an artifact. The privileged step that needs a write token —
-# posting the comment — lives in the separate workflow_run publisher, which
-# never checks out PR code. The daemon is driven with dummy OpenAI creds, so no
-# model is contacted and the responses are deterministic + safe to diff.
+# the `pull_request` trigger (fork PRs get a read-only token and NO secrets) and
+# with `contents: read`. It produces only JSON captures + a markdown body as an
+# artifact. The privileged step that needs a write token — posting the comment —
+# lives in the separate workflow_run publisher, which never checks out PR code.
+# The daemon is driven with dummy OpenAI creds, so no model is contacted and the
+# responses are deterministic + safe to diff.
+#
+# Runner routing: in-repo PRs, and fork PRs whose author has write access
+# (OWNER/MEMBER/COLLABORATOR association), run on the persistent ECS pool —
+# a write-access author could push the same code to this repo directly, so the
+# pool grants them nothing new, and the pre-checkout wipe below keeps one PR's
+# build from bleeding into the next. Other fork PRs stay on ephemeral hosted
+# runners. NOTE: this trigger reads its YAML from the fork, so the association
+# clause is routing convenience, not a security boundary — the boundary for
+# fork code is the repo's fork-PR workflow-approval setting.
 on:
   pull_request:
     branches:
@@ -44,9 +53,77 @@ jobs:
   ab:
     name: 'Serve A/B (ubuntu-latest, Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # Same-repo PRs and fork PRs whose author has write access
+    # (OWNER/MEMBER/COLLABORATOR association) run on the persistent ECS pool;
+    # other fork PRs stay on ephemeral hosted runners. Keep in sync with
+    # ci.yml's classify_pr routing. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Wipe stale workspace before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          # The two checkouts clone into head/ and base/ subdirectories;
+          # leftovers there from a previous run on the same reusable runner
+          # could bleed into the builds and silently change the posted A/B
+          # diff. Hosted runners are ephemeral and never see this. After the
+          # ownership-restore step everything is user-owned, so no sudo.
+          #
+          # Guard, ported from qwen-code-pr-review.yml's checkout heal
+          # (#9220, #9265): this step had none — under a mangled env even
+          # `/home` or an empty string reached the rm. A wipe pointed at the
+          # wrong path is far worse than a skipped wipe, so canonicalize,
+          # strip trailing slashes, denylist the known roots, and require
+          # the target to sit inside the runner workspace before any rm.
+          WS="${GITHUB_WORKSPACE:?}"
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          # Trailing slashes slip past the exact-match case arms below
+          # (`/home/` would pass the guard and reach the rm); realpath strips
+          # them too; keep the guard whole if the path reaches this point with
+          # trailing slashes.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          # Mirror the WS strip before building the allowlist pattern; "/"
+          # stripped empty would match every path instead.
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
+          esac
+          # Bare on purpose: this job runs under `bash -eo pipefail`, so a
+          # wipe that cannot clear the workspace fails the job here instead
+          # of building both checkouts on top of the leftovers.
+          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:

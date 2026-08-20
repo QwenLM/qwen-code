@@ -144,6 +144,9 @@ jobs:
   file_issue:
     name: 'Create autofix issue'
     needs: 'analyze'
+    # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
+    # and the pool being the REASON CI broke would queue the report behind
+    # the very failure it documents.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

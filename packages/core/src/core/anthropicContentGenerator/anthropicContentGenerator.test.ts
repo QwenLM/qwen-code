@@ -1472,6 +1472,7 @@ describe('AnthropicContentGenerator', () => {
         config: {
           temperature: 0.1,
           maxOutputTokens: 200,
+          thinkingConfig: { thinkingBudget: 199 },
           topP: 0.5,
           topK: 5,
           abortSignal: abortController.signal,
@@ -1503,7 +1504,7 @@ describe('AnthropicContentGenerator', () => {
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
-          thinking: { type: 'enabled', budget_tokens: 1000 },
+          thinking: { type: 'enabled', budget_tokens: 199 },
           output_config: { effort: 'high' },
         }),
       );
@@ -1514,6 +1515,45 @@ describe('AnthropicContentGenerator', () => {
       );
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('caps an effort-derived thinking budget with the request budget', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 200 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'high' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: { thinkingConfig: { thinkingBudget: 199 } },
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          max_tokens: 200,
+          thinking: { type: 'enabled', budget_tokens: 199 },
+          output_config: { effort: 'high' },
+        }),
+      );
     });
 
     // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
@@ -2221,6 +2261,38 @@ describe('AnthropicContentGenerator', () => {
 
       it('selects adaptive for a future major like claude-opus-5-1', async () => {
         expect(await thinkingFor('claude-opus-5-1')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
+      it('selects adaptive for dotted-minor aliases (claude-opus-4.7 / 4.8, claude-sonnet-4.6)', async () => {
+        // LiteLLM/Vertex/Bedrock-style proxies expose Anthropic Model Groups
+        // with dotted minor versions. A hyphen-only parser silently degrades
+        // these to `minor=0`, sending `thinking.type.enabled` to an adaptive-
+        // only model group and taking a 400. parseClaudeModelVersion must
+        // accept `[-.]` between major and minor so the version-gated shape
+        // is picked correctly regardless of alias convention.
+        expect(await thinkingFor('claude-opus-4.7')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-4.8')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-sonnet-4.6')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
+      it('selects adaptive for dotted-minor Opus 5 aliases (claude-opus-5.0 / 5.1)', async () => {
+        expect(await thinkingFor('claude-opus-5.0')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-5.1')).toEqual({
           type: 'adaptive',
           display: 'summarized',
         });

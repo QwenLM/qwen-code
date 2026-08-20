@@ -5,8 +5,16 @@
  */
 
 import {
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+  GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+  GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
   GOAL_STATE_VERSION,
+  goalLimitKindForReason,
+  isGoalEvidenceProofKind,
+  isGoalLimitKind,
   type GoalControlRequest,
+  type GoalEvidenceCheckpoint,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -96,7 +104,9 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
+      evidenceCheckpoint: undefined,
       lastReason: undefined,
+      limitKind: undefined,
     });
   }
 
@@ -122,15 +132,17 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
+  if (current.status === 'usage_limited' && isEvidenceLimited(current)) {
+    throw new GoalInvalidTransitionError(
+      'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+      snapshotOf(current),
+    );
+  }
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
-  // An explicit resume re-authorizes autonomous continuation, so it grants a
-  // fresh turn budget; keeping the exhausted count would report `active` and
-  // immediately re-transition to `usage_limited` without running a turn.
   return transitionGoal(current, transition.now, {
     status: 'active',
-    turnCount: 0,
   });
 }
 
@@ -209,24 +221,46 @@ export function parseGoalStateRecordPayloadV2(
 ): GoalStateRecordPayloadV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'cause', 'snapshot', 'blockedAudit']) ||
+    !hasOnlyKeys(value, [
+      'v',
+      'cause',
+      'snapshot',
+      'checkpointPending',
+      'blockedAudit',
+    ]) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalStateCause(value['cause']) ||
+    !isCheckpointPending(value['checkpointPending']) ||
     !isBlockedAudit(value['blockedAudit'])
   ) {
     return undefined;
   }
   const parsedSnapshot = parseGoalSnapshotV2(value['snapshot']);
-  return parsedSnapshot?.activity === 'idle'
-    ? {
-        v: GOAL_STATE_VERSION,
-        cause: value['cause'],
-        snapshot: parsedSnapshot,
-        ...(value['blockedAudit']
-          ? { blockedAudit: structuredClone(value['blockedAudit']) }
-          : {}),
-      }
-    : undefined;
+  if (parsedSnapshot?.activity !== 'idle') return undefined;
+  const checkpointPending = value['checkpointPending'];
+  if (
+    checkpointPending &&
+    (parsedSnapshot.goal?.status !== 'active' ||
+      checkpointPending.permit.goalId !== parsedSnapshot.goal.goalId ||
+      checkpointPending.permit.revision !== parsedSnapshot.goal.revision ||
+      checkpointPending.recordUuid ===
+        parsedSnapshot.goal.evidenceCursor.recordId ||
+      (value['cause'] !== 'turn_finished' &&
+        value['cause'] !== 'verifier_reject'))
+  ) {
+    return undefined;
+  }
+  return {
+    v: GOAL_STATE_VERSION,
+    cause: value['cause'],
+    snapshot: parsedSnapshot,
+    ...(checkpointPending
+      ? { checkpointPending: structuredClone(checkpointPending) }
+      : {}),
+    ...(value['blockedAudit']
+      ? { blockedAudit: structuredClone(value['blockedAudit']) }
+      : {}),
+  };
 }
 
 export function parseGoalSnapshotV2(
@@ -251,6 +285,12 @@ export function parseGoalSnapshotV2(
   return goal
     ? { v: GOAL_STATE_VERSION, goal, activity: value['activity'] }
     : undefined;
+}
+
+export function parseGoalStateCause(
+  value: unknown,
+): GoalStateCause | undefined {
+  return isGoalStateCause(value) ? value : undefined;
 }
 
 function createGoal(
@@ -298,6 +338,21 @@ function normalizeObjective(
     );
   }
   return normalized;
+}
+
+/**
+ * Whether a stopped Goal was stopped by one of the evidence bounds.
+ *
+ * `limitKind` is the field of record. The `lastReason` comparison behind it
+ * reads Goals persisted before `limitKind` existed, where the sentinel prose
+ * was the only marker a transition could key off.
+ */
+function isEvidenceLimited(goal: GoalRecord): boolean {
+  return (
+    goal.limitKind !== undefined ||
+    (goal.lastReason !== undefined &&
+      goalLimitKindForReason(goal.lastReason) !== undefined)
+  );
 }
 
 function transitionGoal(
@@ -354,7 +409,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'activeTimeMs',
       'createdAt',
       'updatedAt',
+      'evidenceCheckpoint',
       'lastReason',
+      'limitKind',
     ]) ||
     typeof value['goalId'] !== 'string' ||
     !value['goalId'] ||
@@ -368,8 +425,19 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isNonNegativeNumber(value['activeTimeMs']) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
+    !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['lastReason'] !== undefined &&
-      typeof value['lastReason'] !== 'string')
+      typeof value['lastReason'] !== 'string') ||
+    (value['limitKind'] !== undefined &&
+      (!isGoalLimitKind(value['limitKind']) ||
+        value['status'] !== 'usage_limited'))
+  ) {
+    return undefined;
+  }
+  if (
+    value['evidenceCheckpoint'] &&
+    value['evidenceCursor'].recordId !==
+      value['evidenceCheckpoint'].checkpointId
   ) {
     return undefined;
   }
@@ -383,9 +451,17 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     activeTimeMs: value['activeTimeMs'],
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
+    ...(value['evidenceCheckpoint'] === undefined
+      ? {}
+      : {
+          evidenceCheckpoint: structuredClone(value['evidenceCheckpoint']),
+        }),
     ...(value['lastReason'] === undefined
       ? {}
       : { lastReason: value['lastReason'] }),
+    ...(value['limitKind'] === undefined
+      ? {}
+      : { limitKind: value['limitKind'] }),
   };
 }
 
@@ -434,6 +510,7 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'pause' ||
     value === 'resume' ||
     value === 'turn_finished' ||
+    value === 'checkpoint' ||
     value === 'verifier_accept' ||
     value === 'verifier_reject' ||
     value === 'complete' ||
@@ -441,6 +518,78 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'usage_limited' ||
     value === 'clear' ||
     value === 'migrated'
+  );
+}
+
+function isGoalEvidenceCheckpoint(
+  value: unknown,
+): value is GoalEvidenceCheckpoint | undefined {
+  if (value === undefined) return true;
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['checkpointId', 'createdAt', 'claims']) ||
+    typeof value['checkpointId'] !== 'string' ||
+    value['checkpointId'].length === 0 ||
+    !isFiniteNumber(value['createdAt']) ||
+    !Array.isArray(value['claims']) ||
+    value['claims'].length === 0 ||
+    value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT
+  ) {
+    return false;
+  }
+  let checkpointBytes = 0;
+  for (const [index, claim] of value['claims'].entries()) {
+    if (
+      !isRecord(claim) ||
+      !hasOnlyKeys(claim, ['id', 'proofKind', 'claim', 'sourceRefs']) ||
+      claim['id'] !== `${value['checkpointId']}:${index + 1}` ||
+      !isGoalEvidenceProofKind(claim['proofKind']) ||
+      typeof claim['claim'] !== 'string' ||
+      claim['claim'].trim().length === 0 ||
+      [...claim['claim']].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS ||
+      !Array.isArray(claim['sourceRefs']) ||
+      claim['sourceRefs'].length === 0 ||
+      claim['sourceRefs'].length > GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT ||
+      new Set(claim['sourceRefs']).size !== claim['sourceRefs'].length ||
+      claim['sourceRefs'].some(
+        (reference) => typeof reference !== 'string' || reference.length === 0,
+      )
+    ) {
+      return false;
+    }
+    checkpointBytes += new TextEncoder().encode(claim['claim']).byteLength;
+    if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
+  }
+  return true;
+}
+
+function isCheckpointPending(
+  value: unknown,
+): value is GoalStateRecordPayloadV2['checkpointPending'] {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      hasOnlyKeys(value, ['permit', 'recordUuid']) &&
+      isGoalTurnPermit(value['permit']) &&
+      typeof value['recordUuid'] === 'string' &&
+      value['recordUuid'].length > 0)
+  );
+}
+
+function isGoalTurnPermit(value: unknown): value is {
+  goalId: string;
+  revision: number;
+  turnId: string;
+} {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['goalId', 'revision', 'turnId']) &&
+    typeof value['goalId'] === 'string' &&
+    value['goalId'].length > 0 &&
+    isNonNegativeInteger(value['revision']) &&
+    value['revision'] > 0 &&
+    typeof value['turnId'] === 'string' &&
+    value['turnId'].length > 0
   );
 }
 

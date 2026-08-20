@@ -1,5 +1,10 @@
-import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
-import { isSubAgentToolCall } from '../adapters/toolClassification';
+import type {
+  ACPToolCall,
+  Message,
+  PermissionRequest,
+  TodoItem,
+} from '../adapters/types.js';
+import { isSubAgentToolCall } from '../adapters/toolClassification.js';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and
@@ -9,6 +14,20 @@ import { isSubAgentToolCall } from '../adapters/toolClassification';
 export function isTodoWriteToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return normalized === 'todo_write' || normalized === 'todowrite';
+}
+
+/**
+ * The full exit-plan approval rule: the switch_mode frame kind plus the
+ * exit_plan_mode wire name. Shared by App, ChatPane, and ToolApproval so the
+ * surfaces that gate the revision-bound approval UI never drift.
+ */
+export function isExitPlanApprovalRequest(
+  request: Pick<PermissionRequest, 'toolKind' | 'toolName'> | null | undefined,
+): boolean {
+  return (
+    request?.toolKind === 'switch_mode' &&
+    request?.toolName?.toLowerCase() === 'exit_plan_mode'
+  );
 }
 
 export function parseTodoItemsFromEntries(
@@ -140,20 +159,25 @@ export function getFloatingTodos(
   return { todos, planId, allCompleted, sourceMessageId };
 }
 
-export function getLatestActiveTodos(messages: readonly Message[]): TodoItem[] {
-  let todos: TodoItem[] = [];
+export function getActiveTodosForPlanRevision(
+  messages: readonly Message[],
+  revision: { planId: string; sourceCallId: string } | null | undefined,
+): TodoItem[] {
+  if (!revision) return [];
   for (const message of messages) {
-    if (message.role === 'plan') {
-      todos = message.todos;
-      continue;
-    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      const nextTodos = extractTodosFromToolCall(tool);
-      if (nextTodos !== undefined) todos = nextTodos;
+      if (
+        tool.callId !== revision.sourceCallId ||
+        getTodoPlanId(tool) !== revision.planId
+      ) {
+        continue;
+      }
+      const todos = extractTodosFromToolCall(tool) ?? [];
+      return todos;
     }
   }
-  return hasActiveTodos(todos) ? todos : [];
+  return [];
 }
 
 export function getAgentToolsForPlan(

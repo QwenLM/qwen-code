@@ -136,12 +136,16 @@ const pointer = (
   type: 'pointerdown' | 'pointerup' | 'pointercancel',
   pointerId = 1,
   mouseButton = 0,
+  timeStamp?: number,
 ) => {
   const event = new MouseEvent(type, {
     bubbles: true,
     button: mouseButton,
   });
   Object.defineProperty(event, 'pointerId', { value: pointerId });
+  if (timeStamp !== undefined) {
+    Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  }
   act(() => {
     button.dispatchEvent(event);
   });
@@ -637,7 +641,7 @@ describe('VoiceButton', () => {
     if (!button) throw new Error('VoiceButton did not render');
     const heldButton = button;
 
-    pointer(button, 'pointerdown');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
     expect(mocks.capture.start).toHaveBeenCalledOnce();
 
     mocks.capture.status = 'recording';
@@ -656,19 +660,19 @@ describe('VoiceButton', () => {
     // capture set on pointerdown survives the status change and the release
     // still lands on this element.
     expect(button).toBe(heldButton);
-    pointer(button, 'pointerup');
+    pointer(button, 'pointerup', 1, 0, 1_500);
     click(button);
 
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
-  it('stops a hold that is released while connecting', async () => {
+  it('keeps the hold click suppressed after a rejected pointerdown', async () => {
     const { root, container } = mount(false);
     await flush();
     let button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
-    pointer(button, 'pointerdown');
 
+    pointer(button, 'pointerdown', 1, 0, 1_000);
     mocks.capture.status = 'connecting';
     act(() => {
       root.render(
@@ -681,8 +685,73 @@ describe('VoiceButton', () => {
     });
     button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
-    pointer(button, 'pointerup');
+    pointer(button, 'pointerdown', 2, 0, 1_100);
+    pointer(button, 'pointerup', 1, 0, 1_500);
+    click(button);
 
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+  });
+
+  it('keeps a quick hold active as a tap', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    click(button);
+
+    expect(mocks.capture.stop).not.toHaveBeenCalled();
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+    click(button);
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('honours a stop click after a quick hold released outside', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    // Release outside: pointer capture delivers pointerup to the button, but
+    // the trailing click lands elsewhere — ignoreNextClickRef leaks.
+    mocks.capture.stop.mockClear();
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    const outside = document.createElement('button');
+    click(outside);
+
+    // A real click on the button must still stop the recording.
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 2_000);
+    click(button);
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 

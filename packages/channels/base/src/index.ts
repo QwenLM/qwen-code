@@ -5,6 +5,11 @@ export {
 } from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+export {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
@@ -17,6 +22,7 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -72,7 +78,11 @@ export type {
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
 export { PairingStore } from './PairingStore.js';
-export type { PairingRequest } from './PairingStore.js';
+export type {
+  CreatePairingRequestResult,
+  PairingRequest,
+  PairingSubject,
+} from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
@@ -83,6 +93,7 @@ export { SessionRouter } from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
+  sanitizeDisplayText,
   sanitizeLogText,
   truncateCodePoints,
 } from './sanitize.js';
@@ -92,8 +103,14 @@ export type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigNestedFieldDescriptor,
+  ChannelConfigNumberFieldDescriptor,
+  ChannelConfigObjectFieldDescriptor,
+  ChannelConfigPlainValueFieldDescriptor,
+  ChannelConfigValueFieldDescriptor,
   ChannelIdentityConfig,
   ChannelManagementDescriptor,
   ChannelMemoryIntentClassifier,

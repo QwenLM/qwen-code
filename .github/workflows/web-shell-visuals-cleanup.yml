@@ -6,7 +6,7 @@ name: 'PR Asset Branch Cleanup'
 # context (pull_request_target) but never checks out or runs PR code — it
 # only deletes refs by name.
 #
-# Both producers are covered, and every new `pr-assets/*` producer must be
+# All producers are covered, and every new `pr-assets/*` producer must be
 # added here: a branch nothing deletes is permanent.
 on:
   pull_request_target:
@@ -19,7 +19,10 @@ permissions:
 jobs:
   delete-asset-branch:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (pull_request_target
+    # events use base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
       - name: 'Delete the PR asset branches'
@@ -35,7 +38,8 @@ jobs:
           status=0
           for branch in \
             "pr-assets/web-shell-visuals-${PR_NUMBER}" \
-            "pr-assets/${PR_NUMBER}-verify"; do
+            "pr-assets/${PR_NUMBER}-verify" \
+            "pr-assets/${PR_NUMBER}-review"; do
             if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
               echo "No asset branch ${branch}; nothing to delete."
               continue

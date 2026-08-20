@@ -49,12 +49,71 @@ function makeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
+    includeLiveVoice: true,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
 }
 
 describe('POST /workspace/settings', () => {
+  it('exposes the Live shortcut as user-global and rejects generic writes', async () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { experimental: { liveVoice: { shortcut: 'Command+W' } } },
+      user: {
+        settings: {
+          experimental: {
+            liveVoice: { enabled: true, shortcut: 'Command+E' },
+          },
+        },
+      },
+      workspace: {
+        settings: {
+          experimental: { liveVoice: { shortcut: 'Command+W' } },
+        },
+      },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const { app, persistSetting } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    const shortcut = read.body.settings.find(
+      (setting: { key?: string }) =>
+        setting.key === 'experimental.liveVoice.shortcut',
+    );
+    expect(shortcut).toMatchObject({
+      requiresRestart: false,
+      default: 'Command+E',
+      values: { effective: 'Command+E', user: 'Command+E' },
+    });
+    expect(shortcut.values.workspace).toBeUndefined();
+
+    for (const scope of ['user', 'workspace']) {
+      const write = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'experimental.liveVoice.shortcut',
+        value: 'Command+K',
+      });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe('live_managed_setting');
+    }
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('exposes disabled Live setup settings on the supported WebShell surface', async () => {
+    const { app } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+
+    expect(
+      read.body.settings.map((setting: { key?: string }) => setting.key),
+    ).toEqual(
+      expect.arrayContaining([
+        'experimental.liveVoice.enabled',
+        'experimental.liveVoice.shortcut',
+      ]),
+    );
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({

@@ -14,6 +14,7 @@ import {
   createTransport,
   ExtensionManager,
   isGatedMcpScope,
+  runWithTimeout,
 } from '@qwen-code/qwen-code-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
@@ -25,6 +26,12 @@ const COLOR_GREEN = '\u001b[32m';
 const COLOR_YELLOW = '\u001b[33m';
 const COLOR_RED = '\u001b[31m';
 const RESET_COLOR = '\u001b[0m';
+const MCP_CONNECT_TIMEOUT_MS = 5000;
+
+interface McpConnectionResult {
+  status: MCPServerStatus;
+  timedOut: boolean;
+}
 
 async function getMcpServersFromConfig(): Promise<
   Record<string, MCPServerConfig>
@@ -66,7 +73,7 @@ async function getMcpServersFromConfig(): Promise<
 async function testMCPConnection(
   serverName: string,
   config: MCPServerConfig,
-): Promise<MCPServerStatus> {
+): Promise<McpConnectionResult> {
   const client = new Client({
     name: 'mcp-test-client',
     version: '0.0.1',
@@ -78,28 +85,37 @@ async function testMCPConnection(
     transport = await createTransport(serverName, config, false);
   } catch (_error) {
     await client.close();
-    return MCPServerStatus.DISCONNECTED;
+    return { status: MCPServerStatus.DISCONNECTED, timedOut: false };
   }
 
   try {
-    // Attempt actual MCP connection with short timeout
-    await client.connect(transport, { timeout: 5000 }); // 5s timeout
+    // The SDK timeout only covers initialization after transport.start().
+    // Guard the transport startup too so a silent SSE server cannot hang this command.
+    await runWithTimeout(
+      client.connect(transport, { timeout: MCP_CONNECT_TIMEOUT_MS }),
+      MCP_CONNECT_TIMEOUT_MS,
+      `MCP connection for ${serverName}`,
+    );
 
     // Test basic MCP protocol by pinging the server
     await client.ping();
 
     await client.close();
-    return MCPServerStatus.CONNECTED;
-  } catch (_error) {
+    return { status: MCPServerStatus.CONNECTED, timedOut: false };
+  } catch (error) {
     await transport.close();
-    return MCPServerStatus.DISCONNECTED;
+    return {
+      status: MCPServerStatus.DISCONNECTED,
+      timedOut:
+        error instanceof Error && error.message.startsWith('Timed out after '),
+    };
   }
 }
 
 async function getServerStatus(
   serverName: string,
   server: MCPServerConfig,
-): Promise<MCPServerStatus> {
+): Promise<McpConnectionResult> {
   // Test all server types by attempting actual connection
   return await testMCPConnection(serverName, server);
 }
@@ -149,7 +165,7 @@ export async function listMcpServers(): Promise<void> {
       }
     }
 
-    const status = await getServerStatus(serverName, server);
+    const { status, timedOut } = await getServerStatus(serverName, server);
 
     let statusIndicator = '';
     let statusText = '';
@@ -165,7 +181,9 @@ export async function listMcpServers(): Promise<void> {
       case MCPServerStatus.DISCONNECTED:
       default:
         statusIndicator = COLOR_RED + '✗' + RESET_COLOR;
-        statusText = 'Disconnected';
+        statusText = timedOut
+          ? `Disconnected (timed out after ${MCP_CONNECT_TIMEOUT_MS}ms)`
+          : 'Disconnected';
         break;
     }
 

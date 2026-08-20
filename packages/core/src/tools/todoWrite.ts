@@ -8,6 +8,7 @@ import type { ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { FunctionDeclaration } from '@google/genai';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -370,7 +371,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
           (oldTodos.every((todo) => todo.status === 'completed') &&
-            finalTodos.some((todo) => todo.status !== 'completed')));
+            !isDeepStrictEqual(finalTodos, oldTodos)));
       const activePlanId =
         finalTodos.length === 0
           ? undefined

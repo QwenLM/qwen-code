@@ -273,7 +273,7 @@ export async function runAutoMemoryExtractionByAgent(
       topicSummaries,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    maxTurns: 5,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,

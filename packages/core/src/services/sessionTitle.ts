@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
@@ -108,6 +109,7 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
+  userDisplayTexts: ReadonlyArray<string | undefined> = [],
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -119,7 +121,14 @@ export async function tryGenerateSessionTitle(
     const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
-    const dialog = filterToDialog(fullHistory);
+    const hasDisplayProjection = userDisplayTexts.some(
+      (displayText) => displayText !== undefined,
+    );
+    const dialog = hasDisplayProjection
+      ? userDisplayTexts.flatMap((displayText): Content[] =>
+          displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
+        )
+      : filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };
@@ -212,7 +221,8 @@ function filterToDialog(history: Content[]): Content[] {
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
     const textParts: Part[] = [];
-    for (const part of msg.parts ?? []) {
+    const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
+    for (const part of parts) {
       if (
         typeof part?.text !== 'string' ||
         part.text.trim() === '' ||

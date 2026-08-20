@@ -6,6 +6,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  goalLimitKindForReason,
   goalRequiresExactPermit,
   type GoalControlRequest,
   type GoalRecord,
@@ -21,6 +24,8 @@ import {
   reduceGoalControl,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
+
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
 const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   goalId: 'g-1',
@@ -108,6 +113,39 @@ describe('goal reducer', () => {
 
     expect(next?.lastReason).toBeUndefined();
     expect(next?.objective).toBe('updated objective');
+  });
+
+  it('clears the evidence checkpoint when editing the objective', () => {
+    const previous = goalRecord({
+      revision: 2,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 42,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'external_fact',
+            claim: 'The focused suite passed.',
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      },
+    });
+    const next = reduceGoalControl(previous, {
+      request: {
+        action: 'edit',
+        objective: 'updated objective',
+        expectedGoalId: 'g-1',
+        expectedRevision: 2,
+      },
+      now: 300,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-300' },
+    });
+
+    expect(next?.evidenceCheckpoint).toBeUndefined();
+    expect(next?.evidenceCursor).toEqual({ recordId: 'r-300' });
   });
 
   it('creates a trimmed active goal only when no goal exists', () => {
@@ -243,9 +281,13 @@ describe('goal reducer', () => {
     },
   );
 
-  it('resets the continuation turn budget when resuming an exhausted goal', () => {
+  it('preserves the cumulative turn count when resuming a limited goal', () => {
     const resumed = reduceGoalControl(
-      goalRecord({ status: 'usage_limited', revision: 4, turnCount: 50 }),
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
+      }),
       {
         request: {
           action: 'resume',
@@ -261,9 +303,97 @@ describe('goal reducer', () => {
     expect(resumed).toMatchObject({
       status: 'active',
       revision: 4,
-      turnCount: 0,
+      turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
       evidenceCursor: { recordId: 'r-100' },
     });
+  });
+
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'refuses to resume a Goal that carries limitKind %s',
+    (limitKind) => {
+      expect(() =>
+        reduceGoalControl(
+          goalRecord({
+            status: 'usage_limited',
+            revision: 4,
+            limitKind,
+            lastReason: 'a reason the guard no longer has to recognise',
+          }),
+          {
+            request: {
+              action: 'resume',
+              expectedGoalId: 'g-1',
+              expectedRevision: 4,
+            },
+            now: 200,
+            nextGoalId: 'unused',
+            cursor: { recordId: 'r-200' },
+          },
+        ),
+      ).toThrow(
+        'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+      );
+    },
+  );
+
+  it.each([
+    [GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON, 'evidence_catalog'],
+    [GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON, 'checkpoint_request'],
+    ['An operational limit', undefined],
+  ] as const)(
+    'maps a Goal limit reason only to its canonical kind',
+    (reason, expected) => {
+      expect(goalLimitKindForReason(reason)).toBe(expected);
+    },
+  );
+
+  it.each([
+    GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+    GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  ])(
+    'still refuses to resume a pre-limitKind Goal stopped by the sentinel prose',
+    (lastReason) => {
+      expect(() =>
+        reduceGoalControl(
+          goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
+          {
+            request: {
+              action: 'resume',
+              expectedGoalId: 'g-1',
+              expectedRevision: 4,
+            },
+            now: 200,
+            nextGoalId: 'unused',
+            cursor: { recordId: 'r-200' },
+          },
+        ),
+      ).toThrow(GoalInvalidTransitionError);
+    },
+  );
+
+  it('clears limitKind when the objective is edited', () => {
+    const edited = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+      }),
+      {
+        request: {
+          action: 'edit',
+          objective: 'ship something else',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(edited?.limitKind).toBeUndefined();
+    expect(edited?.lastReason).toBeUndefined();
   });
 
   it('rejects an unsupported control action instead of resuming', () => {
@@ -495,6 +625,39 @@ describe('goal reducer', () => {
     },
   );
 
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'round-trips a %s limitKind through a persisted snapshot',
+    (limitKind) => {
+      const value = snapshot(
+        goalRecord({ status: 'usage_limited', limitKind }),
+      );
+
+      expect(parseGoalSnapshotV2(value)).toEqual(value);
+    },
+  );
+
+  it('rejects a snapshot carrying an unknown limitKind', () => {
+    const value = snapshot(
+      goalRecord({
+        status: 'usage_limited',
+        limitKind: 'something_else' as never,
+      }),
+    );
+
+    expect(parseGoalSnapshotV2(value)).toBeUndefined();
+  });
+
+  it.each(['active', 'paused', 'blocked', 'complete'] as const)(
+    'rejects a %s snapshot carrying a limitKind',
+    (status) => {
+      const value = snapshot(
+        goalRecord({ status, limitKind: 'evidence_catalog' }),
+      );
+
+      expect(parseGoalSnapshotV2(value)).toBeUndefined();
+    },
+  );
+
   it.each([
     ['zero count', { fingerprint: 'same', count: 0, turnIds: [] }],
     [
@@ -547,4 +710,199 @@ describe('goal reducer', () => {
     expect(parsed?.blockedAudit).toEqual(blockedAudit);
     expect(parsed?.blockedAudit).not.toBe(blockedAudit);
   });
+
+  it('parses and clones a persisted evidence checkpoint', () => {
+    const evidenceCheckpoint = {
+      checkpointId: 'checkpoint-1',
+      createdAt: 42,
+      claims: [
+        {
+          id: 'checkpoint-1:1',
+          proofKind: 'external_fact' as const,
+          claim: 'The focused suite passed.',
+          sourceRefs: ['tool-1'],
+        },
+      ],
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'checkpoint',
+      snapshot: snapshot(
+        goalRecord({
+          evidenceCursor: { recordId: 'checkpoint-1' },
+          evidenceCheckpoint,
+        }),
+      ),
+    });
+
+    expect(parsed?.snapshot.goal?.evidenceCheckpoint).toEqual(
+      evidenceCheckpoint,
+    );
+    expect(parsed?.snapshot.goal?.evidenceCheckpoint).not.toBe(
+      evidenceCheckpoint,
+    );
+  });
+
+  it('parses a persisted evidence checkpoint without a Buffer global', () => {
+    // Browser hosts bundling the goalWire subpath have no Buffer global, so
+    // the checkpoint byte count must rely on TextEncoder alone.
+    const buffer = globalThis.Buffer;
+    (globalThis as { Buffer?: unknown }).Buffer = undefined;
+    try {
+      const evidenceCheckpoint = {
+        checkpointId: 'checkpoint-1',
+        createdAt: 42,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'external_fact' as const,
+            claim: 'The focused suite passed \u2713 18 tests',
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      };
+      const parsed = parseGoalStateRecordPayloadV2({
+        v: 2,
+        cause: 'checkpoint',
+        snapshot: snapshot(
+          goalRecord({
+            evidenceCursor: { recordId: 'checkpoint-1' },
+            evidenceCheckpoint,
+          }),
+        ),
+      });
+      expect(parsed?.snapshot.goal?.evidenceCheckpoint).toEqual(
+        evidenceCheckpoint,
+      );
+    } finally {
+      globalThis.Buffer = buffer;
+    }
+  });
+
+  it('rejects persisted checkpoint claims without Core-owned sequential IDs', () => {
+    expect(
+      parseGoalStateRecordPayloadV2({
+        v: 2,
+        cause: 'checkpoint',
+        snapshot: snapshot(
+          goalRecord({
+            evidenceCursor: { recordId: 'checkpoint-1' },
+            evidenceCheckpoint: {
+              checkpointId: 'checkpoint-1',
+              createdAt: 42,
+              claims: [
+                {
+                  id: 'checkpoint-1:custom',
+                  proofKind: 'external_fact',
+                  claim: 'The focused suite passed.',
+                  sourceRefs: ['tool-1'],
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    ).toBeUndefined();
+  });
+
+  it('parses and clones a durable pending checkpoint', () => {
+    const checkpointPending = {
+      permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+      recordUuid: 'checkpoint-1',
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'turn_finished',
+      snapshot: snapshot(goalRecord()),
+      checkpointPending,
+    });
+
+    expect(parsed?.checkpointPending).toEqual(checkpointPending);
+    expect(parsed?.checkpointPending).not.toBe(checkpointPending);
+  });
+
+  it('parses a pending checkpoint persisted after a verifier rejection', () => {
+    const checkpointPending = {
+      permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+      recordUuid: 'checkpoint-1',
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'verifier_reject',
+      snapshot: snapshot(goalRecord()),
+      checkpointPending,
+    });
+
+    expect(parsed?.checkpointPending).toEqual(checkpointPending);
+    expect(parsed?.checkpointPending).not.toBe(checkpointPending);
+  });
+
+  it.each([
+    [
+      'a mismatched Goal',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'other', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'a mismatched revision',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 2, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'an unsupported cause',
+      'checkpoint',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'a stopped Goal',
+      'turn_finished',
+      snapshot(goalRecord({ status: 'paused' })),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'an empty checkpoint ID',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: '',
+      },
+    ],
+    [
+      'the current evidence cursor as its checkpoint ID',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'r-100',
+      },
+    ],
+  ])(
+    'rejects a pending checkpoint with %s',
+    (_label, cause, goalSnapshot, checkpointPending) => {
+      expect(
+        parseGoalStateRecordPayloadV2({
+          v: 2,
+          cause,
+          snapshot: goalSnapshot,
+          checkpointPending,
+        }),
+      ).toBeUndefined();
+    },
+  );
 });

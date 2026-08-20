@@ -19,6 +19,7 @@ export interface VoiceConfig {
   baseUrl: string;
   apiKey?: string;
   language?: string;
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface VoiceAudio {

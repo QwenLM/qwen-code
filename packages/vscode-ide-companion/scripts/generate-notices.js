@@ -191,7 +191,13 @@ function collectDependencies(
     const realInfo = packageLock.packages[packageInfo.resolved];
     if (realInfo?.dependencies) {
       for (const depName of Object.keys(realInfo.dependencies)) {
-        collectDependencies(depName, packageLock, dependenciesMap, resolveFrom, visitedKeys);
+        collectDependencies(
+          depName,
+          packageLock,
+          dependenciesMap,
+          resolveFrom,
+          visitedKeys,
+        );
       }
     }
     return;
@@ -211,7 +217,13 @@ function collectDependencies(
   if (packageInfo.dependencies) {
     for (const depName of Object.keys(packageInfo.dependencies)) {
       // Resolve transitive deps from THIS package's location
-      collectDependencies(depName, packageLock, dependenciesMap, resolvedKey, visitedKeys);
+      collectDependencies(
+        depName,
+        packageLock,
+        dependenciesMap,
+        resolvedKey,
+        visitedKeys,
+      );
     }
   }
 }

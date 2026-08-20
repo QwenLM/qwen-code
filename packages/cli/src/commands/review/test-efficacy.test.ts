@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
   splitDiffIntoHunks,
@@ -19,6 +20,10 @@ import {
   parseAddedLines,
   hasCollocatedNewTest,
   collocatedProbe,
+  collocatedNotGreenDetail,
+  runnerFailureReason,
+  type ProbeReason,
+  heldForRedCollocatedTest,
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
   findVitestBin,
@@ -178,8 +183,20 @@ describe('planTestEfficacy', () => {
 describe('findVitestBin', () => {
   it('names the search root when vitest cannot be resolved', () => {
     const worktree = mkdtempSync(join(tmpdir(), 'no-vitest-'));
+    // A bare tmpdir answers "not found" only when nothing up-tree happens to
+    // provide vitest — a node_modules above the runner's TMPDIR (observed on
+    // self-hosted CI) would resolve one and the throw never fires. Inject the
+    // MODULE_NOT_FOUND itself so the test asks the same question on every
+    // host instead of depending on the ambient filesystem.
+    const vitestNotInstalled = () => {
+      const err = new Error(
+        "Cannot find module 'vitest/package.json'",
+      ) as NodeJS.ErrnoException;
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    };
 
-    expect(() => findVitestBin(worktree)).toThrow(
+    expect(() => findVitestBin(worktree, vitestNotInstalled)).toThrow(
       `vitest not found searching up from ${worktree}`,
     );
   });
@@ -309,11 +326,26 @@ describe('runControlMutant', () => {
     try {
       const original = 'import { it } from "vitest";\nit("t", () => {});\n';
       writeFileSync(join(dir, 'a.test.ts'), original);
-      // No vitest resolvable from this tmpdir, so the run THROWS out of the
-      // suite helper — which is the point: the restore lives in a `finally`
-      // and has to survive that path, or the control leaves an injected
+      // The control throws only when the vitest run never starts. A bare
+      // tmpdir has no vitest only when nothing up-tree provides one — a
+      // node_modules above the runner's TMPDIR (observed on self-hosted CI)
+      // would resolve vitest and the run would actually execute. Plant a
+      // shadow vitest whose `exports` hides its package.json: the innermost
+      // node_modules wins resolution on every host, so findVitestBin surfaces
+      // the ERR_PACKAGE_PATH_NOT_EXPORTED and the restore's `finally` has to
+      // survive exactly that path — or the control leaves an injected
       // always-failing test behind in a file every later mutant run uses.
       // (The caller's outer catch is what turns the throw into inconclusive.)
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({
+          name: 'vitest',
+          exports: { '.': './index.js' },
+        }),
+      );
+      writeFileSync(join(vitestDir, 'index.js'), '');
       expect(() => runControlMutant(dir, 'a.test.ts')).toThrow();
       expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
     } finally {
@@ -403,6 +435,90 @@ describe('safeRmWithin', () => {
 describe('classifyProbeRun', () => {
   const json = (o: unknown) => JSON.stringify(o);
   const only = <T>(got: T[]): T => got[0];
+  /** The tag, if the verdict is one that carries one. Narrowing is the point:
+   *  `ProbeResult` only offers `reason` on the `inconclusive` arm. */
+  const reasonOf = (r: ReturnType<typeof classifyProbeRun>[number]) =>
+    r.verdict === 'inconclusive' ? r.reason : undefined;
+
+  // The tags are what `collocatedNotGreenDetail` reads, and an untagged branch
+  // silently degrades every hold of that kind to a vague catch-all. Measured
+  // before these existed: deleting one tag left all 116 tests green.
+  it('tags a run that produced no parseable output as no-output', () => {
+    const got = classifyProbeRun(
+      1,
+      'boom',
+      ['packages/lib/src/a.test.ts'],
+      'x',
+    );
+    expect(only(got).verdict).toBe('inconclusive');
+    expect(reasonOf(only(got))).toBe('no-output');
+  });
+
+  it('tags a file absent from the results as not-in-results', () => {
+    // Distinct from collecting zero tests: the run answered and this file was
+    // not in the answer, which a path miss produces as readily as a compile
+    // error.
+    const got = classifyProbeRun(
+      1,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/other.test.ts',
+            assertionResults: [{ status: 'passed' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('not-in-results');
+    expect(only(got).detail).toContain('none for this file');
+  });
+
+  it('tags a file that collected nothing as no-tests', () => {
+    const got = classifyProbeRun(
+      1,
+      json({
+        testResults: [
+          { name: '/w/packages/lib/src/a.test.ts', assertionResults: [] },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('no-tests');
+  });
+
+  it('tags an all-skipped file as all-skipped', () => {
+    const got = classifyProbeRun(
+      0,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/a.test.ts',
+            assertionResults: [{ status: 'skipped' }, { status: 'skipped' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('all-skipped');
+  });
+
+  it('leaves a decided verdict untagged', () => {
+    const got = classifyProbeRun(
+      0,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/a.test.ts',
+            assertionResults: [{ status: 'passed' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(only(got).verdict).toBe('inert');
+    expect('reason' in only(got)).toBe(false);
+  });
 
   it('calls a test that still passes without the change INERT', () => {
     // The finding. The source is reverted and the test is green anyway, so it
@@ -1309,6 +1425,209 @@ describe('collocatedProbe', () => {
         'packages/core/src/x.test.ts',
         'packages/cli/src/xy.test.ts',
       ]),
+    ).toBeUndefined();
+  });
+});
+
+describe('runnerFailureReason', () => {
+  // Driven through the real spawnSync rather than hand-written strings: the
+  // version this replaced matched a message the code never emits, and a
+  // fabricated fixture is exactly what let that pass.
+  it('calls a suite killed at the deadline one that did not survive', () => {
+    const r = spawnSync(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 5000)'],
+      { timeout: 300, encoding: 'utf8' },
+    );
+    // What node actually reports, and why the old message match failed:
+    // `error` is set on a timeout, so the throw never reaches a
+    // "runner killed by" sentence.
+    expect(r.error?.message).toContain('ETIMEDOUT');
+    expect(runnerFailureReason(r)).toBe('runner-died');
+  });
+
+  it('calls a runner that could not start one that never ran', () => {
+    const r = spawnSync('/nonexistent/vitest-bin', [], { encoding: 'utf8' });
+    expect(r.error?.message).toContain('ENOENT');
+    expect(r.signal).toBeNull();
+    expect(runnerFailureReason(r)).toBe('not-run');
+  });
+
+  it('calls a plain failure before any spawn one that never ran', () => {
+    expect(runnerFailureReason({})).toBe('not-run');
+  });
+});
+
+describe('collocatedNotGreenDetail', () => {
+  const perFile = [
+    { file: 'packages/cli/src/red.test.ts', verdict: 'gated' as const },
+    {
+      file: 'packages/cli/src/empty.test.ts',
+      verdict: 'inconclusive' as const,
+      // The union requires it, which is the point: a fixture cannot stand for
+      // an untagged `inconclusive` because the code cannot produce one.
+      reason: 'no-tests' as const,
+    },
+  ];
+
+  it('says the test was red when the baseline collected it and it failed', () => {
+    // The case that produced this function: on PR #8368 AuthDialog.test.tsx
+    // compiled and ran 26 tests, one of which failed. Reporting that as an
+    // import error sends the reader to a file that imports fine.
+    const detail = collocatedNotGreenDetail(
+      'mutant',
+      'packages/cli/src/red.test.ts',
+      perFile,
+    );
+    expect(detail).toContain('was RED there');
+    expect(detail).not.toContain('compile or import error');
+  });
+
+  it.each(['not-run', 'runner-died', 'control-failed'] as const)(
+    'refuses to explain %s, which a baseline entry cannot carry',
+    (reason) => {
+      // These are set on the run-level results array, never by
+      // classifyProbeRun. Rendered inside this sentence, `control-failed`
+      // would read "did not run green … it read green there".
+      const detail = collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/x.test.ts',
+        [
+          {
+            file: 'packages/cli/src/x.test.ts',
+            verdict: 'inconclusive' as const,
+            reason,
+          },
+        ],
+      );
+      expect(detail).toContain('the baseline did not classify it');
+      expect(detail).toContain('does not apply');
+    },
+  );
+
+  it('refuses to explain a probe the baseline reported GREEN', () => {
+    // `inert` is what greenProbes is built from, so this sentence does not
+    // apply to it. The production caller cannot get here; the export can, and
+    // a fluent claim contradicting the measurement is worse than saying so.
+    const detail = collocatedNotGreenDetail(
+      'mutant',
+      'packages/cli/src/green.test.ts',
+      [{ file: 'packages/cli/src/green.test.ts', verdict: 'inert' as const }],
+    );
+    expect(detail).toContain('reported it GREEN');
+    expect(detail).toContain('does not apply');
+  });
+
+  it('says the baseline never reported a probe it has no entry for', () => {
+    // Absent is an evidentiary hole, never the claim that its tests failed —
+    // and not the claim that it collected nothing either, which is a
+    // measurement the baseline never took.
+    const detail = collocatedNotGreenDetail(
+      'mutant',
+      'packages/cli/src/absent.test.ts',
+      perFile,
+    );
+    expect(detail).toContain('did not report it');
+    expect(detail).not.toContain('RED');
+  });
+
+  it.each([
+    ['no-output', 'produced no parseable output', 'nothing at all is known'],
+    ['no-tests', 'collected no tests there', 'compile or import error'],
+    ['all-skipped', 'executed none of them', 'collected tests there'],
+    [
+      'not-in-results',
+      'produced results there but none for it',
+      'a path that did not match',
+    ],
+  ])(
+    'names %s as the reason rather than guessing one',
+    (reason, phrase, alsoPhrase) => {
+      const detail = collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/x.test.ts',
+        [
+          {
+            file: 'packages/cli/src/x.test.ts',
+            verdict: 'inconclusive' as const,
+            reason: reason as ProbeReason,
+          },
+        ],
+      );
+      expect(detail).toContain(phrase);
+      expect(detail).toContain(alsoPhrase);
+      // The runner falling over is not a compile error, and the message that
+      // says so is the whole point of carrying the reason.
+      if (reason === 'no-output') {
+        expect(detail).not.toContain('compile or import error');
+      }
+    },
+  );
+
+  it('names the probe and what the passing probes cannot show, per kind', () => {
+    expect(
+      collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/red.test.ts',
+        perFile,
+      ),
+    ).toBe(
+      "this mutant's collocated test packages/cli/src/red.test.ts did not run green in the unmutated baseline — it was RED there, so the remaining probes passing cannot show the statement is uncovered",
+    );
+    expect(
+      collocatedNotGreenDetail('hunk', 'packages/cli/src/red.test.ts', perFile),
+    ).toContain('cannot show the hunk is uncovered');
+  });
+});
+
+describe('heldForRedCollocatedTest — the one decision both loops make', () => {
+  const perFile = [
+    {
+      file: 'packages/cli/src/x.test.ts',
+      verdict: 'gated' as const,
+    },
+    {
+      file: 'packages/cli/src/ok.test.ts',
+      verdict: 'inert' as const,
+    },
+  ];
+  const probes = ['packages/cli/src/x.test.ts', 'packages/cli/src/ok.test.ts'];
+
+  it('holds when the collocated test was not green, and explains why', () => {
+    const detail = heldForRedCollocatedTest(
+      'mutant',
+      'packages/cli/src/x.ts',
+      probes,
+      ['packages/cli/src/ok.test.ts'],
+      perFile,
+    );
+    expect(detail).toContain('was RED there');
+    expect(detail).toContain('packages/cli/src/x.test.ts');
+  });
+
+  it('does not hold when the collocated test was green', () => {
+    expect(
+      heldForRedCollocatedTest(
+        'hunk',
+        'packages/cli/src/ok.ts',
+        probes,
+        ['packages/cli/src/ok.test.ts'],
+        perFile,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does not hold when the file has no collocated probe at all', () => {
+    // No covering test was measured either way, so this guard has nothing to
+    // say — the other probes decide.
+    expect(
+      heldForRedCollocatedTest(
+        'mutant',
+        'packages/cli/src/untested.ts',
+        probes,
+        [],
+        perFile,
+      ),
     ).toBeUndefined();
   });
 });

@@ -39,13 +39,19 @@ const configSchema = z.discriminatedUnion('version', [
       version: z.literal(1),
       timeoutMs: z.number().int().min(1).max(30_000).default(5000),
       provider: providerSchema,
+      write: z
+        .object({
+          enabled: z.literal(true),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   z
     .object({
       version: z.literal(2),
-      // Read only by the on-demand MCP path; the auto-recall Hook uses
-      // autoRecall.timeoutMs. Kept on the v2 schema for forward compatibility.
+      // Retained for compatibility with existing v2 configuration files. The
+      // auto-recall Hook uses autoRecall.timeoutMs, and the MCP rejects v2.
       timeoutMs: z.number().int().min(1).max(30_000).default(5000),
       autoRecall: z
         .object({
@@ -105,15 +111,25 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is invalid.');
   }
 
-  const provider = resolveProvider(result.data.provider, env);
   if (result.data.version === 1) {
+    if (
+      result.data.write !== undefined &&
+      result.data.provider.type !== 'mem0-platform-v3'
+    ) {
+      throw new ConfigurationError(
+        'External context memory writes require a Mem0 provider.',
+      );
+    }
+    const provider = resolveProvider(result.data.provider, env);
     return {
       version: 1,
       timeoutMs: result.data.timeoutMs,
       provider,
+      ...(result.data.write === undefined ? {} : { write: result.data.write }),
     };
   }
 
+  const provider = resolveProvider(result.data.provider, env);
   return {
     version: 2,
     timeoutMs: result.data.timeoutMs,

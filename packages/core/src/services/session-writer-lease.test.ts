@@ -36,6 +36,7 @@ import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
+  SessionTranscriptIdentityUnavailableError,
   SessionWriterConflictError,
   SessionWriterLease,
   SessionWriterLostError,
@@ -51,6 +52,10 @@ const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
   remainingFailures: 0,
   calls: 0,
+}));
+
+const zeroInodeFault = vi.hoisted(() => ({
+  underRoot: undefined as string | undefined,
 }));
 
 const fsOpenTestHook = vi.hoisted(() => ({
@@ -113,6 +118,22 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         }
       }
       return actual.lstat(filePath);
+    },
+    stat: async (
+      filePath: Parameters<typeof actual.stat>[0],
+      ...rest: unknown[]
+    ) => {
+      const result = await (
+        actual.stat as (...args: unknown[]) => ReturnType<typeof actual.stat>
+      )(filePath, ...rest);
+      if (
+        zeroInodeFault.underRoot !== undefined &&
+        typeof filePath === 'string' &&
+        filePath.startsWith(zeroInodeFault.underRoot)
+      ) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
     },
     open: async (filePath: PathLike, flags: string | number, mode?: Mode) => {
       await fsOpenTestHook.beforeOpen?.(filePath, flags);
@@ -298,8 +319,25 @@ async function requestChild(
 }
 
 async function waitForClose(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  const pid = child.pid;
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  }
+  if (pid === undefined) return;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      // ESRCH means gone; EPERM means the PID was already recycled by a
+      // process this test cannot signal. Either way the child is gone.
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  // On Windows PIDs recycle aggressively, so a still-answerable signal 0
+  // almost always means a reused PID, not a leaked child; do not turn that
+  // teardown observation into a test failure.
+  console.warn(`Process ${pid} remained live after close`);
 }
 
 function record(
@@ -359,6 +397,7 @@ afterEach(async () => {
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
+  zeroInodeFault.underRoot = undefined;
   fsOpenTestHook.beforeOpen = undefined;
   transitionFault.renameFrom = undefined;
   transitionFault.renameTo = undefined;
@@ -1356,6 +1395,58 @@ describe('SessionWriterLease', () => {
     await lease.release();
   });
 
+  it('rejects a new session up front when the filesystem cannot number inodes', async () => {
+    const fixture = await createFixture();
+    // Brand-new session: the transcript file does not exist yet, so the
+    // probe stands in for it with the nearest existing ancestor directory.
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    zeroInodeFault.underRoot = fixture.runtimeBaseDir;
+
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+    await expect(fs.access(fixture.transcriptPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('acquires normally when the transcript directory does not exist yet', async () => {
+    const fixture = await createFixture();
+
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    await lease.appendJsonLine({ hello: 'world' });
+    await lease.release();
+
+    await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+      '{"hello":"world"}\n',
+    );
+  });
+
+  it('rejects a transcript with an unverifiable inode before writing', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const originalStat = nativeFileHandleStat;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalStat.apply(this, args);
+        return Object.defineProperty(result, 'ino', { value: 0 });
+      });
+
+    try {
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+      await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+        seed,
+      );
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
   it('detects a size change between handle and path stat', async () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
@@ -1658,42 +1749,45 @@ describe('SessionWriterLease', () => {
     }
   });
 
-  it('detects an atomic replacement during content verification', async () => {
-    const fixture = await createFixture();
-    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
-    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
-    const lease = await SessionWriterLease.acquire(fixture.options);
-    const initial = await fs.stat(fixture.transcriptPath);
-    await fs.utimes(
-      fixture.transcriptPath,
-      initial.atime,
-      new Date(initial.mtimeMs + 1000),
-    );
-    const replacement = `${fixture.transcriptPath}.replacement`;
-    await fs.writeFile(replacement, '{"sEEd":true}\n');
-    const originalRead = nativeFileHandleRead;
-    let replaced = false;
-    const read = vi
-      .spyOn(fileHandlePrototype, 'read')
-      .mockImplementation(async function (this: fs.FileHandle, ...args) {
-        const result = await originalRead.apply(this, args);
-        if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
-          replaced = true;
-          await fs.rename(replacement, fixture.transcriptPath);
-        }
-        return result;
-      });
-
-    try {
-      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
-        SessionTranscriptChangedError,
+  it.skipIf(process.platform === 'win32')(
+    'detects an atomic replacement during content verification',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+      await fs.utimes(
+        fixture.transcriptPath,
+        initial.atime,
+        new Date(initial.mtimeMs + 1000),
       );
-      expect(replaced).toBe(true);
-    } finally {
-      read.mockRestore();
-      await lease.release();
-    }
-  });
+      const replacement = `${fixture.transcriptPath}.replacement`;
+      await fs.writeFile(replacement, '{"sEEd":true}\n');
+      const originalRead = nativeFileHandleRead;
+      let replaced = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (this: fs.FileHandle, ...args) {
+          const result = await originalRead.apply(this, args);
+          if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
+            replaced = true;
+            await fs.rename(replacement, fixture.transcriptPath);
+          }
+          return result;
+        });
+
+      try {
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+        expect(replaced).toBe(true);
+      } finally {
+        read.mockRestore();
+        await lease.release();
+      }
+    },
+  );
 
   it('detects truncation during content verification', async () => {
     const fixture = await createFixture();

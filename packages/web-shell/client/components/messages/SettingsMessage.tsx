@@ -28,6 +28,8 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
+import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
   WEB_SHELL_THEMES,
   WebShellThemeId,
@@ -42,6 +44,7 @@ import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
+import { LocalControlSettingsCard } from './LocalControlSettingsCard';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -99,6 +102,7 @@ export interface SettingsMessageSettingsState {
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
+  liveSetup?: UseLiveVoiceSetupResult;
 }
 
 const SUB_DIALOG_KEYS = new Set([
@@ -113,6 +117,10 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'ui.compactInline',
   'mcpServers',
+]);
+const LIVE_SETTING_KEYS = new Set([
+  'experimental.liveVoice.enabled',
+  'experimental.liveVoice.shortcut',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -238,7 +246,9 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' }
+  | { type: 'local-control' }
+  | { type: 'live' };
 
 interface SettingsPageCategory {
   id: string;
@@ -411,7 +421,8 @@ export function SettingsMessage({
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
-  const { status, settings, loading, error, reload, setValue } = settingsState;
+  const { status, settings, loading, error, reload, setValue, liveSetup } =
+    settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -421,7 +432,9 @@ export function SettingsMessage({
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
-      (setting) => !HIDDEN_SETTING_KEYS.has(setting.key),
+      (setting) =>
+        !HIDDEN_SETTING_KEYS.has(setting.key) &&
+        !LIVE_SETTING_KEYS.has(setting.key),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -456,8 +469,30 @@ export function SettingsMessage({
         items: [localItem],
       });
     }
+    if (liveSetup?.supported) {
+      const experimental = groups.find((group) => group.id === 'Experimental');
+      if (experimental) {
+        experimental.items.unshift({ type: 'live' });
+      } else {
+        groups.push({
+          id: 'Experimental',
+          label: formatSettingCategory('Experimental', t),
+          items: [{ type: 'live' }],
+        });
+      }
+    }
+    const daemon = groups.find((group) => group.id === 'Daemon');
+    if (daemon) {
+      daemon.items.unshift({ type: 'local-control' });
+    } else {
+      groups.push({
+        id: 'Daemon',
+        label: formatSettingCategory('Daemon', t),
+        items: [{ type: 'local-control' }],
+      });
+    }
     return groups;
-  }, [settings, t]);
+  }, [liveSetup, settings, t]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -783,6 +818,22 @@ export function SettingsMessage({
                                   false,
                                 )}
                               />
+                            </div>
+                          );
+                        }
+                        if (item.type === 'live') {
+                          return liveSetup ? (
+                            <div key="live-voice-setup">
+                              {separator}
+                              <LiveVoiceSettingsCard setup={liveSetup} />
+                            </div>
+                          ) : null;
+                        }
+                        if (item.type === 'local-control') {
+                          return (
+                            <div key="local-control">
+                              {separator}
+                              <LocalControlSettingsCard />
                             </div>
                           );
                         }

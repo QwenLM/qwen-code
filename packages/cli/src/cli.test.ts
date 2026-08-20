@@ -144,6 +144,8 @@ describe('resolveBootstrapRoute', () => {
 describe('runCliEntry', () => {
   const savedEnv = {
     CLI_VERSION: process.env['CLI_VERSION'],
+    QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN:
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
     QWEN_CODE_MANAGED_NPM_UPDATE_VERSION:
       process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'],
   };
@@ -184,6 +186,12 @@ describe('runCliEntry', () => {
       process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] =
         savedEnv.QWEN_CODE_MANAGED_NPM_UPDATE_VERSION;
     }
+    if (savedEnv.QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN === undefined) {
+      delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+    } else {
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] =
+        savedEnv.QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN;
+    }
     vi.restoreAllMocks();
   });
 
@@ -199,6 +207,12 @@ describe('runCliEntry', () => {
 
   it('runs a managed update worker without starting the CLI', async () => {
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mocks.installManagedNpmUpdate.mockImplementationOnce(async () => {
+      expect(
+        process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+      ).toBeUndefined();
+    });
 
     await runCliEntry([]);
 
@@ -329,6 +343,33 @@ describe('runCliEntry', () => {
     await runCliEntry(['serve']);
 
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the external Guard token for the full serve parser', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mocks.tryRunServeFastPath.mockResolvedValue(false);
+    mocks.main.mockImplementationOnce(async () => {
+      expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBe(
+        'guard-secret',
+      );
+    });
+
+    await runCliEntry(['serve']);
+
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it('scrubs the external Guard token before non-serve startup', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mocks.main.mockImplementationOnce(async () => {
+      expect(
+        process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+      ).toBeUndefined();
+    });
+
+    await runCliEntry([]);
+
     expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 

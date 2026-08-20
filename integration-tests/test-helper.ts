@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
@@ -27,7 +28,11 @@ function sanitizeTestName(name: string) {
 // Helper to create detailed error messages
 export function createToolCallErrorMessage(
   expectedTools: string | string[],
-  foundTools: string[],
+  // Callers build this by mapping `toolRequest.name` over the parsed
+  // telemetry, where the name is optional. This is a failure message, so a
+  // missing entry should print as `undefined` rather than force every call
+  // site to filter first.
+  foundTools: Array<string | undefined>,
   result: string,
 ) {
   const expectedStr = Array.isArray(expectedTools)
@@ -170,6 +175,10 @@ interface ParsedLog {
     duration_ms?: number;
     status?: string;
     'error.message'?: string;
+    // Telemetry carries far more attributes than the tool-call subset named
+    // above; callers reach them by key (`attributes['request_text']`). Every
+    // value is `unknown` because nothing validates the payload shape.
+    [key: string]: unknown;
   };
   scopeMetrics?: {
     metrics: {
@@ -199,7 +208,7 @@ export class TestRig {
     return 15000; // 15s locally
   }
 
-  setup(
+  async setup(
     testName: string,
     options: { settings?: Record<string, unknown> } = {},
   ) {
@@ -210,7 +219,7 @@ export class TestRig {
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
-    rmSync(this.testDir, { recursive: true, force: true });
+    await rm(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
@@ -244,11 +253,6 @@ export class TestRig {
 
   mkdir(dir: string) {
     mkdirSync(join(this.testDir!, dir), { recursive: true });
-  }
-
-  sync() {
-    // ensure file system is done before spawning
-    execSync('sync', { cwd: this.testDir! });
   }
 
   /**
@@ -487,7 +491,7 @@ export class TestRig {
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
-        execSync(`rm -rf ${this.testDir}`);
+        await rm(this.testDir, { recursive: true, force: true });
       } catch (error) {
         // Ignore cleanup errors
         if (env['VERBOSE'] === 'true') {
@@ -500,8 +504,6 @@ export class TestRig {
   async waitForTelemetryReady() {
     // Telemetry is always written to the test directory
     const logFilePath = join(this.testDir!, 'telemetry.log');
-
-    if (!logFilePath) return;
 
     // Wait for telemetry file to exist and have content
     await this.poll(
@@ -816,12 +818,17 @@ export class TestRig {
     }
 
     const parsedLogs = this._readAndParseTelemetryLog();
+    // Every field is optional because it is copied straight out of the
+    // telemetry attributes, which nothing validates. The stdout fallback above
+    // reconstructs the same fields from a regex and can promise them; this
+    // branch cannot, and claiming otherwise just moved the `undefined` past
+    // the type checker into the assertions.
     const logs: {
       toolRequest: {
-        name: string;
-        args: string;
-        success: boolean;
-        duration_ms: number;
+        name?: string;
+        args?: string;
+        success?: boolean;
+        duration_ms?: number;
         status?: string;
         error?: string;
       };
@@ -850,7 +857,9 @@ export class TestRig {
     return logs;
   }
 
-  readLastApiRequest(): Record<string, unknown> | null {
+  // Returns the parsed log, not a bare record: callers want `.attributes`,
+  // and `Record<string, unknown>` hid that the value already has a shape.
+  readLastApiRequest(): ParsedLog | null {
     const logs = this._readAndParseTelemetryLog();
     const apiRequests = logs.filter(
       (logData) =>

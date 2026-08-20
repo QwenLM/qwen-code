@@ -611,19 +611,27 @@ describe('readManyFiles', () => {
     it('drops a validated directory when its identity changes after reading', async () => {
       const relativePath = 'approved-dir';
       const absolutePath = path.join(tempRootDir, relativePath);
+      const backupPath = `${absolutePath}.approved`;
+      const visiblePath = path.join(absolutePath, 'visible.txt');
       await fs.mkdir(absolutePath);
-      await fs.writeFile(path.join(absolutePath, 'visible.txt'), 'visible');
+      await fs.writeFile(visiblePath, 'visible');
       const approvedStats = await fs.stat(absolutePath);
-      const originalStat = fs.stat.bind(fs);
-      let validatedStats = 0;
-      const statSpy = vi.spyOn(fs, 'stat').mockImplementation(async (file) => {
-        const stats = await originalStat(file);
-        if (file === absolutePath && ++validatedStats === 2) {
-          return { ...stats, ino: stats.ino + 1 } as nodeFs.Stats;
-        }
-        return stats;
-      });
-      const mockConfig = createMockConfig(tempRootDir);
+      const fileService = new FileDiscoveryService(tempRootDir);
+      let swapped = false;
+      const ignoreSpy = vi
+        .spyOn(fileService, 'shouldGitIgnoreFile')
+        .mockImplementation((file) => {
+          if (file === visiblePath && !swapped) {
+            nodeFs.renameSync(absolutePath, backupPath);
+            nodeFs.mkdirSync(absolutePath);
+            swapped = true;
+          }
+          return false;
+        });
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileService: () => fileService,
+      } as Config;
 
       try {
         const result = await readManyFiles(mockConfig, {
@@ -633,12 +641,17 @@ describe('readManyFiles', () => {
           ]),
         });
 
+        expect(swapped).toBe(true);
         expect(contentToString(result.contentParts)).not.toContain(
           'visible.txt',
         );
         expect(result.files).toHaveLength(0);
       } finally {
-        statSpy.mockRestore();
+        ignoreSpy.mockRestore();
+        if (swapped) {
+          await fs.rm(absolutePath, { recursive: true, force: true });
+          await fs.rename(backupPath, absolutePath);
+        }
       }
     });
 

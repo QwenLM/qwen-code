@@ -11,7 +11,11 @@ import {
 } from './nonInteractiveCliCommands.js';
 import {
   __resetActiveGoalStoreForTests,
+  createGoalRuntime,
+  type ChatRecord,
   type Config,
+  type GoalJournal,
+  type GoalStateRecordPayloadV2,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
@@ -42,10 +46,32 @@ describe('handleSlashCommand', () => {
   let abortController: AbortController;
   let mockFireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
+  const createJournal = (): GoalJournal => ({
+    getTranscriptCursor: () => ({ recordId: null }),
+    async recordGoalState(
+      recordUuid: string,
+      payload: GoalStateRecordPayloadV2,
+    ): Promise<ChatRecord> {
+      return {
+        uuid: recordUuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/test/project',
+        version: 'test',
+        systemPayload: structuredClone(payload),
+      };
+    },
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
+    const goalRuntime = createGoalRuntime({ journal: createJournal() });
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
@@ -81,6 +107,8 @@ describe('handleSlashCommand', () => {
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getGoalRuntime: vi.fn(() => goalRuntime),
+      getGoalRuntimeReady: vi.fn(async () => goalRuntime),
       storage: {},
     } as unknown as Config;
 
@@ -220,14 +248,45 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(mockBtwCommand.action).toHaveBeenCalled();
+    expect(mockBtwCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: undefined }),
+      'question',
+    );
     expect(result.type).toBe('message');
     if (result.type === 'message') {
       expect(result.content).toBe('btw> question\nanswer');
     }
   });
 
-  it('should execute /goal in non-interactive mode as a submit_prompt command', async () => {
+  it('passes the abort signal to executed commands', async () => {
+    const mockCommand = {
+      name: 'advisor',
+      description: 'Ask for advice',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'ok',
+      }),
+    };
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    await handleSlashCommand(
+      '/advisor check this',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: abortController.signal }),
+      'check this',
+    );
+  });
+
+  it('returns canonical goal_control for a non-interactive create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -237,25 +296,26 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(result.type).toBe('submit_prompt');
-    if (result.type === 'submit_prompt') {
-      expect(result.content).toEqual([
-        expect.objectContaining({
-          text: expect.stringContaining('write a hello world script'),
-        }),
-      ]);
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'write a hello world script',
-          setAt: expect.any(Number),
-        }),
-      ]);
-    }
+    expect(result).toMatchObject({
+      type: 'goal_control',
+      operation: {
+        kind: 'set',
+        objective: 'write a hello world script',
+      },
+      response: {
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
+    });
   });
 
-  it('should report no active goal for empty non-interactive /goal', async () => {
+  it('returns canonical goal_control for empty non-interactive /goal status', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -266,13 +326,15 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
   });
 
-  it('should report active goal status after setting a non-interactive /goal', async () => {
+  it('returns the active v2 snapshot for status after create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -289,18 +351,20 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: {
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.content).toContain(
-        'Goal active: write a hello world script',
-      );
-      expect(result.content).toContain('not yet evaluated');
-    }
   });
 
-  it('should report cleared goal for non-interactive /goal clear', async () => {
+  it('returns the cleared v2 snapshot for non-interactive /goal clear', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -317,23 +381,15 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'cleared',
-          condition: 'write a hello world script',
-          durationMs: expect.any(Number),
-        }),
-      ]);
-    }
   });
 
-  it('should report cleared goal for ACP /goal clear', async () => {
+  it('returns canonical state for ACP /goal clear', async () => {
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
     mockGetCommands.mockReturnValue([goalCommand]);
 
@@ -351,9 +407,12 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      cause: 'clear',
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
   });
 
@@ -406,6 +465,32 @@ describe('handleSlashCommand', () => {
     if (result.type === 'submit_prompt') {
       expect(result.content).toEqual([{ text: 'Run on the override model' }]);
       expect(result.modelOverride).toBe('glm-5.1');
+    }
+  });
+
+  it('passes context-file refresh intent through submit_prompt results', async () => {
+    const mockCommand = {
+      name: 'remember',
+      description: 'Remember a fact',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact' }],
+        refreshContextFilesOnWrite: true,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/remember fact',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.refreshContextFilesOnWrite).toBe(true);
     }
   });
 
@@ -724,6 +809,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -751,6 +837,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -778,6 +865,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -811,6 +899,7 @@ describe('handleSlashCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'UserPromptExpansion blocked: Blocked by policy',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -1063,6 +1152,31 @@ describe('handleSlashCommand', () => {
         expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
         expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
         expect(texts).toContain('implement X');
+      }
+    });
+
+    it('preserves context-file refresh intent from stacked skills', async () => {
+      const skillA = {
+        ...createSkillCommand('remember-skill', 'remember workflow'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:remember-skill' }],
+          refreshContextFilesOnWrite: true,
+        }),
+      };
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/remember-skill /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.refreshContextFilesOnWrite).toBe(true);
       }
     });
 

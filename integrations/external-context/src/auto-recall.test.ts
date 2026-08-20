@@ -14,7 +14,12 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import {
+  type AddressInfo,
+  createServer as createNetServer,
+  type Server as NetServer,
+  type Socket,
+} from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
@@ -28,14 +33,23 @@ import type {
 const loadConfig = vi.hoisted(() => vi.fn());
 const search = vi.hoisted(() => vi.fn());
 const createProvider = vi.hoisted(() => vi.fn(() => ({ search })));
-const installEnvironmentProxy = vi.hoisted(() => vi.fn());
+const PROXY_ENVIRONMENT_KEYS = new Set([
+  'ALL_PROXY',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+]);
+const proxyMocks = vi.hoisted(() => ({
+  destroy: vi.fn(),
+  install: vi.fn(),
+}));
 
 vi.mock('./config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./config.js')>()),
   loadConfig,
 }));
 vi.mock('./providers.js', () => ({ createProvider }));
-vi.mock('./proxy.js', () => ({ installEnvironmentProxy }));
+vi.mock('./proxy.js', () => ({ installEnvironmentProxy: proxyMocks.install }));
 
 const temporaryDirectories: string[] = [];
 
@@ -43,7 +57,10 @@ beforeEach(() => {
   loadConfig.mockReset();
   search.mockReset();
   createProvider.mockClear();
-  installEnvironmentProxy.mockReset();
+  proxyMocks.destroy.mockReset().mockResolvedValue(undefined);
+  proxyMocks.install.mockReset().mockReturnValue({
+    destroy: proxyMocks.destroy,
+  });
 });
 
 afterEach(async () => {
@@ -201,7 +218,8 @@ describe('runAutoRecall', () => {
       cwd: fixture.child,
     });
 
-    expect(installEnvironmentProxy).toHaveBeenCalledOnce();
+    expect(proxyMocks.install).toHaveBeenCalledOnce();
+    expect(proxyMocks.destroy).toHaveBeenCalledOnce();
     expect(createProvider).toHaveBeenCalledOnce();
     expect(search).toHaveBeenCalledOnce();
     expect(search).toHaveBeenCalledWith({
@@ -270,13 +288,14 @@ describe('runAutoRecall', () => {
         }),
       ).resolves.toEqual({});
       expect(loadConfig).not.toHaveBeenCalled();
-      expect(installEnvironmentProxy).not.toHaveBeenCalled();
+      expect(proxyMocks.install).not.toHaveBeenCalled();
+      expect(proxyMocks.destroy).not.toHaveBeenCalled();
       expect(createProvider).not.toHaveBeenCalled();
       expect(search).not.toHaveBeenCalled();
     },
   );
 
-  it('skips malformed events, v1 configs, and directories outside the root', async () => {
+  it('skips malformed events, empty queries, v1 configs, and directories outside the root', async () => {
     const fixture = await createRepositoryFixture();
     const outside = await mkdtemp(`${fixture.root}-outside-`);
     temporaryDirectories.push(outside);
@@ -286,6 +305,15 @@ describe('runAutoRecall', () => {
       {},
     );
     expect(loadConfig).not.toHaveBeenCalled();
+
+    loadConfig.mockResolvedValue(config(fixture.root));
+    await expect(
+      runAutoRecall({
+        hook_event_name: 'UserPromptSubmit',
+        submitted_prompt: '```text\nonly code\n```',
+        cwd: fixture.root,
+      }),
+    ).resolves.toEqual({});
 
     const provider = config(fixture.root).provider;
     loadConfig.mockResolvedValue({
@@ -310,6 +338,8 @@ describe('runAutoRecall', () => {
       }),
     ).resolves.toEqual({});
     expect(search).not.toHaveBeenCalled();
+    expect(proxyMocks.install).not.toHaveBeenCalled();
+    expect(proxyMocks.destroy).not.toHaveBeenCalled();
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -349,6 +379,7 @@ describe('runAutoRecall', () => {
         cwd: fixture.root,
       }),
     ).resolves.toEqual({});
+    expect(proxyMocks.destroy).toHaveBeenCalledOnce();
   });
 });
 
@@ -356,7 +387,12 @@ describe('runAutoRecallCli', () => {
   it('runs as a child process and exits without stderr or a retained timer', async () => {
     const result = await runAutoRecallProcess('{');
 
-    expect(result).toEqual({ exitCode: 0, stdout: '{}', stderr: '' });
+    expect(result).toEqual({
+      exitCode: 0,
+      signal: null,
+      stdout: '{}',
+      stderr: '',
+    });
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -374,6 +410,7 @@ describe('runAutoRecallCli', () => {
 
       await expect(runAutoRecallProcess('{', link)).resolves.toEqual({
         exitCode: 0,
+        signal: null,
         stdout: '{}',
         stderr: '',
       });
@@ -411,10 +448,7 @@ describe('runAutoRecallCli', () => {
         }),
       );
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
-    });
+    await listen(server);
 
     try {
       const address = server.address() as AddressInfo;
@@ -453,6 +487,7 @@ describe('runAutoRecallCli', () => {
       );
 
       expect(result.exitCode).toBe(0);
+      expect(result.signal).toBeNull();
       expect(result.stderr).toBe('');
       expect(requests).toEqual([
         {
@@ -478,11 +513,81 @@ describe('runAutoRecallCli', () => {
         },
       });
     } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
+      await closeServer(server);
     }
   });
+
+  it('exits after a provider timeout leaves a proxy CONNECT stalled', async () => {
+    const fixture = await createRepositoryFixture();
+    const proxyConnects: string[] = [];
+    const proxySockets = new Set<Socket>();
+    const proxy = createNetServer((socket) => {
+      proxySockets.add(socket);
+      socket.on('error', () => undefined);
+      socket.once('close', () => proxySockets.delete(socket));
+      let request = '';
+      let recorded = false;
+      socket.on('data', (chunk: Buffer) => {
+        request += chunk.toString('latin1');
+        if (!recorded && request.includes('\r\n\r\n')) {
+          recorded = true;
+          const [method, authority] = request.split('\r\n', 1)[0]!.split(' ');
+          proxyConnects.push(`${method} ${authority}`);
+        }
+      });
+    });
+
+    try {
+      await listen(proxy);
+      const proxyAddress = proxy.address() as AddressInfo;
+      const configPath = join(fixture.root, 'auto-recall.json');
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          version: 2,
+          autoRecall: {
+            repositoryRoot: fixture.root,
+            timeoutMs: 1000,
+          },
+          provider: {
+            type: 'generic-http-search-v1',
+            baseUrl: 'https://context.invalid',
+            tokenEnv: 'FAKE_CONTEXT_TOKEN',
+          },
+        }),
+      );
+      const proxyUrl = `http://127.0.0.1:${proxyAddress.port}`;
+
+      const result = await runAutoRecallProcess(
+        JSON.stringify({
+          hook_event_name: 'UserPromptSubmit',
+          submitted_prompt: 'repository question',
+          cwd: fixture.root,
+        }),
+        undefined,
+        {
+          QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+          FAKE_CONTEXT_TOKEN: 'bound-credential',
+          HTTP_PROXY: proxyUrl,
+          HTTPS_PROXY: proxyUrl,
+          NO_PROXY: '',
+        },
+      );
+
+      expect(result).toEqual({
+        exitCode: 0,
+        signal: null,
+        stdout: '{}',
+        stderr: '',
+      });
+      expect(proxyConnects).toEqual(['CONNECT context.invalid:443']);
+    } finally {
+      for (const socket of proxySockets) {
+        socket.destroy();
+      }
+      await closeServer(proxy);
+    }
+  }, 12_000);
 
   it.each([
     ['invalid JSON', '{'],
@@ -513,6 +618,7 @@ describe('runAutoRecallCli', () => {
     expect(output).toBe('{}');
     expect(output).not.toContain('secret provider response');
     expect(search).toHaveBeenCalledOnce();
+    expect(proxyMocks.destroy).toHaveBeenCalledOnce();
   });
 
   it('aborts an in-flight request at the configured provider timeout', async () => {
@@ -656,12 +762,15 @@ async function runAutoRecallProcess(
   envOverrides: NodeJS.ProcessEnv = {},
 ): Promise<{
   exitCode: number | null;
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
 }> {
   const child = spawn(process.execPath, ['--import', 'tsx/esm', entryPoint], {
-    env: { ...process.env, ...envOverrides, NODE_NO_WARNINGS: '1' },
+    env: childEnvironment(envOverrides),
+    killSignal: 'SIGKILL',
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 8000,
   });
   let stdout = '';
   let stderr = '';
@@ -674,17 +783,39 @@ async function runAutoRecallProcess(
   child.stdin.end(input);
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill();
-      reject(new Error('Auto-recall child process did not exit.'));
-    }, 5000);
-    child.on('error', (error) => {
-      clearTimeout(timeout);
-      reject(error);
+    child.on('error', reject);
+    child.on('close', (exitCode, signal) => {
+      resolve({ exitCode, signal, stdout, stderr });
     });
-    child.on('close', (exitCode) => {
-      clearTimeout(timeout);
-      resolve({ exitCode, stdout, stderr });
+  });
+}
+
+function childEnvironment(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!PROXY_ENVIRONMENT_KEYS.has(name.toUpperCase())) {
+      env[name] = value;
+    }
+  }
+  return { ...env, ...overrides, NODE_NO_WARNINGS: '1' };
+}
+
+async function listen(server: NetServer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
     });
+  });
+}
+
+async function closeServer(server: NetServer): Promise<void> {
+  if (!server.listening) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
   });
 }

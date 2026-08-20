@@ -145,13 +145,20 @@ interface ParsedClaudeModelVersion {
 function parseClaudeModelVersion(
   model: string,
 ): ParsedClaudeModelVersion | null {
+  // The minor separator accepts both `-` (Anthropic canonical, e.g.
+  // `claude-opus-4-8`) and `.` (LiteLLM/Vertex/Bedrock alias convention, e.g.
+  // `claude-opus-4.8`). Without the `.` branch a dotted alias parses as
+  // `{major, minor:0}`, silently disabling adaptive thinking, the
+  // temperature-rejection gate, and the version-gated effort tiers for 4.6+
+  // models — which surfaces as a server 400 the first time the harness sends
+  // `thinking.type.enabled` to an Opus 4.7+ / 5.x model group.
   const match = model
     .toLowerCase()
     .match(
       new RegExp(
         `claude-(${CLAUDE_MODEL_FAMILIES.join(
           '|',
-        )})-(\\d+)(?:-(\\d{1,2})(?!\\d))?`,
+        )})-(\\d+)(?:[-.](\\d{1,2})(?!\\d))?`,
       ),
     );
   if (!match) {
@@ -1042,16 +1049,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
 
     const reasoning = this.contentGeneratorConfig.reasoning;
+    const requestBudgetCap = request.config?.thinkingConfig?.thinkingBudget;
+    const applyRequestBudgetCap = (budgetTokens: number): number =>
+      typeof requestBudgetCap === 'number' && requestBudgetCap > 0
+        ? Math.min(budgetTokens, requestBudgetCap)
+        : budgetTokens;
 
     if (reasoning === false) {
       return undefined;
     }
 
     // Explicit budget_tokens is an escape hatch from the effort ladder: honor
-    // exactly what the user asked for, without re-clamping to track the
-    // (possibly clamped) effort label — the budget field is just an integer the
-    // server accepts within its context window, so an explicit override stays
-    // explicit. This only applies to models that still accept the manual
+    // what the user asked for without re-clamping to the effort label. A caller
+    // may still provide a smaller per-request thinkingBudget when it also sets
+    // a lower maxOutputTokens; Anthropic requires budget_tokens < max_tokens,
+    // so that request-local ceiling keeps bounded side queries valid. This only
+    // applies to models that still accept the manual
     // `{ type: 'enabled', budget_tokens }` shape (Opus 4.5/4.6, Sonnet 4.6,
     // older 4.x, and unknown/unversioned ids). Opus 4.7+ and every 5.x family
     // reject manual thinking with a 400 and require adaptive thinking, so on
@@ -1068,7 +1081,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     ) {
       return {
         type: 'enabled',
-        budget_tokens: reasoning.budget_tokens,
+        budget_tokens: applyRequestBudgetCap(reasoning.budget_tokens),
       };
     }
 
@@ -1124,7 +1137,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     return {
       type: 'enabled',
-      budget_tokens: budgetTokens,
+      budget_tokens: applyRequestBudgetCap(budgetTokens),
     };
   }
 

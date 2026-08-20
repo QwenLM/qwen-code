@@ -17,6 +17,7 @@ import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
   ToolArtifact,
+  ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -25,6 +26,7 @@ import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
+  getErrorStatus,
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
@@ -139,18 +141,26 @@ export interface ToolCallRequestInfo {
   goalContext?: GoalTurnPermit;
 }
 
+export type ToolExecutionStatus =
+  | 'not_started'
+  | 'success'
+  | 'error'
+  | 'cancelled';
+
 export interface ToolCallResponseInfo {
   callId: string;
   responseParts: Part[];
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
+  executionStatus?: ToolExecutionStatus;
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
+  boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {
@@ -211,7 +221,12 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
 }
 
 function duplicateProviderToolCallMessage(providerCallId: string): string {
-  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+  return (
+    `Duplicate provider tool call id "${providerCallId}" was already handled. ` +
+    `The duplicate tool call was ignored and not executed again. If you ` +
+    `intended to run this tool again, re-issue the call with a new unique ` +
+    `tool-call id (or explicitly different arguments).`
+  );
 }
 
 export function createDuplicateProviderToolCallResponse(
@@ -233,6 +248,7 @@ export function createDuplicateProviderToolCallResponse(
     resultDisplay: message,
     error: new Error(message),
     errorType: ToolErrorType.EXECUTION_FAILED,
+    executionStatus: 'not_started',
   };
 }
 
@@ -243,16 +259,25 @@ export function markDuplicateProviderToolCallResponseSent(
   duplicateProviderToolCallResponseIds.add(providerCallId);
 }
 
+/**
+ * Finds the first tool call in `items` that must trip the repeated-duplicate
+ * circuit breaker. `isReplayOfHandled` decides whether an item replays an
+ * already-handled call (same provider id AND same (name, args) fingerprint
+ * — see `isReplayOfHandledToolCall`); an id collision with different args is
+ * not a replay and never trips the breaker. A replay trips it once a
+ * synthetic duplicate response was already sent for its provider id, or when
+ * the same handled id replays more than once within one batch.
+ */
 export function findRepeatedDuplicateProviderToolCall<T>(
   items: readonly T[],
   getProviderCallId: (item: T) => string | undefined,
-  handledProviderToolCallIds: ReadonlySet<string>,
+  isReplayOfHandled: (item: T) => boolean,
   duplicateProviderToolCallResponseIds: ReadonlySet<string>,
 ): T | undefined {
   const repeatedProviderIds = new Map<string, number>();
   for (const item of items) {
     const providerCallId = getProviderCallId(item);
-    if (!providerCallId || !handledProviderToolCallIds.has(providerCallId)) {
+    if (!providerCallId || !isReplayOfHandled(item)) {
       continue;
     }
     repeatedProviderIds.set(
@@ -265,7 +290,7 @@ export function findRepeatedDuplicateProviderToolCall<T>(
     const providerCallId = getProviderCallId(item);
     return (
       providerCallId !== undefined &&
-      handledProviderToolCallIds.has(providerCallId) &&
+      isReplayOfHandled(item) &&
       (duplicateProviderToolCallResponseIds.has(providerCallId) ||
         (repeatedProviderIds.get(providerCallId) ?? 0) > 1)
     );
@@ -277,9 +302,21 @@ export interface ServerToolCallConfirmationDetails {
   details: ToolCallConfirmationDetails;
 }
 
+export type ServerGeminiContentPart =
+  | { text: string }
+  | {
+      inlineData: {
+        data: string;
+        mimeType: string;
+        displayName?: string;
+      };
+    };
+
 export type ServerGeminiContentEvent = {
   type: GeminiEventType.Content;
   value: string;
+  /** Ordered display parts, present only when the chunk contains an image. */
+  parts?: ServerGeminiContentPart[];
 };
 
 export type ServerGeminiThoughtEvent = {
@@ -328,8 +365,10 @@ export enum CompressionStatus {
   NOOP,
 
   /**
-   * The compression call produced a summary, but the output hit
-   * COMPACT_MAX_OUTPUT_TOKENS, indicating likely truncation. The summary
+   * The compression call produced a summary, but the output reached the
+   * requested output budget — the fixed COMPACT_MAX_OUTPUT_TOKENS ceiling
+   * or the window-clamped budget below it (issue #7960) — indicating
+   * likely truncation. The summary
    * is dropped (newHistory=null) and the attempt is treated as a failure:
    * `isCompressionFailureStatus` returns true so it counts toward the
    * per-chat circuit breaker. Kept distinct from
@@ -354,6 +393,8 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /** Whether newTokenCount ultimately came from a local estimate. */
+  newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
   /** Set when the compaction model was swapped for the main model at runtime. */
@@ -449,6 +490,40 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiUserCancelledEvent
   | ServerGeminiSessionTokenLimitExceededEvent
   | ServerGeminiRetryEvent;
+
+function getDisplayContentParts(
+  response: GenerateContentResponse,
+): ServerGeminiContentPart[] {
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  const displayParts: ServerGeminiContentPart[] = [];
+
+  for (const part of parts) {
+    if (part.thought) {
+      continue;
+    }
+    if (typeof part.text === 'string' && part.text.length > 0) {
+      displayParts.push({ text: part.text });
+    }
+    const inlineData = part.inlineData;
+    if (
+      inlineData?.mimeType?.trim().toLowerCase().startsWith('image/') &&
+      typeof inlineData.data === 'string' &&
+      inlineData.data.length > 0
+    ) {
+      displayParts.push({
+        inlineData: {
+          data: inlineData.data,
+          mimeType: inlineData.mimeType,
+          ...(typeof inlineData.displayName === 'string'
+            ? { displayName: inlineData.displayName }
+            : {}),
+        },
+      });
+    }
+  }
+
+  return displayParts;
+}
 
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
@@ -555,9 +630,15 @@ export class Turn {
           };
         }
 
-        const text = getResponseText(resp);
-        if (text) {
-          yield { type: GeminiEventType.Content, value: text };
+        const text = getResponseText(resp) ?? '';
+        const displayParts = getDisplayContentParts(resp);
+        const hasImage = displayParts.some((part) => 'inlineData' in part);
+        if (text || hasImage) {
+          yield {
+            type: GeminiEventType.Content,
+            value: text,
+            ...(hasImage ? { parts: displayParts } : {}),
+          };
         }
 
         // Handle function calls (requesting tool execution)
@@ -611,6 +692,7 @@ export class Turn {
         return;
       }
 
+      const originalStatus = getErrorStatus(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -638,16 +720,9 @@ export class Turn {
         'Turn.run-sendMessageStream',
         { contextAlreadySummarized: true },
       );
-      const status =
-        typeof error === 'object' &&
-        error !== null &&
-        'status' in error &&
-        typeof (error as { status: unknown }).status === 'number'
-          ? (error as { status: number }).status
-          : undefined;
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
-        status,
+        status: getErrorStatus(error) ?? originalStatus,
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: GeminiEventType.Error, value: { error: structuredError } };

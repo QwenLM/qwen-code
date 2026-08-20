@@ -203,6 +203,31 @@ describe('System Control (E2E)', () => {
         await fakeServer.close();
       }
     });
+
+    it('should throw error when setModel is called on closed query', async () => {
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
+      );
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
+
+        await q.close();
+
+        await expect(q.setModel('fake-model-2')).rejects.toThrow(
+          'Query is closed',
+        );
+      } finally {
+        await fakeServer.close();
+      }
+    });
   });
 
   describe('supportedCommands API', () => {
@@ -280,6 +305,29 @@ describe('System Control (E2E)', () => {
       } catch (error) {
         await q.close();
         throw error;
+      } finally {
+        await fakeServer.close();
+      }
+    });
+
+    it('should throw error when supportedCommands is called on closed query', async () => {
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
+      );
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
+
+        await q.close();
+
+        await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
       } finally {
         await fakeServer.close();
       }

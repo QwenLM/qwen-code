@@ -17,4 +17,24 @@ describe('ECS runner qwen update workflow', () => {
     expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
     expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
   });
+
+  it('runs only when this workflow changes on main', () => {
+    expect(workflow).toContain(
+      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+    );
+  });
+
+  it('annotates a retry and a terminal failure distinctly', () => {
+    // The final attempt must not log a "retrying" warning that never
+    // retries; a sustained failure ends with an explicit exhausted error.
+    expect(workflow).toContain(
+      'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+    );
+    expect(workflow).toContain(
+      'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+    );
+    expect(workflow).toContain('for attempt in 1 2 3; do');
+    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
+    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
+  });
 });

@@ -157,7 +157,13 @@ describe('extractPendingPermission', () => {
       toolCall: {
         toolCallId: 'call-plan',
         kind: 'switch_mode',
-        _meta: { toolName: 'exit_plan_mode' },
+        _meta: {
+          toolName: 'exit_plan_mode',
+          qwenTodoApproval: {
+            planId: 'plan-1',
+            sourceCallId: 'todo-call-1',
+          },
+        },
         content: [
           {
             type: 'content',
@@ -174,6 +180,7 @@ describe('extractPendingPermission', () => {
     expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
       toolKind: 'switch_mode',
       toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
       content: [{ type: 'text', text: '1. Prepare\n2. Ship' }],
     });
   });

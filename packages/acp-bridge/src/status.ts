@@ -21,6 +21,7 @@ export const SERVE_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
@@ -53,6 +54,18 @@ export class BridgeTimeoutError extends Error {
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+export class SessionRestoreTimeoutError extends BridgeTimeoutError {
+  readonly sessionId: string;
+  readonly action: 'load' | 'resume';
+
+  constructor(sessionId: string, action: 'load' | 'resume', timeoutMs: number) {
+    super(`session/${action}`, timeoutMs);
+    this.name = 'SessionRestoreTimeoutError';
+    this.sessionId = sessionId;
+    this.action = action;
   }
 }
 
@@ -144,6 +157,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',
+  sessionLiveConversation: 'qwen/control/session/live-conversation',
+  sessionLiveTranscript: 'qwen/control/session/live-transcript',
+  sessionBackgroundNotification: 'qwen/control/session/background_notification',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
@@ -169,6 +185,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
+  /** Read a bounded settled `turn_result` from the active transcript. */
+  sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -185,6 +203,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * result: `{ payload }`.
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
+  /**
+   * Called by a private ACP CHILD immediately before a tool executor. The
+   * parent validates the runtime-owned session/prompt identity, invokes its
+   * configured external provider once, and returns allow/deny. Unavailable
+   * unless the daemon explicitly enabled required external guarding.
+   */
+  externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
@@ -195,6 +220,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
+  liveTaskTool: 'qwen/control/live/task-tool',
+  liveSpeakToUser: 'qwen/control/live/speak-to-user',
   channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 
@@ -1050,9 +1078,15 @@ export type ServeExtensionInstallType =
   | 'link'
   | 'github-release'
   | 'npm'
-  | 'archive-url';
+  | 'archive-url'
+  | 'snapshot';
 
-export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ServeExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface ServeExtensionCapabilities {
   mcpServerCount: number;
@@ -1100,6 +1134,7 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
   details?: ServeExtensionDetails;
@@ -1398,6 +1433,7 @@ const MODEL_CONFIG_ERROR_NAMES: ReadonlySet<string> = new Set([
 export function mapDomainErrorToErrorKind(
   err: unknown,
 ): ServeErrorKind | undefined {
+  if (err instanceof SessionRestoreTimeoutError) return 'restore_timeout';
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';

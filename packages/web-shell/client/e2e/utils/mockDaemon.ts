@@ -6,14 +6,19 @@ import {
   type DaemonChannelsSnapshot,
   type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionArtifact,
+  type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
+  type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
@@ -57,10 +62,16 @@ export interface WebShellDaemonScenario {
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals: Record<string, string[]>;
+  pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
+  sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /** Artifact list returned by `GET /session/:id/artifacts`. */
+  artifacts: DaemonSessionArtifact[];
+  /** File contents served by `GET /file?path=...`, keyed by requested path. */
+  workspaceFiles: Record<string, string>;
   /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
@@ -79,6 +90,13 @@ export interface WebShellDaemonScenario {
   gitLog?: unknown;
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
+  /** Stateful response and replay used by historical branch E2E flows. */
+  branch?: {
+    sessionId: string;
+    clientId?: string;
+    displayName: string;
+    events: DaemonEvent[];
+  };
 }
 
 export interface MockDaemonController {
@@ -90,6 +108,8 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  branchRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -107,8 +127,10 @@ type ScenarioOverrides = Partial<
     | 'channels'
     | 'pairingRequests'
     | 'pairingApprovals'
+    | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
+    | 'sessionCatalogVersion'
     | 'state'
   >
 > & {
@@ -124,8 +146,10 @@ type ScenarioOverrides = Partial<
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals?: Record<string, string[]>;
+  pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
+  sessionCatalogVersion?: DaemonSessionCatalogVersion;
   state?: Partial<DaemonSessionState>;
 };
 
@@ -339,16 +363,24 @@ export function createWebShellDaemonScenario(
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
     pairingApprovals: overrides.pairingApprovals ?? {},
+    pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
+    sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
+      generation: 'web-shell-e2e',
+      revision: 0,
+    },
     events: overrides.events ?? [],
     state,
+    artifacts: overrides.artifacts ?? [],
+    workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
+    branch: overrides.branch,
   };
 }
 
@@ -417,6 +449,14 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    branchRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/branch\/?$/.test(request.path),
+      ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
+      ),
   };
 }
 
@@ -436,13 +476,24 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
     },
     options.id,
   );
@@ -528,6 +579,27 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// excludes pinned rows from organized sections via `excludePinned`.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const sourceSessions = sourceType
+    ? scenario.sessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' && session.sourceType === undefined),
+      )
+    : scenario.sessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -552,7 +624,10 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
       path,
@@ -564,9 +639,11 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -621,10 +698,24 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     return true;
   }
   if (
@@ -683,6 +774,10 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -702,7 +797,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -784,6 +879,16 @@ async function handleDaemonRoute(
     await json(route, workspaceVoice(scenario));
     return;
   }
+  if (method === 'GET' && /^\/file\/?$/.test(path)) {
+    const filePath = searchParams.get('path') ?? '';
+    const content = scenario.workspaceFiles[filePath];
+    if (content === undefined) {
+      await json(route, { error: `No such file: ${filePath}` }, 404);
+      return;
+    }
+    await json(route, workspaceFile(filePath, content));
+    return;
+  }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
     await json(route, workspaceVoice(scenario));
     return;
@@ -818,19 +923,46 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sessions =
-      group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
-    await json(route, { sessions });
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
+  ) {
+    await json(route, {
+      v: 1,
+      catalogVersion: scenario.sessionCatalogVersion,
+      sessions: scenario.sessions
+        .filter(
+          (session) =>
+            (session.clientCount ?? 0) > 0 ||
+            session.hasActivePrompt === true ||
+            session.isWaitingForPermission === true ||
+            session.isWaitingForUserQuestion === true,
+        )
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount ?? 0,
+          hasActivePrompt: session.hasActivePrompt ?? false,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        })),
+    });
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams),
+    });
+    return;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path))
+  ) {
     const catalog: DaemonSessionGroupCatalog = {
       groups: scenario.sessionGroups,
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -871,15 +1003,27 @@ async function handleDaemonRoute(
         ...scenario.pairingRequests,
         [name]: remaining,
       };
-      scenario.pairingApprovals = {
-        ...scenario.pairingApprovals,
-        [name]: Array.from(
-          new Set([
-            ...(scenario.pairingApprovals[name] ?? []),
-            approved.senderId,
-          ]),
-        ),
-      };
+      if (approved.subject?.type === 'group') {
+        scenario.pairingGroupApprovals = {
+          ...scenario.pairingGroupApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingGroupApprovals[name] ?? []),
+              approved.subject.id,
+            ]),
+          ),
+        };
+      } else {
+        scenario.pairingApprovals = {
+          ...scenario.pairingApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingApprovals[name] ?? []),
+              approved.senderId,
+            ]),
+          ),
+        };
+      }
       await json(route, { approved, requests: remaining });
       return;
     }
@@ -890,13 +1034,18 @@ async function handleDaemonRoute(
   if (pairingApprovalsMatch) {
     const name = decodeURIComponent(pairingApprovalsMatch[1]);
     const senderIds = scenario.pairingApprovals[name] ?? [];
+    const groupIds = scenario.pairingGroupApprovals[name] ?? [];
     if (method === 'GET') {
-      await json(route, { senderIds });
+      await json(route, { senderIds, groupIds });
       return;
     }
     if (method === 'DELETE') {
       const senderId = String(getRecordValue(body, 'senderId') ?? '');
-      if (!senderIds.includes(senderId)) {
+      const groupId = String(getRecordValue(body, 'groupId') ?? '');
+      const known = senderId
+        ? senderIds.includes(senderId)
+        : groupIds.includes(groupId);
+      if (!known) {
         await json(
           route,
           {
@@ -907,12 +1056,26 @@ async function handleDaemonRoute(
         );
         return;
       }
-      const remaining = senderIds.filter((item) => item !== senderId);
+      const remainingSenders = senderId
+        ? senderIds.filter((item) => item !== senderId)
+        : senderIds;
+      const remainingGroups =
+        groupId && !senderId
+          ? groupIds.filter((item) => item !== groupId)
+          : groupIds;
       scenario.pairingApprovals = {
         ...scenario.pairingApprovals,
-        [name]: remaining,
+        [name]: remainingSenders,
       };
-      await json(route, { revoked: senderId, senderIds: remaining });
+      scenario.pairingGroupApprovals = {
+        ...scenario.pairingGroupApprovals,
+        [name]: remainingGroups,
+      };
+      await json(route, {
+        revoked: senderId || groupId,
+        senderIds: remainingSenders,
+        groupIds: remainingGroups,
+      });
       return;
     }
   }
@@ -1187,6 +1350,27 @@ async function handleDaemonRoute(
       await json(route, restoredSessionEnvelope(scenario, sessionId));
       return;
     }
+    if (action === 'branch') {
+      if (!scenario.branch) {
+        await json(route, { error: 'Branch scenario is not configured.' }, 404);
+        return;
+      }
+      const branch = scenario.branch;
+      const response: DaemonPersistedBranchedSession = {
+        sessionId: branch.sessionId,
+        displayName: branch.displayName,
+        forkedFrom: {
+          sessionId,
+          displayName: scenario.displayName,
+        },
+      };
+      await json(route, response, 201);
+      return;
+    }
+    if (action === 'artifacts') {
+      await json(route, sessionArtifactsEnvelope(scenario, sessionId));
+      return;
+    }
     if (action === 'prompt') {
       if (!isPromptRequest(body)) {
         await badRequest(route, 'Invalid prompt request.');
@@ -1240,6 +1424,24 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      if (configId !== 'reasoning_effort' || !value) {
+        await badRequest(route, 'Invalid config-option request.');
+        return;
+      }
+      const configOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions.map((option) =>
+            isRecord(option) && option['id'] === configId
+              ? { ...option, currentValue: value }
+              : option,
+          )
+        : [];
+      scenario.state.configOptions = configOptions;
+      await json(route, { configOptions });
       return;
     }
     if (action === 'approval-mode') {
@@ -1319,17 +1521,22 @@ function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
+  const branch =
+    scenario.branch?.sessionId === sessionId ? scenario.branch : undefined;
+  const events = branch?.events ?? scenario.events;
   return {
     sessionId,
     workspaceCwd: scenario.workspaceCwd,
     attached: true,
-    clientId: scenario.clientId,
+    clientId: branch?.clientId ?? scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
-    state: scenario.state,
-    compactedReplay: scenario.events,
+    state: branch
+      ? { ...scenario.state, displayName: branch.displayName }
+      : scenario.state,
+    compactedReplay: events,
     liveJournal: [],
-    lastEventId: maxEventId(scenario.events),
+    lastEventId: maxEventId(events),
   };
 }
 
@@ -1454,6 +1661,36 @@ function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
   return scenario.voice;
+}
+
+function sessionArtifactsEnvelope(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonSessionArtifactsEnvelope {
+  return {
+    v: 1,
+    sessionId,
+    artifacts: scenario.artifacts,
+    generatedAt: now,
+    limits: { maxArtifacts: 100 },
+  };
+}
+
+function workspaceFile(path: string, content: string): DaemonWorkspaceFile {
+  const sizeBytes = new TextEncoder().encode(content).byteLength;
+  return {
+    kind: 'file',
+    path,
+    content,
+    encoding: 'utf-8',
+    bom: false,
+    lineEnding: 'lf',
+    sizeBytes,
+    returnedBytes: sizeBytes,
+    truncated: false,
+    matchedIgnore: null,
+    originalLineCount: null,
+  };
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {
