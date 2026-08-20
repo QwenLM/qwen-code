@@ -1066,7 +1066,10 @@ describe('deleteDaemonSessions', () => {
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId.toUpperCase(), sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession },
+      bridge: {
+        closeSession,
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
       coordinator: new SessionArchiveCoordinator(),
     });
 
