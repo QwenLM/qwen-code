@@ -17,6 +17,7 @@ import {
   type ConversationDirectoryIdentity,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 
 export type { ConversationRootIdentity } from '../../utils/conversation-directory-identity.js';
 
@@ -166,11 +167,28 @@ export class ConversationWorkspace {
     return assertExactConversationRoot(await this.getRoot(), candidate);
   }
 
+  /**
+   * The private directory is derived from the canonical session id, not from
+   * whatever spelling a caller happens to hold.
+   *
+   * `getConversationDirectoryName()` is a case-sensitive hash, and callers reach
+   * these methods with a mix of request ids, live-entry ids and ids echoed back
+   * from tool arguments. Canonicalizing here makes one session resolve to one
+   * directory by construction instead of leaving it to every call site.
+   */
+  private directoryKey(sessionId: string): string {
+    return normalizeSessionIdForLookup(sessionId);
+  }
+
   async materializeConversationDirectory(sessionId: string): Promise<string> {
     const root = await this.revalidate();
     try {
-      return (await materializeConversationDirectoryIdentity(root, sessionId))
-        .identity.canonicalPath;
+      return (
+        await materializeConversationDirectoryIdentity(
+          root,
+          this.directoryKey(sessionId),
+        )
+      ).identity.canonicalPath;
     } catch (error) {
       liveIdentityError(error);
     }
@@ -180,7 +198,10 @@ export class ConversationWorkspace {
     const root = await this.revalidate();
     let identity: ConversationDirectoryIdentity | undefined;
     try {
-      identity = await inspectConversationDirectoryIdentity(root, sessionId);
+      identity = await inspectConversationDirectoryIdentity(
+        root,
+        this.directoryKey(sessionId),
+      );
     } catch (error) {
       liveIdentityError(error);
     }

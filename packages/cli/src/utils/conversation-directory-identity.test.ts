@@ -189,14 +189,14 @@ describe('conversation directory identity', () => {
     }
   });
 
-  it('refuses to prove identity on a filesystem that reports no inode', async () => {
-    // FAT/exFAT and some SMB mounts report ino 0 for every entry, which would
-    // make every directory compare equal and let a swap pass the anti-swap
-    // checks unnoticed. An unverifiable inode must read as a changed identity.
-    // The pinned root carries inode 0 too, so a plain `===` comparison would
-    // match and this only fails on the verifiability guard itself.
-    const { root } = await tempRoot();
-    const inodelessRoot = { ...root, inode: 0 };
+  it('degrades instead of failing on a filesystem that reports no inode', async () => {
+    // FAT/exFAT and some SMB mounts report ino 0 for every entry. Requiring a
+    // verifiable inode would make the very first root establishment throw
+    // `identity_changed` — a directory failing to equal itself — and the
+    // feature would never start there. "Cannot prove unchanged" is not
+    // "changed": the root is established with the weaker guarantee recorded.
+    const { base } = await tempRoot();
+    const configuredRoot = join(base, 'Inodeless');
     const realLstat = realFsPromises.lstat;
     vi.mocked(lstat).mockImplementation((async (path: string) => {
       const stats = (await realLstat(path)) as Stats;
@@ -208,11 +208,31 @@ describe('conversation directory identity', () => {
       } as Stats;
     }) as unknown as typeof lstat);
     try {
+      const root = await createConversationRootIdentity(configuredRoot);
+      expect(root.inodeVerifiable).toBe(false);
       await expect(
-        revalidateConversationRootIdentity(inodelessRoot),
-      ).rejects.toMatchObject({ scope: 'root', reason: 'identity_changed' });
+        revalidateConversationRootIdentity(root),
+      ).resolves.toMatchObject({ inodeVerifiable: false });
+      const created = await materializeConversationDirectoryIdentity(
+        root,
+        'inodeless',
+      );
+      expect(created.identity.name).toBe(
+        getConversationDirectoryName('inodeless'),
+      );
     } finally {
       vi.mocked(lstat).mockRestore();
     }
+  });
+
+  it('still requires matching inodes when the filesystem reports them', async () => {
+    const { root } = await tempRoot();
+    expect(root.inodeVerifiable).toBe(true);
+    await rename(root.configuredRoot, `${root.configuredRoot}-old`);
+    await mkdir(root.configuredRoot, { mode: 0o700 });
+
+    await expect(
+      revalidateConversationRootIdentity(root),
+    ).rejects.toMatchObject({ scope: 'root', reason: 'identity_changed' });
   });
 });

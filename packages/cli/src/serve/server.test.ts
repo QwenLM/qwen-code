@@ -30507,6 +30507,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: string;
       device: number;
       inode: number;
+      inodeVerifiable: boolean;
     }> = {},
   ) {
     const primaryBridge = fakeBridge();
@@ -30523,6 +30524,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: '/work/live-conversations',
       device: 1,
       inode: 2,
+      inodeVerifiable: true,
       ...rootOverrides,
     };
     const conversationWorkspace = {

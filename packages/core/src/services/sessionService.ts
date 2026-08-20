@@ -781,54 +781,28 @@ export class SessionService {
         candidates.set(candidateSessionId, states);
       }
     }
-    if (candidates.size > 1) {
-      // Conflict decisions are content-based, not filename-based: a file
-      // whose head recovers no records (crash-mid-append tear, foreign
-      // project) still occupies the id, but does not make a loadable
-      // session conflict with one.
-      const readable: Array<{
-        candidateSessionId: string;
-        state: SessionArchiveState;
-      }> = [];
-      for (const candidateSessionId of candidates.keys()) {
-        const location = await this.getSessionLocation(candidateSessionId);
-        if (location === 'conflict') {
-          throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
-        }
-        if (location !== undefined) {
-          readable.push({ candidateSessionId, state: location });
-        }
+    // Conflict decisions are content-based, not filename-based: a file whose
+    // head recovers no records (crash-mid-append tear, foreign project) still
+    // occupies the id, but does not make a loadable session conflict with one.
+    const readable: Array<{
+      candidateSessionId: string;
+      state: SessionArchiveState;
+    }> = [];
+    for (const candidateSessionId of candidates.keys()) {
+      const location = await this.getSessionLocation(candidateSessionId);
+      if (location === 'conflict') {
+        throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
       }
-      if (readable.length === 1) return readable[0].candidateSessionId;
-      if (readable.length === 0) {
-        // The requested spelling's own transcript is a twin of nothing: reusing
-        // an id whose file already exists mints no case-only twin, so a first
-        // run that crashed before its first record still resumes it. Same
-        // escape as the single-candidate arm below.
-        if (candidates.has(sessionId)) return undefined;
-        // Every enumerated file failed content validation: a file still on
-        // disk under another spelling occupies the id, because minting the
-        // requested spelling beside it would make both permanently
-        // unrestorable; files that raced away mid-resolution are absent.
-        let anyPresent = false;
-        for (const [candidateSessionId, states] of candidates) {
-          for (const state of states) {
-            anyPresent ||= fs.existsSync(
-              this.getSessionFilePath(candidateSessionId, state),
-            );
-          }
-        }
-        if (!anyPresent) return undefined;
-        throw new SessionIdCaseConflictError(
-          sessionId,
-          undefined,
-          'unreadable_transcript',
-        );
+      if (location !== undefined) {
+        readable.push({ candidateSessionId, state: location });
       }
-      // On a case-insensitive filesystem every spelling opens the same
-      // physical transcript, so several spellings can each report a readable
-      // location while only one file exists. Collapse those aliases before
-      // calling it a conflict.
+    }
+    if (readable.length === 1) return readable[0].candidateSessionId;
+    if (readable.length > 1) {
+      // On a case-insensitive filesystem every spelling opens the same physical
+      // transcript, so several spellings can each report a readable location
+      // while only one file exists. Collapse those aliases before calling it a
+      // conflict.
       const aliased = this.resolveAliasedReadableCandidate(
         readable,
         candidates,
@@ -836,36 +810,33 @@ export class SessionService {
       if (aliased !== undefined) return aliased;
       throw new SessionIdCaseConflictError(sessionId);
     }
-    const candidate = candidates.entries().next().value;
-    if (candidate === undefined) return undefined;
-    const [candidateSessionId, states] = candidate;
-    // Content first: one readable copy of a spelling present in both state
-    // directories resolves to that copy (getSessionLocation counts only
-    // readable transcripts), not a conflict.
-    const location = await this.getSessionLocation(candidateSessionId);
-    if (location === 'conflict') {
-      throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
-    }
-    if (location !== undefined) return candidateSessionId;
-    // The head recovered no records. Only a *different* persisted spelling
-    // occupies the id, because minting the requested spelling beside it would
-    // create the case-only twin that makes both permanently unrestorable. The
-    // requested spelling is a twin of nothing: reporting it absent is how a
-    // first run that crashed before its first record resumes its own 0-byte
-    // transcript, and it keeps this resolver consistent with
-    // `getSessionLocation`, which already calls that file nonexistent.
-    if (candidateSessionId === sessionId) return undefined;
-    // A file that raced away mid-resolution is genuinely absent.
-    for (const state of states) {
-      if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
-        throw new SessionIdCaseConflictError(
-          sessionId,
-          candidateSessionId,
-          'unreadable_transcript',
-        );
+    // No candidate recovered records. A transcript under a *different* spelling
+    // still occupies the id, because minting the requested spelling beside it
+    // would create the case-only twin that makes both permanently
+    // unrestorable. The requested spelling's own file is a twin of nothing, so
+    // it never counts as occupancy: that is how a first run which crashed
+    // before its first record resumes its own 0-byte transcript, and it keeps
+    // this resolver consistent with `getSessionLocation`, which already calls
+    // that file nonexistent. Anything that raced away is genuinely absent.
+    let occupyingSpelling: string | undefined;
+    for (const [candidateSessionId, states] of candidates) {
+      if (candidateSessionId === sessionId) continue;
+      for (const state of states) {
+        if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
+          occupyingSpelling = candidateSessionId;
+          break;
+        }
       }
+      if (occupyingSpelling !== undefined) break;
     }
-    return undefined;
+    if (occupyingSpelling === undefined) return undefined;
+    throw new SessionIdCaseConflictError(
+      sessionId,
+      // Naming the single enumerated spelling is actionable; with several, no
+      // one of them is the answer.
+      candidates.size === 1 ? occupyingSpelling : undefined,
+      'unreadable_transcript',
+    );
   }
 
   /**

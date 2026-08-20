@@ -29,6 +29,17 @@ export interface ConversationRootIdentity {
   readonly canonicalRoot: string;
   readonly device: number;
   readonly inode: number;
+  /**
+   * False when the hosting filesystem does not expose inode numbers, so
+   * identity cannot be proven by `dev:ino`.
+   *
+   * Comparisons then fall back to device, canonical path and stat shape, which
+   * cannot detect a same-path replacement. That is a real reduction in
+   * guarantee, but refusing to establish the root would make Conversations
+   * permanently unusable on exFAT/FAT and some SMB mounts: "cannot prove
+   * unchanged" is not "changed". Callers should surface this once per root.
+   */
+  readonly inodeVerifiable: boolean;
 }
 
 export interface ConversationDirectoryIdentity {
@@ -118,45 +129,41 @@ function hasRootIdentity(
   stats: Stats,
   root: ConversationRootIdentity,
 ): boolean {
+  if (!root.inodeVerifiable) return stats.dev === root.device;
   return (
     hasVerifiableInode(stats.ino) &&
-    hasVerifiableInode(root.inode) &&
     stats.dev === root.device &&
     stats.ino === root.inode
   );
 }
 
 /**
- * True iff `before` and `after` are provably the same directory.
+ * True iff `before` and `after` may be treated as the same directory.
  *
- * These comparisons are the anti-swap checks: they must prove the path was not
- * replaced between two probes. A filesystem that reports no inode makes every
- * directory compare equal, so an unverifiable inode is treated as a changed
- * identity rather than as a match.
+ * These comparisons are the anti-swap checks around `realpath`. Where inodes
+ * are available they must match; where the filesystem reports none, there is
+ * nothing to compare and reporting a change would be a false positive that
+ * blocks the feature outright, so only the device is required.
  */
 function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
-  return (
-    hasVerifiableInode(before.ino) &&
-    hasVerifiableInode(after.ino) &&
-    before.dev === after.dev &&
-    before.ino === after.ino
-  );
+  if (!hasVerifiableInode(before.ino) || !hasVerifiableInode(after.ino)) {
+    return before.dev === after.dev;
+  }
+  return before.dev === after.dev && before.ino === after.ino;
 }
 
 function hasExpectedDirectoryIdentity(
   identity: ConversationDirectoryIdentity,
   expected: ConversationDirectoryIdentity,
 ): boolean {
+  const inodesProvable =
+    hasVerifiableInode(identity.inode) && hasVerifiableInode(expected.inode);
   return (
-    hasVerifiableInode(identity.inode) &&
-    hasVerifiableInode(expected.inode) &&
-    hasVerifiableInode(identity.root.inode) &&
-    hasVerifiableInode(expected.root.inode) &&
     identity.storageSessionId === expected.storageSessionId &&
     identity.name === expected.name &&
     isSameConversationPath(identity.canonicalPath, expected.canonicalPath) &&
     identity.device === expected.device &&
-    identity.inode === expected.inode &&
+    (!inodesProvable || identity.inode === expected.inode) &&
     isSameConversationPath(
       identity.root.configuredRoot,
       expected.root.configuredRoot,
@@ -166,7 +173,9 @@ function hasExpectedDirectoryIdentity(
       expected.root.canonicalRoot,
     ) &&
     identity.root.device === expected.root.device &&
-    identity.root.inode === expected.root.inode
+    (!identity.root.inodeVerifiable ||
+      !expected.root.inodeVerifiable ||
+      identity.root.inode === expected.root.inode)
   );
 }
 
@@ -211,6 +220,7 @@ export async function createConversationRootIdentity(
     canonicalRoot,
     device: after.dev,
     inode: after.ino,
+    inodeVerifiable: hasVerifiableInode(after.ino),
   };
 }
 

@@ -2660,10 +2660,10 @@ describe('SessionService', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('reports the requested spelling absent even when an unreadable case twin is enumerated', async () => {
-      // Both files are unreadable, so this takes the multi-candidate arm. The
-      // requested spelling already exists, so reusing the id mints no twin and
-      // the crashed-first-run recovery must survive the twin's presence.
+    it('lets an unreadable case twin keep occupying the id', async () => {
+      // Both files are unreadable. The requested spelling's own file is a twin of
+      // nothing, but the *other* spelling still occupies the id: minting the
+      // request beside it is what would make both permanently unrestorable.
       const legacySessionId = sessionIdA.toUpperCase();
       readdirSyncSpy
         .mockReturnValueOnce([
@@ -2675,6 +2675,32 @@ describe('SessionService', () => {
         undefined,
       );
       existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        reason: 'unreadable_transcript',
+      });
+    });
+
+    it('reports the requested spelling absent when only its own file survives', async () => {
+      // The twin raced away between enumeration and the presence check, so
+      // nothing but the request's own unreadable file is left to occupy the id.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        String(filePath).includes(`${sessionIdA}.jsonl`),
+      );
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
