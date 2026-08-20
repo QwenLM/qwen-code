@@ -5348,14 +5348,17 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
-            pr?: unknown;
+            prs?: unknown;
           };
           const result: SessionMetadataResult = {};
           if (typeof body.displayName === 'string') {
             result.displayName = body.displayName;
           }
-          if (isDaemonSessionPrInfo(body.pr)) {
-            result.pr = body.pr;
+          if (
+            Array.isArray(body.prs) &&
+            body.prs.every(isDaemonSessionPrInfo)
+          ) {
+            result.prs = body.prs;
           }
           return result;
         }

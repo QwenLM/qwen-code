@@ -94,7 +94,10 @@ describe('SessionDetailsTooltip', () => {
               sessionId: 'session-1',
               workspaceCwd: '/work/qwen-code',
               clientCount: 1,
-              pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+              prs: [
+                { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+                { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+              ],
             }}
             label="Fix CI"
             time=""
@@ -110,11 +113,17 @@ describe('SessionDetailsTooltip', () => {
 
     const details = document.querySelector('[role="dialog"]');
     expect(details?.textContent).toContain('Pull Request #9517');
+    expect(details?.textContent).toContain('Pull Request #9500');
     const link = details?.querySelector(
       'a[href="https://github.com/o/r/pull/9517"]',
     );
     expect(link).not.toBeNull();
     expect(link?.getAttribute('target')).toBe('_blank');
+    // Latest binding listed first.
+    const links = details?.querySelectorAll('a[href*="/pull/"]');
+    expect(links?.[0]?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9517',
+    );
 
     act(() => root.unmount());
   });

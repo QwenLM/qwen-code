@@ -10,7 +10,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
-  readSessionPr,
+  readSessionPrs,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -403,7 +403,10 @@ async function enrichWorktreeSidecars(
 /**
  * Enrich persisted session summaries with GitHub PR bindings from sidecar
  * files so the binding survives daemon restarts. Same pattern as
- * {@link enrichWorktreeSidecars}.
+ * {@link enrichWorktreeSidecars}. Live entries only accumulate bindings
+ * from this daemon lifetime, so sidecar history is merged in rather than
+ * skipped when the summary already carries live bindings (deduped by PR
+ * number, the live entry's url wins, live-only bindings sort latest).
  */
 async function enrichPrSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
@@ -413,25 +416,28 @@ async function enrichPrSidecars(
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    if (summary.pr) continue;
-    let sidecar: Awaited<ReturnType<typeof readSessionPr>>;
+    let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
     try {
       const sidecarPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
         archiveState,
       );
       sidecar = signal
-        ? await readSessionPr(sidecarPath, { signal })
-        : await readSessionPr(sidecarPath);
+        ? await readSessionPrs(sidecarPath, { signal })
+        : await readSessionPrs(sidecarPath);
     } catch {
       signal?.throwIfAborted();
       sidecar = null;
     }
     if (sidecar) {
-      bySessionId.set(sessionId, {
-        ...summary,
-        pr: { number: sidecar.number, url: sidecar.url },
-      });
+      const live = summary.prs ?? [];
+      const merged = [
+        ...sidecar
+          .filter((entry) => !live.some((l) => l.number === entry.number))
+          .map(({ number, url }) => ({ number, url })),
+        ...live,
+      ];
+      bySessionId.set(sessionId, { ...summary, prs: merged });
     }
   }
 }

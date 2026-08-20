@@ -19,17 +19,23 @@ function session(
 }
 
 describe('sessionMatchesGitQuery', () => {
-  it('matches the PR number with and without #', () => {
+  it('matches any bound PR number with and without #', () => {
     const s = session({
-      pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      prs: [
+        { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ],
     });
     expect(sessionMatchesGitQuery(s, '9517')).toBe(true);
     expect(sessionMatchesGitQuery(s, '#9517')).toBe(true);
+    // Older bindings match too — stacked PRs stay findable.
+    expect(sessionMatchesGitQuery(s, '9500')).toBe(true);
+    expect(sessionMatchesGitQuery(s, '#9500')).toBe(true);
   });
 
   it('does not partially match the PR number', () => {
     const s = session({
-      pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
     });
     expect(sessionMatchesGitQuery(s, '951')).toBe(false);
   });

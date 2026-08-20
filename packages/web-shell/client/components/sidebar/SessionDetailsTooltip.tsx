@@ -142,23 +142,23 @@ export function SessionDetailsTooltip({
             <span title={branch}>{branch}</span>
           </div>
         )}
-        {session.pr && (
-          <div className={styles.sessionDetailsRow}>
+        {[...(session.prs ?? [])].reverse().map((pr) => (
+          <div className={styles.sessionDetailsRow} key={pr.number}>
             <GitPullRequestIcon aria-hidden="true" />
             <a
-              href={session.pr.url}
+              href={pr.url}
               target="_blank"
               rel="noreferrer"
-              title={session.pr.url}
+              title={pr.url}
               onClick={(event) => {
                 event.stopPropagation();
-                openExternalLink(event, session.pr?.url);
+                openExternalLink(event, pr.url);
               }}
             >
-              {t('sidebar.sessionPr', { number: session.pr.number })}
+              {t('sidebar.sessionPr', { number: pr.number })}
             </a>
           </div>
-        )}
+        ))}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>

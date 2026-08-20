@@ -21,7 +21,7 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
-  writeSessionPr,
+  upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
@@ -2827,17 +2827,14 @@ export class AcpDispatcher {
               // The bridge keeps the binding in live memory only; persist it
               // as a sidecar so it survives daemon restarts, matching the
               // REST metadata routes.
-              if (result?.pr) {
+              const latestPr = result?.prs?.[result.prs.length - 1];
+              if (latestPr) {
                 const service = new SessionService(this.boundWorkspace, {
                   runtimeBaseDir: this.sessionRuntimeBaseDir,
                 });
-                await writeSessionPr(
+                await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                  {
-                    number: result.pr.number,
-                    url: result.pr.url,
-                    createdAt: new Date().toISOString(),
-                  },
+                  latestPr,
                 );
               }
             } finally {

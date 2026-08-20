@@ -13,9 +13,9 @@ export function sessionMatchesGitQuery(
   session: DaemonSessionSummary,
   query: string,
 ): boolean {
-  const prNumber = session.pr?.number;
-  if (prNumber !== undefined) {
-    const prText = String(prNumber);
+  const prs = session.prs ?? [];
+  for (const pr of prs) {
+    const prText = String(pr.number);
     if (query === prText || query === `#${prText}`) return true;
   }
   const candidates = [

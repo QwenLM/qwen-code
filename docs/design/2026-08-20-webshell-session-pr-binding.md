@@ -20,43 +20,44 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 `DaemonSessionSummary` 与 `BridgeSessionSummary`（镜像，需同步）增加：
 
 ```json
-"pr": { "number": 9517, "url": "https://github.com/owner/repo/pull/9517" }
+"prs": [{ "number": 9517, "url": "https://github.com/owner/repo/pull/9517" }]
 ```
 
+- 一个会话可能创建多个 PR（stacked PR、连续修复），`prs` 按绑定时间排序（最后一个 = 最新），上限 10 个（超出丢弃最旧）。同号重复绑定刷新 url 并移到最新位。
 - `number`：正整数；`url`：http(s) URL（badge/tooltip 直接作为链接目标渲染，拒绝 `javascript:` 等 scheme——route、bridge、SDK 校验器、sidecar 校验四层统一要求）。
-- 字段可选、可缺省；不提供"清除"语义（MVP 内 PR 绑定只增不改——重复创建 PR 时覆盖为最新）。
+- 字段可选、可缺省；不提供"清除"语义。
+- 写入 API 保持单条：`updateSessionMetadata(sessionId, { pr: {number, url} })` 每次绑定一个，daemon 负责 upsert 进列表；读取/事件/响应均为完整 `prs` 数组。
 
 ### 写入端
 
-- SDK `DaemonClient.updateSessionMetadata` 的 metadata 参数扩展 `pr?: { number: number; url: string }`。
-- daemon 两个 PATCH metadata 路由（`/session/:id/metadata` 与 workspace 作用域版本，`packages/cli/src/serve/routes/session.ts` ~5040/5089）校验并透传 `pr`。
-- bridge `updateSessionMetadata`（`packages/acp-bridge/src/bridge.ts:9526`）校验后写入 live entry，`session_metadata_updated` SSE 事件 data 增加 `pr`。
-- `GitDialog.doCreatePr` 成功后：用已注入的 `sessionId` / `resolveSessionForWorkspace` 解析当前会话，调用 `updateSessionMetadata(sessionId, { pr })`。GitDialog 已有这两个 props（`App.tsx:11130-11131`）。写入失败仅降级为 console 警告，不影响 PR 创建成功的状态展示。
+- SDK `DaemonClient.updateSessionMetadata` 的 metadata 参数扩展 `pr?: { number: number; url: string }`（单条）；响应解析完整 `prs` 数组。
+- daemon 两个 PATCH metadata 路由（`/session/:id/metadata` 与 workspace 作用域版本）校验 `pr` 后透传，bridge 更新成功后将 sidecar upsert 的完整列表回显在响应里。
+- bridge `updateSessionMetadata`（`packages/acp-bridge/src/bridge.ts`）先做全部校验再变更（组合请求不允许部分生效）；upsert 进 live entry.prs（去重按 number，上限 10），`session_metadata_updated` SSE 事件 data 带完整 `prs`。
+- ACP `session/update_metadata`（`acp-http/dispatch.ts`）同样把最新绑定 upsert 进 sidecar。
+- `GitDialog.doCreatePr` 成功后：仅用 dialog 已有的 `sessionId`（`sessionIdRef.current`，即连接会话或 dialog 已为提交信息生成等操作解析出的会话）调用 `updateSessionMetadata(sessionId, { pr })`。**不调 `resolveSessionForWorkspace`**——它可能创建幽灵会话或误绑"最近会话"。写入失败仅降级为 console 警告，不影响 PR 创建成功的状态展示。
 
 ### 持久化
 
-新增 sidecar `<chatsDir>/<sessionId>.pr.json`，完全复刻 worktree sidecar 模式：
+新增 sidecar `<chatsDir>/<sessionId>.pr.json`，复刻 worktree sidecar 模式：
 
-- 新 core 服务 `packages/core/src/services/sessionPrService.ts`：`SessionPr` 接口、`isValidSessionPr` 运行时校验、`readSessionPr` / `writeSessionPr`（atomicWriteJSON，容忍 ENOENT/JSON 损坏）。
-- `SessionService` 增加 `getPrSessionPathForArchiveState(sessionId, archiveState)` 路径助手（对照 `getWorktreeSessionPathForArchiveState`）。
-- daemon workspace 作用域 PATCH 路由在 bridge 更新成功后写 sidecar。
-- `session-list.ts` 增加 `enrichPrSidecars`（对照 `enrichWorktreeSidecars`），三条列表路径共用，回填 persisted summary 的 `pr` 字段。
+- 新 core 服务 `packages/core/src/services/session-pr-service.ts`：`SessionPr` 接口、数组 schema 校验（`{prs: [...]}`，容忍 ENOENT/JSON 损坏）、`readSessionPrs` / `writeSessionPrs` / `upsertSessionPr`（按 number 去重、移到最新、cap 10）。
+- `SessionService` 增加 `getPrSessionPathForArchiveState` 路径助手；归档/取消归档移动 sidecar、删除会话时清理（与 worktree sidecar 一一对应）。
+- `session-list.ts` 的 `enrichPrSidecars` 回填 persisted summary 的 `prs`；live 会话的 entry.prs 只含本 daemon 生命周期内的绑定，回填时与 sidecar 历史按 number 合并（live 的 url 优先，live-only 的排最后）。
 
 ### 展示与搜索（web-shell 侧栏）
 
-- `renderSessionRow`：会话行标题旁渲染小号 `#1234` badge（仅当 `session.pr` 存在），点击新窗口打开 PR URL；worktree/branch 图标逻辑不变。
-- `SessionDetailsTooltip`：分支行下方增加 PR 链接行。
-- `filteredSessions` 匹配逻辑扩展：`label`、`sessionId` 之外，增加 `pr.number`（输入 `9517` 或 `#9517` 都命中）、`branch.name`、`worktree.branch`、`worktree.slug`。
-- `WorkspaceSection.tsx:428-439` 的同类过滤若仍在使用则同步更新；若为死代码则不动。
+- `renderSessionRow`：会话行标题旁渲染小号 badge（`session.prs` 非空时），显示最新 PR 号，多于一个时追加 `+N`；点击经 `useExternalLinkOpener` 打开最新 PR（desktop webview 下 `target="_blank"` 会被静默丢弃）；click/doubleClick/keydown 均 stopPropagation（双击 badge 不触发重命名）。
+- `SessionDetailsTooltip`：列出全部绑定 PR（最新在前），各为外链。
+- `filteredSessions` 匹配逻辑扩展：`label`、`sessionId` 之外，增加**任意一个**绑定 PR 号（输入 `9517` 或 `#9517` 都命中）、`branch.name`、`worktree.branch`、`worktree.slug`（`sessionMatchesGitQuery`，WebShellSidebar 与 WorkspaceSection 共用）。
 - SSE 消费侧：web-shell 不直接消费 `session_metadata_updated` 更新 store；bridge 的 `markSessionCatalogChanged()` 触发 catalog revision bump，侧栏 live-state 轮询（2s 周期）发现后自动 refetch——badge 在绑定后 ~2s 内出现（与改名等其他客户端变更的传播机制一致）。
-- i18n：新增 badge 的 aria-label / tooltip 文案 key（如 `sidebar.sessionPr`）。
+- i18n：新增 `sidebar.sessionPr` / `sidebar.sessionPrMultiple` 两个 key（EN/ZH）。
 
 ## 关键决策
 
 - **绑定时机 = GitDialog 创建 PR 成功时**。Agent 在 shell 里自行 `gh pr create` 的路径无法拦截，MVP 不覆盖；用户主力流程是 GitDialog。
 - **sidecar 而非 transcript 记录**：displayName 走 `custom_title` transcript 记录是因为标题属于会话内容流；PR 绑定是会话外部元数据，worktree sidecar 是同类先例，改动面更小。
-- **只覆盖最新 PR**：同一会话多次创建 PR 时 `pr` 字段覆盖。会话-PR 是 1:1 主力场景，不做列表。
-- **workspace 级打开 GitDialog（无会话上下文）时不回写**：`resolveSessionForWorkspace` 解析不到会话就跳过，不报错。
+- **多 PR 列表（cap 10）**：一个会话可能创建多个 PR（stacked PR、连续修复），只保留最新一个会让"按 PR 号反查会话"在这些场景失效。绑定按 number 去重、重复绑定移到最新位；badge 显示最新号 + `+N`，tooltip 列全部，搜索匹配任意一个。上限 10 防无界增长。
+- **workspace 级打开 GitDialog（无会话上下文）时不回写**：dialog 没有已解析的会话就跳过，不报错；绝不通过 `resolveSessionForWorkspace` 创建新会话来绑定（会产生幽灵会话/误绑）。
 
 ## 影响文件
 

@@ -25,7 +25,7 @@ import {
   writeWorktreeSessionMarker,
   writeWorktreeSession,
   readWorktreeSession,
-  writeSessionPr,
+  upsertSessionPr,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -5112,10 +5112,17 @@ export function registerSessionRoutes(
           );
           if (pr) {
             const service = createWorkspaceRuntimeSessionService(runtime);
-            await writeSessionPr(
+            // The sidecar holds the full binding history (the live bridge
+            // entry only knows bindings from this daemon lifetime), so the
+            // persisted list is the complete one to echo back.
+            const persisted = await upsertSessionPr(
               service.getPrSessionPathForArchiveState(sessionId, 'active'),
-              { ...pr, createdAt: new Date().toISOString() },
+              pr,
             );
+            effective = {
+              ...effective,
+              prs: persisted.map(({ number, url }) => ({ number, url })),
+            };
           }
         } finally {
           invalidateSessionLists(runtime, ['active']);
@@ -5216,7 +5223,7 @@ export function registerSessionRoutes(
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: {
               displayName?: string;
-              pr?: { number: number; url: string };
+              prs?: Array<{ number: number; url: string }>;
             };
             try {
               effective = runtime.bridge.updateSessionMetadata(
@@ -5227,11 +5234,19 @@ export function registerSessionRoutes(
               assertRuntimeGenerationOpen?.();
               if (pr) {
                 const service = createWorkspaceRuntimeSessionService(runtime);
-                await writeSessionPr(
+                // The sidecar holds the full binding history (the live
+                // bridge entry only knows bindings from this daemon
+                // lifetime), so the persisted list is the complete one to
+                // echo back.
+                const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                  { ...pr, createdAt: new Date().toISOString() },
+                  pr,
                 );
                 assertRuntimeGenerationOpen?.();
+                effective = {
+                  ...effective,
+                  prs: persisted.map(({ number, url }) => ({ number, url })),
+                };
               }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
@@ -5259,12 +5274,15 @@ export function registerSessionRoutes(
                 effective.displayName = displayName;
               }
               if (pr) {
-                await writeSessionPr(
+                const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  { ...pr, createdAt: new Date().toISOString() },
+                  pr,
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.pr = pr;
+                effective.prs = persisted.map(({ number, url }) => ({
+                  number,
+                  url,
+                }));
               }
               // The persisted mutation is picked up by the next catalog
               // scan, so this fallback must advance the same catalog

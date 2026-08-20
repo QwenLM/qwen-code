@@ -26446,19 +26446,46 @@ describe('createAcpSessionBridge', () => {
         pr,
       });
 
-      expect(effective.pr).toEqual(pr);
-      expect(bridge.getSessionSummary(session.sessionId).pr).toEqual(pr);
+      expect(effective.prs).toEqual([pr]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([pr]);
       await new Promise((r) => setImmediate(r));
       const metaEvent = events.find(
         (e) =>
           e.type === 'session_metadata_updated' &&
-          (e.data as { pr?: unknown }).pr !== undefined,
+          (e.data as { prs?: unknown }).prs !== undefined,
       );
       expect(metaEvent).toBeDefined();
-      expect((metaEvent?.data as { pr: typeof pr }).pr).toEqual(pr);
+      expect((metaEvent?.data as { prs: Array<typeof pr> }).prs).toEqual([pr]);
 
       await bridge.closeSession(session.sessionId);
       await drain;
+      await bridge.shutdown();
+    });
+
+    it('accumulates multiple bindings and re-binding moves a number to latest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const prA = { number: 9500, url: 'https://github.com/o/r/pull/9500' };
+      const prB = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr: prA });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prB,
+      });
+      expect(effective.prs).toEqual([prA, prB]);
+
+      const prA2 = {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500?v=2',
+      };
+      const rebound = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prA2,
+      });
+      expect(rebound.prs).toEqual([prB, prA2]);
+
+      await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
     });
 
@@ -26483,7 +26510,7 @@ describe('createAcpSessionBridge', () => {
       const prEvents = events.filter(
         (e) =>
           e.type === 'session_metadata_updated' &&
-          (e.data as { pr?: unknown }).pr !== undefined,
+          (e.data as { prs?: unknown }).prs !== undefined,
       );
       expect(prEvents).toHaveLength(1);
 

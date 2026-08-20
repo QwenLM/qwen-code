@@ -297,7 +297,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
-  pr?: DaemonSessionPrInfo;
+  prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
 
@@ -2669,8 +2669,10 @@ function isSessionMetadataUpdatedData(
   ) {
     return false;
   }
-  const pr = value['pr'];
-  return pr === undefined || isSessionPrInfo(pr);
+  const prs = value['prs'];
+  return (
+    prs === undefined || (Array.isArray(prs) && prs.every(isSessionPrInfo))
+  );
 }
 
 function isArtifactChangedData(

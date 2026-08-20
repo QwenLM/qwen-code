@@ -683,8 +683,11 @@ export interface BridgeSessionSummary {
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
-  /** Present when a GitHub PR has been bound to the session. */
-  pr?: SessionPrInfo;
+  /**
+   * GitHub PRs bound to the session, in binding order (last = latest). A
+   * session can produce several PRs (stacked or follow-up work).
+   */
+  prs?: SessionPrInfo[];
 }
 
 /**
@@ -723,6 +726,8 @@ export interface SessionPrInfo {
 export interface SessionMetadataUpdate {
   displayName?: string;
   pr?: SessionPrInfo;
+  /** Full binding list after the update (return value only; ignored on input). */
+  prs?: SessionPrInfo[];
 }
 
 export interface CloseSessionOpts {

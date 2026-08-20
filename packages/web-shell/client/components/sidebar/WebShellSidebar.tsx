@@ -3620,22 +3620,32 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const prBadge = session.pr ? (
+      const prs = session.prs ?? [];
+      const latestPr = prs.length > 0 ? prs[prs.length - 1] : undefined;
+      const prBadge = latestPr ? (
         <a
           className={styles.sessionPrBadge}
-          href={session.pr.url}
+          href={latestPr.url}
           target="_blank"
           rel="noreferrer"
-          aria-label={t('sidebar.sessionPr', { number: session.pr.number })}
-          title={session.pr.url}
+          aria-label={t('sidebar.sessionPr', { number: latestPr.number })}
+          title={
+            prs.length > 1
+              ? t('sidebar.sessionPrMultiple', {
+                  number: latestPr.number,
+                  count: prs.length,
+                })
+              : latestPr.url
+          }
           onClick={(event) => {
             event.stopPropagation();
-            openExternalLink(event, session.pr?.url);
+            openExternalLink(event, latestPr.url);
           }}
           onDoubleClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
         >
-          #{session.pr.number}
+          #{latestPr.number}
+          {prs.length > 1 ? ` +${prs.length - 1}` : ''}
         </a>
       ) : null;
       const withDetails = (row: ReactElement) => (

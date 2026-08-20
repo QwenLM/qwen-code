@@ -1209,8 +1209,8 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
-  /** Present when a GitHub PR has been bound to the session. */
-  pr?: DaemonSessionPrInfo;
+  /** Present when GitHub PRs have been bound to the session (last = latest). */
+  prs?: DaemonSessionPrInfo[];
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -1400,7 +1400,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
-  pr?: DaemonSessionPrInfo;
+  prs?: DaemonSessionPrInfo[];
 }
 
 type OpenStringUnion<T extends string> = T | (string & {});

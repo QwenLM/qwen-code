@@ -959,8 +959,8 @@ interface SessionEntry {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string };
-  /** GitHub PR bound to the session via updateSessionMetadata. */
-  pr?: SessionPrInfo;
+  /** GitHub PRs bound via updateSessionMetadata, in binding order. */
+  prs?: SessionPrInfo[];
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -1240,6 +1240,8 @@ function writeServeDebugLine(message: string): void {
 }
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
+/** Bound on the per-session PR binding list; oldest are dropped beyond it. */
+const MAX_SESSION_PRS = 10;
 
 /**
  * Upper bound on how many prompt content blocks the bridge echoes per
@@ -3607,7 +3609,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
-      ...(entry.pr ? { pr: entry.pr } : {}),
+      ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -9628,20 +9630,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (metadata.pr !== undefined) {
         // Already validated above, before any mutation.
-        const nextPr: SessionPrInfo = {
-          number: metadata.pr.number,
-          url: metadata.pr.url,
-        };
-        if (
-          entry.pr?.number !== nextPr.number ||
-          entry.pr?.url !== nextPr.url
-        ) {
-          entry.pr = nextPr;
+        const bound = metadata.pr;
+        const existing = entry.prs ?? [];
+        const latest = existing[existing.length - 1];
+        if (latest?.number === bound.number && latest.url === bound.url) {
+          // Same binding repeated — no change, no event.
+        } else {
+          // Re-binding a number refreshes it and moves it to latest.
+          entry.prs = [
+            ...existing.filter((p) => p.number !== bound.number),
+            { number: bound.number, url: bound.url },
+          ].slice(-MAX_SESSION_PRS);
           markSessionCatalogChanged();
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              data: { sessionId, pr: entry.pr },
+              data: { sessionId, prs: entry.prs },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }
                 : {}),
@@ -9653,7 +9657,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return {
         displayName: entry.displayName,
-        ...(entry.pr ? { pr: entry.pr } : {}),
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
       };
     },
 
