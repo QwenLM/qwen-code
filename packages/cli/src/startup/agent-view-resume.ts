@@ -40,6 +40,7 @@ export async function routeManagedAgentViewResume(
     );
     const supervisor = await ensureAgentViewSupervisor();
     await supervisor.attach(sessionId);
+    process.exitCode = 0;
   } catch (error) {
     writeStderrLineSafe(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

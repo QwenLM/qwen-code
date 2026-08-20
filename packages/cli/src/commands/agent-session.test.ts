@@ -38,6 +38,7 @@ const mockSupervisor = vi.hoisted(() => ({
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => mockSupervisor),
 );
+const mockRequireAgentViewEnabled = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: mockWriteStderrLineSafe,
@@ -49,7 +50,7 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
 }));
 
 vi.mock('../agent-view/feature.js', () => ({
-  requireAgentViewEnabled: vi.fn(),
+  requireAgentViewEnabled: mockRequireAgentViewEnabled,
 }));
 
 const jsonSessionCommands = [
@@ -122,6 +123,21 @@ describe('agent session commands', () => {
     expect(mockSupervisor.logs).toHaveBeenCalledWith('session-1');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('hello from worker\n');
   });
+
+  it.each(['logs', 'stop', 'kill', 'rm'])(
+    'does not start the supervisor when %s is feature-gated',
+    async (command) => {
+      mockRequireAgentViewEnabled.mockImplementationOnce(() => {
+        throw new Error('Agent View is disabled.');
+      });
+
+      await expect(parseCommand(`${command} session-1`)).rejects.toThrow(
+        'Agent View is disabled.',
+      );
+
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(jsonSessionCommands)(
     'routes $command to the supervisor and prints JSON',

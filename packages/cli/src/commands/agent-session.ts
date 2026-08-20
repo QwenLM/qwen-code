@@ -67,6 +67,7 @@ function sessionCommand(
     builder: (yargs: Argv) =>
       yargs.positional('id', { type: 'string', demandOption: true }),
     handler: async (argv) => {
+      requireAgentViewEnabled();
       const supervisor = await getSessionSupervisor();
       writeStdoutLine(formatResult(await supervisor[method](argv['id'])));
     },
@@ -184,6 +185,7 @@ export const rmCommand: CommandModule<unknown, SessionArgs> = {
   builder: (yargs: Argv) =>
     yargs.positional('id', { type: 'string', demandOption: true }),
   handler: async (argv) => {
+    requireAgentViewEnabled();
     const supervisor = await getSessionSupervisor();
     writeJsonResult(await supervisor.remove(argv['id']));
   },

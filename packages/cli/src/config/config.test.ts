@@ -684,6 +684,45 @@ describe('parseArguments', () => {
     }
   });
 
+  it.each([
+    ['--bg', 'serve'],
+    ['--background', 'update'],
+    ['--continue', 'update'],
+    ['-c', 'update'],
+  ])(
+    'rejects %s with the %s subcommand before its handler runs',
+    async (flag, command) => {
+      process.argv = ['node', 'script.js', flag, command];
+      mockUpdateHandler.mockClear();
+      mockEnsureAgentViewSupervisor.mockClear();
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(mockUpdateHandler).not.toHaveBeenCalled();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+      }
+    },
+  );
+
+  it('allows a --bg prompt matching a subcommand after the separator', async () => {
+    process.argv = ['node', 'script.js', '--bg', '--', 'serve'];
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+
+    try {
+      const argv = await parseArguments();
+      expect(argv.background).toBe(true);
+      expect(argv.query).toBe('serve');
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
   it.each(['--continue', '-c'])(
     'rejects %s before an agents command instead of treating agents as a prompt',
     async (flag) => {
@@ -700,7 +739,9 @@ describe('parseArguments', () => {
       });
 
       try {
-        await expect(parseArguments()).rejects.toThrow(/process\.exit/);
+        await expect(parseArguments()).rejects.toThrow(
+          'cannot be combined with a CLI subcommand',
+        );
         expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
       } finally {
         mockExit.mockRestore();

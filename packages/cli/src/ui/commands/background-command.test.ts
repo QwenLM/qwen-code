@@ -192,14 +192,49 @@ describe('backgroundCommand', () => {
       content: 'Cannot detach Agent View before the session is saved.',
     });
   });
+
+  it('rejects while background work is running', async () => {
+    const config = mockConfig({ sessionExists: true, hasBackgroundWork: true });
+
+    const result = await backgroundCommand.action?.(
+      createMockCommandContext({
+        services: { config },
+        ui: { isIdleRef: { current: true } },
+      }),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Stop the current session's running background tasks before detaching it.",
+    });
+  });
 });
 
-function mockConfig(options: { sessionExists: boolean }) {
+function mockConfig(options: {
+  sessionExists: boolean;
+  hasBackgroundWork?: boolean;
+}) {
   return {
     isAgentViewEnabled: () => true,
     getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
     getSessionService: () => ({
       sessionExists: vi.fn().mockResolvedValue(options.sessionExists),
+    }),
+    getBackgroundTaskRegistry: () => ({
+      hasRunningTasks: () => options.hasBackgroundWork === true,
+      getAll: () => [],
+    }),
+    getMonitorRegistry: () => ({ getRunning: () => [] }),
+    getBackgroundShellRegistry: () => ({
+      hasRunningEntries: () => false,
+      getAll: () => [],
+    }),
+    getWorkflowRunRegistry: () => ({
+      hasRunningEntries: () => false,
+      list: () => [],
     }),
   };
 }

@@ -1220,10 +1220,11 @@ class AgentViewSupervisorProcessHandler
     return this.withAttachSetupLock(sessionId, () =>
       this.withPromptQueueLock(sessionId, () =>
         this.workers.withHostSetupLock(sessionId, async () => {
-          const state = await readAgentViewSessionState(sessionId, this.store);
+          let state = await readAgentViewSessionState(sessionId, this.store);
           if (!state) {
             throw new Error(`No Agent View session found for ${sessionId}.`);
           }
+          state = await this.detachIfAttachIsStale(state);
           if (state.ownership === 'unmanaged') {
             return { sessionId, released: true, alreadyReleased: true };
           }

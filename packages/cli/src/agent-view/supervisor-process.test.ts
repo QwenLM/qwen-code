@@ -3925,6 +3925,58 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('releases an exited session after healing a stale attach', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const now = '2026-07-17T00:00:00.000Z';
+    await writeAgentViewSessionState(
+      {
+        schemaVersion: 1,
+        sessionId,
+        ownership: 'managed',
+        sessionState: 'idle',
+        processState: 'exited',
+        attachState: 'attached',
+        projectCwd: globalDir,
+        originalCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+        worktree: { mode: 'none' },
+      },
+      { globalDir },
+    );
+    await upsertAgentViewRosterEntry(
+      {
+        sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { globalDir },
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+    });
+
+    await expect(handler.release?.({ sessionId })).resolves.toMatchObject({
+      sessionId,
+      released: true,
+    });
+    await expect(
+      readAgentViewSessionState(sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      ownership: 'unmanaged',
+      attachState: 'detached',
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('finishes an interrupted remove after a daemon restart', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),

@@ -1155,6 +1155,16 @@ export async function parseArguments(): Promise<CliArgs> {
 
   const yargsInstance = buildCliParser(rawArgv);
   yargsInstance.command(agentsCommand);
+  yargsInstance.middleware((argv) => {
+    if (
+      argv._.length > 0 &&
+      (argv['background'] === true || argv['continue'] === true)
+    ) {
+      throw new Error(
+        '`--bg/--background` and `--continue/-c` cannot be combined with a CLI subcommand. Place `--` before prompt text that matches a command name.',
+      );
+    }
+  });
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json

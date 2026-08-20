@@ -858,11 +858,9 @@ export async function main() {
     message?: string,
   ): Promise<never> => {
     if (message) writeStderrLine(message);
-    const cleanupError = await discardCreatedStartupWorktree(
-      startupWorktreeContext,
-    );
-    if (cleanupError) {
-      writeStderrLine(`Failed to clean up startup worktree: ${cleanupError}`);
+    const cleanup = await discardCreatedStartupWorktree(startupWorktreeContext);
+    if (cleanup.error) {
+      writeStderrLine(`Failed to clean up startup worktree: ${cleanup.error}`);
       code = 1;
     }
     process.exit(code);
@@ -1088,11 +1086,13 @@ export async function main() {
         settingsWatcher,
       );
     } catch (error) {
-      const cleanupError = await discardCreatedStartupWorktree(
+      const cleanup = await discardCreatedStartupWorktree(
         startupWorktreeContext,
       );
-      if (cleanupError) {
-        writeStderrLine(`Failed to clean up startup worktree: ${cleanupError}`);
+      if (cleanup.error) {
+        writeStderrLine(
+          `Failed to clean up startup worktree: ${cleanup.error}`,
+        );
       }
       throw error;
     }
@@ -1223,8 +1223,6 @@ export async function main() {
 
     // Persist session usage for cross-session reports (must run before
     // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
     registerCleanup(() => {
       try {
         const metrics = uiTelemetryService.getMetrics();
@@ -1232,9 +1230,14 @@ export async function main() {
           (m) => m.api.totalRequests > 0,
         );
         if (!hasActivity) return;
+        const resumedStartTime = Date.parse(
+          config.getResumedSessionData()?.conversation.startTime ?? '',
+        );
         persistSessionUsage({
           sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
+          startTime: Number.isFinite(resumedStartTime)
+            ? new Date(resumedStartTime)
+            : uiTelemetryService.getSessionStartTime(),
           endTime: new Date(),
           project: config.getProjectRoot(),
           metrics,

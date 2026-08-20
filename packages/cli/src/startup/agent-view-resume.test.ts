@@ -50,7 +50,7 @@ describe('routeManagedAgentViewResume', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Session session-1 is managed by Agent View; attaching via supervisor...',
     );
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(0);
   });
 
   it('rejects one-shot input for managed Agent View resumes', async () => {
