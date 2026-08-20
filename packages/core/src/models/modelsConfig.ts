@@ -650,6 +650,29 @@ export class ModelsConfig {
         ? rollbackSnapshot.generationConfigSources['apiKey']
         : undefined;
 
+      // Session endpoints (cli/env/settings kinds) are not seeded into the
+      // registry default endpoint (the R10-12 boundary), so `model` above was
+      // resolved against the registry default endpoint and its catalog
+      // modalities may not match the live session endpoint. Mirror
+      // syncAfterAuthRefresh's savedBaseUrl re-apply, but only for
+      // same-provider switches: carrying a session endpoint across providers
+      // would violate the pinned "does not reuse a settings endpoint for a
+      // base-url-less registry model" boundary.
+      const previousBaseUrlSource =
+        rollbackSnapshot.generationConfigSources['baseUrl'];
+      const previousProviderId = previousModel
+        ? this.modelRegistry.getProviderId(previousModel)
+        : undefined;
+      const shouldCarrySessionEndpoint =
+        !options?.baseUrl &&
+        !!rollbackSnapshot.generationConfig.baseUrl &&
+        (previousBaseUrlSource?.kind === 'cli' ||
+          previousBaseUrlSource?.kind === 'env' ||
+          previousBaseUrlSource?.kind === 'settings') &&
+        model.registryBaseUrl === undefined &&
+        previousProviderId !== undefined &&
+        previousProviderId === this.modelRegistry.getProviderId(model);
+
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
       if (!this._generationConfig.apiKey && previousApiKey) {
@@ -657,6 +680,37 @@ export class ModelsConfig {
         if (previousApiKeySource) {
           this.generationConfigSources['apiKey'] =
             ModelsConfig.deepClone(previousApiKeySource);
+        }
+      }
+
+      if (shouldCarrySessionEndpoint) {
+        const carriedBaseUrl = rollbackSnapshot.generationConfig.baseUrl;
+        this._generationConfig.baseUrl = carriedBaseUrl;
+        if (previousBaseUrlSource) {
+          this.generationConfigSources['baseUrl'] = {
+            ...previousBaseUrlSource,
+          };
+        }
+        const appliedCatalogModalities = this.applyCatalogModalities(
+          model.id,
+          carriedBaseUrl,
+          model.envKey,
+          false,
+          this.modelRegistry.getProviderId(model),
+        );
+        const resolvedCatalogMatchesSessionEndpoint =
+          this.modelRegistry.getModalitiesSource(model) === 'catalog' &&
+          model.baseUrl === carriedBaseUrl;
+        if (
+          !appliedCatalogModalities &&
+          !resolvedCatalogMatchesSessionEndpoint &&
+          this.canApplyCatalogModalities()
+        ) {
+          this._generationConfig.modalities = defaultModalities(model.id);
+          this.generationConfigSources['modalities'] = {
+            kind: 'computed',
+            detail: 'auto-detected from model',
+          };
         }
       }
 

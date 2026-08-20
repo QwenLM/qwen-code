@@ -1901,6 +1901,90 @@ describe('ModelsConfig', () => {
     );
   });
 
+  it('carries a settings endpoint and its catalog modalities across a same-provider switchModel', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openrouter: [{ id: 'google/gemma-4-31b-it' }],
+      },
+      providerProtocolConfig: { openrouter: 'openai' },
+      generationConfig: {
+        model: 'google/gemma-4-31b-it',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modalities: { image: true, video: true },
+      },
+      generationConfigSources: {
+        baseUrl: {
+          kind: 'settings',
+          detail: 'model.generationConfig.baseUrl',
+        },
+        modalities: {
+          kind: 'computed',
+          detail: 'loaded from models.dev catalog',
+        },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'google/gemma-4-31b-it': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    await modelsConfig.switchModel(
+      AuthType.USE_OPENAI,
+      'google/gemma-4-31b-it',
+    );
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(
+      'https://openrouter.ai/api/v1',
+    );
+    expect(modelsConfig.getGenerationConfigSources()['baseUrl']).toEqual({
+      kind: 'settings',
+      detail: 'model.generationConfig.baseUrl',
+    });
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
+  it('does not carry a settings endpoint across providers on switchModel', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        corp: [{ id: 'corp-model' }],
+        openai: [
+          {
+            id: 'gpt-5-mini',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      },
+      providerProtocolConfig: { corp: 'openai' },
+      generationConfig: {
+        model: 'corp-model',
+        baseUrl: 'https://corp-proxy.example.com/v1',
+      },
+      generationConfigSources: {
+        baseUrl: {
+          kind: 'settings',
+          detail: 'model.generationConfig.baseUrl',
+        },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-5-mini');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(
+      'https://api.openai.com/v1',
+    );
+  });
+
   it('does not reuse catalog modalities at an unlisted settings endpoint', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
