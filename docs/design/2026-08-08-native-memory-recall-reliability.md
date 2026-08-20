@@ -271,5 +271,6 @@ flatters every design; the floor is what makes the headline readable.
   A broader manageability pass is separate from this recall-only change.
   Superseded for Forget: issue #9378 moved Forget to the uncapped scanner, with
   a per-scope bound on the model-selection prompt so literal matches in each
-  scope reach the model first; semantic-only matches ranked past that bound can
-  still be missed. Indexer, Status, and Extraction remain capped.
+  scope reach the model first; any match, literal or semantic, ranked past that
+  bound is not offered to the model and can still be missed. Indexer, Status,
+  and Extraction remain capped.

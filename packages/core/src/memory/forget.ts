@@ -118,17 +118,10 @@ async function listIndexedForgetCandidates(
   // entry that recall can inject must be one that forget can remove.
   const [projectDocs, userDocs] = await Promise.all([
     scanAllAutoMemoryTopicDocuments(projectRoot),
-    // Best-effort, as in recall.ts and extractionAgentPlanner.ts: an
-    // unreadable `~/.qwen/memories` must not make project-level forget fail
-    // outright. `scan.ts` swallows only ENOENT.
-    scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
-      debugLogger.warn(
-        `User-level auto-memory scan failed; project-level forget continues: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return [];
-    }),
+    // Deliberately NOT best-effort, unlike recall.ts: a scan failure here must
+    // stay loud. Swallowing it would report "no entries matched" for a scope
+    // that was never read, and forget acts on that answer by deleting.
+    scanAllUserAutoMemoryTopicDocuments(),
   ]);
   abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];
@@ -197,9 +190,13 @@ function buildForgetSelectionPrompt(
   ].join('\n');
 }
 
-/** Shared by the prompt bound and the heuristic so the two cannot drift. */
+/**
+ * Shared by the prompt bound and the heuristic so the two cannot drift, and
+ * delegated to `normalizeSummary` so query matching and the post-selection
+ * re-match in `forgetManagedAutoMemoryMatches` normalize text identically.
+ */
 function normalizeForgetQuery(query: string): string {
-  return query.replace(/\s+/g, ' ').trim().toLowerCase();
+  return normalizeSummary(query);
 }
 
 /** Shared by the prompt bound and the heuristic so the two cannot drift. */
@@ -602,7 +599,12 @@ export async function forgetManagedAutoMemoryEntries(
   const selection = await selectManagedAutoMemoryForgetCandidates(
     projectRoot,
     trimmedQuery,
-    { ...options, limit: Number.MAX_SAFE_INTEGER },
+    // Bounded, not MAX_SAFE_INTEGER: this path deletes without confirmation,
+    // and the heuristic fallback substring-matches the whole store, so a very
+    // short query matches nearly everything. The capped scanners this replaced
+    // held the same failure to one scan's worth of candidates; keep that
+    // ceiling rather than letting an uncapped scan widen it.
+    { ...options, limit: MAX_MODEL_FORGET_CANDIDATES },
   );
   const result = await forgetManagedAutoMemoryMatches(
     projectRoot,

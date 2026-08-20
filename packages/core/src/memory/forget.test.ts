@@ -15,6 +15,7 @@ import {
   scanAllUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import {
+  forgetManagedAutoMemoryEntries,
   forgetManagedAutoMemoryMatches,
   selectManagedAutoMemoryForgetCandidates,
 } from './forget.js';
@@ -209,6 +210,107 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     expect(result.matches.map((match) => match.filePath)).toContain(
       '/tmp/project/memory/reference/overflow.md',
     );
+  });
+
+  it('bounds how much the unconfirmed forget path can delete at once', async () => {
+    // forgetManagedAutoMemoryEntries (MemoryManager.forget, the ACP path)
+    // deletes without confirmation. With an uncapped scan and a heuristic
+    // fallback that substring-matches the whole store, an unbounded limit
+    // would let a very short query wipe everything.
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forget-cap-'));
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      const docsDir = path.join(tempDir, 'docs');
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.mkdir(docsDir, { recursive: true });
+
+      const docs = await Promise.all(
+        Array.from({ length: 401 }, async (_, index) => {
+          const body = `forgettable-marker note ${index}`;
+          const filePath = path.join(docsDir, `doc-${index}.md`);
+          await fs.writeFile(
+            filePath,
+            [
+              '---',
+              'type: reference',
+              `name: Doc ${index}`,
+              '---',
+              '',
+              body,
+            ].join('\n'),
+            'utf-8',
+          );
+          return {
+            type: 'reference' as const,
+            filePath,
+            relativePath: `reference/doc-${index}.md`,
+            filename: `doc-${index}.md`,
+            title: `Doc ${index}`,
+            description: 'Matching',
+            body,
+            mtimeMs: 1_000 + index,
+          };
+        }),
+      );
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+      const result = await forgetManagedAutoMemoryEntries(
+        projectRoot,
+        'forgettable-marker',
+        { config: mockConfig },
+      );
+
+      expect(result.removedEntries).toHaveLength(400);
+      const survivors = (await fs.readdir(docsDir)).length;
+      expect(survivors).toBe(1);
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('splits the prompt evenly when both scopes are over quota', async () => {
+    // Both scopes over the 200 quota, so no spare is redistributed and the
+    // quota itself decides the split. Mutating the quota changes these counts.
+    const makeDocs = (scope: 'user' | 'project', dir: string, base: number) =>
+      Array.from({ length: 300 }, (_, index) => ({
+        type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
+        filePath: `${dir}/doc-${index}.md`,
+        relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
+        filename: `doc-${index}.md`,
+        title: `Doc ${index}`,
+        description: 'Unrelated',
+        body: 'Unrelated note',
+        mtimeMs: base + index,
+      }));
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
+      makeDocs('user', '/tmp/user/memories/user', 1_000),
+    );
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      makeDocs('project', '/tmp/project/memory/reference', 500_000),
+    );
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'something that matches nothing literally',
+      { config: mockConfig },
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]?.[1];
+    const prompt = options?.contents[0]?.parts?.[0]?.text ?? '';
+    expect(prompt.match(/^scope: user$/gm)).toHaveLength(200);
+    expect(prompt.match(/^scope: project$/gm)).toHaveLength(200);
   });
 
   it('gives the heuristic fallback the full list, not the bounded one', async () => {
