@@ -41,6 +41,7 @@ import {
   IdeClient,
   ideContextStore,
   createDebugLogger,
+  describeHoldCause,
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
@@ -250,6 +251,7 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -2410,6 +2412,58 @@ export const AppContainer = (props: AppContainerProps) => {
       return true;
     });
   }, [addMessage, remoteInput]);
+
+  // Cross-session messaging: accepted peer messages enter the same queue as
+  // typed input. First argument is the model-bound text and must stay the
+  // full envelope — it carries the attribution and the authority notice;
+  // the one-line form rides along as the submitted-prompt projection (what
+  // hooks and the recording see), never as the model's copy.
+  const peerMessaging = usePeerMessaging();
+  useEffect(() => {
+    if (!peerMessaging) return;
+    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
+      addMessage(modelText, false, displayText);
+    });
+  }, [addMessage, peerMessaging]);
+
+  // Surface parked messages. The model never sees a held message, so
+  // without a notice the only symptom is a peer that seems to be ignored.
+  // Only ids that are newly held are announced: the gate emits on every
+  // change to the set, so announcing every emission would print "held a
+  // message" again when /peers released one of three — indistinguishable
+  // from a new arrival.
+  const announcedHoldsRef = useRef<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onHeldChange((held) => {
+      const announced = announcedHoldsRef.current;
+      const fresh = held.filter((entry) => !announced.has(entry.frame.msgId));
+      // Track the gate's set exactly, so ids it dropped are forgotten
+      // rather than accumulating for the life of the session.
+      announcedHoldsRef.current = new Set(
+        held.map((entry) => entry.frame.msgId),
+      );
+      const newest = fresh.at(-1);
+      if (!newest) return;
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `${held.length} waiting — /peers to review.`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // A held message may only be waiting on a mode mismatch, so re-run the
+  // gate whenever the approval mode changes rather than making the user
+  // approve something the new mode would have accepted outright.
+  const approvalModeForPeers = config.getApprovalMode();
+  useEffect(() => {
+    peerMessaging?.reevaluate('approval-mode-changed');
+  }, [approvalModeForPeers, peerMessaging]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.

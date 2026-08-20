@@ -1,0 +1,189 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * `/peers` — review messages other sessions sent this one.
+ *
+ * A held message is invisible to the model by design, so this is the only
+ * place it can be seen and released. Kept as a text command rather than a
+ * modal dialog: a message can be held while the session is mid-turn, and
+ * interrupting the user with a blocking prompt for something a peer chose
+ * to send would be the wrong trade.
+ */
+
+import { describeHoldCause, type HeldMessage } from '@qwen-code/qwen-code-core';
+import type { SlashCommand, SlashCommandActionReturn } from './types.js';
+import { CommandKind } from './types.js';
+
+/** Short handle shown to the user, so nobody has to type a full UUID. */
+export function shortId(msgId: string): string {
+  return msgId.replace(/-/g, '').slice(0, 6);
+}
+
+function preview(text: string, max = 100): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+export function formatHeldList(held: readonly HeldMessage[]): string {
+  if (held.length === 0) return 'No messages from other sessions are waiting.';
+
+  const lines = held.map((entry) => {
+    const who = entry.frame.fromName ?? entry.frame.from ?? 'unknown session';
+    return (
+      `  ${shortId(entry.frame.msgId)}  ${who}\n` +
+      `      ${preview(entry.frame.message.content)}\n` +
+      `      held because ${describeHoldCause(entry.cause)}`
+    );
+  });
+
+  return [
+    `${held.length} message${held.length === 1 ? '' : 's'} waiting for your review:`,
+    ...lines,
+    '',
+    'Release with /peers accept <id|all>, or drop with /peers deny <id|all>.',
+  ].join('\n');
+}
+
+/**
+ * Resolve a user-typed handle against the held set.
+ *
+ * Accepts the short handle or any unique prefix of the full id. An
+ * ambiguous prefix is an error rather than a guess — picking one of two
+ * messages to inject into the session is not a coin flip worth taking.
+ */
+export function resolveHeld(
+  held: readonly HeldMessage[],
+  token: string,
+): { kind: 'one'; msgId: string } | { kind: 'none' } | { kind: 'ambiguous' } {
+  const needle = token.toLowerCase();
+  const matches = held.filter(
+    (entry) =>
+      // Lowercased on both sides: a peer picks its own msgId, so the handle
+      // printed by /peers can contain uppercase, and a handle the user
+      // cannot retype is a dead end.
+      shortId(entry.frame.msgId).toLowerCase().startsWith(needle) ||
+      entry.frame.msgId.toLowerCase().startsWith(needle),
+  );
+  if (matches.length === 0) return { kind: 'none' };
+  if (matches.length > 1) return { kind: 'ambiguous' };
+  return { kind: 'one', msgId: matches[0]!.frame.msgId };
+}
+
+export const peersCommand: SlashCommand = {
+  name: 'peers',
+  kind: CommandKind.BUILT_IN,
+  description:
+    'Review messages held from other Qwen Code sessions (accept | deny)',
+  action: async (context, args): Promise<SlashCommandActionReturn> => {
+    const peerMessaging = context.services.peerMessaging;
+    if (!peerMessaging) {
+      // Absent for two different reasons, and telling a user to enable a
+      // setting they already enabled sends them nowhere: the inbox is also
+      // absent when the session failed to register or the socket failed to
+      // bind (path too long, unwritable runtime dir).
+      const enabled =
+        context.services.settings?.merged?.agents?.crossSessionMessaging ===
+        true;
+      return {
+        type: 'message',
+        messageType: enabled ? 'error' : 'info',
+        content: enabled
+          ? 'Cross-session messaging is on, but this session has no inbox: it either failed to register in the session registry or failed to bind its socket. Re-run with DEBUG=1 to see the bind error.'
+          : 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.',
+      };
+    }
+
+    const held = peerMessaging.getHeld();
+    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+    if (verb === undefined || verb === 'list') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatHeldList(held),
+      };
+    }
+
+    if (verb !== 'accept' && verb !== 'deny') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, or /peers deny <id|all>.`,
+      };
+    }
+
+    const decision = verb === 'accept' ? 'approve' : 'deny';
+    const target = rest[0];
+
+    if (target === undefined) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `Which message? Use /peers ${verb} <id|all> — /peers lists the ids.`,
+      };
+    }
+
+    if (held.length === 0) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: 'No messages from other sessions are waiting.',
+      };
+    }
+
+    if (target === 'all') {
+      // Snapshot first: deciding mutates the held list underneath us.
+      const ids = held.map((entry) => entry.frame.msgId);
+      let count = 0;
+      for (const msgId of ids) {
+        if (peerMessaging.decide(msgId, decision) === 'done') count += 1;
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: `${verb === 'accept' ? 'Released' : 'Dropped'} ${count} message${
+          count === 1 ? '' : 's'
+        }.`,
+      };
+    }
+
+    const resolved = resolveHeld(held, target);
+    if (resolved.kind === 'none') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `No held message matches "${target}". Run /peers to see what is waiting.`,
+      };
+    }
+    if (resolved.kind === 'ambiguous') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `"${target}" matches more than one held message. Use more characters of the id.`,
+      };
+    }
+
+    const outcome = peerMessaging.decide(resolved.msgId, decision);
+    if (outcome === 'gone') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content:
+          'That message is no longer waiting — it may have expired or already been decided.',
+      };
+    }
+
+    return {
+      type: 'message',
+      messageType: 'info',
+      content:
+        verb === 'accept'
+          ? 'Released to this session. It will be picked up on the next turn.'
+          : 'Dropped. The sending session has been told.',
+    };
+  },
+};

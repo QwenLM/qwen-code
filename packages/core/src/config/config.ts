@@ -4145,6 +4145,23 @@ export class Config {
       });
   }
 
+  /**
+   * Resolves once initial registration has settled, reporting whether a
+   * record actually exists.
+   *
+   * Anything that publishes *into* the record — the peer-messaging socket
+   * path, today — has to wait for this: `patchSessionRecord` no-ops when
+   * the record is missing, so advertising an address before registration
+   * lands would silently never advertise it at all. Reuses the same write
+   * queue rather than adding a second signal to keep in sync.
+   */
+  async whenSessionRegistered(): Promise<boolean> {
+    await this.sessionRegistryWrite.catch(() => {
+      // A failed earlier write is reported by the flag, not by throwing.
+    });
+    return this.sessionRegistered;
+  }
+
   /** Drain queued patches, then remove this process's registered record. */
   async unregisterSessionRegistry(): Promise<void> {
     this.sessionRegistryActive = false;
