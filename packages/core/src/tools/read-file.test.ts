@@ -125,6 +125,13 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
+    it('advertises audio and video support to the model', () => {
+      expect(tool.description).toContain('audio, video');
+      expect(tool.description).toContain(
+        'selected model to support the corresponding modality',
+      );
+    });
+
     it('should return an invocation for valid params (absolute path within root)', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),

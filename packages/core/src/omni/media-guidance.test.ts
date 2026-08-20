@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { buildOmniMediaGuidanceSection } from './media-guidance.js';
+import type { OmniUploadConfig } from './upload-config.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
@@ -27,6 +28,7 @@ function stubConfig(overrides?: {
   cgc?: Record<string, unknown>;
   policyTools?: Record<string, unknown>;
   recallMode?: 'active' | 'sideQuery';
+  upload?: OmniUploadConfig;
 }): Config {
   return {
     isOmniEnabled: vi.fn().mockReturnValue(overrides?.omniEnabled ?? true),
@@ -34,6 +36,8 @@ function stubConfig(overrides?: {
     getContentGeneratorConfig: vi
       .fn()
       .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
+    getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
+    getOmniUploadConfig: vi.fn().mockReturnValue(overrides?.upload),
     getOmniPolicyToolsSettings: vi.fn().mockReturnValue(overrides?.policyTools),
     getOmniMemoryConfig: vi
       .fn()
@@ -60,6 +64,25 @@ describe('buildOmniMediaGuidanceSection', () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  it('includes guidance for custom inference with a dedicated upload channel', () => {
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({
+        cgc: {
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'inference-key',
+          baseUrl: 'http://127.0.0.1:22002/v1',
+        },
+        upload: {
+          apiKey: 'upload-key',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'qwen3.5-omni-plus',
+        },
+      }),
+    );
+
+    expect(section).toContain('Media Delivery');
   });
 
   it('explains all three disclosure markers and the progressive contract', () => {
