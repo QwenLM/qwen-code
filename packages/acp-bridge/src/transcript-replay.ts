@@ -200,6 +200,31 @@ function replaceTextPartsForDisplay(
   return projected;
 }
 
+function stripGeneratedAttachmentTokens(
+  displayText: string,
+  payload: Record<string, unknown> | undefined,
+): string {
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
+}
+
 export function toTranscriptEpochMs(
   timestamp?: string | number,
 ): number | undefined {
@@ -260,13 +285,13 @@ export function createTranscriptImageUpdate(
   } as SessionUpdate;
 }
 
-function createTranscriptMediaReferenceUpdate(
+function createTranscriptAttachmentReferenceUpdate(
   reference: Record<string, unknown>,
   options: UpdateMetaOptions,
 ): SessionUpdate | undefined {
   if (
-    (reference['type'] !== 'image' && reference['type'] !== 'audio') ||
-    typeof reference['mediaId'] !== 'string' ||
+    (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+    typeof reference['attachmentId'] !== 'string' ||
     typeof reference['mimeType'] !== 'string' ||
     typeof reference['size'] !== 'number'
   ) {
@@ -277,7 +302,7 @@ function createTranscriptMediaReferenceUpdate(
     sessionUpdate: 'user_message_chunk',
     content: {
       type: reference['type'],
-      mediaId: reference['mediaId'],
+      attachmentId: reference['attachmentId'],
       mimeType: reference['mimeType'],
       size: reference['size'],
     },
@@ -595,11 +620,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     ) {
       const displayText =
         payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
+          ? stripGeneratedAttachmentTokens(payload['displayText'], payload)
           : undefined;
       if (record.subtype === 'mid_turn_user_message' && displayText === '') {
         const media = [
-          ...this.projectUserMediaReferences(payload, emit, replayMeta),
+          ...this.projectUserAttachmentReferences(payload, emit, replayMeta),
         ];
         if (media.length > 0) {
           yield* media;
@@ -630,7 +655,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
-        yield* this.projectUserMediaReferences(payload, emit, replayMeta);
+        yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
@@ -638,18 +663,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const projection = projectUserTranscriptForDisplay(record);
     if (projection.displayText !== undefined) {
+      const displayText = stripGeneratedAttachmentTokens(
+        projection.displayText,
+        payload,
+      );
       yield* this.projectMessageParts(
         record,
         'user',
         emit,
         replayMeta,
         undefined,
-        replaceTextPartsForDisplay(
-          record.message?.parts,
-          projection.displayText,
-        ),
+        replaceTextPartsForDisplay(record.message?.parts, displayText),
       );
-      yield* this.projectUserMediaReferences(payload, emit, replayMeta);
+      yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
       return;
     }
 
@@ -661,19 +687,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       undefined,
       projection.parts,
     );
-    yield* this.projectUserMediaReferences(payload, emit, replayMeta);
+    yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
   }
 
-  private *projectUserMediaReferences(
+  private *projectUserAttachmentReferences(
     payload: Record<string, unknown> | undefined,
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
-    const references = payload?.['mediaReferences'];
+    const references = payload?.['attachmentReferences'];
     if (!Array.isArray(references)) return;
     for (const reference of references) {
       if (!isObjectRecord(reference)) continue;
-      const update = createTranscriptMediaReferenceUpdate(reference, meta);
+      const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
       if (update) yield emit(update);
     }
   }

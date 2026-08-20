@@ -242,9 +242,18 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 
   it('preserves user file attachment metadata', () => {
+    const data = new Blob(['line one']);
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'check this', 1, false, {
-        files: [{ name: 'app.log', mimeType: 'text/plain' }],
+        files: [
+          {
+            name: 'app.log',
+            mimeType: 'text/plain',
+            data,
+            text: 'line one',
+            attachmentId: 'app.log',
+          },
+        ],
       }),
     ]);
 
@@ -252,8 +261,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
       id: 'user-1',
       role: 'user',
       content: 'check this',
-      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+      files: [
+        {
+          name: 'app.log',
+          mimeType: 'text/plain',
+          data,
+          text: 'line one',
+          attachmentId: 'app.log',
+        },
+      ],
     });
+  });
+
+  it('preserves literal attachment-looking user text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this\n\n@attachment:///data.json', 1),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this\n\n@attachment:///data.json',
+    });
+    expect(messages[0]).not.toHaveProperty('files');
   });
 
   it('preserves user input annotations metadata', () => {
@@ -626,7 +656,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
               content: [
                 {
                   type: 'text',
-                  text: '[Attached media is no longer available]',
+                  text: '[Attachment is no longer available]',
                 },
               ],
             },
@@ -638,7 +668,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '[Attached media is no longer available]',
+        content: '[Attachment is no longer available]',
         source: 'mid_turn_message_injected',
       }),
     ]);

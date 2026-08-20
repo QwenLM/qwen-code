@@ -6705,7 +6705,7 @@ describe('R5 review batch — coverage additions', () => {
 
   it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
     // Replay producers persist uploaded attachments as media references
-    // (`mediaId`, no inline bytes). Paths that normalize without hydrating
+    // (`attachmentId`, no inline bytes). Paths that normalize without hydrating
     // (offline record projections) must degrade to a visible placeholder
     // instead of silently dropping the user's message.
     expect(
@@ -6718,7 +6718,7 @@ describe('R5 review batch — coverage additions', () => {
             sessionUpdate: 'user_message_chunk',
             content: {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -6733,13 +6733,66 @@ describe('R5 review batch — coverage additions', () => {
     ).toEqual([
       expect.objectContaining({
         type: 'user.text.delta',
-        text: '[Attached media is no longer available]',
+        text: '[Attachment is no longer available]',
         sourceRecordIds: ['record-1'],
         meta: {
           source: 'mid_turn_message_injected',
           qwenDiscreteMessage: true,
         },
       }),
+    ]);
+  });
+
+  it('leaves file attachment references for lazy preview consumers', () => {
+    const textEvents = normalizeDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'check this' },
+      },
+    });
+    const events = normalizeDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'user.file.delta',
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        attachmentId: 'notes.txt',
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...textEvents, ...events],
+    );
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        text: 'check this',
+        files: [
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ],
+      },
     ]);
   });
 
@@ -6770,6 +6823,40 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('normalizes a resource-only mid-turn message without dropping its slot', () => {
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      items: [
+        {
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
+            },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
   it('normalizes a degraded-media mid-turn echo instead of dropping it', () => {
     // The drain's media-failure path publishes `messages: ['']` whose item
     // content is the media-unavailable text block (no image blocks); the
@@ -6781,7 +6868,7 @@ describe('R5 review batch — coverage additions', () => {
       items: [
         {
           content: [
-            { type: 'text', text: '[Attached media is no longer available]' },
+            { type: 'text', text: '[Attachment is no longer available]' },
           ],
         },
       ],
