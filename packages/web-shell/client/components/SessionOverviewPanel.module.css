@@ -154,12 +154,25 @@
   line-height: 18px;
   white-space: nowrap;
   text-decoration: none;
-  color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  /* Same accent as the sidebar / picker badges — one element, one color. */
+  background: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 10%,
+    transparent
+  );
+  color: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 95%,
+    var(--foreground)
+  );
 }
 
 .prBadge:hover {
-  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 18%,
+    transparent
+  );
 }
 
 .cardMeta {
