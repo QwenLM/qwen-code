@@ -919,6 +919,12 @@ export const useGeminiStream = (
           const releaseToolCompletionActivity = isSubmittingQueryRef.current
             ? retainSubmissionActivity(submissionLeaseGenerationRef.current)
             : undefined;
+          // Captured before the await: the continuation scheduled inside
+          // handleCompletedTools may re-register a reused callId for the
+          // NEXT batch, and the cleanup below must not delete that entry.
+          const batchId = getToolBatchId(
+            completedToolCallsFromScheduler[0].request.callId,
+          );
           try {
             const projectRoot = config.getProjectRoot();
             // Add the final state of these tools to the history for display.
@@ -926,9 +932,7 @@ export const useGeminiStream = (
               completedToolCallsFromScheduler as TrackedToolCall[],
               projectRoot,
             );
-            toolGroupDisplay.batchId = getToolBatchId(
-              completedToolCallsFromScheduler[0].request.callId,
-            );
+            toolGroupDisplay.batchId = batchId;
             addItem(toolGroupDisplay, Date.now());
 
             // Handle tool response submission immediately when tools complete
@@ -939,8 +943,16 @@ export const useGeminiStream = (
             releaseToolCompletionActivity?.();
             // Entries are only needed until the batch commits; the scheduler
             // clears its display copy right after this callback returns.
+            // Delete only entries still pointing at this batch's id: a
+            // provider reusing a wire callId may have already registered
+            // the next batch under the same key during the await above.
             for (const tc of completedToolCallsFromScheduler) {
-              toolBatchIdByCallIdRef.current.delete(tc.request.callId);
+              if (
+                toolBatchIdByCallIdRef.current.get(tc.request.callId) ===
+                batchId
+              ) {
+                toolBatchIdByCallIdRef.current.delete(tc.request.callId);
+              }
             }
           }
         }

@@ -1759,6 +1759,123 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('keeps the next batch identity when a provider reuses a callId in the continuation (#9420)', async () => {
+    const makeCompletedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-id',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    // Completing a batch submits its result; the continuation stream
+    // schedules the next batch under the same wire callId.
+    const completeAndScheduleReuse = async (
+      completedCallId: string,
+      continuationArgs: Record<string, unknown>,
+    ) => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'reused-X',
+              name: 'testTool',
+              args: continuationArgs,
+            },
+          };
+        })(),
+      );
+      await act(async () => {
+        await capturedOnComplete?.([makeCompletedTool(completedCallId)]);
+      });
+    };
+
+    // Batch 1: the setup tool's continuation registers 'reused-X'.
+    await completeAndScheduleReuse('setup-tool', { step: 1 });
+    await waitFor(() => {
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    });
+
+    // Batch 2: completing 'reused-X' registers the continuation batch
+    // under the same callId inside the awaited handleCompletedTools,
+    // before batch 1's cleanup runs — the cleanup must not destroy it.
+    await completeAndScheduleReuse('reused-X', { step: 2 });
+    await waitFor(() => {
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      await capturedOnComplete?.([makeCompletedTool('reused-X')]);
+    });
+
+    const committedReusedGroups = mockAddItem.mock.calls
+      .map((call) => call[0])
+      .filter(
+        (item) =>
+          item?.type === 'tool_group' &&
+          item.tools.some(
+            (tool: { callId: string }) => tool.callId === 'reused-X',
+          ),
+      );
+
+    // Both continuation batches committed under 'reused-X'; each must
+    // carry its own minted batchId, or the collapse is silently disabled
+    // for the batch whose mapping the previous cleanup destroyed.
+    expect(committedReusedGroups).toHaveLength(2);
+    expect(committedReusedGroups[0]?.batchId).toEqual(expect.any(String));
+    expect(committedReusedGroups[1]?.batchId).toEqual(expect.any(String));
+    expect(committedReusedGroups[1]?.batchId).not.toEqual(
+      committedReusedGroups[0]?.batchId,
+    );
+  });
+
   it('mints batch ids that cannot collide across mounts (checkpoint restore, #9420)', async () => {
     const makeCompletedTool = (callId: string): TrackedCompletedToolCall =>
       ({
