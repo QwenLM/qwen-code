@@ -129,6 +129,29 @@ function isLocallyHeldPrompt(prompt: QueuedPrompt): boolean {
   );
 }
 
+/**
+ * Drop a finished release chain from `ref` so later sends stop queueing behind
+ * it. A prompt typed while the chain is draining appends itself to the tail,
+ * so "the tail I awaited" and "the tail the chain has now" can differ: when
+ * they do, re-arm on the newer tail instead of retiring a chain that still has
+ * links to run.
+ */
+function retireChainWhenDrained<T extends { tail: Promise<void> }>(
+  ref: { current: T | null },
+  chain: T,
+): void {
+  const tail = chain.tail;
+  const settle = () => {
+    if (ref.current !== chain) return;
+    if (chain.tail !== tail) {
+      retireChainWhenDrained(ref, chain);
+      return;
+    }
+    ref.current = null;
+  };
+  void tail.then(settle, settle);
+}
+
 interface AnnotatedFiles {
   displayText: string;
   paths: string[];
@@ -421,6 +444,17 @@ export function useQueuedPrompts({
    * owner change it holds exactly the rows the chain never got to POST.
    */
   const unreleasedPromptIdsRef = useRef<Set<number>>(new Set());
+  /**
+   * The live serial release chain, if a drain is in flight. Published so that
+   * `enqueuePrompt` can append to its tail: the chain exists to keep a prompt
+   * carrying media from being overtaken, and a prompt typed inside that window
+   * was typed AFTER the rows still waiting on it, so POSTing it immediately
+   * would land it ahead of them.
+   */
+  const releaseChainRef = useRef<{
+    owner: typeof ownerToken;
+    tail: Promise<void>;
+  } | null>(null);
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
@@ -1064,6 +1098,7 @@ export function useQueuedPrompts({
     }
     submitAbortControllersRef.current.clear();
     unreleasedPromptIdsRef.current = new Set();
+    releaseChainRef.current = null;
     removingServerPromptIdsRef.current = new Set();
     displayedServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
@@ -1434,6 +1469,58 @@ export function useQueuedPrompts({
       settleCompletionCallback,
       t,
     ],
+  );
+
+  /**
+   * One link of the serial release chain: hand the daemon a prompt the drain
+   * has already stamped `submitting`, but only while it is still ours to send.
+   * Shared with `enqueuePrompt`, which appends to a live chain rather than
+   * POSTing past it, so both paths carry the same guards.
+   */
+  const releaseChainedPrompt = useCallback(
+    (prompt: QueuedPrompt, chainOwner: typeof ownerToken): Promise<void> => {
+      // Owner changed mid-drain: `submitPrompt` would throw on the session
+      // mismatch before POSTing and the `.catch` below would swallow it,
+      // dropping the prompt silently. Bail and leave the rows alone — the
+      // owner-change effect has already stashed them for the session they
+      // were typed in, and touching state here would fight it.
+      //
+      // The id must stay in `unreleasedPromptIdsRef` on this path. The
+      // token is replaced in the render body while the stash is a passive
+      // effect flushed after commit, so a link firing in that window would
+      // otherwise leave a row that is neither locally held (it is stamped
+      // `submitting`) nor unreleased — and the stash drops exactly those.
+      if (!isCurrentOwnerTokenRef.current(chainOwner)) {
+        return Promise.resolve();
+      }
+      unreleasedPromptIdsRef.current.delete(prompt.id);
+      // Every path that removes a stamped row means cancellation: a queue
+      // clear mid-drain aborts the in-flight link's controller, but the
+      // links still pending have no controller yet, so only the row's
+      // absence tells them the user cleared what they were about to POST.
+      if (!queuedPromptsRef.current.some((item) => item.id === prompt.id)) {
+        return Promise.resolve();
+      }
+      // Re-check the hold per link, not once for the whole batch: the chain
+      // is built synchronously when the hold lifts, but each link runs only
+      // after the previous admission settles. A Goal resumed inside that
+      // window (or a write block) must stop the remaining links instead of
+      // POSTing them against an active Goal — they return to held, and the
+      // next inactive transition re-drains them in order.
+      if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
+        // Inline rather than `setQueuedPromptFlags`: that callback is
+        // declared below, so naming it here would read it before its
+        // initializer.
+        const reverted = queuedPromptsRef.current.map((item) =>
+          item.id === prompt.id ? { ...item, serverState: undefined } : item,
+        );
+        queuedPromptsRef.current = reverted;
+        setQueuedPrompts(reverted);
+        return Promise.resolve();
+      }
+      return submitPendingPrompt(prompt).catch(() => undefined);
+    },
+    [submitPendingPrompt],
   );
 
   const fallbackToPendingPrompt = useCallback(
@@ -1849,6 +1936,22 @@ export function useQueuedPrompts({
       if (holdQueuedPromptsLocallyRef.current) return true;
 
       if (!shouldInsertMidTurn) {
+        // A drain is still releasing older held prompts: append to its tail
+        // rather than POSTing past it. The chain exists because the prompt at
+        // its head may await media uploads for seconds; this prompt was typed
+        // inside that window — i.e. AFTER the rows still waiting — so sending
+        // it now would admit it ahead of them.
+        const chain = releaseChainRef.current;
+        if (chain && isCurrentOwnerTokenRef.current(chain.owner)) {
+          // Stamped `submitting` above but not yet POSTed: the same state the
+          // chain's own undrained rows are in, so record it as unreleased and
+          // an owner change stashes the text instead of losing it.
+          unreleasedPromptIdsRef.current.add(prompt.id);
+          chain.tail = chain.tail.then(() =>
+            releaseChainedPrompt(prompt, chain.owner),
+          );
+          return true;
+        }
         submitPendingPrompt(prompt);
         return true;
       }
@@ -1905,6 +2008,7 @@ export function useQueuedPrompts({
       canQueryMidTurn,
       fallbackToPendingPrompt,
       reconcileMidTurnMessages,
+      releaseChainedPrompt,
       reportError,
       restoreQueuedPromptsToEditor,
       sessionActions,
@@ -2013,62 +2117,39 @@ export function useQueuedPrompts({
       // Release serially: a prompt carrying media awaits its uploads before its
       // admission POST, so firing the whole batch at once lets a later plain
       // prompt overtake it and reach the daemon's queue out of order.
-      let release: Promise<void> | undefined;
+      //
       // The chain is built synchronously, but each link runs only after the
       // previous admission settles, so the session can change mid-drain.
       // Pinned here rather than read per link: the guard has to ask "is this
       // still the owner the chain was built for", not "is there an owner".
       const chainOwner = ownerTokenRef.current;
+      // A chain for this owner may still be draining (a hold that flipped on
+      // and back off re-drains the rows its links reverted). Extend it instead
+      // of racing it, so every release for one owner stays on one chain.
+      const liveChain = releaseChainRef.current;
+      const liveTail =
+        liveChain && isCurrentOwnerTokenRef.current(liveChain.owner)
+          ? liveChain.tail
+          : undefined;
+      let release: Promise<void> | undefined = liveTail;
       for (const id of localIds) unreleasedPromptIdsRef.current.add(id);
       for (const prompt of next) {
         if (!localIds.has(prompt.id)) continue;
-        // Re-check the hold per link, not once for the whole batch: the chain
-        // is built synchronously when the hold lifts, but each link runs only
-        // after the previous admission settles. A Goal resumed inside that
-        // window (or a write block) must stop the remaining links instead of
-        // POSTing them against an active Goal — they return to held, and the
-        // next inactive transition re-drains them in order.
-        const submit = () => {
-          // Owner changed mid-drain: `submitPrompt` would throw on the session
-          // mismatch before POSTing and the `.catch` below would swallow it,
-          // dropping the prompt silently. Bail and leave the rows alone — the
-          // owner-change effect has already stashed them for the session they
-          // were typed in, and touching state here would fight it.
-          //
-          // The id must stay in `unreleasedPromptIdsRef` on this path. The
-          // token is replaced in the render body while the stash is a passive
-          // effect flushed after commit, so a link firing in that window would
-          // otherwise leave a row that is neither locally held (it is stamped
-          // `submitting`) nor unreleased — and the stash drops exactly those.
-          if (!isCurrentOwnerTokenRef.current(chainOwner)) {
-            return Promise.resolve();
-          }
-          unreleasedPromptIdsRef.current.delete(prompt.id);
-          // Every path that removes a stamped row means cancellation: a queue
-          // clear mid-drain aborts the in-flight link's controller, but the
-          // links still pending have no controller yet, so only the row's
-          // absence tells them the user cleared what they were about to POST.
-          if (!queuedPromptsRef.current.some((item) => item.id === prompt.id)) {
-            return Promise.resolve();
-          }
-          if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
-            // Inline rather than `setQueuedPromptFlags`: that callback is
-            // declared below this effect, so naming it in the dep array would
-            // read it before its initializer.
-            const reverted = queuedPromptsRef.current.map((item) =>
-              item.id === prompt.id
-                ? { ...item, serverState: undefined }
-                : item,
-            );
-            queuedPromptsRef.current = reverted;
-            setQueuedPrompts(reverted);
-            return Promise.resolve();
-          }
-          return submitPendingPrompt(prompt).catch(() => undefined);
-        };
-        // The first release stays synchronous, so a single held prompt reaches
-        // the daemon exactly as it did before.
+        const submit = () => releaseChainedPrompt(prompt, chainOwner);
+        // With no chain already draining, the first release stays synchronous,
+        // so a single held prompt reaches the daemon exactly as it did before.
         release = release ? release.then(submit) : submit();
+      }
+      // Publish the tail so a prompt typed during the drain queues behind the
+      // rows it was typed after instead of POSTing past them.
+      if (release) {
+        if (liveChain && liveTail !== undefined) {
+          liveChain.tail = release;
+        } else {
+          const chain = { owner: chainOwner, tail: release };
+          releaseChainRef.current = chain;
+          retireChainWhenDrained(releaseChainRef, chain);
+        }
       }
     }
     if (!canQueryMidTurn) return;
@@ -2090,6 +2171,7 @@ export function useQueuedPrompts({
     writeBlocked,
     holdQueuedPromptsLocally,
     canQueryMidTurn,
+    releaseChainedPrompt,
     submitPendingPrompt,
     restoreQueuedPromptsToEditor,
     reconcileMidTurnMessages,

@@ -761,6 +761,44 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ).toEqual(['first with media', 'second plain']);
   });
 
+  it('holds a prompt typed mid-drain behind the release chain', async () => {
+    // The chain preserves order only inside the batch it drains. A prompt typed
+    // while it is still in flight used to POST immediately -- overtaking the
+    // older rows it was typed after, and, while link 1's uploads were still
+    // running, even starting the turn ahead of link 1 itself.
+    const { actions } = createActions();
+    const firstAdmission = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstAdmission.promise as never)
+      .mockResolvedValue({ promptId: 'later' } as never);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('first with media'));
+    act(() => latest.enqueuePrompt('second plain'));
+
+    render('idle', 'session-1', false, false, false);
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    // Typed inside the drain window: it must queue behind the chain, not race
+    // it. The row is still stamped `submitting` -- it is spoken for, just not
+    // POSTed yet.
+    act(() => latest.enqueuePrompt('typed during drain'));
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media']);
+
+    await act(async () => {
+      firstAdmission.resolve({ promptId: 'first' });
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    });
+
+    expect(
+      vi.mocked(actions.submitPrompt).mock.calls.map((call) => call[0]),
+    ).toEqual(['first with media', 'second plain', 'typed during drain']);
+  });
+
   it('stashes a chain link that bails before the owner change commits', async () => {
     // The owner token is replaced in the render body while the stash is a
     // passive effect flushed after commit. A link firing in that window used
