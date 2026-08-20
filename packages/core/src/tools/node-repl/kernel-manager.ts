@@ -5,7 +5,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +17,6 @@ import { prepareNodeReplCell } from './cell-transform.js';
 import {
   encodeFrame,
   FrameDecoder,
-  type CapabilityRequestMessage,
   type ExecResultMessage,
   type KernelToHostMessage,
   type NodeReplBindingKind,
@@ -37,10 +36,6 @@ const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
 const MAX_RAW_IMAGES = 64;
 const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
-const MAX_CAPABILITY_ARGS_CHARS = 1024 * 1024;
-const MAX_CAPABILITY_ID_CHARS = 128;
-const MAX_CAPABILITY_OPERATION_CHARS = 256;
-const MAX_CAPABILITY_REQUESTS_PER_EXEC = 4096;
 const CONSOLE_LEVELS = new Set(['log', 'info', 'warn', 'error', 'debug']);
 
 export interface NodeReplTextEvent {
@@ -88,25 +83,12 @@ export interface NodeReplExecRequest {
   signal?: AbortSignal;
 }
 
-export interface NodeReplCapabilityContext {
-  execId: string;
-  generation: number;
-  signal: AbortSignal;
-  generationSignal: AbortSignal;
-}
-
-export type NodeReplCapabilityHandler = (
-  args: unknown,
-  context: NodeReplCapabilityContext,
-) => unknown | Promise<unknown>;
-
 export interface KernelManagerOptions {
   cwd: string;
   homeDir: string;
   tmpRootDir: string;
   policy: NodeReplSecurityPolicy;
   readableRoots: string[];
-  capabilities?: Readonly<Record<string, NodeReplCapabilityHandler>>;
 }
 
 interface InflightExec {
@@ -122,8 +104,6 @@ interface InflightExec {
   imageChars: number;
   droppedStaleFrames: number;
   allowedBindingKinds: Map<string, NodeReplBindingKind>;
-  seenCapabilityRequests: Set<string>;
-  capabilityAbort: AbortController;
   settled: boolean;
   settle: (
     result:
@@ -136,8 +116,6 @@ interface KernelHandle {
   child: ChildProcess;
   pid: number;
   generation: number;
-  capabilityToken: string;
-  generationAbort: AbortController;
   toKernel: NodeJS.WritableStream;
 }
 
@@ -201,9 +179,6 @@ export class NodeReplKernelManager {
   private readonly bindingKinds = new Map<string, NodeReplBindingKind>();
   private readonly moduleRoots: NodeReplModuleRoot[];
   private readonly readableRoots: string[];
-  private readonly capabilities: Readonly<
-    Record<string, NodeReplCapabilityHandler>
-  >;
   private inflight: InflightExec | null = null;
   private operationChain: Promise<unknown> = Promise.resolve();
   private disposed = false;
@@ -223,12 +198,6 @@ export class NodeReplKernelManager {
         ),
       ),
     ];
-    this.capabilities = Object.freeze(
-      Object.assign(
-        Object.create(null) as Record<string, NodeReplCapabilityHandler>,
-        options.capabilities ?? {},
-      ),
-    );
   }
 
   getGeneration(): number {
@@ -315,7 +284,6 @@ export class NodeReplKernelManager {
     this.disposed = true;
     const inflight = this.inflight;
     if (inflight) {
-      inflight.capabilityAbort.abort();
       inflight.settle({
         hostStatus: 'cancelled',
         message: 'The node_repl task was disposed during execution.',
@@ -327,7 +295,6 @@ export class NodeReplKernelManager {
     const handle = this.kernel;
     this.kernel = null;
     if (handle) {
-      handle.generationAbort.abort();
       this.signalProcessTree(handle, true);
     }
     this.cleanupTmpDir();
@@ -406,8 +373,6 @@ export class NodeReplKernelManager {
           bindingKind,
         ]),
       ),
-      seenCapabilityRequests: new Set(),
-      capabilityAbort: new AbortController(),
       settled: false,
       settle: () => undefined,
     };
@@ -490,7 +455,6 @@ export class NodeReplKernelManager {
     const terminal = await settled;
     clearTimeout(timeout);
     request.signal?.removeEventListener('abort', onAbort);
-    inflight.capabilityAbort.abort();
     if (this.inflight === inflight) this.inflight = null;
 
     if ('hostStatus' in terminal) {
@@ -543,7 +507,6 @@ export class NodeReplKernelManager {
     const handle = this.kernel;
     this.kernel = null;
     if (handle) {
-      handle.generationAbort.abort();
       await this.terminateHandle(handle);
     }
     debugLogger.debug(`[node-repl] reset (generation=${this.generation})`);
@@ -581,8 +544,6 @@ export class NodeReplKernelManager {
       child,
       pid: child.pid,
       generation: this.generation,
-      capabilityToken: randomBytes(32).toString('hex'),
-      generationAbort: new AbortController(),
       toKernel: child.stdio[4] as NodeJS.WritableStream,
     };
     this.kernel = handle;
@@ -624,7 +585,6 @@ export class NodeReplKernelManager {
         encodeFrame({
           type: 'init',
           generation: handle.generation,
-          capabilityToken: handle.capabilityToken,
           cwd: this.options.cwd,
           homeDir: this.options.homeDir,
           tmpDir: this.sessionTmpDir,
@@ -646,7 +606,6 @@ export class NodeReplKernelManager {
         `[node-repl] spawned (generation=${handle.generation}, pid=${handle.pid})`,
       );
     } catch (error) {
-      handle.generationAbort.abort();
       if (this.kernel === handle) {
         this.kernel = null;
         this.advanceGeneration();
@@ -729,12 +688,6 @@ export class NodeReplKernelManager {
         else pending.reject(new Error(message.error ?? 'module root rejected'));
         return;
       }
-      case 'capabilityRequest':
-        void this.handleCapabilityRequest(
-          handle,
-          message as CapabilityRequestMessage,
-        );
-        return;
       case 'audit': {
         const trustedEntry = this.options.policy
           .getTrustedPackages()
@@ -902,145 +855,6 @@ export class NodeReplKernelManager {
     this.collectText(this.inflight.execId, kind, chunk.toString('utf8'), kind);
   }
 
-  private async handleCapabilityRequest(
-    handle: KernelHandle,
-    message: CapabilityRequestMessage,
-  ): Promise<void> {
-    if (
-      typeof message.capabilityRequestId !== 'string' ||
-      message.capabilityRequestId.length === 0 ||
-      message.capabilityRequestId.length > MAX_CAPABILITY_ID_CHARS ||
-      hasControlCharacters(message.capabilityRequestId)
-    ) {
-      this.handleProtocolError(
-        handle,
-        new Error('invalid capability request id'),
-      );
-      return;
-    }
-    const reject = (error: string) => {
-      this.sendCapabilityResult(handle, message.capabilityRequestId, false, {
-        error,
-      });
-    };
-    if (
-      typeof message.operation !== 'string' ||
-      message.operation.length === 0 ||
-      message.operation.length > MAX_CAPABILITY_OPERATION_CHARS ||
-      hasControlCharacters(message.operation) ||
-      typeof message.argsJson !== 'string' ||
-      typeof message.capabilityToken !== 'string' ||
-      message.capabilityToken.length > MAX_CAPABILITY_ID_CHARS ||
-      typeof message.execId !== 'string' ||
-      message.execId.length === 0 ||
-      message.execId.length > MAX_CAPABILITY_ID_CHARS ||
-      !Number.isSafeInteger(message.generation) ||
-      message.generation < 1
-    ) {
-      reject('invalid capability request');
-      return;
-    }
-    const inflight = this.inflight;
-    if (
-      !inflight ||
-      inflight.execId !== message.execId ||
-      inflight.generation !== message.generation ||
-      handle.generation !== message.generation ||
-      !this.tokenMatches(handle.capabilityToken, message.capabilityToken)
-    ) {
-      reject('capability request is not owned by the live generation');
-      return;
-    }
-    if (inflight.seenCapabilityRequests.has(message.capabilityRequestId)) {
-      reject('duplicate capability request id');
-      return;
-    }
-    if (
-      inflight.seenCapabilityRequests.size >= MAX_CAPABILITY_REQUESTS_PER_EXEC
-    ) {
-      reject('too many capability requests in one execution');
-      return;
-    }
-    inflight.seenCapabilityRequests.add(message.capabilityRequestId);
-    if (message.argsJson.length > MAX_CAPABILITY_ARGS_CHARS) {
-      reject('capability arguments are too large');
-      return;
-    }
-    const handler = this.capabilities[message.operation];
-    if (!handler) {
-      reject('host capability is not registered');
-      return;
-    }
-    let args: unknown;
-    try {
-      args = JSON.parse(message.argsJson);
-    } catch {
-      reject('capability arguments are not valid JSON');
-      return;
-    }
-    debugLogger.debug(
-      `[node-repl] capability allowed (operation=${message.operation}, generation=${inflight.generation})`,
-    );
-    try {
-      const result = await handler(args, {
-        execId: inflight.execId,
-        generation: inflight.generation,
-        signal: inflight.capabilityAbort.signal,
-        generationSignal: handle.generationAbort.signal,
-      });
-      if (
-        this.kernel !== handle ||
-        this.inflight !== inflight ||
-        inflight.capabilityAbort.signal.aborted
-      ) {
-        return;
-      }
-      const resultJson = JSON.stringify(result ?? null);
-      this.sendCapabilityResult(handle, message.capabilityRequestId, true, {
-        resultJson,
-      });
-    } catch (error) {
-      if (
-        this.kernel !== handle ||
-        this.inflight !== inflight ||
-        inflight.capabilityAbort.signal.aborted
-      ) {
-        return;
-      }
-      reject(safeErrorMessage(error));
-    }
-  }
-
-  private sendCapabilityResult(
-    handle: KernelHandle,
-    capabilityRequestId: string,
-    ok: boolean,
-    detail: { resultJson?: string; error?: string },
-  ): void {
-    if (this.kernel !== handle) return;
-    try {
-      handle.toKernel.write(
-        encodeFrame({
-          type: 'capabilityResult',
-          capabilityRequestId,
-          ok,
-          ...detail,
-        }),
-      );
-    } catch (error) {
-      this.handleProtocolError(handle, error as Error);
-    }
-  }
-
-  private tokenMatches(expected: string, actual: string): boolean {
-    const expectedBytes = Buffer.from(expected);
-    const actualBytes = Buffer.from(actual);
-    return (
-      expectedBytes.length === actualBytes.length &&
-      timingSafeEqual(expectedBytes, actualBytes)
-    );
-  }
-
   private async sendAddRoot(root: NodeReplModuleRoot): Promise<void> {
     const handle = this.kernel;
     if (!handle) return;
@@ -1096,11 +910,9 @@ export class NodeReplKernelManager {
     if (this.kernel !== handle) return;
     this.kernel = null;
     this.bindingKinds.clear();
-    handle.generationAbort.abort();
     this.advanceGeneration();
     this.rejectPending('node_repl kernel exited');
     const inflight = this.inflight;
-    inflight?.capabilityAbort.abort();
     inflight?.settle({
       hostStatus: 'crashed',
       message: `The node_repl kernel exited (code=${String(code)}, signal=${String(signal)}); bindings were lost.`,
@@ -1116,9 +928,7 @@ export class NodeReplKernelManager {
     );
     this.kernel = null;
     this.bindingKinds.clear();
-    handle.generationAbort.abort();
     this.advanceGeneration();
-    this.inflight?.capabilityAbort.abort();
     this.rejectPending('node_repl generation was revoked');
     await this.terminateHandle(handle);
   }

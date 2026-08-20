@@ -39,10 +39,10 @@ function canonicalizeFuturePath(filePath: string): string {
  * canonical package target, package name, entry path, and every loaded-file
  * sha256 match a host-configured entry.
  * Model code and model-supplied paths (node_repl_add_node_module_dir) can
- * never create or widen privilege — they only add ordinary resolution roots.
+ * never create or widen trust — they only add ordinary resolution roots.
  *
- * Phase 1 ships with an empty trusted set. Activating this generic mechanism
- * later requires an explicit host policy. SDKs use normal package loading.
+ * Production ships with an empty trusted set. Activating this mechanism
+ * requires an explicit host policy.
  */
 export class NodeReplSecurityPolicy {
   private readonly trusted: TrustedPackageEntry[];

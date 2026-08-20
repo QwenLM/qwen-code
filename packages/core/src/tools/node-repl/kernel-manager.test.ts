@@ -38,7 +38,7 @@ function texts(outcome: NodeReplExecOutcome): string[] {
 
 function makeManager(
   overrides: Partial<
-    Pick<KernelManagerOptions, 'policy' | 'capabilities' | 'readableRoots'>
+    Pick<KernelManagerOptions, 'policy' | 'readableRoots'>
   > = {},
 ): NodeReplKernelManager {
   return new NodeReplKernelManager({
@@ -1148,17 +1148,14 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'allows only a hash-pinned host package to use an exact host capability',
+    'loads a hash-pinned package without exposing a host capability broker',
     async () => {
       const root = path.join(workDir, 'node_modules');
       const source = [
         'let calls = 0;',
-        'export const privileged = typeof nodeRepl.callHost === "function";',
+        'export const hostBridge = typeof nodeRepl.callHost;',
         'export const runtimeFrozen = Object.isFrozen(nodeRepl);',
         'export const processFacade = [typeof process, typeof process.cwd, Object.keys(process.env).length].join("/");',
-        'export async function echo(value) { return nodeRepl.callHost("fixture.echo", { value }); }',
-        'export async function unknown() { return nodeRepl.callHost("fixture.missing", null); }',
-        'export async function inherited() { return nodeRepl.callHost("constructor", { escaped: true }); }',
         'export function bump() { return ++calls; }',
       ].join('\n');
       const entry = createEsmPackage(root, 'trusted-fixture', source);
@@ -1166,8 +1163,6 @@ describe('NodeReplKernelManager', () => {
       const digest = createHash('sha256')
         .update(fs.readFileSync(entry))
         .digest('hex');
-      const executionSignals: AbortSignal[] = [];
-      const generationSignals: AbortSignal[] = [];
       manager.dispose();
       manager = makeManager({
         policy: new NodeReplSecurityPolicy([
@@ -1178,13 +1173,6 @@ describe('NodeReplKernelManager', () => {
             entrySha256: digest,
           },
         ]),
-        capabilities: {
-          'fixture.echo': (args, context) => {
-            executionSignals.push(context.signal);
-            generationSignals.push(context.generationSignal);
-            return { echoed: args };
-          },
-        },
       });
       expect(manager.getModuleRoots()).toEqual([]);
       expect(
@@ -1199,58 +1187,23 @@ describe('NodeReplKernelManager', () => {
         [
           'const fixture = await import("trusted-fixture");',
           'let constructorProbe;',
-          'try { fixture.echo.constructor("return process")(); } catch (error) { constructorProbe = error.name; }',
-          'const echoed = await fixture.echo("ok");',
-          'nodeRepl.write(`${fixture.privileged}|${fixture.runtimeFrozen}|${Object.isFrozen(nodeRepl)}|${fixture.processFacade}|${typeof nodeRepl.callHost}|${constructorProbe}|${echoed.echoed.value}|${fixture.bump()}`);',
+          'try { fixture.bump.constructor("return process")(); } catch (error) { constructorProbe = error.name; }',
+          'nodeRepl.write(`${fixture.hostBridge}|${fixture.runtimeFrozen}|${Object.isFrozen(nodeRepl)}|${fixture.processFacade}|${typeof nodeRepl.callHost}|${constructorProbe}|${fixture.bump()}`);',
         ].join('\n'),
       );
       expect(result.status).toBe('ok');
       expect(texts(result)).toEqual([
-        'true|true|true|object/function/0|undefined|EvalError|ok|1',
+        'undefined|true|true|object/function/0|undefined|EvalError|1',
       ]);
-      expect(executionSignals[0]?.aborted).toBe(true);
-      expect(generationSignals[0]?.aborted).toBe(false);
-
-      const denied = await run(
-        [
-          'let capabilityErrorProbe;',
-          'let capabilityMessage;',
-          'const cachedCall = fixture.bump();',
-          'try { await fixture.unknown(); } catch (error) {',
-          '  capabilityMessage = error.message;',
-          '  try { error.constructor.constructor("return process")(); } catch (inner) { capabilityErrorProbe = inner.name; }',
-          '}',
-          'nodeRepl.write(`${capabilityMessage}|${capabilityErrorProbe}|${cachedCall}`);',
-        ].join('\n'),
-      );
-      expect(denied.status).toBe('ok');
-      expect(texts(denied)[0]).toMatch(/not registered\|EvalError\|2/);
-
-      const inherited = await run(
-        [
-          'let inheritedMessage;',
-          'try { await fixture.inherited(); } catch (error) { inheritedMessage = error.message; }',
-          'nodeRepl.write(inheritedMessage);',
-        ].join('\n'),
-      );
-      expect(inherited.status).toBe('ok');
-      expect(texts(inherited)).toEqual(['host capability is not registered']);
 
       await manager.reset();
-      expect(generationSignals[0]?.aborted).toBe(true);
       const resetSingleton = await run(
         [
           'const fixture = await import("trusted-fixture");',
-          'const echoed = await fixture.echo("again");',
-          'nodeRepl.write(`${fixture.bump()}|${echoed.echoed.value}`);',
+          'nodeRepl.write(`${fixture.bump()}|${fixture.hostBridge}`);',
         ].join('\n'),
       );
-      expect(texts(resetSingleton)).toEqual(['1|again']);
-      expect(executionSignals[1]?.aborted).toBe(true);
-      expect(generationSignals[1]).not.toBe(generationSignals[0]);
-      expect(generationSignals[1]?.aborted).toBe(false);
-      manager.dispose();
-      expect(generationSignals[1]?.aborted).toBe(true);
+      expect(texts(resetSingleton)).toEqual(['1|undefined']);
     },
     TEST_TIMEOUT,
   );
@@ -1271,7 +1224,7 @@ describe('NodeReplKernelManager', () => {
         root,
         'external-trusted-fixture',
         [
-          'export const privileged = typeof nodeRepl.callHost === "function";',
+          'export const hostBridge = typeof nodeRepl.callHost;',
           'export const dependency = async () => (await import("external-trusted-dependency")).value;',
         ].join('\n'),
       );
@@ -1292,89 +1245,14 @@ describe('NodeReplKernelManager', () => {
 
       try {
         const result = await run(
-          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(`${fixture.privileged}|${await fixture.dependency()}`);',
+          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(`${fixture.hostBridge}|${await fixture.dependency()}`);',
         );
         expect(result.status).toBe('ok');
-        expect(texts(result)).toEqual(['true|7']);
+        expect(texts(result)).toEqual(['undefined|7']);
       } finally {
         manager.dispose();
         fs.rmSync(trustedParent, { recursive: true, force: true });
       }
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'authenticates capability requests against the live execution',
-    async () => {
-      let calls = 0;
-      manager.dispose();
-      manager = makeManager({
-        capabilities: {
-          'fixture.echo': () => {
-            calls += 1;
-            return null;
-          },
-        },
-      });
-      const pending = run(
-        'await new Promise((resolve) => setTimeout(resolve, 1000));',
-      );
-      const internals = manager as unknown as {
-        kernel: { capabilityToken: string; generation: number } | null;
-        inflight: { execId: string } | null;
-        handleFrame: (handle: object, frame: unknown) => void;
-      };
-      for (let attempt = 0; attempt < 200; attempt++) {
-        if (internals.kernel && internals.inflight) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      const handle = internals.kernel;
-      const inflight = internals.inflight;
-      expect(handle).not.toBeNull();
-      expect(inflight).not.toBeNull();
-      if (!handle || !inflight) throw new Error('execution did not start');
-
-      const base = {
-        type: 'capabilityRequest',
-        capabilityToken: handle.capabilityToken,
-        generation: handle.generation,
-        execId: inflight.execId,
-        operation: 'fixture.echo',
-        argsJson: 'null',
-      };
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'wrong-token',
-        capabilityToken: 'wrong',
-      });
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'wrong-generation',
-        generation: handle.generation + 1,
-      });
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'stale-execution',
-        execId: 'stale',
-      });
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'unknown-operation',
-        operation: 'fixture.missing',
-      });
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'duplicate',
-      });
-      internals.handleFrame(handle, {
-        ...base,
-        capabilityRequestId: 'duplicate',
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(calls).toBe(1);
-      expect((await pending).status).toBe('ok');
     },
     TEST_TIMEOUT,
   );
@@ -1625,63 +1503,6 @@ describe('NodeReplKernelManager', () => {
       const changed = await run('await import("trusted-multifile");');
       expect(changed.status).toBe('error');
       expect(changed.error?.message).toMatch(/sha256 verification/);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'revokes an in-flight trusted request when execution is cancelled',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const source =
-        'export async function wait() { return nodeRepl.callHost("fixture.wait", null); }';
-      const entry = createEsmPackage(root, 'waiting-fixture', source);
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      let hostSignalAborted = false;
-      let markHostStarted: (() => void) | undefined;
-      const hostStarted = new Promise<void>((resolve) => {
-        markHostStarted = resolve;
-      });
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'waiting-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-        capabilities: {
-          'fixture.wait': (_args, context) => {
-            markHostStarted?.();
-            return new Promise((resolve) => {
-              context.signal.addEventListener(
-                'abort',
-                () => {
-                  hostSignalAborted = true;
-                  resolve(null);
-                },
-                { once: true },
-              );
-            });
-          },
-        },
-      });
-      const controller = new AbortController();
-      const pending = manager.exec({
-        code: 'const fixture = await import("waiting-fixture"); await fixture.wait();',
-        timeoutMs: EXEC_TIMEOUT,
-        signal: controller.signal,
-      });
-      await hostStarted;
-      controller.abort();
-      const result = await pending;
-      expect(result.status).toBe('cancelled');
-      expect(hostSignalAborted).toBe(true);
-      expect(manager.getKernelPid()).toBeNull();
     },
     TEST_TIMEOUT,
   );

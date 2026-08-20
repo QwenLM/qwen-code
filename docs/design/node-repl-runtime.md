@@ -1,9 +1,7 @@
 # Session-Persistent Node REPL Runtime
 
-Issue: QwenLM/qwen-code#9333. This is phase 1 of the persistent-kernel
-Computer Use roadmap. #9334 modifies cua-driver and wraps it as an independent
-JavaScript SDK. #9335 adds the Skill that guides Qwen Code to load and call that
-SDK through Node REPL. This phase contains only the general Node REPL.
+Issue: QwenLM/qwen-code#9333. This design covers only the general persistent
+Node REPL runtime.
 
 ## Scope
 
@@ -19,14 +17,14 @@ They are registered through the regular tool registry. Deliberately minimal
 deferred family.
 
 There is no MCP prerequisite, external install, `functions.exec`, nested Qwen
-tool calling, `qwenSession` global, Computer Use API, cua-driver, or browser API
-in this change. Like the reference runtime, imported Node builtins and packages
-retain their normal Node capabilities.
+tool calling, `qwenSession` global, or browser API in this change. Like the
+reference runtime, imported Node builtins and packages retain their normal Node
+capabilities.
 
 The behavioral reference is the Codex `node_repl` contract observed while
 planning #9333. The implementation is clean-room: no Codex runtime source,
-binary, private package, or Computer Use Skill text is copied or shipped.
-Generic model-facing REPL guidance may be adapted to the Qwen tool names.
+binary, or private package is copied or shipped. Generic model-facing REPL
+guidance may be adapted to the Qwen tool names.
 
 ## Ownership and process topology
 
@@ -44,7 +42,7 @@ Config / ToolRegistry (one Qwen task/session)
 
 The tool-family closure owns the manager. A separate `Config` creates a
 separate closure and therefore a separate process, binding store, module-root
-list, output collector, temp directory, trust policy, token, and generation.
+list, output collector, temp directory, trust policy, and generation.
 `ToolRegistry.stop()` disposes every loaded member of the family; manager
 disposal is idempotent.
 
@@ -76,8 +74,7 @@ newly added and `false` when it was already registered.
 The `node_repl` description tells the model about the 30-second default,
 top-level await, persistent bindings, redeclaration strategies, dynamic
 imports, Node-compatible package loading, reset, partial commit, and the public
-`nodeRepl` APIs. It does not claim Browser, Chrome, Computer Use, or nested-tool
-capabilities.
+`nodeRepl` APIs. It does not claim browser or nested-tool capabilities.
 
 ## Cell semantics
 
@@ -207,9 +204,8 @@ automatically. #9333 adds no memory threshold, watchdog, LRU, automatic reset,
 or automatic process kill.
 
 Timers and console methods are also context-realm wrappers. Each timer is
-tagged with the current execution id. Once an execution is sealed, output and
-privileged requests carrying that id are rejected rather than reassigned to a
-later call.
+tagged with the current execution id. Once an execution is sealed, output
+carrying that id is rejected rather than reassigned to a later call.
 
 ## Module loading
 
@@ -243,12 +239,12 @@ require each configured root to still resolve to its pinned canonical path.
 Symlinks cannot move either a root or a file outside the host-approved target
 after validation.
 
-## Trusted context and host bridge
+## Trusted package context
 
 The trusted-package registry is empty in production for #9333. Tests register
-one temporary package and one fake capability. #9334 and #9335 do not use this
-bridge: the independent SDK follows the ordinary Node package import path.
-Activating a production privileged package remains a separate design decision.
+one temporary package to verify the context boundary observed in the reference
+runtime. There is no generic host capability broker. Activating a production
+trusted package remains a separate design decision.
 
 Trust requires all of the following:
 
@@ -261,7 +257,7 @@ Trust requires all of the following:
 - the entry SHA-256 matches the host-provided digest.
 
 Every additional trusted file is pinned by canonical path and SHA-256. A
-host-configured trusted package name is its only privileged entry. A model
+host-configured trusted package name is its only trusted entry. A model
 cannot bypass that decision with a `file:` URL or relative path into a trusted
 package directory. Registering an ordinary module root also cannot shadow or
 widen a same-named trusted entry.
@@ -269,31 +265,13 @@ widen a same-named trusted entry.
 Model-provided roots are never trust inputs. A matching package loads in the
 separate trusted context. An import crossing between contexts is represented
 by a `SyntheticModule` in the importing context after the target module has
-evaluated. Trust affects access to the privileged bridge, not whether an
-ordinary sibling package can be resolved through the normal cwd/module-root
-search path.
+evaluated. Trust selects the execution context and restricted process facade;
+it does not affect whether an ordinary sibling package can be resolved through
+the normal cwd/module-root search path.
 
-The trusted context receives its own frozen `nodeRepl`. Its public runtime
-methods match the normal object, and it additionally has an internal
-`callHost(operation, args)` method for trusted packages. The method serializes
-arguments in the trusted realm and sends a capability request through the
-kernel protocol. The parent validates:
-
-- a cryptographically random token generated for this process generation;
-- the current generation;
-- the current execution id;
-- a unique capability-request id;
-- an exact operation name present in the manager's capability map.
-
-The token remains in the child host and protocol code; it is not inserted into
-either VM. Results cross the boundary as JSON, not as parent functions,
-streams, handles, or arbitrary objects. Reset, timeout, cancellation, crash,
-and disposal reject pending requests and revoke the old token/generation.
-Capability handlers receive both an execution-scoped abort signal and a
-generation-scoped abort signal. The former seals one Cell; the latter remains
-live across Cells and is aborted on reset, timeout, cancellation, crash, or
-task disposal. This defines revocation semantics without creating or owning a
-desktop session in #9333.
+The trusted context receives the same frozen public `nodeRepl` API as the
+ordinary context. It does not receive a hidden `callHost` method or any other
+Qwen capability surface.
 
 Every host-callback failure and dynamic-loader failure is converted to a new
 `Error` owned by the receiving VM realm before model code can catch it. This
@@ -301,33 +279,24 @@ prevents a rejected host promise or filesystem error from leaking a parent
 Realm constructor path into either context.
 
 The trusted context exposes only a frozen process facade containing inert
-metadata required by the phase-1 fixture. It has no `binding`, `mainModule`,
+metadata required by the trusted-package fixture. It has no `binding`, `mainModule`,
 stdio, exit/kill/signal control, unrestricted environment, or parent process
 object. Both VM contexts use `codeGeneration: { strings: false, wasm: false }`.
 
-The trusted package's reviewed public namespace is the intended capability
-surface visible to model code. Cross-realm constructor/prototype paths cannot
-expose the privileged global or broker itself.
+Cross-realm constructor/prototype paths cannot expose the trusted global.
 
 ## Protocol
 
 NDJSON frames are length-checked incrementally. Host-to-kernel frames are
-`init`, `exec`, `addModuleRoot`, `capabilityResult`, and `shutdown`.
+`init`, `exec`, `addModuleRoot`, and `shutdown`.
 Kernel-to-host frames are `ready`, ordered output events, `execResult`,
-`addModuleRootResult`, `capabilityRequest`, trusted-module `audit`, and
-`fatal`.
-
-Every capability request carries its token, generation, execution id, unique
-request id, and operation; capability results correlate by that request id.
-Unknown message types, oversized frames, and invalid JSON are protocol
-failures. Invalid capability owners are rejected, and already-revoked stale
-results are dropped. A protocol failure makes the current process unusable;
-the manager kills it and advances generation.
+`addModuleRootResult`, trusted-module `audit`, and `fatal`. Unknown message
+types, oversized frames, and invalid JSON are protocol failures. A protocol
+failure makes the current process unusable; the manager kills it and advances
+generation.
 
 Debug logging records process-generation revocation, non-content execution
-statistics, hash-pinned trusted-module loads, and approved capability
-operations. It does not log capability arguments, results, user output, or
-the generation token.
+statistics, and hash-pinned trusted-module loads. It does not log user output.
 
 ## Output layers
 
@@ -385,7 +354,6 @@ with older CLI packages that predate `node_repl`.
 
 ## Deliberate non-goals
 
-- production Computer Use capabilities;
 - hard-sandbox claims for Node `vm`;
 - memory pressure policy;
 - automatic output persistence outside normal ToolResult handling;

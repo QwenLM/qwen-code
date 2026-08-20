@@ -10,7 +10,7 @@ import process from 'node:process';
 import v8 from 'node:v8';
 import { Buffer } from 'node:buffer';
 import { StringDecoder } from 'node:string_decoder';
-import { randomUUID, webcrypto } from 'node:crypto';
+import { webcrypto } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import path from 'node:path';
 import { URL, URLSearchParams, fileURLToPath } from 'node:url';
@@ -42,7 +42,6 @@ const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_PERCENT_ENCODED_IMAGE_CHARS = MAX_IMAGE_BYTES * 3;
 const MAX_RAW_IMAGES = 64;
 const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
-const MAX_PENDING_CAPABILITIES = 4096;
 const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
 const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
@@ -60,7 +59,6 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
 
 let config = null;
 let generation = 0;
-let capabilityToken = '';
 let untrustedContext = null;
 let trustedContext = null;
 let loader = null;
@@ -69,7 +67,6 @@ let activeExec = null;
 let operationChain = Promise.resolve();
 let shuttingDown = false;
 
-const pendingCapabilities = new Map();
 const timers = new Map();
 let nextTimerId = 1;
 
@@ -357,48 +354,6 @@ function resolveImagePayload(payload) {
   return { data: buffer.toString('base64'), mimeType: sniffed };
 }
 
-function rejectCapabilitiesForExec(execId, message) {
-  for (const [requestId, pending] of pendingCapabilities) {
-    if (pending.execId !== execId) continue;
-    pendingCapabilities.delete(requestId);
-    pending.reject(new Error(message));
-  }
-}
-
-function rejectAllCapabilities(message) {
-  for (const pending of pendingCapabilities.values()) {
-    pending.reject(new Error(message));
-  }
-  pendingCapabilities.clear();
-}
-
-function callHostCapability(operation, argsJson) {
-  const execId = currentExecId();
-  if (!execId || !activeExec || activeExec.execId !== execId) {
-    return Promise.reject(
-      new Error('host capabilities require a live node_repl execution'),
-    );
-  }
-  if (pendingCapabilities.size >= MAX_PENDING_CAPABILITIES) {
-    return Promise.reject(
-      new Error('too many concurrent host capability requests'),
-    );
-  }
-  const capabilityRequestId = randomUUID();
-  return new Promise((resolve, reject) => {
-    pendingCapabilities.set(capabilityRequestId, { execId, resolve, reject });
-    send({
-      type: 'capabilityRequest',
-      capabilityToken,
-      generation,
-      execId,
-      capabilityRequestId,
-      operation: String(operation),
-      argsJson: String(argsJson),
-    });
-  });
-}
-
 function scheduleTimer(callback, delay, repeat) {
   const execId = currentExecId();
   const timerId = nextTimerId++;
@@ -465,7 +420,6 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
-const intrinsicJSONStringify = JSON.stringify;
 const intrinsicJSONParse = JSON.parse;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
@@ -556,25 +510,6 @@ const runtime = {
   },
 };
 
-if (privileged) {
-  intrinsicObjectDefineProperty(runtime, 'callHost', {
-    enumerable: false,
-    value: async function callHost(operation, args) {
-      if (typeof operation !== 'string' || operation.length === 0) {
-        throw new TypeError('host capability operation must be a non-empty string');
-      }
-      const argsJson = intrinsicJSONStringify(args === undefined ? null : args);
-      let resultJson;
-      try {
-        resultJson = await bridge.callHost(operation, argsJson);
-      } catch (error) {
-        throw bridgeError(error);
-      }
-      return intrinsicJSONParse(resultJson);
-    },
-  });
-}
-
 deepFreeze(runtime);
 
 const consoleObject = {};
@@ -626,7 +561,7 @@ intrinsicObjectDefineProperties(globalThis, {
   clearInterval: { value: clearTimerWrapper, enumerable: true },
 });
 
-if (privileged) {
+if (trusted) {
   const processFacade = deepFreeze({
     pid: intrinsicNumber(metadata.pid),
     platform: intrinsicString(metadata.platform),
@@ -644,7 +579,7 @@ if (privileged) {
 
 `;
 
-function createContext(name, privileged) {
+function createContext(name, trusted) {
   const context = vm.createContext(Object.create(null), {
     name,
     codeGeneration: { strings: false, wasm: false },
@@ -694,13 +629,10 @@ function createContext(name, privileged) {
     },
     scheduleTimer,
     cancelTimer,
-    callHost: privileged
-      ? (operation, argsJson) => callHostCapability(operation, argsJson)
-      : undefined,
   });
   const bootstrap = vm.compileFunction(
     BOOTSTRAP_SOURCE,
-    ['bridge', 'metadata', 'privileged'],
+    ['bridge', 'metadata', 'trusted'],
     { parsingContext: context, filename: '<node-repl-bootstrap>' },
   );
   bootstrap(
@@ -715,7 +647,7 @@ function createContext(name, privileged) {
       version: process.version,
       nodeVersion: process.versions.node,
     },
-    privileged,
+    trusted,
   );
   return context;
 }
@@ -725,14 +657,7 @@ function initialize(message) {
   if (!Number.isInteger(message.generation) || message.generation < 1) {
     throw new Error('invalid kernel generation');
   }
-  if (
-    typeof message.capabilityToken !== 'string' ||
-    message.capabilityToken.length < 32
-  ) {
-    throw new Error('invalid capability token');
-  }
   generation = message.generation;
-  capabilityToken = message.capabilityToken;
   config = {
     cwd: String(message.cwd),
     homeDir: String(message.homeDir),
@@ -881,10 +806,6 @@ async function handleExec(message) {
       ...(described.stack ? { errorStack: described.stack } : {}),
     });
   } finally {
-    rejectCapabilitiesForExec(
-      message.execId,
-      'node_repl execution ended before the capability returned',
-    );
     activeExec = null;
   }
 }
@@ -909,22 +830,10 @@ function handleAddModuleRoot(message) {
   });
 }
 
-function handleCapabilityResult(message) {
-  const pending = pendingCapabilities.get(message.capabilityRequestId);
-  if (!pending) return;
-  pendingCapabilities.delete(message.capabilityRequestId);
-  if (message.ok && typeof message.resultJson === 'string') {
-    pending.resolve(message.resultJson);
-  } else {
-    pending.reject(new Error(message.error || 'host capability failed'));
-  }
-}
-
 function shutdown(removeSessionTmpDir = false) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearAllTimers();
-  rejectAllCapabilities('node_repl kernel shut down');
   if (removeSessionTmpDir) {
     try {
       if (config?.tmpDir) {
@@ -948,10 +857,6 @@ function fatal(error) {
 function routeMessage(message) {
   if (!message || typeof message !== 'object') {
     throw new Error('protocol message must be an object');
-  }
-  if (message.type === 'capabilityResult') {
-    handleCapabilityResult(message);
-    return;
   }
   if (message.type === 'shutdown') {
     shutdown();

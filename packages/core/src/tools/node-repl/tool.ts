@@ -424,8 +424,8 @@ export class NodeReplAddNodeModuleDirTool extends BaseDeclarativeTool<
         'inside it can be imported with dynamic import() in ' +
         'node_repl. Registration persists across node_repl_reset for the ' +
         'rest of the task. Returns true when newly added and false when the ' +
-        'same root was already registered. It does not grant access to the ' +
-        'privileged nodeRepl bridge.',
+        'same root was already registered. It does not mark packages as ' +
+        'trusted.',
       Kind.Execute,
       {
         type: 'object',

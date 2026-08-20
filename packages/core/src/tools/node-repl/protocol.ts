@@ -45,7 +45,6 @@ export interface TrustedPackageEntry {
 export interface InitMessage {
   type: 'init';
   generation: number;
-  capabilityToken: string;
   cwd: string;
   homeDir: string;
   tmpDir: string;
@@ -73,14 +72,6 @@ export interface AddModuleRootMessage {
   root: NodeReplModuleRoot;
 }
 
-export interface CapabilityResultMessage {
-  type: 'capabilityResult';
-  capabilityRequestId: string;
-  ok: boolean;
-  resultJson?: string;
-  error?: string;
-}
-
 export interface ShutdownMessage {
   type: 'shutdown';
 }
@@ -89,7 +80,6 @@ export type HostToKernelMessage =
   | InitMessage
   | ExecMessage
   | AddModuleRootMessage
-  | CapabilityResultMessage
   | ShutdownMessage;
 
 export interface ReadyMessage {
@@ -132,16 +122,6 @@ export interface AddModuleRootResultMessage {
   error?: string;
 }
 
-export interface CapabilityRequestMessage {
-  type: 'capabilityRequest';
-  capabilityToken: string;
-  generation: number;
-  execId: string | null;
-  capabilityRequestId: string;
-  operation: string;
-  argsJson: string;
-}
-
 export interface TrustedModuleAuditMessage {
   type: 'audit';
   event: 'trustedModuleLoaded';
@@ -164,7 +144,6 @@ export type KernelToHostMessage =
   | ImageMessage
   | ExecResultMessage
   | AddModuleRootResultMessage
-  | CapabilityRequestMessage
   | TrustedModuleAuditMessage
   | FatalMessage;
 

@@ -53,7 +53,7 @@ describe('NodeReplTool', () => {
     expect(schema['required']).toEqual(['code']);
     expect(tool.description).toContain('top-level await');
     expect(tool.description).toContain('nodeRepl.getHeapStatus()');
-    expect(tool.description).not.toMatch(/browser|chrome|computer use/i);
+    expect(tool.description).not.toMatch(/browser|chrome/i);
   });
 
   it('validates code, timeout, title, and unknown properties', () => {

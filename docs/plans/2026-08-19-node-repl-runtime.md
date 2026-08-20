@@ -4,11 +4,10 @@ Issue: QwenLM/qwen-code#9333
 
 ## Delivery boundary
 
-Deliver one focused phase-1 change: three deferred built-in tools, one
+Deliver one focused #9333 change: three deferred built-in tools, one
 task-owned Node child, fresh SourceTextModule cells with `@prev` persistence,
 process-level reset, output conversion, heap status, and an empty-by-default
-trusted-context bridge. Do not include #9334 cua-driver/SDK work or #9335
-Skill work that calls the independent SDK through Node REPL.
+trusted-package context matching the observed reference behavior.
 
 ## Sequence
 
@@ -49,19 +48,17 @@ Skill work that calls the independent SDK through Node REPL.
      preserving images.
    - Add synchronous `getHeapStatus()` without policy side effects.
 
-5. **Implement the trusted bridge**
-   - Keep model-added roots outside the privileged-package policy.
+5. **Implement the trusted package boundary**
+   - Keep model-added roots outside the trusted-package policy.
    - Classify host entries by package name, pinned canonical root, entry path,
      and SHA-256; reject roots whose realpath target changes after approval.
    - Pin workspace-symlink package targets and every allowed package file;
      load bare dependencies and Node builtins through the same Node-compatible
      loader used by the current Codex runtime.
-   - Create separate normal and privileged `nodeRepl` realm objects.
-   - Add token + generation + execution + operation validation around
-     structured capability requests.
-   - Give capability handlers separate execution- and generation-lifetime
-     abort signals so future host sessions survive Cells but not reset/crash.
-   - Keep the production capability map empty; validate with a test fixture.
+   - Create separate ordinary and trusted `nodeRepl` realm objects with the
+     same public API and no generic host capability broker.
+   - Keep the production trusted package map empty; validate the boundary with
+     a test fixture.
 
 6. **Wire and package**
    - Add tool/display names and lazy regular-registry registration.
@@ -77,9 +74,7 @@ Skill work that calls the independent SDK through Node REPL.
    - Run the 100-cell and 10-kernel E2E driver against built output.
    - Run build, bundle, typecheck, focused lint/format, a minimal real CLI
      registration path, and the performance probes.
-   - Build the independent #9334 TypeScript package out of tree and prove that
-     this REPL can import its ESM entry, CommonJS dependencies, and N-API
-     runtime without adding cua-driver code to #9333.
+   - Prove that the REPL can import neutral ESM, CommonJS, and N-API fixtures.
    - Record provider/infrastructure blockers separately from source failures.
 
 8. **Review**
@@ -92,8 +87,8 @@ Skill work that calls the independent SDK through Node REPL.
 
 - adding a new runtime dependency instead of using the existing tree-sitter
   stack;
-- adding a production trusted package, concrete Computer Use operation, new
-  network listener, MCP dependency, or external install;
+- adding a production trusted package, new network listener, MCP dependency,
+  or external install;
 - changing Qwen's global permission owner or provider configuration;
 - introducing memory-based automatic process termination;
 - weakening process-level reset or the host-controlled trust boundary.
