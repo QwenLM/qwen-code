@@ -1201,6 +1201,20 @@ for (const f of files) {
       // The window was NOT discarded — this is the whole difference from `false`.
       expect(out.mutants.probed.length).toBeGreaterThan(0);
       expect(out.mutants.skippedForControl).toBe(0);
+      // And the revert phase does not score the relinked probe. It was
+      // screened from the index once, before the baseline; the runner replaced
+      // it during that run, and collecting it here would score the verdict
+      // against whatever the link names. With every probe gone the phase has
+      // nothing left it can run — and `vitest run` with an empty file list
+      // collects the WHOLE suite, so "nothing to score" must not become "score
+      // everything".
+      expect(out.probed).toEqual([
+        expect.objectContaining({
+          file: 'packages/lib/src/f.test.ts',
+          verdict: 'inconclusive',
+        }),
+      ]);
+      expect(out.probed[0].detail).toContain('nothing left it could score');
     },
   );
 

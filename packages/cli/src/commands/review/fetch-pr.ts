@@ -704,7 +704,18 @@ function tryRemove(action: () => void): void {
 }
 
 function cleanStale(prNumber: string): void {
-  releaseWorktree(worktreePath(prNumber));
+  // The result is READ, because `releaseWorktree` can now refuse: an ancestor
+  // symlink above the temp dir means the removal would land in whatever
+  // checkout it names, so it declines and says so. Dropping that on the floor
+  // left the sweep looking successful and the next `worktree add` wedged at a
+  // path nobody was told about — the same "something that should be gone is
+  // still there, and nothing said so" the cleanup path reports everywhere else.
+  const { existed, freed, reason } = releaseWorktree(worktreePath(prNumber));
+  if (existed && !freed) {
+    writeStderrLine(
+      `Could not free the stale worktree at ${worktreePath(prNumber)}: ${reason}`,
+    );
+  }
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>

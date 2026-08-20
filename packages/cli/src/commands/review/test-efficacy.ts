@@ -1539,6 +1539,13 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   }
   const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
   try {
+    // The LEAF first. Every comparison below realpaths both sides, so a probe
+    // tree that is itself a symlink into the shared review worktree agrees
+    // with itself all the way down — and the restore's `checkout --force` and
+    // `clean -ffdx` would then run in the tree every other agent is reading.
+    if (lstatSync(probeTree).isSymbolicLink()) {
+      return `${probeTree} is a symlink, so the restore would land wherever it points`;
+    }
     if (realpathSync(toplevel) !== realpathSync(probeTree)) {
       return `the tree at ${probeTree} is not the root of its own checkout`;
     }
@@ -2860,6 +2867,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         const collectable = probes.filter(
           (p) => !probeTargetEscapes(probeTree, p),
         );
+        // Every probe relinked away leaves nothing to run, and `vitest run`
+        // with no file argument collects the WHOLE suite — a run whose verdicts
+        // belong to files this phase never selected. The `probes.length > 0`
+        // gate this phase opened with was taken before the screen above could
+        // empty the list. Thrown before the per-probe records below, so the
+        // report carries one reason rather than the same file twice.
+        if (collectable.length === 0) {
+          throw new Error(
+            'every probe was relinked out of the probe tree after the baseline — the revert phase had nothing left it could score',
+          );
+        }
         for (const p of probes) {
           if (collectable.includes(p)) continue;
           results.push({
