@@ -204,6 +204,7 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
+  isClearedMediaPlaceholder,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -3666,8 +3667,8 @@ export class Session implements SessionContext {
     // the same fallback the TUI twin computeApiTruncationIndex retains.
     // Microcompaction media-clear placeholders are the exception: they are
     // structural replacements inside an identified session, not legacy
-    // turns (mirrors MICROCOMPACT_CLEARED_IMAGE_PREFIX in
-    // packages/core/src/services/microcompaction/microcompact.ts).
+    // turns. The shared predicate matches only complete placeholders, so a
+    // genuine user prompt that merely starts with the prefix still counts.
     for (let index = startIndex; index < apiHistory.length; index++) {
       const content = apiHistory[index]!;
       if (!this.#isUserTextContent(content)) continue;
@@ -3677,7 +3678,7 @@ export class Session implements SessionContext {
           (part) =>
             'text' in part &&
             typeof part.text === 'string' &&
-            part.text.startsWith('[Old inline media cleared:'),
+            isClearedMediaPlaceholder(part.text),
         )
       ) {
         continue;
