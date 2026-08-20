@@ -34,7 +34,8 @@ let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
-let lastAliasedSessionId: string | null = null;
+let lastAliasedKey: string | null = null;
+let aliasChain: Promise<void> = Promise.resolve();
 const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
 export function isDebugLogFileEnabled(): boolean {
@@ -129,10 +130,7 @@ function writeLog(
   // In a multi-session daemon the active session can change between writes.
   // Keep the `latest` alias pointed at the file that is actually receiving
   // logs right now, not just the last Config that was constructed.
-  if (sessionId !== lastAliasedSessionId) {
-    lastAliasedSessionId = sessionId;
-    updateLatestDebugLogAlias(sessionId);
-  }
+  updateLatestDebugLogAlias(sessionId);
 
   void ensureDebugDirExists()
     // Debug logs are best-effort diagnostic output: 1050+ call sites,
@@ -165,12 +163,24 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
-  lastAliasedSessionId = null;
+  lastAliasedKey = null;
+  aliasChain = Promise.resolve();
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function doUpdateLatestDebugLogAlias(sessionId: string): Promise<void> {
+  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
+  const targetPath = Storage.getDebugLogPath(sessionId);
+
+  return ensureDebugDirExists()
+    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
+    .catch(() => {
+      // Best-effort; don't degrade overall logging
+    });
+}
 
 function updateLatestDebugLogAlias(sessionId: string): void {
   if (!isDebugLogFileEnabled()) {
@@ -180,14 +190,17 @@ function updateLatestDebugLogAlias(sessionId: string): void {
     return;
   }
 
-  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
-  const targetPath = Storage.getDebugLogPath(sessionId);
+  // Key by directory + id so runtime base dir changes still get their own
+  // alias; skip when the alias already points at the same file.
+  const key = path.join(Storage.getGlobalDebugDir(), sessionId);
+  if (key === lastAliasedKey) {
+    return;
+  }
+  lastAliasedKey = key;
 
-  void ensureDebugDirExists()
-    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
-    .catch(() => {
-      // Best-effort; don't degrade overall logging
-    });
+  // Serialize alias updates so interleaved writes from different sessions
+  // don't race unlink/symlink into an inconsistent state.
+  aliasChain = aliasChain.then(() => doUpdateLatestDebugLogAlias(sessionId));
 }
 
 /**
@@ -201,9 +214,7 @@ export function setDebugLogSession(
 ) {
   globalSession = session ?? null;
   if (session) {
-    const sessionId = session.getSessionId();
-    lastAliasedSessionId = sessionId;
-    updateLatestDebugLogAlias(sessionId);
+    updateLatestDebugLogAlias(session.getSessionId());
   }
 }
 

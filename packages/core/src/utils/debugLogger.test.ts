@@ -498,6 +498,19 @@ describe('debugLogger', () => {
         expectedLatestPath,
       );
     });
+
+    it('does not refresh the alias for writes of the current session', async () => {
+      resetDebugLoggingState();
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+      vi.clearAllMocks();
+
+      const logger = createDebugLogger();
+      logger.info('same-session message');
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
+    });
   });
 
   describe('resetDebugLoggingState', () => {

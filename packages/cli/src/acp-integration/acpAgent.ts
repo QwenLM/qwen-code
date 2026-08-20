@@ -8368,10 +8368,17 @@ class QwenAgent implements Agent {
         );
       }
       const sessionId = normalizedParams['sessionId'];
-      if (typeof sessionId === 'string' && sessionId.length > 0) {
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.sessions.has(sessionId)
+      ) {
         // Bind the owning session to this async context so that debug logs,
         // shell env vars, and any other session-scoped diagnostics route to
         // session A even if a Config for session B was created afterwards.
+        // Only bind ids the agent already knows about; caller-supplied strings
+        // are otherwise unsanitized and can reach filesystem paths and child
+        // process env vars.
         return await sessionIdContext.run(sessionId, () =>
           this.extMethodInternal(method, normalizedParams),
         );

@@ -16111,6 +16111,8 @@ describe('QwenAgent extMethod sessionIdContext binding', () => {
           method: string,
           params: Record<string, unknown>,
         ) => Promise<Record<string, unknown>>;
+        initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        newSession: (args: Record<string, unknown>) => Promise<unknown>;
       })
     | undefined;
 
@@ -16137,6 +16139,16 @@ describe('QwenAgent extMethod sessionIdContext binding', () => {
         },
       } as unknown as InstanceType<typeof AgentSideConnection>;
     });
+
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          getConfig: vi.fn().mockReturnValue(mockConfig),
+          collectActiveWorkHolds: () => [],
+          installRewriter: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -16179,6 +16191,13 @@ describe('QwenAgent extMethod sessionIdContext binding', () => {
 
   it('binds sessionIdContext around session-scoped extMethod dispatch', async () => {
     const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    // Seed the agent's session map directly so the extMethod gate sees a known
+    // session without exercising the full newSession stack.
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      { getConfig: () => mockConfig },
+    );
     const runSpy = vi.spyOn(sessionIdContext, 'run');
 
     // Use an unknown method so the test only verifies dispatch wrapping;
@@ -16189,18 +16208,31 @@ describe('QwenAgent extMethod sessionIdContext binding', () => {
     ).rejects.toThrow();
 
     expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    // The callback handed to run must actually perform the dispatch; a
+    // mutant that calls run but dispatches outside the callback would make
+    // the previous assertion pass while the bug survives.
+    await expect(runSpy.mock.calls[0]![1]!()).rejects.toThrow();
 
     runSpy.mockRestore();
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('does not bind sessionIdContext for extMethods without a sessionId', async () => {
+  it('does not bind sessionIdContext for unknown sessions or missing sessionId', async () => {
     const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
     const runSpy = vi.spyOn(sessionIdContext, 'run');
 
+    // No sessionId at all.
     await expect(
       agent.extMethod('qwen/control/session/unknown-method', {}),
+    ).rejects.toThrow();
+
+    // sessionId supplied but the agent has no such session.
+    await expect(
+      agent.extMethod('qwen/control/session/unknown-method', {
+        sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      }),
     ).rejects.toThrow();
 
     expect(runSpy).not.toHaveBeenCalled();
