@@ -148,11 +148,19 @@ export function mapReasoningControls(
     return value ? [value] : [];
   });
   if (!values.includes('none')) return undefined;
-  const efforts = values.filter((value) => value !== 'none');
-  if (efforts.length === 0) return undefined;
   const currentValue = getString(option, 'currentValue');
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+  const selectableValues = values.filter((value) => value !== 'none');
+  if (selectableValues.length === 0) return undefined;
+  if (reasoningMeta?.['toggleOnly'] === true) {
+    return {
+      enabled: currentValue !== 'none',
+      effort: selectableValues[0]!,
+      efforts: [],
+    };
+  }
+  const efforts = selectableValues;
   const defaultEffort = getString(reasoningMeta, 'defaultEffort');
   const effort =
     [currentValue, fallbackEffort, defaultEffort].find(

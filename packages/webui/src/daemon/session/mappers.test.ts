@@ -12,6 +12,7 @@ import type {
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapReasoningControls,
   mapWorkspaceSkills,
   selectGoalState,
   selectGoalStateFromRead,
@@ -73,6 +74,27 @@ const turnComplete: DaemonEvent = {
   type: 'turn_complete',
   data: { stopReason: 'end_turn' },
 };
+
+describe('mapReasoningControls', () => {
+  it('maps toggle-only reasoning without exposing an effort list', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'default',
+          options: [{ value: 'none' }, { value: 'default' }],
+          _meta: {
+            'qwenCode/reasoning': { toggleOnly: true },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: [],
+    });
+  });
+});
 
 describe('getReplayTokenCount', () => {
   it('returns undefined for an empty array', () => {
