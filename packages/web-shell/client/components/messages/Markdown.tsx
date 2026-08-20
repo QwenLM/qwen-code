@@ -17,7 +17,7 @@ import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import remarkCjkFriendly from 'remark-cjk-friendly';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import {
   getCachedHtml,
   getCodeHighlighter,
