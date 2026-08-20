@@ -459,7 +459,9 @@ describe('package scripts', () => {
       );
       expect(publishStep).toContain('already published; skipping');
       expect(publishStep).toContain('exit 0');
-      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
+      expect(publishStep).toContain(
+        'npm publish --provenance "${PUBLISH_ARGS[@]}"',
+      );
     }
 
     // The channel loop must wrap each iteration in a subshell so that

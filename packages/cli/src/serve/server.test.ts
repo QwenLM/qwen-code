@@ -80,6 +80,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
+  SessionIdCaseConflictError,
   SessionService,
   Storage,
   TrustGateError,
@@ -200,6 +201,7 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -538,7 +540,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_side_task',
   'session_prompt',
   'session_turn_status',
-  'session_media',
+  'session_attachments',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -1318,7 +1320,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
-  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
+  const sessionAttachments = new Map<
+    string,
+    { data: Buffer; mimeType: string }
+  >();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -2333,21 +2338,35 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    async storeSessionMedia(_sessionId, data, mimeType) {
-      const mediaId = `media-${sessionMedia.size + 1}`;
-      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+    async storeSessionAttachment(_sessionId, data, mimeType, _context, name) {
+      const attachmentId = name ?? `image-${sessionAttachments.size + 1}.png`;
+      sessionAttachments.set(attachmentId, {
+        data: Buffer.from(data),
+        mimeType,
+      });
       return {
-        type: 'image',
-        mediaId,
+        type: [
+          'image/bmp',
+          'image/gif',
+          'image/jpeg',
+          'image/png',
+          'image/webp',
+        ].includes(mimeType)
+          ? 'image'
+          : 'resource',
+        attachmentId,
         mimeType,
         size: data.byteLength,
       };
     },
-    async readSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.get(mediaId);
+    async readSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.get(attachmentId);
     },
-    async removeSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.delete(mediaId);
+    async removeSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.delete(attachmentId);
+    },
+    async deleteSessionAttachments() {
+      sessionAttachments.clear();
     },
     enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
@@ -9550,7 +9569,119 @@ describe('createServeApp', () => {
     });
   });
 
-  describe('session media', () => {
+  describe('session attachments', () => {
+    it('uploads session-scoped text attachments', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', encodeURIComponent('notes 你好.txt'))
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'notes 你好.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      });
+    });
+
+    it('uploads empty files', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'empty.txt')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'empty.txt',
+        mimeType: 'text/plain',
+        size: 0,
+      });
+    });
+
+    it('rejects empty images as a bad request', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'empty.png')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(400);
+      expect(uploaded.body).toEqual({
+        error: 'Image attachments cannot be empty',
+      });
+    });
+
+    it('accepts attachment uploads through case-insensitive routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/SESSION/s-1/ATTACHMENTS')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'notes.txt')
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toMatchObject({
+        type: 'resource',
+        attachmentId: 'notes.txt',
+      });
+    });
+
+    it('uploads session-scoped JSON attachments as raw bytes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .set('X-Qwen-Attachment-Name', 'data.json')
+        .send('{"enabled":true}');
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'data.json',
+        mimeType: 'application/json',
+        size: 16,
+      });
+    });
+
     it('uploads and reads session-scoped binary media', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
@@ -9559,22 +9690,23 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
 
       expect(uploaded.status).toBe(201);
       expect(uploaded.body).toEqual({
         type: 'image',
-        mediaId: 'media-1',
+        attachmentId: 'image.png',
         mimeType: 'image/png',
         size: bytes.length,
       });
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9583,53 +9715,99 @@ describe('createServeApp', () => {
       expect(downloaded.body).toEqual(bytes);
 
       const removed = await request(app)
-        .delete('/session/s-1/media/media-1')
+        .delete('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(removed.status).toBe(200);
       expect(removed.body).toEqual({ removed: true });
 
       const missing = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(missing.status).toBe(404);
     });
 
-    it('rejects non-image uploads', async () => {
+    it('requires a name for uploads', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('Content-Type', 'audio/wav')
+        .set('Content-Type', 'text/plain')
         .send(Buffer.from([1]));
 
       expect(response.status).toBe(400);
     });
 
-    it('rejects SVG uploads', async () => {
-      // SVG can carry scripts and the bytes are served back to browsers on
-      // the same origin as the daemon API and Web Shell UI.
+    it('rejects malformed encoded attachment names', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', '%E0%A4%A')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'attachment name is invalid' });
+    });
+
+    it('maps attachment name and Content-Type mismatches to 400', async () => {
+      const bridge = fakeBridge();
+      bridge.storeSessionAttachment = vi.fn(async () => {
+        throw new TypeError('Attachment name and Content-Type do not match');
+      });
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('X-Qwen-Attachment-Name', 'screenshot.png')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'Attachment name and Content-Type do not match',
+      });
+    });
+
+    it('uploads SVG as an ordinary file resource', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/svg+xml')
+        .set('X-Qwen-Attachment-Name', 'image.svg')
         .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
 
-      expect(response.status).toBe(415);
+      expect(response.status).toBe(201);
       expect(response.body).toEqual({
-        error: 'SVG uploads are not supported',
+        type: 'resource',
+        attachmentId: 'image.svg',
+        mimeType: 'image/svg+xml',
+        size: Buffer.byteLength(
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        ),
       });
     });
 
@@ -9641,15 +9819,16 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
       expect(uploaded.status).toBe(201);
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9665,10 +9844,11 @@ describe('createServeApp', () => {
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
+        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(Buffer.alloc(8 * 1024 * 1024 + 1));
 
       expect(response.status).toBe(413);
@@ -9798,6 +9978,31 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('forwards inline resource blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const resource = {
+        type: 'resource',
+        resource: {
+          uri: 'attachment:///notes.txt',
+          mimeType: 'text/plain',
+          text: 'hello',
+        },
+      };
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'read this',
+        content: [resource],
+      });
+
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'read this',
+          options: { content: [resource] },
+        },
+      ]);
+    });
+
     it('admits an empty message when media blocks are present', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
@@ -9821,6 +10026,22 @@ describe('createServeApp', () => {
         { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
       ],
       [
+        'resource with both text and blob',
+        {
+          message: 'hi',
+          content: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                text: 'hello',
+                blob: 'aGVsbG8=',
+              },
+            },
+          ],
+        },
+      ],
+      [
         'mismatched mimeType',
         {
           message: 'hi',
@@ -9841,9 +10062,8 @@ describe('createServeApp', () => {
     ])(
       '400 when `content` carries an SVG block: %s (raster-only policy)',
       async (_label, mimeType) => {
-        // The upload route rejects SVG after normalizing the media type;
-        // the inline-block gate must reject the same spelling variants — an
-        // exact-string match lets standards-conformant variants through.
+        // SVG files are ordinary resources, but an inline image block must
+        // reject spelling variants that could bypass an exact-string match.
         const bridge = fakeBridge();
         const res = await midTurnPost(midTurnApp(bridge), 's-1', {
           message: 'hi',
@@ -9855,12 +10075,23 @@ describe('createServeApp', () => {
       },
     );
 
-    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+    it('forwards reference-form attachment blocks to the bridge verbatim', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: 'see this',
         content: [
-          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+          {
+            type: 'image',
+            attachmentId: 'media-1',
+            mimeType: 'image/png',
+            size: 4,
+          },
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 0,
+          },
         ],
       });
       expect(res.status).toBe(200);
@@ -9872,9 +10103,15 @@ describe('createServeApp', () => {
             content: [
               {
                 type: 'image',
-                mediaId: 'media-1',
+                attachmentId: 'media-1',
                 mimeType: 'image/png',
                 size: 4,
+              },
+              {
+                type: 'resource',
+                attachmentId: 'notes.txt',
+                mimeType: 'text/plain',
+                size: 0,
               },
             ],
           },
@@ -10504,9 +10741,9 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry },
       );
-      const scan = deferred<undefined>();
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const scan = deferred<string | undefined>();
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockReturnValue(scan.promise);
 
       try {
@@ -10515,7 +10752,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionId: '550e8400-e29b-41d4-a716-446655440004' })
           .then((response) => response);
-        await vi.waitFor(() => expect(locationSpy).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(resolverSpy).toHaveBeenCalledOnce());
         expect(
           workspaceRegistry.beginReplacement(
             workspaceRegistry.primaryEntry,
@@ -10530,7 +10767,7 @@ describe('createServeApp', () => {
         expect(bridge.calls).toEqual([]);
       } finally {
         scan.resolve(undefined);
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10587,6 +10824,24 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('reserved_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('rejects the reserved standalone source before validating sourceId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'standalone', sourceId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_session_source');
+      expect(res.body.error).toContain('standalone');
       expect(bridge.calls).toHaveLength(0);
     });
 
@@ -10692,9 +10947,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       try {
         const res = await request(app)
           .post('/session')
@@ -10705,7 +10960,7 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('session_id_conflict');
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10716,8 +10971,8 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockRejectedValue(new Error('EACCES: runtime directory unreadable'));
       try {
         const res = await request(app)
@@ -10732,7 +10987,7 @@ describe('createServeApp', () => {
         });
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10743,9 +10998,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       const runWithSpy = vi.spyOn(Storage, 'runWithRuntimeBaseDir');
       try {
         const res = await request(app)
@@ -10758,7 +11013,7 @@ describe('createServeApp', () => {
         expect(runWithSpy).not.toHaveBeenCalled();
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
         runWithSpy.mockRestore();
       }
     });
@@ -12513,6 +12768,265 @@ describe('createServeApp', () => {
       }
     });
 
+    it.each(['load', 'resume'] as const)(
+      'restores legacy reserved-source transcripts on ordinary workspace runtimes (%s)',
+      async (action) => {
+        const bridge = fakeBridge();
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({ sourceType: 'standalone' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/explicit-standalone/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          // Create-side admission already blocks new reserved-source
+          // transcripts, so one found on an ordinary store predates the
+          // gate and stays loadable; only the internal Conversations
+          // runtime hides it.
+          expect(res.status).toBe(200);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
+        } finally {
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'restores mixed-case reserved-source transcripts on ordinary workspace runtimes (%s)',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440140';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId
+              ? { sourceType: 'standalone' }
+              : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          expect(findSessionId).toHaveBeenCalledWith(sessionId);
+          expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
+        } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'takes the %s shared restore guard on the request session id',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440144';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          // The coordinator canonicalizes lock keys, so holding the
+          // request spelling alone contends with the raw-spelled
+          // exclusive batch locks (pinned in session-archive.test.ts).
+          expect(runSharedMany).toHaveBeenCalledWith(
+            [sessionId],
+            expect.any(Function),
+          );
+        } finally {
+          runSharedMany.mockRestore();
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'converts a pre-guard both-states %s conflict to actionable session conflict',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440147';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        // Same spelling persisted in both active and archived states: the
+        // resolver carries the candidate spelling, so the conversion must
+        // re-check THAT spelling — the request-case id finds nothing on a
+        // case-sensitive filesystem and would skip SessionConflictError.
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('session_conflict');
+          expect(res.body.error).toContain(
+            'Delete the session with POST /sessions/delete',
+          );
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          // The pre-guard conversion must fire before the guard is entered,
+          // so the shared guard never runs.
+          expect(runSharedMany).not.toHaveBeenCalled();
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          runSharedMany.mockRestore();
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'converts an in-guard both-states %s conflict to actionable session conflict',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440148';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValueOnce(storageSessionId)
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('session_conflict');
+          expect(res.body.error).toContain(
+            'Delete the session with POST /sessions/delete',
+          );
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          // Without the call-count assertion below, replacing the in-guard
+          // re-resolve with the pre-guard result still yields the same 409
+          // via assertSessionLoadable's mocked 'conflict' location — the
+          // count is what pins the second resolution.
+          expect(findSessionId).toHaveBeenCalledTimes(2);
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects ordinary %s case conflicts before bridge dispatch',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440141';
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(new SessionIdCaseConflictError(sessionId));
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({
+            code: 'session_conflict',
+            sessionId,
+          });
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
     it('releases restore ownership after invalid approvalMode', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -13550,7 +14064,7 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
     });
 
-    it('202 accepts valid inline and reference media blocks', async () => {
+    it('202 accepts valid inline and reference attachment blocks', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -13564,9 +14078,15 @@ describe('createServeApp', () => {
             { type: 'image', data: 'aW1n', mimeType: 'image/png' },
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 4,
+            },
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
             },
           ],
         });
@@ -13576,7 +14096,18 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.req.prompt).toEqual([
         { type: 'text', text: 'hi' },
         { type: 'image', data: 'aW1n', mimeType: 'image/png' },
-        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        {
+          type: 'image',
+          attachmentId: 'media-1',
+          mimeType: 'image/png',
+          size: 4,
+        },
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
       ]);
     });
 
@@ -32359,6 +32890,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: string;
       device: number;
       inode: number;
+      inodeVerifiable: boolean;
     }> = {},
   ) {
     const primaryBridge = fakeBridge();
@@ -32375,6 +32907,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: '/work/live-conversations',
       device: 1,
       inode: 2,
+      inodeVerifiable: true,
       ...rootOverrides,
     };
     const conversationWorkspace = {
@@ -32756,8 +33289,8 @@ describe('Live conversation runtime lifecycle', () => {
   it('boots an exact Conversations restore target before source proof', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
-    const getLocation = vi
-      .spyOn(SessionService.prototype, 'getSessionLocation')
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
       .mockResolvedValue(undefined);
     mockWt.realpath = (candidate) => candidate;
     try {
@@ -32775,10 +33308,10 @@ describe('Live conversation runtime lifecycle', () => {
       expect(response.status).toBe(404);
       expect(response.body.code).toBe('session_not_found');
       expect(setup.liveBridge.loadCalls).toHaveLength(0);
-      expect(getLocation).toHaveBeenCalled();
+      expect(findSessionId).toHaveBeenCalled();
     } finally {
       mockWt.realpath = undefined;
-      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await restoreLiveSettings();
     }
   });
@@ -32832,6 +33365,9 @@ describe('Live conversation runtime lifecycle', () => {
         sourceType: 'default',
         sourceId: `realtime_voice:p1:h1:a1:${sessionId}`,
       });
+    const readMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (candidateId) => readMetadata(candidateId));
     const updateOrganization = vi
       .spyOn(
         qwenCore.SessionOrganizationService.prototype,
@@ -32924,6 +33460,7 @@ describe('Live conversation runtime lifecycle', () => {
       getLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
+      readMetadataIfReadable.mockRestore();
       updateOrganization.mockRestore();
     }
   });
@@ -33048,7 +33585,18 @@ describe('Live conversation runtime lifecycle', () => {
       .spyOn(SessionService.prototype, 'readCreationMetadata')
       .mockImplementation(async (sessionId) => {
         if (sessionId === 'worker-session') {
-          return { parentSessionId: 'live-load' };
+          return {
+            parentSessionId: '550e8400-e29b-41d4-a716-446655440001',
+          };
+        }
+        if (sessionId === '550e8400-e29b-41d4-a716-446655440001') {
+          return {
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:live-load',
+          };
+        }
+        if (sessionId === 'explicit-standalone') {
+          return { sourceType: 'standalone' };
         }
         return sessionId.startsWith('live-')
           ? {
@@ -33057,9 +33605,15 @@ describe('Live conversation runtime lifecycle', () => {
             }
           : {};
       });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) => sessionId);
     try {
       const rejectedNew = await request(setup.app)
         .post('/session')
@@ -33089,6 +33643,21 @@ describe('Live conversation runtime lifecycle', () => {
         sessionId: 'generic-session',
         path: `${setup.root.canonicalRoot}/conversation-generic-session`,
       });
+
+      const loadCountBeforeExplicit = setup.liveBridge.loadCalls.length;
+      const materializeCountBeforeExplicit =
+        setup.conversationWorkspace.materializeConversationDirectory.mock.calls
+          .length;
+      const explicitStandaloneRestore = await request(setup.app)
+        .post('/session/explicit-standalone/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(explicitStandaloneRestore.status).toBe(404);
+      expect(explicitStandaloneRestore.body.code).toBe('session_not_found');
+      expect(setup.liveBridge.loadCalls).toHaveLength(loadCountBeforeExplicit);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledTimes(materializeCountBeforeExplicit);
 
       for (const action of ['load', 'resume'] as const) {
         const sessionId = `live-${action}`;
@@ -33137,8 +33706,82 @@ describe('Live conversation runtime lifecycle', () => {
       expect(setup.liveBridge.loadCalls).toHaveLength(5);
       expect(setup.liveBridge.resumeCalls).toHaveLength(1);
     } finally {
+      findSessionId.mockRestore();
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const storageSessionId = canonicalSessionId.toUpperCase();
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) =>
+        sessionId === canonicalSessionId ? storageSessionId : sessionId,
+      );
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'default',
+        sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
+      });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
+    try {
+      const restored = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+
+      expect(restored.status).toBe(200);
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({ sessionId: canonicalSessionId }),
+      );
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledWith(canonicalSessionId);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).not.toHaveBeenCalledWith(storageSessionId);
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId: canonicalSessionId,
+        path: `${setup.root.canonicalRoot}/conversation-${canonicalSessionId}`,
+      });
+      // Storage-facing reads still follow the persisted spelling.
+      expect(readCreationMetadataIfReadable).toHaveBeenCalledWith(
+        storageSessionId,
+        'active',
+      );
+
+      findSessionId.mockRejectedValueOnce(
+        new SessionIdCaseConflictError(canonicalSessionId),
+      );
+      const conflict = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: canonicalSessionId,
+      });
+      expect(setup.liveBridge.resumeCalls).toHaveLength(0);
+    } finally {
+      readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();

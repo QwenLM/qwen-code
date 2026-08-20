@@ -23,8 +23,8 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
-  DaemonSessionMediaData,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
   DaemonSessionGenerationEvent,
@@ -135,25 +135,27 @@ export interface DaemonSessionSubscribeOptions
   resume?: boolean;
 }
 
-function isSessionMediaReference(
+function isSessionAttachmentReference(
   value: unknown,
-): value is DaemonSessionMediaReference {
+): value is DaemonSessionAttachmentReference {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
-    record['type'] === 'image' &&
-    typeof record['mediaId'] === 'string' &&
-    record['mediaId'].length > 0 &&
+    (record['type'] === 'image' || record['type'] === 'resource') &&
+    typeof record['attachmentId'] === 'string' &&
+    record['attachmentId'].length > 0 &&
     typeof record['mimeType'] === 'string' &&
-    record['mimeType'].startsWith(`${record['type']}/`) &&
+    record['mimeType'].length > 0 &&
+    (record['type'] !== 'image' || record['mimeType'].startsWith('image/')) &&
     typeof record['size'] === 'number' &&
     Number.isSafeInteger(record['size']) &&
-    record['size'] > 0
+    record['size'] >= 0 &&
+    (record['type'] !== 'image' || record['size'] > 0)
   );
 }
 
-const MAX_MEDIA_CACHE_BYTES = 32 * 1024 * 1024;
-const MAX_MEDIA_CACHE_ENTRIES = 128;
+const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
 
 /**
  * Session-scoped wrapper around `DaemonClient`.
@@ -204,11 +206,11 @@ export class DaemonSessionClient {
   private reattaching?: Promise<void>;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
-  private readonly mediaCache = new Map<
+  private readonly attachmentCache = new Map<
     string,
-    { pending: Promise<DaemonSessionMediaData>; size: number }
+    { pending: Promise<DaemonSessionAttachmentData>; size: number }
   >();
-  private mediaCacheBytes = 0;
+  private attachmentCacheBytes = 0;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -498,31 +500,52 @@ export class DaemonSessionClient {
     return accepted;
   }
 
-  async uploadMedia(
+  async uploadAttachment(
     data: Blob,
+    name: string,
     mimeType: string,
     signal?: AbortSignal,
-  ): Promise<DaemonSessionMediaReference> {
+  ): Promise<DaemonSessionAttachmentReference> {
     return await this.withClientIdSelfHeal(() =>
-      this.client.uploadSessionMedia(this.sessionId, data, mimeType, {
+      this.client.uploadSessionAttachment(
+        this.sessionId,
+        data,
+        name,
+        mimeType,
+        {
+          ...(signal ? { signal } : {}),
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        },
+      ),
+    );
+  }
+
+  async readAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentData> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.readSessionAttachment(this.sessionId, attachmentId, {
         ...(signal ? { signal } : {}),
         ...(this.clientId ? { clientId: this.clientId } : {}),
       }),
     );
   }
 
-  async removeMedia(mediaId: string): Promise<boolean> {
+  async removeAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const removed = await this.withClientIdSelfHeal(() =>
-      this.client.removeSessionMedia(
-        this.sessionId,
-        mediaId,
-        this.clientId ? { clientId: this.clientId } : undefined,
-      ),
+      this.client.removeSessionAttachment(this.sessionId, attachmentId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
     );
     if (removed) {
-      const cached = this.mediaCache.get(mediaId);
-      this.mediaCache.delete(mediaId);
-      this.mediaCacheBytes -= cached?.size ?? 0;
+      const cached = this.attachmentCache.get(attachmentId);
+      this.attachmentCache.delete(attachmentId);
+      this.attachmentCacheBytes -= cached?.size ?? 0;
     }
     return removed;
   }
@@ -1116,45 +1139,51 @@ export class DaemonSessionClient {
   }
 
   private async hydrateBlock(block: unknown): Promise<PromptContentBlock> {
-    if (!isSessionMediaReference(block)) {
+    if (!isSessionAttachmentReference(block)) {
       return block as PromptContentBlock;
     }
-    let cached = this.mediaCache.get(block.mediaId);
+    if (block.type === 'resource') return block;
+    let cached = this.attachmentCache.get(block.attachmentId);
     if (cached) {
-      this.mediaCache.delete(block.mediaId);
-      this.mediaCache.set(block.mediaId, cached);
+      this.attachmentCache.delete(block.attachmentId);
+      this.attachmentCache.set(block.attachmentId, cached);
     } else {
       const pending = this.withClientIdSelfHeal(() =>
-        this.client.readSessionMedia(this.sessionId, block.mediaId, {
+        this.client.readSessionAttachment(this.sessionId, block.attachmentId, {
           ...(this.clientId ? { clientId: this.clientId } : {}),
         }),
       );
       cached = { pending, size: block.size };
-      this.mediaCache.set(block.mediaId, cached);
-      this.mediaCacheBytes += block.size;
+      this.attachmentCache.set(block.attachmentId, cached);
+      this.attachmentCacheBytes += block.size;
       while (
-        this.mediaCache.size > MAX_MEDIA_CACHE_ENTRIES ||
-        this.mediaCacheBytes > MAX_MEDIA_CACHE_BYTES
+        this.attachmentCache.size > MAX_ATTACHMENT_CACHE_ENTRIES ||
+        this.attachmentCacheBytes > MAX_ATTACHMENT_CACHE_BYTES
       ) {
-        const oldestId = this.mediaCache.keys().next().value;
+        const oldestId = this.attachmentCache.keys().next().value;
         if (oldestId === undefined) break;
-        const evicted = this.mediaCache.get(oldestId);
-        this.mediaCache.delete(oldestId);
-        this.mediaCacheBytes -= evicted?.size ?? 0;
+        const evicted = this.attachmentCache.get(oldestId);
+        this.attachmentCache.delete(oldestId);
+        this.attachmentCacheBytes -= evicted?.size ?? 0;
       }
       void pending.catch(() => {
-        if (this.mediaCache.get(block.mediaId)?.pending !== pending) return;
-        this.mediaCache.delete(block.mediaId);
-        this.mediaCacheBytes -= block.size;
+        if (this.attachmentCache.get(block.attachmentId)?.pending !== pending)
+          return;
+        this.attachmentCache.delete(block.attachmentId);
+        this.attachmentCacheBytes -= block.size;
       });
     }
     try {
-      const media = await cached.pending;
-      return { type: block.type, data: media.data, mimeType: media.mimeType };
+      const attachment = await cached.pending;
+      return {
+        type: 'image',
+        data: attachment.data,
+        mimeType: attachment.mimeType,
+      };
     } catch (err) {
       // 404/410 means the daemon no longer holds the blob, so pin the
       // placeholder. Any other failure is transient: return the reference
-      // unchanged so the snapshot keeps its mediaId and a later hydration
+      // unchanged so the snapshot keeps its attachment id and a later hydration
       // pass can retry (the failed cache entry evicted itself above).
       if (
         err instanceof DaemonHttpError &&
@@ -1162,7 +1191,7 @@ export class DaemonSessionClient {
       ) {
         return {
           type: 'text',
-          text: '[Attached media is no longer available]',
+          text: '[Attachment is no longer available]',
         };
       }
       return block;

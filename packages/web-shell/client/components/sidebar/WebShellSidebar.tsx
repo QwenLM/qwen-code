@@ -2338,7 +2338,7 @@ export function WebShellSidebar({
             bumpWorkspaceReload();
             const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
             if (ownerCwd) {
-              sessionCatalogController.invalidateWorkspace(ownerCwd);
+              sessionCatalogController.refreshWorkspace(ownerCwd);
             }
           }
         } catch (err) {
@@ -2498,6 +2498,7 @@ export function WebShellSidebar({
               effectiveName,
             );
           }
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         // A late settle must not close an editor the user moved to another
         // session with while this request was in flight.
@@ -2514,7 +2515,7 @@ export function WebShellSidebar({
       })
       .finally(() => {
         if (!renamed && workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setSessionBusy(sessionId, false, workspaceCwd);
       });
@@ -2670,7 +2671,7 @@ export function WebShellSidebar({
         const workspaceCwd =
           deleteCandidate.workspaceCwd ?? primaryWorkspaceCwd;
         if (scope.kind !== 'primary' && workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
@@ -2873,7 +2874,7 @@ export function WebShellSidebar({
       } finally {
         const workspaceCwd = groupEditor.workspaceCwd ?? primaryWorkspaceCwd;
         if (workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setGroupBusy(false);
       }
@@ -2941,7 +2942,7 @@ export function WebShellSidebar({
         const workspaceCwd =
           deleteGroupCandidate.workspaceCwd ?? primaryWorkspaceCwd;
         if (workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setGroupBusy(false);
       });
@@ -3019,7 +3020,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -3070,7 +3071,7 @@ export function WebShellSidebar({
           bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -3122,7 +3123,7 @@ export function WebShellSidebar({
           bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -3222,7 +3223,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -3270,7 +3271,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -4215,7 +4216,11 @@ export function WebShellSidebar({
     }
     if (error && sessionsPage === undefined) {
       return (
-        <button className={styles.retry} type="button" onClick={reload}>
+        <button
+          className={styles.retry}
+          type="button"
+          onClick={() => void reload({ interactive: true })}
+        >
           {t('sidebar.loadFailed')}
         </button>
       );
@@ -4342,9 +4347,9 @@ export function WebShellSidebar({
         className={styles.retry}
         type="button"
         onClick={() => {
-          void reloadArchived().catch(() => undefined);
+          void reloadArchived({ interactive: true }).catch(() => undefined);
           for (const workspaceCwd of secondaryWorkspaceCwds) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
         }}
       >
