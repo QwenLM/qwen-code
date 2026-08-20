@@ -147,11 +147,9 @@ export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 export class SessionIdCaseConflictError extends Error {
   override readonly name = 'SessionIdCaseConflictError';
 
-  // `candidateSessionId` is set only when one exact spelling was found
-  // persisted in both active and archived states, so callers can re-check
-  // the persisted spelling instead of the request-case id. `reason`
-  // separates a genuinely conflicted pair from a single transcript whose
-  // head is unreadable yet still occupies the id.
+  // `candidateSessionId` names the single other spelling that occupies this
+  // identity when one is known. `reason` separates several readable case
+  // twins from a single unreadable transcript that still occupies the id.
   constructor(
     readonly sessionId: string,
     readonly candidateSessionId?: string,

@@ -109,6 +109,33 @@ describe('scheduled-task keepalive', () => {
     );
   });
 
+  it('canonicalizes mixed-case task ids for heartbeat and revive admission', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: sessionId.toUpperCase() }),
+    ]);
+    const resumeSession = vi.fn(async () => undefined);
+    const recordHeartbeat = vi.fn(() => {
+      throw new Error('not resident');
+    });
+    const ka = startScheduledTaskKeepalive({
+      bridge: {
+        ...bridge,
+        recordHeartbeat,
+        resumeSession,
+      },
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+
+    await ka.tick();
+    ka.stop();
+    expect(recordHeartbeat).toHaveBeenCalledWith(sessionId);
+    expect(resumeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId }),
+    );
+  });
+
   it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {
     // A disabled task's session is intentionally left for the idle reaper — the
     // keepalive must NOT heartbeat it (which would pin it resident) and must NOT
@@ -384,8 +411,9 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('does not spawn a duplicate revive while a prior one is still in flight', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440004';
     await updateCronTasks(workspace, () => [
-      task({ id: 'a', sessionId: 'sess-1' }),
+      task({ id: 'a', sessionId: sessionId.toUpperCase() }),
     ]);
     let releaseLoad: (() => void) | undefined;
     const reviving = {
@@ -415,9 +443,10 @@ describe('scheduled-task keepalive', () => {
     });
     await ka.tick(); // revive starts + times out at 5ms; load still hanging
     await new Promise((r) => setTimeout(r, 30)); // let the backoff expire
+    await updateCronTasks(workspace, () => [task({ id: 'a', sessionId })]);
     await ka.tick(); // past backoff, but the load is still in flight → skip
     ka.stop();
-    expect(loads).toEqual(['sess-1']); // no duplicate spawn
+    expect(loads).toEqual([sessionId]); // no duplicate spawn across aliases
     releaseLoad?.(); // let the hung load settle (cleanup)
   });
 
@@ -517,6 +546,24 @@ describe('scheduled-task keepalive', () => {
     expect(res.loaded.sort()).toEqual(['sess-1', 'sess-2']);
     expect(res.failed).toEqual([]);
     readMetadata.mockRestore();
+  });
+
+  it('rehydrate canonicalizes mixed-case bridge admission ids', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: sessionId.toUpperCase() }),
+    ]);
+    const resumeSession = vi.fn(async () => undefined);
+
+    const result = await rehydrateScheduledTaskSessions({
+      bridge: { resumeSession },
+      boundWorkspace: workspace,
+    });
+
+    expect(resumeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId }),
+    );
+    expect(result.loaded).toEqual([sessionId.toUpperCase()]);
   });
 
   it('rehydrate records a gone session as failed but keeps loading siblings', async () => {

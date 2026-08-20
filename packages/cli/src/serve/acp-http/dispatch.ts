@@ -2938,12 +2938,10 @@ export class AcpDispatcher {
             let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
-            let liveExists = false;
             if (!exists) {
               try {
                 const liveSummary = this.bridge.getSessionSummary(sessionId);
-                liveExists = liveSummary.workspaceCwd === this.boundWorkspace;
-                exists = liveExists;
+                exists = liveSummary.workspaceCwd === this.boundWorkspace;
               } catch {
                 exists = false;
               }
@@ -2956,7 +2954,7 @@ export class AcpDispatcher {
                 exists = true;
               }
             } catch (error) {
-              if (!liveExists || error instanceof SessionIdCaseConflictError) {
+              if (!exists || error instanceof SessionIdCaseConflictError) {
                 throw error;
               }
             }

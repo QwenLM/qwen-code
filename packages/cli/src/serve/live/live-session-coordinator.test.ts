@@ -1002,6 +1002,37 @@ describe('LiveSessionCoordinator', () => {
     await harness.finishTurn(0, [{ type: 'message', text: '继续完成。' }]);
   });
 
+  it('registers a mixed-case persisted candidate under its canonical live id', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const harness = makeHarness({
+      recent: [
+        {
+          sessionId: sessionId.toUpperCase(),
+          sourceType: 'default',
+          sourceId: LIVE_SESSION_SOURCE_PREFIX + 'previous',
+        } as SessionListItem,
+      ],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '继续',
+      activeTranscript: [{ role: 'user', text: '继续' }],
+    });
+
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId }),
+    );
+    await harness.finishTurn(0, [{ type: 'message', text: '继续完成。' }]);
+  });
+
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {
     readPersistedParentSessionId.mockResolvedValue('live-new');
     const harness = makeHarness();

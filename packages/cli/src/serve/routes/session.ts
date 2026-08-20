@@ -1142,6 +1142,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: readonly string[],
     archiveState: SessionArchiveState | 'any',
+    options: { allowActiveConflict?: boolean } = {},
   ): Promise<WorkspaceRuntime | undefined> => {
     const target = resolveQualifiedSessionTarget(req, res);
     if (!target) return undefined;
@@ -1157,10 +1158,16 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      if (location === 'conflict') throw new SessionConflictError(sessionId);
+      const usesActiveCopy =
+        options.allowActiveConflict === true &&
+        archiveState === 'active' &&
+        location === 'conflict';
+      if (location === 'conflict' && !usesActiveCopy) {
+        throw new SessionConflictError(sessionId);
+      }
       if (
         location === undefined ||
-        (archiveState !== 'any' && location !== archiveState)
+        (archiveState !== 'any' && location !== archiveState && !usesActiveCopy)
       ) {
         throw new SessionNotFoundError(sessionId);
       }
@@ -3867,7 +3874,9 @@ export function registerSessionRoutes(
     await handleSessionExport(req, res, {
       route,
       resolveRuntime: (sessionId) =>
-        resolveQualifiedSessionRuntime(req, res, route, [sessionId], 'active'),
+        resolveQualifiedSessionRuntime(req, res, route, [sessionId], 'active', {
+          allowActiveConflict: true,
+        }),
       workspaceQualified: true,
     });
   });
@@ -3994,6 +4003,7 @@ export function registerSessionRoutes(
               route,
               [sessionId],
               'active',
+              { allowActiveConflict: true },
             ));
           if (!runtime) return undefined;
           const assertRuntimeGenerationOpen =
@@ -5396,12 +5406,10 @@ export function registerSessionRoutes(
             let organizationSessionId = sessionId;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
-            let liveExists = false;
             if (!exists) {
               try {
                 const summary = runtime.bridge.getSessionSummary(sessionId);
-                liveExists = summary.workspaceCwd === runtime.workspaceCwd;
-                exists = liveExists;
+                exists = summary.workspaceCwd === runtime.workspaceCwd;
               } catch {
                 exists = false;
               }
@@ -5414,7 +5422,7 @@ export function registerSessionRoutes(
                 exists = true;
               }
             } catch (error) {
-              if (!liveExists || error instanceof SessionIdCaseConflictError) {
+              if (!exists || error instanceof SessionIdCaseConflictError) {
                 throw error;
               }
             }

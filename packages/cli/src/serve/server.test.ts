@@ -15090,6 +15090,55 @@ describe('createServeApp', () => {
       }
     });
 
+    it('preserves exact organization updates when the optional alias scan fails', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440008';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'exact persisted task',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+      const organizationService = new qwenCore.SessionOrganizationService(
+        WS_BOUND,
+      );
+      const group = await organizationService.createGroup({
+        name: 'Exact session',
+        color: 'blue',
+      });
+      await organizationService.updateSessionOrganization(sessionId, {
+        groupId: group.id,
+        color: 'red',
+      });
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockRejectedValue(
+          Object.assign(new Error('directory scan failed'), { code: 'EIO' }),
+        );
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+      );
+
+      try {
+        const update = await request(app)
+          .patch(`/session/${sessionId}/organization`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ isPinned: true });
+
+        expect(update.status).toBe(200);
+        expect(update.body).toMatchObject({
+          isPinned: true,
+          groupId: group.id,
+          color: 'red',
+        });
+      } finally {
+        findSessionId.mockRestore();
+      }
+    });
+
     it('does not repeat a mixed-case persisted row across default list pages', async () => {
       const liveSessionId = '550e8400-e29b-41d4-a716-446655440010';
       const persistedSessionId = liveSessionId.toUpperCase();
@@ -17693,6 +17742,65 @@ describe('createServeApp', () => {
         mockWt.readSidecar = undefined;
       }
     });
+
+    it.each([
+      ['organized', { view: 'organized' as const }],
+      ['metadata', { sourceType: 'default' }],
+    ])(
+      'keeps a live alias whose persisted row is beyond the %s scan cap',
+      async (_name, options) => {
+        const liveSessionId = '550e8400-e29b-41d4-a716-446655440199';
+        const items: SessionListItem[] = Array.from(
+          { length: 50_001 },
+          (_, index) => ({
+            sessionId:
+              index === 50_000
+                ? liveSessionId.toUpperCase()
+                : `session-${index}`,
+            cwd: WS_BOUND,
+            startTime: '2026-05-17T12:00:00.000Z',
+            mtime: index,
+            prompt: `prompt ${index}`,
+            filePath: `/tmp/session-${index}.jsonl`,
+            sourceType: 'default',
+          }),
+        );
+        const listSessionsSpy = vi
+          .spyOn(SessionService.prototype, 'listSessions')
+          .mockResolvedValue({ items, nextCursor: 1, hasMore: true });
+        mockWt.readSidecar = () => Promise.resolve(null);
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: liveSessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2099-05-17T12:00:00.000Z',
+              updatedAt: '2099-05-17T12:00:01.000Z',
+              sourceType: 'default',
+              clientCount: 1,
+              hasActivePrompt: false,
+            },
+          ],
+        });
+
+        try {
+          const result = await listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            options,
+            { runtimeBaseDir: runtimeDir },
+          );
+
+          expect(result.truncated).toBe(true);
+          expect(result.sessions).toContainEqual(
+            expect.objectContaining({ sessionId: liveSessionId }),
+          );
+        } finally {
+          listSessionsSpy.mockRestore();
+          mockWt.readSidecar = undefined;
+        }
+      },
+    );
 
     it('stops organized session scans when a cursor page is empty', async () => {
       const listSessionsSpy = vi
@@ -24363,6 +24471,16 @@ describe('createServeApp', () => {
       const internalOnlyTranscriptFromActive = await request(app)
         .get(`/session/${internalOnlyConflictedSid}/transcript`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const qualifiedInternalTranscriptFromActive = await request(app)
+        .get(
+          `/workspaces/${internalRuntime.workspaceId}/session/${internalOnlyConflictedSid}/transcript`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const qualifiedInternalExportFromActive = await request(app)
+        .get(
+          `/workspaces/${internalRuntime.workspaceId}/session/${internalOnlyConflictedSid}/export`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(transcript.status).toBe(200);
       expect(ambiguousTranscript.status).toBe(500);
@@ -24370,6 +24488,14 @@ describe('createServeApp', () => {
       expect(internalOnlyTranscript.status).toBe(409);
       expect(internalOnlyTranscript.body.code).toBe('session_archived');
       expect(internalOnlyTranscriptFromActive.status).toBe(200);
+      expect(qualifiedInternalTranscriptFromActive.status).toBe(200);
+      expect(qualifiedInternalTranscriptFromActive.body).toMatchObject({
+        sessionId: internalOnlyConflictedSid,
+      });
+      expect(qualifiedInternalExportFromActive.status).toBe(200);
+      expect(
+        qualifiedInternalExportFromActive.headers['content-disposition'],
+      ).toContain('attachment');
       expect(primaryBridge.sessionTranscriptCalls).toEqual([
         { sessionId: archivedSid },
       ]);

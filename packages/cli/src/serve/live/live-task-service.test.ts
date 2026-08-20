@@ -37,6 +37,9 @@ const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
 const sessionIdBatchLookups = vi.hoisted(
   () => new Array<{ cwd: string; sessionIds: string[] }>(),
 );
+const sessionIdLookups = vi.hoisted(
+  () => new Array<{ cwd: string; sessionId: string }>(),
+);
 const sessionIdLookupErrors = vi.hoisted(() => new Map<string, Error>());
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
@@ -69,7 +72,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       private resolveSessionIdIgnoringCase(sessionId: string) {
-        const error = sessionIdLookupErrors.get(sessionId);
+        const error =
+          sessionIdLookupErrors.get(`${this.cwd}:${sessionId}`) ??
+          sessionIdLookupErrors.get(sessionId);
         if (error) throw error;
         const matches = [...persistedSessions.keys()].filter(
           (candidate) =>
@@ -84,6 +89,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       async findSessionIdIgnoringCase(sessionId: string) {
+        sessionIdLookups.push({ cwd: this.cwd, sessionId });
         return this.resolveSessionIdIgnoringCase(sessionId);
       }
 
@@ -384,6 +390,7 @@ beforeEach(() => {
   removeSessionMock.mockClear();
   removeSessionRuntimeBaseDirs.length = 0;
   sessionIdBatchLookups.length = 0;
+  sessionIdLookups.length = 0;
   sessionIdLookupErrors.clear();
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
@@ -1205,7 +1212,7 @@ describe('LiveTaskService', () => {
     );
   });
 
-  it('rejects ambiguous persisted case twins behind a canonical live id', async () => {
+  it('uses an exact persisted copy for a canonical resident task without catalog scans', async () => {
     const harness = makeHarness();
     const sessionId = '550e8400-e29b-41d4-a716-446655440003';
     const storageSessionId = sessionId.toUpperCase();
@@ -1229,7 +1236,75 @@ describe('LiveTaskService', () => {
         name: 'read_thread',
         arguments: { threadId: sessionId },
       }),
-    ).rejects.toMatchObject({ name: 'SessionIdCaseConflictError' });
+    ).resolves.toMatchObject({
+      thread: { id: sessionId, preview: 'first prompt' },
+      turns: [{ id: 'user-1' }],
+    });
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'wait_threads',
+        arguments: { targets: [{ threadId: sessionId }], timeoutMs: 0 },
+      }),
+    ).resolves.toMatchObject({ polls: [{ thread: { id: sessionId } }] });
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: { threadId: sessionId, prompt: 'continue' },
+      }),
+    ).resolves.toMatchObject({ threadId: sessionId });
+    expect(sessionIdBatchLookups).toEqual([]);
+    expect(sessionIdLookups).toEqual([]);
+  });
+
+  it('uses a unique cold owner despite an unrelated workspace scan failure', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440004';
+    const summary: BridgeSessionSummary = {
+      sessionId,
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Project task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessionOwners.set(sessionId, '/project');
+    sessionIdLookupErrors.set(
+      `/conversations:${sessionId}`,
+      Object.assign(new Error('EIO: unrelated catalog unavailable'), {
+        code: 'EIO',
+      }),
+    );
+    listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: sessionId },
+      }),
+    ).resolves.toMatchObject({
+      thread: { id: sessionId, preview: 'first prompt' },
+    });
+  });
+
+  it('preserves a cold scan failure when no workspace owns the task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440005';
+    const error = Object.assign(new Error('EIO: catalog unavailable'), {
+      code: 'EIO',
+    });
+    sessionIdLookupErrors.set(`/conversations:${sessionId}`, error);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: sessionId },
+      }),
+    ).rejects.toBe(error);
   });
 
   it('reuses a canonical live entry for a mixed-case stored task', async () => {

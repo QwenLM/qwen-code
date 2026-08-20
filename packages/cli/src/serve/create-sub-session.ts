@@ -52,6 +52,7 @@ import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const log = createDebugLogger('SUB_SESSION');
@@ -402,10 +403,11 @@ async function deliverSentCompletion(
   stopSignal: AbortSignal,
   isolatedWorkspace?: IsolatedWorkspace,
 ): Promise<void> {
+  const liveParentSessionId = normalizeSessionIdForLookup(parentSessionId);
   const deadline = Date.now() + RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS;
   const initialDelivery = await awaitSentCompletionAcceptance(
     bridge,
-    parentSessionId,
+    liveParentSessionId,
     notification,
     stopSignal,
     deadline,
@@ -417,12 +419,12 @@ async function deliverSentCompletion(
   // bridge registers the parent can reserve its prompt queue for relocation.
   // That keeps a concurrently arriving prompt behind the cwd change.
   const isolatedCwd = isolatedWorkspace
-    ? await isolatedWorkspace.materializeDirectory(parentSessionId)
+    ? await isolatedWorkspace.materializeDirectory(liveParentSessionId)
     : undefined;
   let materializedDirectoryUnused = isolatedCwd !== undefined;
   try {
     restoredParent = await bridge.resumeSession({
-      sessionId: parentSessionId,
+      sessionId: liveParentSessionId,
       workspaceCwd: boundWorkspace,
     });
     if (isolatedCwd !== undefined) {
@@ -441,7 +443,7 @@ async function deliverSentCompletion(
         // Once relocation begins, retain the directory if the bridge throws: a
         // caller-facing timeout does not cancel the queued cwd change.
         materializedDirectoryUnused = false;
-        const changed = await bridge.changeSessionCwd(parentSessionId, {
+        const changed = await bridge.changeSessionCwd(liveParentSessionId, {
           path: isolatedCwd,
           allowedRoots: [boundWorkspace],
           managedRelocation: 'live-conversation',
@@ -455,11 +457,11 @@ async function deliverSentCompletion(
         restoredParent.currentCwd = changed.newCwd;
       }
     }
-    const lastEventId = bridge.getSessionLastEventId(parentSessionId);
-    const eventEpoch = bridge.getSessionEventEpoch(parentSessionId);
+    const lastEventId = bridge.getSessionLastEventId(liveParentSessionId);
+    const eventEpoch = bridge.getSessionEventEpoch(liveParentSessionId);
     const recoveredDelivery = await awaitSentCompletionAcceptance(
       bridge,
-      parentSessionId,
+      liveParentSessionId,
       notification,
       stopSignal,
       deadline,
@@ -476,7 +478,7 @@ async function deliverSentCompletion(
     // stale client registrations and provides the bounded cleanup path here.
     void awaitRecoveredParentNotification(
       bridge,
-      parentSessionId,
+      liveParentSessionId,
       notification,
       lastEventId,
       eventEpoch,
@@ -536,7 +538,7 @@ async function deliverSentCompletion(
       (recoveredParentClosed || materializedDirectoryUnused)
     ) {
       await isolatedWorkspace
-        .discardEmptyDirectory(parentSessionId)
+        .discardEmptyDirectory(liveParentSessionId)
         .catch(() => {});
     }
     throw error;

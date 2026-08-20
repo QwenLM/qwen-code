@@ -1176,9 +1176,7 @@ export class LiveTaskService {
       } catch {
         continue;
       }
-      if (live.kind === 'found') {
-        addTarget(live.runtime, threadId);
-      } else if (live.kind === 'not_found') {
+      if (live.kind === 'not_found') {
         for (const runtime of allRuntimes) addTarget(runtime, threadId);
       }
     }
@@ -1223,8 +1221,12 @@ export class LiveTaskService {
     }
     const resolvePersistedSessionId = async (
       runtime: WorkspaceRuntime,
+      preferExact = false,
     ): Promise<string | undefined> => {
       const service = createWorkspaceRuntimeSessionService(runtime);
+      if (preferExact && (await service.sessionExists(threadId))) {
+        return threadId;
+      }
       const prefetched = persistedSessionIds?.get(runtime);
       const candidate = prefetched?.has(threadId)
         ? prefetched.get(threadId)
@@ -1232,14 +1234,14 @@ export class LiveTaskService {
       if (candidate !== undefined && (await service.sessionExists(candidate))) {
         return candidate;
       }
-      return (await service.sessionExists(threadId)) ? threadId : undefined;
+      return undefined;
     };
     let runtime: WorkspaceRuntime;
     let persistedSessionId: string | undefined;
     if (live.kind === 'found') {
       runtime = live.runtime;
       try {
-        persistedSessionId = await resolvePersistedSessionId(runtime);
+        persistedSessionId = await resolvePersistedSessionId(runtime, true);
       } catch (error) {
         if (
           error instanceof SessionIdCaseConflictError &&
@@ -1252,18 +1254,29 @@ export class LiveTaskService {
         persistedSessionId = undefined;
       }
     } else {
-      const matches = (
-        await Promise.all(
-          (
-            this.options.workspaceRegistry.listAll?.() ??
-            this.options.workspaceRegistry.list()
-          ).map(async (candidateRuntime) => ({
-            runtime: candidateRuntime,
-            persistedSessionId:
-              await resolvePersistedSessionId(candidateRuntime),
-          })),
-        )
-      ).filter(
+      const candidates = await Promise.all(
+        (
+          this.options.workspaceRegistry.listAll?.() ??
+          this.options.workspaceRegistry.list()
+        ).map(async (candidateRuntime) => {
+          try {
+            return {
+              runtime: candidateRuntime,
+              persistedSessionId:
+                await resolvePersistedSessionId(candidateRuntime),
+            };
+          } catch (error) {
+            return { runtime: candidateRuntime, error };
+          }
+        }),
+      );
+      const conflict = candidates.find(
+        (candidate) =>
+          'error' in candidate &&
+          candidate.error instanceof SessionIdCaseConflictError,
+      );
+      if (conflict && 'error' in conflict) throw conflict.error;
+      const matches = candidates.filter(
         (
           entry,
         ): entry is {
@@ -1271,7 +1284,11 @@ export class LiveTaskService {
           persistedSessionId: string;
         } => entry.persistedSessionId !== undefined,
       );
-      if (matches.length === 0) throw new SessionNotFoundError(threadId);
+      if (matches.length === 0) {
+        const failed = candidates.find((candidate) => 'error' in candidate);
+        if (failed && 'error' in failed) throw failed.error;
+        throw new SessionNotFoundError(threadId);
+      }
       if (matches.length > 1)
         throw new Error(`Task id is ambiguous: ${threadId}`);
       runtime = matches[0]!.runtime;

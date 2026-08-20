@@ -932,14 +932,6 @@ async function listOrganizedWorkspaceSessionsForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-      const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
-        sessionService,
-        liveSessions.map((session) => session.sessionId),
-        bySessionId,
-        persistedSessionIdByCanonicalId,
-        isFirstPage && persisted.truncated,
-        readOptions.signal,
-      );
       for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
@@ -966,20 +958,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
               organization,
             ),
           );
-        } else if (
-          // A live-only row has no persisted key to page by, so it stays a
-          // first-page-only insertion as before.
-          isFirstPage &&
-          // `listAllPersistedSummaries` already scanned every persisted
-          // session when the scan wasn't truncated, so a `sessionId` missing
-          // from `bySessionId` is definitively new — no disk re-check
-          // needed. Re-checking here raced a session that persists its
-          // first write (e.g. a `displayName` update) between the scan
-          // above and this point: `existing` stayed undefined but
-          // `sessionExists` flipped to true, silently dropping the live
-          // session from the response instead of merging it.
-          (!persisted.truncated || !persistedLiveSessionIds.has(live.sessionId))
-        ) {
+        } else if (isFirstPage) {
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -1130,14 +1109,6 @@ async function listWorkspaceSessionsByMetadataForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-      const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
-        sessionService,
-        liveSessions.map((session) => session.sessionId),
-        bySessionId,
-        persistedSessionIdByCanonicalId,
-        persisted.truncated,
-        readOptions.signal,
-      );
       for (const live of liveSessions) {
         const persistedSessionId = persistedSessionIdForLiveEntry(
           live.sessionId,
@@ -1152,14 +1123,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
             listedSessionId,
             mergeLiveSessionSummary(existing, live),
           );
-        } else if (
-          // See the matching comment in
-          // `listOrganizedWorkspaceSessionsForResponse`: an untruncated scan
-          // already covers every persisted session, so skip the racy
-          // re-check when nothing was truncated.
-          !persisted.truncated ||
-          !persistedLiveSessionIds.has(live.sessionId)
-        ) {
+        } else {
           bySessionId.set(live.sessionId, {
             ...live,
             createdAt: live.createdAt,
