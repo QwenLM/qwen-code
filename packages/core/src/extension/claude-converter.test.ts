@@ -26,6 +26,10 @@ import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
 import { recursivelyHydrateStrings } from './variables.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+} from './agent-plugins-v1/manifest.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -142,7 +146,7 @@ describe('convertClaudeToQwenConfig', () => {
     } as ClaudePluginConfig;
 
     expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
-      /Invalid MCP configuration: mcpServers must be an object/,
+      /Invalid MCP server "array-mcp-plugin": Invalid MCP configuration: mcpServers must be an object/,
     );
   });
 
@@ -1092,10 +1096,15 @@ describe('convertClaudePluginPackage', () => {
     // runtime against the installed directory (see loadExtension).
     expect(result.config.hooks).toBe('./hooks/hooks.json');
     // The referenced hooks file must be copied into the converted directory so
-    // the runtime loader can find it.
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'hooks', 'hooks.json')),
-    ).toBe(true);
+    // the runtime loader can find it. Its placeholders must NOT be hydrated
+    // at conversion time — that is the loader's job, and skipping it here
+    // would let the converted file ship with substituted paths that go stale
+    // if the install directory moves.
+    const copiedHooksJson = fs.readFileSync(
+      path.join(result.convertedDir, 'hooks', 'hooks.json'),
+      'utf-8',
+    );
+    expect(copiedHooksJson).toContain('${CLAUDE_PLUGIN_ROOT}');
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -1432,6 +1441,31 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
+  it('drops a root agent-plugins plugin.json so it cannot shadow the converted manifest', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'shadowed', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'carried-agent-plugin',
+      }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    expect(
+      fs.existsSync(path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST)),
+    ).toBe(false);
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
   it('throws when there is no .claude-plugin/plugin.json', async () => {
     await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
       /Plugin configuration not found/,
@@ -1651,6 +1685,10 @@ describe('convertClaudePluginStandalone', () => {
 
       const result = await convertClaudePluginPackage(pluginDir, 'p');
       expect(result.convertedDir).toBeDefined();
+      // The marketplace entry must overlay the non-object body — a regression
+      // to an empty config base (no name) would otherwise install an unnamed
+      // extension silently.
+      expect(result.config.name).toBe('p');
     },
   );
 
@@ -1673,7 +1711,7 @@ describe('convertClaudePluginStandalone', () => {
   });
 });
 
-describe('performVariableReplacement for Claude extensions', () => {
+describe('plugin package routing and variable replacement', () => {
   let testDir: string;
 
   beforeEach(() => {
@@ -1771,10 +1809,9 @@ describe('performVariableReplacement for Claude extensions', () => {
   it.runIf(process.platform !== 'win32')(
     'a relative source whose symlink target is the marketplace dir returns the marketplace dir without copying',
     async () => {
-      const mpDir = path.join(testDir, 'symlink-to-root');
-      fs.mkdirSync(mpDir, { recursive: true });
-      fs.symlinkSync(mpDir, path.join(mpDir, 'self-link'));
       const extDir = path.join(testDir, 'symlink-to-root-ext');
+      fs.mkdirSync(extDir, { recursive: true });
+      fs.symlinkSync(extDir, path.join(extDir, 'self-link'));
       fs.mkdirSync(path.join(extDir, '.claude-plugin'), { recursive: true });
       fs.writeFileSync(
         path.join(extDir, '.claude-plugin', 'marketplace.json'),
@@ -1785,6 +1822,11 @@ describe('performVariableReplacement for Claude extensions', () => {
       );
       const result = await convertClaudePluginPackage(extDir, 'p');
       expect(result.convertedDir).toBeDefined();
+      // copyDirectory skips a symlink whose real target is the copied
+      // directory itself — otherwise the conversion never terminates.
+      expect(
+        fs.existsSync(path.join(result.convertedDir, 'self-link')),
+      ).toBe(false);
     },
   );
 });

@@ -4,11 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import mock from 'mock-fs';
 import * as path from 'node:path';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import type { Extension } from '../extension/extensionManager.js';
+
+const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+  }),
+}));
 
 describe('LspConfigLoader config-driven behavior', () => {
   const workspaceRoot = '/workspace';
@@ -401,15 +413,22 @@ describe('LspConfigLoader extension configs', () => {
         lspServers: '\u001b[2Jspoof.json',
       },
     } as Extension;
+    mockWarn.mockClear();
     const configs = await loader.loadExtensionConfigs([extension]);
     expect(configs).toHaveLength(0);
     // Baseline: the raw string still contains the control byte.
     expect((extension.config.lspServers ?? '').toString()).toContain(
       '\u001b[2J',
     );
-    // parseConfigSource at LspConfigLoader.ts:148 uses stripAnsiAndControl
-    // so the raw byte never reaches the surfaced error at :251 / :261 / :274.
-    // Mutation: drop the wrapper.
+    // The parse-error warn surfaces the sanitized path and names the reason.
+    // Mutation: drop the stripAnsiAndControl wrapper → raw byte in message;
+    // mis-map the reason (e.g. 'missing') → wrong detail string.
+    const messages = mockWarn.mock.calls.map((c) => String(c[0]));
+    const sanitized = messages.find((m) =>
+      m.includes('LSP config failed to parse for extension ts-plugin'),
+    );
+    expect(sanitized).toBeDefined();
+    expect(sanitized).not.toContain('\u001b');
   });
 
   it('loads an out-of-tree lspServers path for a link-mode extension', async () => {

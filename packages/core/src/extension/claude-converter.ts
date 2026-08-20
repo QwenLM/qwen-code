@@ -21,6 +21,7 @@ import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
 import {
+  isRegularFile,
   realPathWithin,
   readExtensionManifest,
   readExtraJsonFile,
@@ -33,30 +34,18 @@ import {
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
-/**
- * Strips terminal escape/control sequences from untrusted values before they
- * are interpolated into error messages. Conversion errors here propagate to the
- * TUI install status area, so a hostile plugin `source`/`path` could otherwise
- * smuggle ANSI/OSC sequences to the terminal during a failed install. Aliases
- * the shared `stripAnsiAndControl` so the rule stays in one place.
- */
+/** Alias for `stripAnsiAndControl` so call sites read as error-context. */
 const sanitizeForError = stripAnsiAndControl;
 
-/**
- * True when `filePath` exists and is a regular file (not a directory). Used to
- * reject a directory-valued hooks reference at conversion time and after
- * resource collection.
- */
-export const isRegularFile = (filePath: string): boolean => {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
-};
+/** Re-exported from path-confinement for callers that already depend on this module. */
+export { isRegularFile };
 
 export interface ClaudePluginConfig {
   name: string;
@@ -417,10 +406,15 @@ export function normalizeMcpServers(
 export function assertMcpServersContainer(
   value: unknown,
   errorMessage: string,
+  serverName?: string,
 ): Record<string, unknown> | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(errorMessage);
+    throw new Error(
+      serverName
+        ? `Invalid MCP server "${stripAnsiAndControl(serverName)}": ${errorMessage}`
+        : errorMessage,
+    );
   }
   return value as Record<string, unknown>;
 }
@@ -450,6 +444,7 @@ export function convertClaudeToQwenConfig(
       const servers = assertMcpServersContainer(
         claudeConfig.mcpServers,
         'Invalid MCP configuration: mcpServers must be an object',
+        claudeConfig.name,
       );
       if (servers) {
         mcpServers = normalizeMcpServers(
@@ -621,10 +616,11 @@ export async function convertClaudePluginPackage(
       mergedConfig = marketplacePlugin as ClaudePluginConfig;
     }
   } else {
-    // `existsSync` follows symlinks, so the strict check at line 500 passes
-    // when plugin.json is a symlink to an existing host file — but the file is
-    // not trusted (`realPathWithin` rejected it). Strict mode must fail here
-    // rather than silently fall back to the marketplace entry.
+    // `existsSync` follows symlinks, so the strict check earlier in this
+    // function passes when plugin.json is a symlink to an existing host file
+    // — but the file is not trusted (`realPathWithin` rejected it). Strict
+    // mode must fail here rather than silently fall back to the marketplace
+    // entry.
     if (strict) {
       throw new Error(
         `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
@@ -642,6 +638,14 @@ export async function convertClaudePluginPackage(
     pluginSource,
     mergedConfig,
   );
+  // Remove root plugin.json if the converted tree still resolves as an
+  // Agent-Plugins package — it would shadow the Claude manifest at install.
+  if (getAgentPluginSchemaStatus(converted.convertedDir) !== 'unrelated') {
+    await fs.promises.rm(
+      path.join(converted.convertedDir, AGENT_PLUGIN_MANIFEST),
+      { force: true },
+    );
+  }
   return { ...converted, externalContent };
 }
 
@@ -817,7 +821,18 @@ export async function convertClaudePluginStandalone(
     }
   }
 
-  return buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+  const result = await buildQwenExtensionFromPlugin(
+    extensionDir,
+    mergedConfig,
+  );
+  // Remove root plugin.json if the converted tree still resolves as an
+  // Agent-Plugins package — it would shadow the Claude manifest at install.
+  if (getAgentPluginSchemaStatus(result.convertedDir) !== 'unrelated') {
+    await fs.promises.rm(path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST), {
+      force: true,
+    });
+  }
+  return result;
 }
 
 /**
@@ -1114,7 +1129,7 @@ async function resolvePluginSource(
     // If source path equals marketplace dir (source is '.' or ''), or a
     // subdir whose symlink target IS the marketplace dir, return
     // marketplaceDir directly to avoid copying a directory into
-    // itself. The lexical check at line 1116 alone misses the
+    // itself. The lexical containment check alone misses the
     // symlink-to-root case: `fs.promises.cp` would then crash with a
     // raw SystemError because the source and the destination resolve to
     // the same path.

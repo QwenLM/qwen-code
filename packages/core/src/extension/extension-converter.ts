@@ -26,7 +26,6 @@ import type {
 } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  AGENT_PLUGIN_MANIFEST,
   AGENT_PLUGIN_SCHEMA,
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
@@ -141,11 +140,6 @@ export async function convertCompatibleExtension(
         networkPolicy,
         signal,
       );
-      if (getAgentPluginSchemaStatus(converted.convertedDir) !== 'unrelated') {
-        fs.rmSync(path.join(converted.convertedDir, AGENT_PLUGIN_MANIFEST), {
-          force: true,
-        });
-      }
       return {
         extensionDir: converted.convertedDir,
         originSource: 'Claude',

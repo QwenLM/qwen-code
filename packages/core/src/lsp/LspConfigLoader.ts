@@ -106,7 +106,7 @@ export class LspConfigLoader {
         );
       } else {
         debugLogger.warn(
-          `LSP config for ${originBase} must be an object or a JSON file path.`,
+          `LSP config for ${stripAnsiAndControl(originBase)} must be an object or a JSON file path.`,
         );
       }
     }
@@ -127,14 +127,35 @@ export class LspConfigLoader {
     trustSymlinks: boolean,
   ): void {
     const data = readExtraJsonFile(extension.path, lspServers, trustSymlinks, (reason) => {
-      if (reason === 'missing') {
-        const lspConfigPath = path.isAbsolute(lspServers)
-          ? lspServers
-          : path.join(extension.path, lspServers);
-        debugLogger.warn(
-          `LSP config not found for ${originBase}: ${stripAnsiAndControl(lspConfigPath)}`,
-        );
+      const lspConfigPath = path.isAbsolute(lspServers)
+        ? lspServers
+        : path.join(extension.path, lspServers);
+      const safePath = stripAnsiAndControl(lspConfigPath);
+      let detail: string;
+      switch (reason) {
+        case 'missing':
+          detail = 'not found';
+          break;
+        case 'parse-error':
+          detail = 'failed to parse';
+          break;
+        case 'directory':
+          detail = 'is a directory, not a regular file';
+          break;
+        case 'non-object-body':
+          detail = 'is not a JSON object';
+          break;
+        case 'absolute-symlink-escape':
+        case 'absolute-outside':
+        case 'confinement-threw':
+          detail = 'rejected: path escapes the extension directory';
+          break;
+        default:
+          detail = 'rejected';
       }
+      debugLogger.warn(
+        `LSP config ${detail} for ${originBase}: ${safePath}`,
+      );
     });
     if (!data) {
       return;
@@ -337,14 +358,14 @@ export class LspConfigLoader {
 
     if (transport === 'stdio' && !command) {
       debugLogger.warn(
-        `LSP config error in ${origin}: ${name} missing command`,
+        `LSP config error in ${stripAnsiAndControl(origin)}: ${stripAnsiAndControl(name)} missing command`,
       );
       return null;
     }
 
     if (transport !== 'stdio' && !socket) {
       debugLogger.warn(
-        `LSP config error in ${origin}: ${name} missing socket info`,
+        `LSP config error in ${stripAnsiAndControl(origin)}: ${stripAnsiAndControl(name)} missing socket info`,
       );
       return null;
     }
@@ -522,7 +543,7 @@ export class LspConfigLoader {
     }
 
     debugLogger.warn(
-      `LSP workspaceFolder must be within ${this.workspaceRoot}; using workspace root instead.`,
+      `LSP workspaceFolder must be within ${stripAnsiAndControl(this.workspaceRoot)}; using workspace root instead.`,
     );
     return this.workspaceRoot;
   }

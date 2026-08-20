@@ -11,10 +11,12 @@ import type { ExtensionConfig } from './extensionManager.js';
 import {
   buildQwenExtensionFromPlugin,
   normalizeMcpServers,
+  assertMcpServersContainer,
   type ClaudePluginConfig,
 } from './claude-converter.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import {
+  isRegularFile,
   readExtensionManifest,
   readExtraJsonFile,
   resolvePluginRelativeFile,
@@ -100,11 +102,10 @@ function loadMcpServersFile(
     requireWrapper
       ? null
       : (_reason, ctx) => {
-          const safePath = stripAnsiAndControl(relativePath);
           throw new Error(
             explicitMcpFailureMessage(
               _reason,
-              safePath,
+              ctx.safeFileRef,
               ctx.cause,
             ),
           );
@@ -143,16 +144,18 @@ function loadMcpServersFile(
 function resolveMcpServers(
   extensionDir: string,
   configured: QoderPluginConfig['mcpServers'],
+  pluginName: string,
 ): Record<string, MCPServerConfig> | undefined {
   if (typeof configured === 'string') {
     return loadMcpServersFile(extensionDir, configured, false);
   }
   if (configured !== undefined && configured !== null) {
-    if (typeof configured !== 'object' || Array.isArray(configured)) {
-      throw new Error('Qoder plugin mcpServers must be an object or file path');
-    }
     return normalizeMcpServers(
-      configured as Record<string, unknown>,
+      assertMcpServersContainer(
+        configured,
+        'Invalid MCP configuration: mcpServers must be an object',
+        pluginName,
+      ) as Record<string, unknown>,
       path.join(extensionDir, QODER_PLUGIN_MANIFEST),
     );
   }
@@ -172,12 +175,7 @@ function resolveContextFiles(
   const seen = new Set<string>();
   const addContextFile = (relativePath: string, prepend = false): void => {
     const resolved = resolvePluginRelativeFile(extensionDir, relativePath);
-    if (!resolved) return;
-    try {
-      if (!fs.statSync(resolved).isFile()) return;
-    } catch {
-      return;
-    }
+    if (!resolved || !isRegularFile(resolved)) return;
     const normalized = path.relative(path.resolve(extensionDir), resolved);
     if (normalized && !seen.has(normalized)) {
       seen.add(normalized);
@@ -200,7 +198,11 @@ export async function convertQoderPlugin(
   extensionDir: string,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   const config = loadQoderConfig(extensionDir);
-  config.mcpServers = resolveMcpServers(extensionDir, config.mcpServers);
+  config.mcpServers = resolveMcpServers(
+    extensionDir,
+    config.mcpServers,
+    config.name,
+  );
   const converted = await buildQwenExtensionFromPlugin(
     extensionDir,
     config as ClaudePluginConfig,

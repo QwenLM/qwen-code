@@ -732,4 +732,23 @@ describe('convertQoderPlugin', () => {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
   });
+
+  it('names the extension in the mcpServers validation error', async () => {
+    // Top-level mcpServers as a scalar — assertMcpServersContainer should
+    // surface the extension name so the user can locate the bad entry.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-scalar-'));
+    try {
+      fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, '.qoder-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'scalar-mcp-test', mcpServers: 42 }),
+      );
+
+      await expect(convertQoderPlugin(root)).rejects.toThrow(
+        /Invalid MCP server "scalar-mcp-test"/,
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

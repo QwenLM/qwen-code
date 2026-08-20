@@ -1433,6 +1433,26 @@ describe('HookRunner', () => {
         'git log --grep=fix#123 "/test/project"',
       );
     });
+
+    // `#` after one of the widened token-boundary chars ({,},[,],=,,)
+    // starts a comment. The comment skip eats the opening `"`, so a
+    // placeholder later on the line is outside any quote region and gets
+    // wrapped. Mutation: revert the class to ["'();|&>] → `#` is literal,
+    // the `"` opens a string and the placeholder stays unwrapped — red.
+    it('treats # after = as a comment start', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command: 'x=#comment "echo $CLAUDE_PROJECT_DIR"',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(`x=#comment "echo '/test/project'"`);
+    });
   });
 
   describe('convertPlainTextToHookOutput', () => {
@@ -1668,6 +1688,56 @@ describe('HookRunner', () => {
         }
       },
     );
+
+    // The alternation's new match class — a leading quote embedding the
+    // OTHER quote type — is only treated as a bare-quoted path when it
+    // carries path shape: a whole-command string literal stays literal,
+    // an apostrophe-carrying path still gets the call-operator prefix.
+    it.each([
+      ['string literal', `'say "hi"'`, `'say "hi"'`],
+      [
+        'apostrophe path',
+        `"C:/Users/O'Brien/setup.cmd"`,
+        `& "C:/Users/O'Brien/setup.cmd"`,
+      ],
+    ])(
+      'applies the bare-quoted path-shape gate to a %s (cmd fallback)',
+      async (_label, command, expected) => {
+        const spy = mockCmdShellConfig();
+        try {
+          mockSpawn.mockImplementation(() => createMockProcess(0));
+          await hookRunner.executeHook(
+            {
+              type: HookType.Command,
+              command,
+              source: HooksConfigSource.Project,
+            },
+            HookEventName.PreToolUse,
+            createMockInput(),
+          );
+          const spawnArgs = mockSpawn.mock.calls[0];
+          expect(spawnArgs[1][2]).toBe(expected);
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it('does not treat a whole-command string literal as a bare-quoted path (explicit powershell)', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: `'Write-Output "hi"'`,
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(mockSpawn).toHaveBeenCalled();
+      expect(result.success).toBe(true);
+    });
 
     it.each([
       ['double-quoted', '"', '"'],

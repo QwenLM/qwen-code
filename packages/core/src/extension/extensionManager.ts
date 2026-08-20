@@ -34,6 +34,7 @@ import {
   performVariableReplacement,
 } from './variables.js';
 import {
+  isRegularFile,
   readExtensionManifest,
   realPathWithin,
   readExtraJsonFile,
@@ -1631,7 +1632,9 @@ export class ExtensionManager {
         typeof config.hooks !== 'string'
       ) {
         // Inline hooks are already hydrated by loadExtensionConfig.
-        extension.hooks = config.hooks as {
+        // Deep-clone so subsequent hookRegistry mutations (e.g. .source
+        // rewrites) don't leak back into config.hooks on the live config.
+        extension.hooks = structuredClone(config.hooks) as {
           [K in HookEventName]?: HookDefinition[];
         };
       }
@@ -1651,12 +1654,14 @@ export class ExtensionManager {
         // A hooks path (string or absolute) must stay inside the extension;
         // an escaping value would otherwise load an arbitrary host file. Only
         // an existing path can escape via symlink — a missing file is dropped
-        // by the existsSync below, not an escape. Link-mode installs trust the
-        // user's own dev tree, so their symlinks are followed (not dropped).
+        // by the isRegularFile below, not an escape. Link-mode installs trust
+        // the user's own dev tree, so their symlinks are followed (not dropped).
+        // isRegularFile (not fs.existsSync) also rejects directory-valued
+        // config.hooks so the reader below doesn't silently load a folder.
         if (
           configHooksPath &&
           !trustSymlinks &&
-          fs.existsSync(configHooksPath) &&
+          isRegularFile(configHooksPath) &&
           !realPathWithin(configHooksPath, effectiveExtensionPath)
         ) {
           debugLogger.warn(
@@ -1665,22 +1670,26 @@ export class ExtensionManager {
           configHooksPath = null;
         }
 
-        // Warn when the user-set hooks path is missing — independent of
-        // whether a default hooks/hooks.json exists (without this, a
-        // typo + no co-shipped default fails silently).
+        // Warn when the user-set hooks path is missing or directory-valued —
+        // independent of whether a default hooks/hooks.json exists (without
+        // this, a typo + no co-shipped default fails silently, and a
+        // directory-valued reference would silently fall back).
         if (
           typeof config.hooks === 'string' &&
           configHooksPath &&
-          !fs.existsSync(configHooksPath)
+          !isRegularFile(configHooksPath)
         ) {
+          const reason = fs.existsSync(configHooksPath)
+            ? 'is a directory, not a regular file'
+            : 'was not found';
           debugLogger.warn(
-            `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" was not found; falling back to hooks/hooks.json.`,
+            `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" ${reason}; falling back to hooks/hooks.json.`,
           );
         }
 
         if (
-          fs.existsSync(hooksJsonPath) ||
-          (configHooksPath && fs.existsSync(configHooksPath))
+          isRegularFile(hooksJsonPath) ||
+          (configHooksPath && isRegularFile(configHooksPath))
         ) {
           // Pass raw config.hooks (not the pre-joined absolute) so the
           // relative-branch confinement check applies uniformly to both
@@ -1688,7 +1697,7 @@ export class ExtensionManager {
           const rawHooksFileRef =
             configHooksPath &&
             typeof config.hooks === 'string' &&
-            fs.existsSync(configHooksPath)
+            isRegularFile(configHooksPath)
               ? config.hooks
               : 'hooks/hooks.json';
 
@@ -2369,7 +2378,7 @@ export class ExtensionManager {
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||
-            (configHooksPath && fs.existsSync(configHooksPath)))
+            (configHooksPath && isRegularFile(configHooksPath)))
         ) {
           try {
             await performVariableReplacement(stagingPath, destinationPath);
@@ -2589,6 +2598,7 @@ export class ExtensionManager {
           newExtensionConfig = this.loadExtensionConfig({
             extensionDir: localSourcePath,
             workspaceDir: currentDir,
+            trustSymlinks: installMetadata.type === 'link',
           });
         } catch {
           // Ignore error

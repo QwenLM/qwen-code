@@ -4370,49 +4370,6 @@ describe('extension tests', () => {
       ).toBe('echo from-default');
     });
 
-    // config.hooks string warn (extensionManager.ts:1524). Mutation:
-    // comment out the debugLogger.warn(...) body → captured warn count 0.
-    it('warns when config.hooks string points to a missing file', async () => {
-      const extensionDir = path.join(userExtensionsDir, 'dangling-hooks-config');
-      fs.mkdirSync(extensionDir, { recursive: true });
-
-      fs.writeFileSync(
-        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
-        JSON.stringify({
-          name: 'dangling-hooks-config',
-          version: '1.0.0',
-          hooks: 'hooks/this-file-is-missing.json',
-        }),
-      );
-      const hooksDir = path.join(extensionDir, 'hooks');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(hooksDir, 'hooks.json'),
-        JSON.stringify({
-          PreToolUse: [
-            {
-              hooks: [{ type: 'command', command: 'echo from-default' }],
-            },
-          ],
-        }),
-        'utf-8',
-      );
-
-      const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
-      try {
-        const manager = createExtensionManager();
-        await manager.refreshCache();
-        const messages = warnSpy.mock.calls.map((c) => String(c[0]));
-        const matching = messages.find((m) =>
-          m.includes('hooks/this-file-is-missing.json'),
-        );
-        expect(matching).toBeDefined();
-        expect(matching).toMatch(/was not found/);
-      } finally {
-        warnSpy.mockRestore();
-      }
-    });
-
     // Total-loss: config.hooks missing AND no co-shipped default. The
     // warn is hoisted out of the outer existsSync gate so it still fires.
     // Mutation: re-nest the warn inside the outer if → no warn captured.
@@ -4444,6 +4401,57 @@ describe('extension tests', () => {
         warnSpy.mockRestore();
       }
     });
+
+    // config.hooks string warn + default fallback: a missing-file reference
+    // and a directory-valued reference get a reason-specific warn and fall
+    // back to the co-shipped default. Mutation: revert the isRegularFile
+    // gate to fs.existsSync → the directory reason flips to a silent fallback.
+    it.each([
+      ['missing file', 'dangling-hooks-config', 'hooks/this-file-is-missing.json', 'was not found'],
+      ['directory', 'dir-hooks-config', 'hooks', 'is a directory, not a regular file'],
+    ])(
+      'warns when config.hooks points to a %s and falls back to the default',
+      async (_label, dirName, hooksRef, reason) => {
+        const extensionDir = path.join(userExtensionsDir, dirName);
+        fs.mkdirSync(extensionDir, { recursive: true });
+        fs.mkdirSync(path.join(extensionDir, 'hooks'), { recursive: true });
+
+        fs.writeFileSync(
+          path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: dirName,
+            version: '1.0.0',
+            hooks: hooksRef,
+          }),
+        );
+        fs.writeFileSync(
+          path.join(extensionDir, 'hooks', 'hooks.json'),
+          JSON.stringify({
+            PreToolUse: [
+              {
+                hooks: [{ type: 'command', command: 'echo from-default' }],
+              },
+            ],
+          }),
+          'utf-8',
+        );
+
+        const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+        try {
+          const manager = createExtensionManager();
+          await manager.refreshCache();
+          const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+          const matching = messages.find((m) =>
+            m.includes(`Referenced hooks path "${hooksRef}"`),
+          );
+          expect(matching).toBeDefined();
+          expect(matching).toContain(reason);
+          expect(manager.getLoadedExtensions()[0].hooks).toBeDefined();
+        } finally {
+          warnSpy.mockRestore();
+        }
+      },
+    );
   });
 
   describe('hooks loading and processing', () => {
@@ -4489,6 +4497,50 @@ describe('extension tests', () => {
           }
         ).command,
       ).toBe('echo "hello"');
+    });
+
+    // structuredClone isolation (extensionManager.ts:1637). Mutation: revert
+    // the clone to a bare reference → extension.hooks aliases config.hooks and
+    // the registry's .source stamp leaks into the live config.
+    it('does not leak .source stamps from extension.hooks into the live config.hooks', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'clone-hooks-config');
+      fs.mkdirSync(extensionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'clone-hooks-config',
+          version: '1.0.0',
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [{ type: 'command', command: 'echo x' }],
+              },
+            ],
+          },
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'clone-hooks-config')!;
+      expect(extension.hooks).toBeDefined();
+      // Not the same object as the live config — the registry stamps
+      // .source onto extension.hooks and must not reach config.hooks.
+      expect(extension.hooks).not.toBe(extension.config.hooks);
+      (
+        extension.hooks!['PreToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['source'] = 'stamped';
+      const configHooks = extension.config
+        .hooks as unknown as Record<string, unknown>;
+      const guardedGroup = (
+        configHooks['PreToolUse'] as Array<{ hooks?: unknown[] }>
+      )[0];
+      expect(guardedGroup?.hooks?.[0]).not.toHaveProperty('source');
     });
 
     it('should load hooks from hooks/hooks.json when not in main config', async () => {

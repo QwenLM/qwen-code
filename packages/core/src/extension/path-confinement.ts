@@ -35,6 +35,19 @@ export function realPathWithin(target: string, root: string): boolean {
 }
 
 /**
+ * True when `filePath` exists and is a regular file (not a directory).
+ * Single source of truth so a directory-valued path can't slip through a
+ * `fs.existsSync` check at one site and be caught at another.
+ */
+export function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reads a package-relative JSON manifest. Returns null when the file is
  * absent; throws a precise error when it exists but is unparseable, is not a
  * JSON object, or resolves through a symlink outside the package. Callers use
@@ -240,15 +253,7 @@ export function readExtraJsonFile(
   if (!fs.existsSync(filePath)) {
     return reportNull('missing');
   }
-  // Inlined here to avoid importing from claude-converter (which would
-  // create a cross-module dependency between two converter files).
-  let isFile = false;
-  try {
-    isFile = fs.statSync(filePath).isFile();
-  } catch {
-    isFile = false;
-  }
-  if (!isFile) {
+  if (!isRegularFile(filePath)) {
     return reportNull('directory');
   }
   let parsed: unknown;

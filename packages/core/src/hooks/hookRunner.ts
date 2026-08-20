@@ -37,8 +37,16 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /** Match a bare-quoted path (`"..."` or `'...'`); trailer operators only disqualify when UNQUOTED. */
 function isBareQuotedPowerShellCommand(command: string): boolean {
-  const lead = /^\s*(["'])[^"']*\1/.exec(command);
+  const lead = /^\s*(?:"([^"]*)"|'([^']*)')/.exec(command);
   if (!lead) return false;
+  const quoted = lead[1] ?? lead[2];
+  // A quoted segment embedding the other quote type can be a string-literal
+  // statement (`'say "hi"'`) rather than a path — only the alternation's new
+  // matches are gated here; treat them as bare-quoted only when they carry
+  // path shape (a separator or a file extension).
+  if (/["']/.test(quoted) && !/[/\\]|\.[A-Za-z0-9]+$/.test(quoted)) {
+    return false;
+  }
   let i = lead[0].length;
   let state: 'outside' | 'in-double' | 'in-single' = 'outside';
   while (i < command.length) {
@@ -897,7 +905,7 @@ export class HookRunner {
         const isTokenBoundary = (pos: number): boolean => {
           if (pos === 0) return true;
           const prev = command[pos - 1];
-          return /\s/.test(prev) || /["'();|&>]/.test(prev);
+          return /\s/.test(prev) || /["'();|&>{}\[\]=,]/.test(prev);
         };
         for (let i = 0; i < offset; i++) {
           const ch = command[i];

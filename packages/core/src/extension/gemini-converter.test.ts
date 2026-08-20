@@ -195,7 +195,7 @@ describe('convertGeminiToQwenConfig', () => {
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(geminiConfig));
 
     expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
-      /Invalid MCP configuration: mcpServers must be an object/,
+      /Invalid MCP server "gemini-shape-extension": Invalid MCP configuration/,
     );
   });
 
@@ -265,6 +265,23 @@ describe('convertGeminiToQwenConfig', () => {
     expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
       /Gemini extension config not found/,
     );
+  });
+
+  it('sanitizes control bytes from the extension dir in the surfaced not-found error', () => {
+    const mockDir = '/mock/ext\u001b[2J\u001b[1;1Hdir';
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    let caught: unknown;
+    try {
+      convertGeminiToQwenConfig(mockDir);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(
+      'Gemini extension config not found',
+    );
+    expect((caught as Error).message).not.toContain('\u001b');
   });
 
   it('throws when gemini-extension.json resolves through a symlink outside the extension', () => {

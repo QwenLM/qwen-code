@@ -17,6 +17,8 @@ import {
   AGENT_PLUGIN_SCHEMA_PREFIX,
 } from './agent-plugins-v1/index.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
+import { AGENT_PLUGIN_MANIFEST } from './agent-plugins-v1/manifest.js';
+import { convertGeminiExtensionPackage } from './gemini-converter.js';
 import * as claudeConverter from './claude-converter.js';
 
 describe('Agent Plugins extension conversion', () => {
@@ -467,6 +469,29 @@ describe('convertCompatibleExtension', () => {
       fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
     ).toBe(true);
     trackConvertedDir(result);
+  });
+
+  it('drops a root agent-plugins plugin.json from a converted Gemini package', async () => {
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'carried-agent-plugin',
+      }),
+      'utf-8',
+    );
+
+    const result = await convertGeminiExtensionPackage(root);
+
+    expect(
+      fs.existsSync(path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST)),
+    ).toBe(false);
+    trackConvertedDir({ extensionDir: result.convertedDir });
   });
 
   it('converts a detected Qoder plugin', async () => {

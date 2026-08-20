@@ -18,14 +18,19 @@ import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isPathWithin,
+  isRegularFile,
   readExtensionManifest,
   realPathWithin,
 } from './path-confinement.js';
 import {
-  isRegularFile,
   normalizeMcpServers,
   assertMcpServersContainer,
 } from './claude-converter.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -53,7 +58,7 @@ export function convertGeminiToQwenConfig(
   ) as GeminiExtensionConfig | null;
   if (!geminiConfig) {
     throw new Error(
-      `Gemini extension config not found at ${path.join(extensionDir, 'gemini-extension.json')}`,
+      `Gemini extension config not found at ${stripAnsiAndControl(path.join(extensionDir, 'gemini-extension.json'))}`,
     );
   }
   // Validate required fields
@@ -73,6 +78,7 @@ export function convertGeminiToQwenConfig(
       : assertMcpServersContainer(
           geminiConfig.mcpServers,
           'Invalid MCP configuration: mcpServers must be an object',
+          geminiConfig.name,
         );
   const mcpServers = validatedServers
     ? normalizeMcpServers(
@@ -127,6 +133,16 @@ export async function convertGeminiExtensionPackage(
   try {
     // Step 1: Copy all files and directories to temporary directory
     await copyDirectory(extensionDir, tmpDir);
+
+    // If the source ships a root Agent-Plugins manifest, drop it so the
+    // loader does not shadow qwen-extension.json with a plugin.json that
+    // belongs to a sibling format. Mirrors the cleanup applied in the
+    // Claude converter (marketplace + standalone branches).
+    if (getAgentPluginSchemaStatus(tmpDir) !== 'unrelated') {
+      await fs.promises.rm(path.join(tmpDir, AGENT_PLUGIN_MANIFEST), {
+        force: true,
+      });
+    }
 
     // Step 2: Convert TOML commands to Markdown in commands folder
     const commandsDir = path.join(tmpDir, 'commands');
@@ -204,7 +220,16 @@ export async function copyDirectory(
         const realPath = fs.realpathSync(sourcePath);
         if (!isPathWithin(realPath, root)) {
           debugLogger.warn(
-            `Skipping symlink that escapes the package: ${sourcePath} -> ${realPath}`,
+            `Skipping symlink that escapes the package: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
+          );
+          continue;
+        }
+        // A symlink whose real target is the directory being copied or one
+        // of its ancestors resolves back into the copy itself — recursing
+        // would nest the tree into itself until the path length explodes.
+        if (isPathWithin(source, realPath)) {
+          debugLogger.warn(
+            `Skipping symlink that points at the copied directory or an ancestor: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
           );
           continue;
         }
@@ -258,7 +283,7 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       fs.unlinkSync(tomlPath);
     } catch (error) {
       debugLogger.warn(
-        `Warning: Failed to convert command file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
+        `Warning: Failed to convert command file ${stripAnsiAndControl(relativeFile)}: ${error instanceof Error ? error.message : String(error)}`,
       );
       // Continue with other files even if one fails
     }
