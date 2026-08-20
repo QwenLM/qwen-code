@@ -59,6 +59,7 @@ import type {
   WidenedScope,
 } from './lib/incremental-scope.js';
 import { widenScope } from './lib/incremental-scope.js';
+import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   assertUnredirectedParent,
@@ -1315,13 +1316,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ((widened = widenScope({
           anchor: anchor.diffBase ?? anchor.incremental.since,
           selection,
-          readWorktree: (rel) => {
-            try {
-              return readFileSync(resolve(wt, rel), 'utf8');
-            } catch {
-              return null;
-            }
-          },
+          readWorktree: containedWorktreeReader(wt),
         })),
         (narrowed = assembleSections(selection, widened.paths)) === null)
       ) {
