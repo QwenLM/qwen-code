@@ -1698,20 +1698,35 @@ export function createDaemonSessionActions({
       }
     },
 
-    async uploadAttachment(image, opts) {
+    async uploadAttachment(attachment, opts) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Attachment upload failed',
         'send_prompt',
       );
+      if (opts?.sessionId && opts.sessionId !== session.sessionId) {
+        throw new Error('Attachment session changed');
+      }
       const mimeType =
-        image.mimeType ?? image.mediaType ?? image.media_type ?? 'image/*';
+        attachment.mimeType ??
+        attachment.mediaType ??
+        attachment.media_type ??
+        ('name' in attachment ? 'application/octet-stream' : 'image/*');
       attachmentClient = session.client;
       attachmentSessionId = session.sessionId;
       attachmentClientId = session.clientId;
+      if ('name' in attachment) {
+        return await session.uploadAttachment(
+          attachment.data ??
+            new Blob([attachment.text ?? ''], { type: mimeType }),
+          attachment.name,
+          mimeType,
+          opts?.signal,
+        );
+      }
       return await session.uploadAttachment(
-        daemonPromptImageToBlob(image),
+        daemonPromptImageToBlob(attachment),
         imageAttachmentName(mimeType),
         imageAttachmentMimeType(mimeType),
         opts?.signal,
