@@ -212,7 +212,10 @@ describe('generatePromptSuggestion', () => {
     expect(mockGetCacheSafeParamsSessionId).not.toHaveBeenCalled();
     expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
-    expect(mockRunSideQuery).toHaveBeenCalled();
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({ failClosed: true }),
+    );
     expect(result.suggestion).toBe('from base llm');
   });
 

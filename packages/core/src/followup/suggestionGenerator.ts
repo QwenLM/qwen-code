@@ -225,6 +225,8 @@ async function generateViaBaseLlm(
     contents,
     abortSignal,
     model,
+    // A broken cross-provider fast model must not fall back to the primary.
+    failClosed: true,
     // Suggestions are best-effort UI hints; if the model is unavailable,
     // the user shouldn't pay 7× the latency for a hint they may ignore.
     maxAttempts: 1,
