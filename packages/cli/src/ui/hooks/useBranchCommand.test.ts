@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mockSettings = {
@@ -561,6 +562,56 @@ describe('useBranchCommand', () => {
     expect(removeSession).toHaveBeenCalledTimes(1);
     expect(startNewSessionConfig).not.toHaveBeenCalled();
     expect(startNewSessionUI).not.toHaveBeenCalled();
+  });
+
+  it('restores the usage aggregate when a branch fails after the fork initializes', async () => {
+    // Thread the review flagged: when the fork's initialize() SUCCEEDS and a
+    // later pre-UI-swap step throws, initialize() has already replayed the
+    // fork's stored telemetry into the process-wide aggregate. The rollback
+    // re-initializes the parent, adding a second copy of the parent's history
+    // on top — so persistSessionUsage writes the parent out at roughly double
+    // its real usage for the rest of the process.
+    const snapshot = { sessionId: 'fork' } as never;
+    const snapshotForReplay = vi
+      .spyOn(uiTelemetryService, 'snapshotForReplay')
+      .mockReturnValue(snapshot);
+    const restoreFromReplaySnapshot = vi
+      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
+      .mockImplementation(() => {});
+    clearItems.mockImplementationOnce(() => {
+      throw new Error('history swap boom');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(snapshotForReplay).toHaveBeenCalledTimes(1);
+    expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(snapshot);
+
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
+  });
+
+  it('keeps the replayed usage when the branch commits', async () => {
+    const snapshotForReplay = vi
+      .spyOn(uiTelemetryService, 'snapshotForReplay')
+      .mockReturnValue({ sessionId: 'fork' } as never);
+    const restoreFromReplaySnapshot = vi
+      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
+      .mockImplementation(() => {});
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(snapshotForReplay).toHaveBeenCalledTimes(1);
+    expect(restoreFromReplaySnapshot).not.toHaveBeenCalled();
+
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
   });
 
   it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {

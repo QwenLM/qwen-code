@@ -12,6 +12,8 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
+  uiTelemetryService,
+  type UiTelemetryReplaySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -128,6 +130,12 @@ export function useBranchCommand(
 
       let coreSwapped = false;
       let uiSwapped = false;
+      // The fork's stored telemetry is replayed by the client's `initialize()`
+      // below, straight into the process-wide usage aggregate. The service has
+      // no subtraction API, so a branch abandoned after that point would leave
+      // the abandoned fork's whole history in the aggregate that
+      // `persistSessionUsage` writes out. Hold a snapshot to restore from.
+      let telemetryReplaySnapshot: UiTelemetryReplaySnapshot | undefined;
       let forkCreated = false;
       let prevSessionData: ResumedSessionData | undefined;
 
@@ -200,6 +208,8 @@ export function useBranchCommand(
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
+        telemetryReplaySnapshot =
+          uiTelemetryService.snapshotForReplay(newSessionId);
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
@@ -223,6 +233,9 @@ export function useBranchCommand(
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
+        // The swap committed; the replayed history belongs to the session the
+        // user is now on. Drop the undo.
+        telemetryReplaySnapshot = undefined;
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.
@@ -269,6 +282,20 @@ export function useBranchCommand(
           // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
+            if (telemetryReplaySnapshot) {
+              try {
+                uiTelemetryService.restoreFromReplaySnapshot(
+                  telemetryReplaySnapshot,
+                );
+              } catch (restoreErr) {
+                config
+                  .getDebugLogger()
+                  .warn(
+                    `Telemetry rollback after failed /branch init failed: ${restoreErr}`,
+                  );
+              }
+              telemetryReplaySnapshot = undefined;
+            }
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still

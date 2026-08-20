@@ -10,6 +10,8 @@ import {
   buildSessionRecoveryPlan,
   type Config,
   type SessionListItem,
+  uiTelemetryService,
+  type UiTelemetryReplaySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -122,6 +124,12 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      // The incoming session's stored telemetry is replayed by the client's
+      // `initialize()` below, straight into the process-wide usage aggregate.
+      // The service has no subtraction API, so a resume abandoned after that
+      // point would leave the whole abandoned history in the aggregate that
+      // `persistSessionUsage` writes out. Hold a snapshot to restore from.
+      let telemetryReplaySnapshot: UiTelemetryReplaySnapshot | undefined;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
@@ -178,6 +186,13 @@ export function useResumeCommand(
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+        // Resuming the session that is already current replays nothing —
+        // `initialize()` early-returns for an already-initialized session id —
+        // so there is nothing to roll back and no snapshot to take.
+        if (sessionId !== oldSessionId) {
+          telemetryReplaySnapshot =
+            uiTelemetryService.snapshotForReplay(sessionId);
+        }
         await config.getGeminiClient()?.initialize?.();
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
@@ -205,6 +220,9 @@ export function useResumeCommand(
           );
         }
         uiSwapped = true;
+        // The swap committed; the replayed history belongs to the session the
+        // user is now on. Drop the undo.
+        telemetryReplaySnapshot = undefined;
 
         // SessionStart hook is handled during chat initialization so its
         // additionalContext can be injected into the resumed model context.
@@ -217,6 +235,20 @@ export function useResumeCommand(
           // yet — put core back on the old session, otherwise the
           // recorder would keep writing new user messages into the
           // orphaned session JSONL while UI still shows the old session.
+          if (telemetryReplaySnapshot) {
+            try {
+              uiTelemetryService.restoreFromReplaySnapshot(
+                telemetryReplaySnapshot,
+              );
+            } catch (restoreErr) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Telemetry rollback after failed /resume init failed: ${restoreErr}`,
+                );
+            }
+            telemetryReplaySnapshot = undefined;
+          }
           try {
             resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);

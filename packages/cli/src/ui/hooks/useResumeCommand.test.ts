@@ -12,6 +12,8 @@ import {
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
 
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -908,5 +910,154 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
     expect(geminiClient.initialize).not.toHaveBeenCalled();
+  });
+
+  function resumeConfigForTelemetry(overrides: {
+    loadPausedBackgroundAgents?: ReturnType<typeof vi.fn>;
+  }) {
+    const geminiClient = { initialize: vi.fn().mockResolvedValue(undefined) };
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue(undefined),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents:
+        overrides.loadPausedBackgroundAgents ?? vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    return { config, geminiClient };
+  }
+
+  it('restores the usage aggregate when a resume fails after client init', async () => {
+    const snapshot = { sessionId: 'new-session-id' } as never;
+    const snapshotForReplay = vi
+      .spyOn(uiTelemetryService, 'snapshotForReplay')
+      .mockReturnValue(snapshot);
+    const restoreFromReplaySnapshot = vi
+      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
+      .mockImplementation(() => {});
+    // Fails after initialize() has already replayed the incoming session's
+    // stored telemetry into the process-wide aggregate.
+    const loadPausedBackgroundAgents = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('agent sidecar unreadable'))
+      .mockResolvedValue([]);
+    const { config, geminiClient } = resumeConfigForTelemetry({
+      loadPausedBackgroundAgents,
+    });
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+    await act(async () => {
+      await result.current.handleResume('new-session-id');
+    });
+
+    expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
+    expect(snapshotForReplay).toHaveBeenCalledWith('new-session-id');
+    // Without this the abandoned session's whole history stays in the
+    // aggregate that persistSessionUsage writes out.
+    expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(snapshot);
+    // UI never swapped, so core rolled back too.
+    expect(startNewSession).not.toHaveBeenCalled();
+
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
+  });
+
+  it('keeps the replayed usage when the resume commits', async () => {
+    const snapshotForReplay = vi
+      .spyOn(uiTelemetryService, 'snapshotForReplay')
+      .mockReturnValue({ sessionId: 'new-session-id' } as never);
+    const restoreFromReplaySnapshot = vi
+      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
+      .mockImplementation(() => {});
+    const { config } = resumeConfigForTelemetry({});
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await result.current.handleResume('new-session-id');
+    });
+
+    expect(snapshotForReplay).toHaveBeenCalledWith('new-session-id');
+    expect(restoreFromReplaySnapshot).not.toHaveBeenCalled();
+
+    snapshotForReplay.mockRestore();
+    restoreFromReplaySnapshot.mockRestore();
+  });
+
+  it('takes no usage snapshot when resuming the session already current', async () => {
+    const snapshotForReplay = vi.spyOn(uiTelemetryService, 'snapshotForReplay');
+    const { config } = resumeConfigForTelemetry({});
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      // initialize() early-returns for an already-initialized session id, so
+      // nothing is replayed and there is nothing to undo.
+      await result.current.handleResume('old-session-id');
+    });
+
+    expect(snapshotForReplay).not.toHaveBeenCalled();
+
+    snapshotForReplay.mockRestore();
   });
 });
