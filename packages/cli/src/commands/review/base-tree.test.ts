@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   utimesSync,
   mkdtempSync,
   mkdirSync,
@@ -300,6 +301,24 @@ describe('runBaseTree', () => {
     const r = run({ plan: { mergeBaseSha: '0'.repeat(40) } });
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/base worktree could not be created/);
+  });
+
+  it('refuses while repo-local config defines a content filter — the add would execute it', () => {
+    // The base tree's `worktree add` checks every file out, and a checkout
+    // EXECUTES `filter.<name>.smudge` — the same surface `scratch-tree`
+    // refuses to reset through. The attributes line and a matching file make
+    // the execution real: without the screen, the add below fired the smudge.
+    const pwned = join(repo, 'PWNED-base');
+    git(worktree, 'config', 'filter.evil.smudge', `touch ${pwned}`);
+    const attrs = git(worktree, 'rev-parse', '--git-path', 'info/attributes');
+    appendFileSync(attrs, '*.txt filter=evil\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
   it('ignores an exported GIT_DIR redirect when adding the base tree', () => {

@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -25,7 +26,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   runOneMutant,
@@ -1944,6 +1945,166 @@ process.stdout.write(JSON.stringify({
       'packages/lib/src/f.test.ts',
     );
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+});
+
+describe('content-filter screens cover every checkout the probe phase runs', () => {
+  // A checkout EXECUTES `filter.<name>.smudge` on every file it rewrites, and
+  // the probe phase is not one checkout but a sequence: the probe tree's own
+  // `worktree add`, the per-run restore, and the revert's `git checkout base
+  // -- ...`. The restore was screened; the others were not — so a filter the
+  // screen had ALREADY detected still ran in the revert checkout, and a filter
+  // planted before the run ran in the `worktree add` that preceded every
+  // screen (probe, git 2.43: pathspec checkout of a modified file with planted
+  // smudge + `* filter=evil` attr creates the marker; `worktree add` too).
+  const plant = (wt: string, marker: string): void => {
+    git(wt, 'config', 'filter.evil.smudge', `touch ${marker}`);
+    const attrs = git(wt, 'rev-parse', '--git-path', 'info/attributes').trim();
+    appendFileSync(resolve(wt, attrs), '*.ts filter=evil\n');
+  };
+
+  it('refuses BEFORE the probe tree exists when the repo already defines a local filter', async () => {
+    const { wt, base } = scaffoldModifiedPr();
+    const markerDir = mkdtempSync(join(tmpdir(), 'qwen-filter-entry-'));
+    const marker = join(markerDir, 'pwned');
+    plant(wt, marker);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // The `worktree add`'s initial checkout would have executed the smudge on
+    // every tracked `.ts` file — it never ran.
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({ verdict: 'inconclusive' }),
+    ]);
+    expect(out.probed[0].detail).toContain('filter.evil.smudge');
+    expect(
+      (out.hunks.probed as Array<{ verdict: string }>).every(
+        (h) => h.verdict === 'inconclusive',
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses the REVERT checkout when the suite planted a filter mid-run', async () => {
+    // The scenario the restore screen alone cannot close: the plant lands
+    // DURING the baseline run, every later restore correctly refuses, and the
+    // flow lands in the revert phase's unscreened `git checkout base -- ...`
+    // — which rewrote the matching files and executed the planted command.
+    const { wt, base } = scaffoldModifiedPr();
+    const markerDir = mkdtempSync(join(tmpdir(), 'qwen-filter-revert-'));
+    const marker = join(markerDir, 'pwned');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+if (!fs.existsSync(${JSON.stringify(marker)})) {
+  execFileSync('git', ['config', 'filter.evil.smudge', 'touch ${marker}']);
+  const attrs = execFileSync(
+    'git', ['rev-parse', '--git-path', 'info/attributes'],
+    { encoding: 'utf8' },
+  ).trim();
+  fs.appendFileSync(path.resolve(process.cwd(), attrs), '*.ts filter=evil\\n');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(marker)).toBe(false);
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({ verdict: 'inconclusive' }),
+    ]);
+    expect(out.probed[0].detail).toContain('content filter');
+  });
+
+  it("reaps the suite's process group, so nothing it spawned outlives the run", async () => {
+    // The screen and the checkout it authorises are a check-then-use pair: a
+    // process the PR's own test code spawned can toggle the filter config
+    // between the screen's read and the checkout's read, and nothing reaped
+    // the suite's descendants on normal completion (measured: a fast atomic
+    // toggler executed the planted smudge in ~3% of trials). Running the
+    // suite in its own process group and killing the group before the next
+    // screen+checkout pair is the preventive half.
+    const { wt, base } = scaffoldModifiedPr();
+    const pidFile = join(repo, 'linger.pid');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+const linger = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+  stdio: 'ignore',
+});
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(linger.pid));
+linger.unref();
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+// Like the default fake, FAIL the injected positive control, so this run is
+// a fully healthy one — the reap must not disturb the normal flow.
+const st = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
+      ? 'failed'
+      : 'passed';
+  } catch {
+    return 'passed';
+  }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: st(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // The run itself still completed and still scored like a healthy run.
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
+    // ...and the descendant the suite left running did not survive it.
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 });
 

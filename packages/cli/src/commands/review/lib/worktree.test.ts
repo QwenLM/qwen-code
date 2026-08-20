@@ -31,6 +31,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -1395,5 +1396,90 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('localFilterCommands', () => {
+  // The screen every checkout-authorising guard in this pipeline calls. These
+  // fixtures hold the production shape: the tree under measurement is a LINKED
+  // worktree (fetch-pr creates the review worktree with `git worktree add`),
+  // sharing the main checkout's common dir — where the planting surface lives.
+  let repo: string;
+  let tree: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+  const gitRepo = (...args: string[]) =>
+    execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-filter-screen-'));
+    gitRepo('init', '-q', '-b', 'main');
+    gitRepo('config', 'user.email', 't@t.t');
+    gitRepo('config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'head');
+    tree = join(repo, '.qwen', 'tmp', 'review-wt');
+    mkdirSync(dirname(tree), { recursive: true });
+    // Created BEFORE any plant below, the way the review worktree exists
+    // before a probe plants: a `worktree add` made after the plant copies
+    // some shapes into the new tree and hides the gap these pin.
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it('is empty when no local filter is defined', () => {
+    expect(localFilterCommands(tree)).toEqual([]);
+  });
+
+  it('names a filter planted directly into the common config', () => {
+    gitRepo('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
+    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+  });
+
+  it('follows include.path — the merged read the checkout does, the --file read it used to do does not', () => {
+    // `git config --file` ignores `include.*` directives unless `--includes`
+    // is passed, while the merged config a checkout EXECUTES follows them: a
+    // filter defined behind an include planted in the repo-local config was
+    // invisible to the screen and still ran (probe: the --file read exits 1
+    // and reports clean, `git checkout HEAD --` of a dirty file fires the
+    // smudge). The include target lives outside the tree, so the restore's
+    // `clean -ffdx` never removes it either.
+    const outside = join(mkdtempSync(join(tmpdir(), 'qwen-include-')), 'cfg');
+    writeFileSync(
+      outside,
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+    gitRepo('config', 'include.path', outside);
+
+    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+
+    rmSync(dirname(outside), { recursive: true, force: true });
+  });
+
+  it("reads the MAIN worktree's config.worktree when screening a linked one", () => {
+    // With `extensions.worktreeConfig` on, the main worktree's per-worktree
+    // config is `<common>/config.worktree`. A linked screening worktree's
+    // candidates covered `<common>/config`, its own `config.worktree` and every
+    // `<common>/worktrees/*/config.worktree` — but never that file. The screen
+    // reported clean through the whole review while the plant fired on the
+    // user's own later main-worktree checkouts — the persistence outcome the
+    // screen exists to refuse (probe: merged read from the main worktree sees
+    // the filter, a dirty-then-restore checkout there executes it). Refusing
+    // on a key some git versions would not honour is the screen's fail-safe
+    // posture everywhere else.
+    gitRepo('config', 'core.repositoryformatversion', '1');
+    gitRepo('config', 'extensions.worktreeConfig', 'true');
+    writeFileSync(
+      join(repo, '.git', 'config.worktree'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+
+    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
   });
 });

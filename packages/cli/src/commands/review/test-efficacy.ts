@@ -48,7 +48,7 @@
 // `killed`.
 
 import type { CommandModule } from 'yargs';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import {
   mkdirSync,
   writeFileSync,
@@ -76,6 +76,7 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
+import { killProcessGroup } from './run.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
@@ -1592,12 +1593,14 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // this restores FILES and never moves HEAD.
   // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
   // whenever it rewrites a file, and the restore below rewrites every tracked
-  // file this tree has — so the same surface `scratch-tree` refuses to reset
-  // through was, one directory over, run through twice per probe run. The
-  // screen reads repo-LOCAL config only: `git lfs install` writes
-  // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
-  // would put every contributor with git-lfs into permanent refusal — the same
-  // failure as a tripwire that fires on every healthy run.
+  // file this tree has — the same surface `scratch-tree` refuses to reset
+  // through, screened again here because this restore runs before EVERY suite
+  // run in the probe tree and a filter can be planted between the phase's
+  // entry screen and any one of them. The screen reads repo-LOCAL config
+  // only: `git lfs install` writes `filter.lfs.clean` into the user's GLOBAL
+  // config, and refusing on that would put every contributor with git-lfs
+  // into permanent refusal — the same failure as a tripwire that fires on
+  // every healthy run.
   const filters = localFilterCommands(probeTree);
   if (filters.length > 0) {
     return `the repository's local config defines content filter(s) ${filters.join(', ')}, which this tree's restore would EXECUTE`;
@@ -1698,19 +1701,36 @@ function runProbeSuite(
   const exposed = exposeDependencies(probeTree, dependencyRoot, {
     rebuild: true,
   });
+  // `detached` puts the suite in its own process group, so the reap below
+  // can reach everything the suite spawned without touching this process's
+  // group. `spawnSync` honours it at runtime (the child's pgid becomes its
+  // pid, measured); only the types lack it — @types/node declares it on the
+  // async `spawn` alone.
+  const suiteSpawn: SpawnSyncOptions & { detached: boolean } = {
+    cwd: probeTree,
+    encoding: 'utf8',
+    timeout,
+    // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+    // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+    // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+    maxBuffer: 64 * 1024 * 1024,
+    detached: true,
+  };
   const r = spawnSync(
     process.execPath,
     [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    {
-      cwd: probeTree,
-      encoding: 'utf8',
-      timeout,
-      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-      maxBuffer: 64 * 1024 * 1024,
-    },
+    suiteSpawn,
   );
+  // Reap that group BEFORE returning: the screen+checkout pairs that follow
+  // this run (every restore, the revert's checkout) read config and then run
+  // a checkout, and a process the PR's own test code left running can toggle
+  // the filter config between the read and the checkout — measured live at
+  // ~3% of trials with a fast atomic toggler. Killing the group the moment
+  // the run completes removes every descendant that did not setsid away; the
+  // screens stay the detection half for whatever did.
+  if (r.pid > 0) {
+    killProcessGroup(r.pid, 'SIGKILL');
+  }
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
@@ -2534,34 +2554,55 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     const probeTree = probeWorktreePath(worktree);
     let created = false;
     let sweep: SweepResult | undefined;
+    let createDetail = '';
     try {
-      // Clear a stale probe tree left by a crashed run — it would fail `add`.
-      // Its stderr is kept to explain a subsequent `add` failure.
-      sweep = discardWorktree(worktree, probeTree);
-      git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
-      created = true;
+      // The phase's screen, BEFORE its first checkout: the `worktree add`
+      // below executes repo-local content filters on its initial checkout —
+      // a filter planted before the run fired there, ahead of every other
+      // screen. (One planted DURING a run is what the restore screens and
+      // the revert phase's own screen below are for.)
+      const filters = localFilterCommands(worktree);
+      if (filters.length > 0) {
+        createDetail = `the repository's local config defines content filter(s) ${filters.join(', ')}, which the probe phase's checkouts — the probe tree's own creation, every per-run restore, and the revert's checkout — would EXECUTE`;
+      } else {
+        // Clear a stale probe tree left by a crashed run — it would fail `add`.
+        // Its stderr is kept to explain a subsequent `add` failure.
+        sweep = discardWorktree(worktree, probeTree);
+        git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
+        created = true;
+      }
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
       // need no probe, still ship.
-      const detail = worktreeCreateFailureDetail(
+      createDetail = worktreeCreateFailureDetail(
         'probe',
         e,
         String(sweep?.stderr ?? ''),
       );
+    }
+    if (!created) {
       for (const file of probes) {
         results.push({
           file,
           verdict: 'inconclusive' as const,
           reason: 'not-run' as const,
-          detail,
+          detail: createDetail,
         });
       }
       for (const c of candidates) {
-        mutantResults.push({ ...c, verdict: 'inconclusive' as const, detail });
+        mutantResults.push({
+          ...c,
+          verdict: 'inconclusive' as const,
+          detail: createDetail,
+        });
       }
       for (const { patch: _p, ...h } of hunkCandidates) {
-        hunkResults.push({ ...h, verdict: 'inconclusive' as const, detail });
+        hunkResults.push({
+          ...h,
+          verdict: 'inconclusive' as const,
+          detail: createDetail,
+        });
       }
     }
 
@@ -2865,6 +2906,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
         if (modified.length > 0) {
+          // Re-screen at THIS checkout: the phase's entry screen ran before
+          // the baseline, and every run since executed the PR's own test
+          // code — a filter planted mid-run was what the restore screens
+          // refused, while the flow landed here, and this checkout rewrote
+          // the matching files and executed the plant.
+          const filters = localFilterCommands(probeTree);
+          if (filters.length > 0) {
+            throw new Error(
+              `the repository's local config defines content filter(s) ${filters.join(', ')}, which the revert checkout would EXECUTE`,
+            );
+          }
           git(probeTree, 'checkout', base, '--', ...modified);
         }
         for (const p of added) safeRmWithin(probeTree, p);

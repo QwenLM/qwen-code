@@ -53,9 +53,10 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { baseWorktreePath } from './lib/paths.js';
+import { baseWorktreePath, inertPath } from './lib/paths.js';
 import {
   discardWorktree,
+  localFilterCommands,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
@@ -260,6 +261,21 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
   // The parameter re-narrows: TS narrowing does not cross function scopes.
   function buildBaseTree(baseSha: string): BaseTreeReport {
+    // BEFORE any checkout runs: the `worktree add` below executes configured
+    // content filters — the same surface `scratch-tree` refuses to reset
+    // through (see `localFilterCommands`), one directory over.
+    const filters = localFilterCommands(worktree);
+    if (filters.length > 0) {
+      return unavailable(
+        `the repository's local config defines content filter(s) ${filters
+          .map(inertPath)
+          .join(', ')} — the worktree add this command runs would EXECUTE ` +
+          'them, and two plain writes into the common dir are enough to plant ' +
+          'both the filter and the attributes that select it. Remove the ' +
+          'filter config — or the attributes file that uses it — if it is ' +
+          'not yours; until then no base tree is safe to create.',
+      );
+    }
     let sweep: SweepResult | undefined;
     try {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its

@@ -560,21 +560,25 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 /**
  * The repo-local `filter.<name>` COMMANDS, when any are defined.
  *
- * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
- * rebuild, and the probe tree's per-run restore — hooks being disabled covers
- * hooks and not filters. The planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
+ * Every checkout in this pipeline EXECUTES these — the scratch tree's reset
+ * and rebuild, the probe tree's creation, its per-run restores and the
+ * revert phase's checkout, and the base tree's creation — hooks being
+ * disabled covers hooks and not filters. The planting surface is two plain
+ * writes a probe can make into the COMMON dir this command's report calls
+ * shared: `git config filter.evil.smudge CMD` and one line appended to
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
+ * planted by reviewing a malicious PR, measured live. The local config files
+ * are checked with `--file` rather than merged config because filters in the
+ * user's global config (git-lfs is the common one) are the user's own
  * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * surface is the repo-local files. `--includes` because the merged config a
+ * checkout EXECUTES follows `include.*` directives and a bare `--file` read
+ * does not — a filter defined behind an include planted in the local config
+ * would be invisible to the screen and still run. The state cannot be told
+ * apart from a filter the user set deliberately, and cannot be safely wiped,
+ * so a hit is a refusal upstream, not a cleanup here.
  */
 export function localFilterCommands(worktree: string): string[] {
   const files = spawnSync(
@@ -589,6 +593,14 @@ export function localFilterCommands(worktree: string): string[] {
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
+    // The MAIN worktree's per-worktree config at the common root, honoured
+    // once `extensions.worktreeConfig` is on. A linked screening worktree's
+    // other candidates never cover it, so a filter planted there screened
+    // clean through a whole review and fired on the user's own later
+    // main-worktree checkouts — the persistence outcome named above.
+    // Refusing on a key some git versions or flows would not honour is the
+    // fail-safe posture this screen takes everywhere.
+    join(common, 'config.worktree'),
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
@@ -614,6 +626,7 @@ export function localFilterCommands(worktree: string): string[] {
         'config',
         '--file',
         file,
+        '--includes',
         '--get-regexp',
         // `process` beside the pair: it is the third executable key (a
         // long-running filter git speaks a protocol to), and enumerating two

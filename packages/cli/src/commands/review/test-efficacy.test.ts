@@ -531,19 +531,30 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
   it('refuses to run through a repo-LOCAL content filter, and only a local one', () => {
     // The restore rewrites every tracked file in this tree, and a checkout
     // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
-    // `scratch-tree` refuses to reset through, run twice per probe run one
-    // directory over with no screen at all.
+    // `scratch-tree` refuses to reset through, screened here because the
+    // restore runs before every suite run in the probe tree.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
     const isolation = isolateHostGitConfig();
+    const markerDir = mkdtempSync(join(tmpdir(), 'qwen-filter-marker-'));
+    const pwned = join(markerDir, 'pwned');
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
       asCheckout(dir);
-      execFileSync(
-        'git',
-        ['config', 'filter.evil.smudge', 'touch /tmp/qwen-should-never-run'],
-        { cwd: dir },
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${pwned}`], {
+        cwd: dir,
+      });
+      // The attributes line that SELECTS the filter, and residue that makes
+      // the restore's checkout REWRITE a file carrying it: only then does a
+      // screen moved below that checkout show up as a marker. The marker
+      // lives OUTSIDE the tree — inside, the same restore's `clean -ffdx`
+      // would remove it and hide the firing again.
+      mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(dir, '.git', 'info', 'attributes'),
+        '*.ts filter=evil\n',
       );
+      writeFileSync(join(dir, 'a.ts'), 'prior-run residue\n');
 
       const r = runOneMutant(
         dir,
@@ -553,6 +564,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(r.verdict).toBe('inconclusive');
       expect(r.detail).toContain('filter.evil.smudge');
+      expect(existsSync(pwned)).toBe(false);
 
       // ...and a filter in the user's GLOBAL config is their own contract, the
       // way it is for any git command they run. `git lfs install` writes one
@@ -586,6 +598,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
+      rmSync(markerDir, { recursive: true, force: true });
     }
   });
 

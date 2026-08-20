@@ -23,6 +23,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -96,6 +97,12 @@ describe('runScratchTree', () => {
     // whatever it holds.
     const pwned = join(repo, 'PWNED-smudge');
     git(worktree, 'config', 'filter.evil.smudge', `touch ${pwned}`);
+    // The attributes line that SELECTS the filter, and a dirty file for the
+    // checkout to rewrite: without both, the smudge is unfirable and the
+    // `pwned` assertions below could not discriminate a screen moved below
+    // the checkout it guards.
+    const attrs = git(worktree, 'rev-parse', '--git-path', 'info/attributes');
+    appendFileSync(attrs, '*.ts filter=evil\n');
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
 
     const r = run();
@@ -117,9 +124,21 @@ describe('runScratchTree', () => {
     expect(viaProcess.note).toContain('filter.evil.process');
     expect(existsSync(pwned)).toBe(false);
 
+    // `clean` completes the alternation. A checkout never EXECUTES clean
+    // filters, so this is the defense-in-depth layer rather than a shipping
+    // bug — but narrowing the regex to the keys a checkout runs would
+    // silently drop the refusal for a local `filter.x.clean`, and no test
+    // planted one to notice.
+    git(worktree, 'config', '--unset', 'filter.evil.process');
+    git(worktree, 'config', 'filter.evil.clean', `touch ${pwned}`);
+    const viaClean = run();
+    expect(viaClean.available).toBe(false);
+    expect(viaClean.note).toContain('filter.evil.clean');
+    expect(existsSync(pwned)).toBe(false);
+
     // A repo WITHOUT the filter still gets a tree (the global-config filters
     // a user's own git-lfs install carries are not this surface).
-    git(worktree, 'config', '--unset', 'filter.evil.process');
+    git(worktree, 'config', '--unset', 'filter.evil.clean');
     expect(run().available).toBe(true);
   });
 
@@ -148,15 +167,17 @@ describe('runScratchTree', () => {
     execFileSync('git', ['config', 'extensions.worktreeConfig', 'true'], {
       cwd: worktree,
     });
+    const pwned = join(repo, 'PWNED-worktrees');
     writeFileSync(
       scratchAdmin,
-      '[filter "planted"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+      `[filter "planted"]\n\tsmudge = touch ${pwned}\n`,
     );
 
     const r = run();
 
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.planted.smudge');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {
