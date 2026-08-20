@@ -4966,6 +4966,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
 
 describe('issue #9455: compression request admission', () => {
   afterEach(() => {
+    delete process.env['QWEN_MC_KEEP_RECENT'];
     vi.restoreAllMocks();
   });
 
@@ -5069,7 +5070,7 @@ describe('issue #9455: compression request admission', () => {
         },
       } as never);
 
-    await new ChatCompressionService().compress(chat, {
+    const result = await new ChatCompressionService().compress(chat, {
       promptId: 'p',
       force: true,
       config,
@@ -5087,6 +5088,8 @@ describe('issue #9455: compression request admission', () => {
     expect(serialized).toContain('[Old tool result content cleared]');
     expect(serialized).toContain('recent output');
     expect(serialized).not.toContain('x'.repeat(100));
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 
   it('preserves managed-memory reads while reducing cold request input', async () => {
@@ -5181,7 +5184,7 @@ describe('issue #9455: compression request admission', () => {
         },
       } as never);
 
-    await new ChatCompressionService().compress(chat, {
+    const result = await new ChatCompressionService().compress(chat, {
       promptId: 'p',
       force: true,
       config,
@@ -5193,9 +5196,91 @@ describe('issue #9455: compression request admission', () => {
     expect(JSON.stringify(coldSpy.mock.calls[0]![1].contents)).toContain(
       managedMemoryMarker,
     );
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+  });
+
+  it('clears old non-managed read_file results during admission', async () => {
+    const sourceMarker = 'ordinary-source-marker';
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect source' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'source-call',
+              name: 'read_file',
+              args: { file_path: '/tmp/test-workspace/src/main.ts' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'source-call',
+              name: 'read_file',
+              response: { output: sourceMarker.repeat(20_000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'recent-shell',
+              name: 'run_shell_command',
+              args: { command: 'recent' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'recent-shell',
+              name: 'run_shell_command',
+              response: { output: 'recent output' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'latest context' }] },
+    ];
+    const { chat, config } = makeFixture(history, 50_000);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 40_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 40_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 65_000,
+    });
+
+    const serialized = JSON.stringify(coldSpy.mock.calls[0]![1].contents);
+    expect(serialized).toContain('[Old tool result content cleared]');
+    expect(serialized).not.toContain(sourceMarker);
   });
 
   it('uses fixed minimal retention for admission microcompaction', async () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '50';
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'keep the original intent' }] },
       {
@@ -5263,7 +5348,7 @@ describe('issue #9455: compression request admission', () => {
         },
       } as never);
 
-    await new ChatCompressionService().compress(chat, {
+    const result = await new ChatCompressionService().compress(chat, {
       promptId: 'p',
       force: true,
       config,
@@ -5275,6 +5360,8 @@ describe('issue #9455: compression request admission', () => {
     const serialized = JSON.stringify(coldSpy.mock.calls[0]![1].contents);
     expect(serialized).toContain('[Old tool result content cleared]');
     expect(serialized).not.toContain('x'.repeat(100));
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 
   it('keeps a distinct compaction model when reduced input fits its window', async () => {
@@ -5359,6 +5446,71 @@ describe('issue #9455: compression request admission', () => {
       expect.objectContaining({ model: 'compact-model' }),
     );
     expect(result.info.warning).toBeUndefined();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+  });
+
+  it('restores full cold input when a small compaction model falls back', async () => {
+    const oldToolMarker = 'full-old-tool-output';
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(160_000) }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'old-shell',
+              name: 'run_shell_command',
+              args: { command: 'old' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'old-shell',
+              name: 'run_shell_command',
+              response: { output: oldToolMarker.repeat(12_000) },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'latest context' }] },
+    ];
+    const { chat, config } = makeFixture(history, 262_000);
+    vi.mocked(config.getCompactionModel).mockReturnValue('compact-model');
+    vi.mocked(config.getAllConfiguredModels).mockReturnValue([
+      { id: 'compact-model', contextWindowSize: 32_000 },
+    ] as never[]);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 100_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 100_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 120_000,
+    });
+
+    expect(coldSpy).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({ model: 'test-model' }),
+    );
+    const serialized = JSON.stringify(coldSpy.mock.calls[0]![1].contents);
+    expect(serialized).toContain(oldToolMarker);
+    expect(serialized).not.toContain('[Old tool result content cleared]');
   });
 
   it('does not serialize shared-route config when cache sharing is impossible', async () => {
@@ -5378,13 +5530,13 @@ describe('issue #9455: compression request admission', () => {
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
       usage: {
-        promptTokenCount: 1_000,
-        candidatesTokenCount: 500,
-        totalTokenCount: 1_500,
+        promptTokenCount: 1_900,
+        candidatesTokenCount: 100,
+        totalTokenCount: 2_000,
       },
     } as never);
 
-    await new ChatCompressionService().compress(chat, {
+    const result = await new ChatCompressionService().compress(chat, {
       promptId: 'p',
       force: true,
       config,
@@ -5393,6 +5545,8 @@ describe('issue #9455: compression request admission', () => {
     });
 
     expect(toJSON).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 
   it('fails locally when an irreducible cold request cannot leave usable output room', async () => {
@@ -5426,6 +5580,13 @@ describe('issue #9455: compression request admission', () => {
     expect(result.info.warning).toMatch(/input too large/i);
     expect(generateText).not.toHaveBeenCalled();
     expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        tokens_before: 60_000,
+        tokens_after: 60_000,
+      }),
+    );
   });
 
   it('does not fire PreCompact when an irreducible request cannot be sent', async () => {
@@ -5434,6 +5595,11 @@ describe('issue #9455: compression request admission', () => {
       { role: 'model', parts: [{ text: 'latest response' }] },
     ];
     const { chat, config } = makeFixture(history, 50_000);
+    vi.mocked(chat.getLastPromptTokenCount).mockReturnValue(60_000);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      contextWindowSize: 50_000,
+      authType: AuthType.USE_ANTHROPIC,
+    } as never);
     const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
     vi.mocked(config.getHookSystem).mockReturnValue({
       firePreCompactEvent,
@@ -5452,6 +5618,81 @@ describe('issue #9455: compression request admission', () => {
       CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     );
     expect(firePreCompactEvent).not.toHaveBeenCalled();
+  });
+
+  it('accounts for admission-cleared tokens in provider usage math', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'keep intent' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'old-shell',
+              name: 'run_shell_command',
+              args: { command: 'old' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'old-shell',
+              name: 'run_shell_command',
+              response: { output: 'x'.repeat(240_000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'recent-shell',
+              name: 'run_shell_command',
+              args: { command: 'recent' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'recent-shell',
+              name: 'run_shell_command',
+              response: { output: 'recent output' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'latest context' }] },
+    ];
+    const { chat, config } = makeFixture(history, 50_000);
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 1_200,
+        candidatesTokenCount: 3_000,
+        totalTokenCount: 4_200,
+      },
+    } as never);
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 });
 
@@ -5672,7 +5913,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       { id: 'compact-model', contextWindowSize: 200_000 },
     ] as never[]);
     vi.mocked(mockChat.getHistory).mockReturnValue([
-      { role: 'user', parts: [{ text: 'x'.repeat(240_000) }] },
+      { role: 'user', parts: [{ text: 'x'.repeat(255_000) }] },
       { role: 'model', parts: [{ text: 'ok' }] },
     ]);
     mockVllmBackend(200_000);
