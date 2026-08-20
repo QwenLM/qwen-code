@@ -132,9 +132,11 @@ describe('ProviderSetupSteps', () => {
 
   const createModelIdsFlow = ({
     modelIds = 'MiniMax-M3, MiniMax-M2.7',
+    changeModelIds = vi.fn(),
     submitModelIds = vi.fn(),
   }: {
     modelIds?: string;
+    changeModelIds?: ReturnType<typeof vi.fn>;
     submitModelIds?: ReturnType<typeof vi.fn>;
   } = {}): ProviderSetupFlow => {
     const noop = vi.fn();
@@ -191,7 +193,7 @@ describe('ProviderSetupSteps', () => {
       changeBaseUrl: noop,
       changeApiKey: noop,
       submitApiKey: noop,
-      changeModelIds: noop,
+      changeModelIds,
       submitModelIds,
       moveAdvancedFocusUp: noop,
       moveAdvancedFocusDown: noop,
@@ -1017,6 +1019,70 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('reports the post-edit caret when a separator ends an active id', async () => {
+    const changeModelIds = vi.fn();
+    const flow = createModelIdsFlow({ modelIds: '', changeModelIds });
+
+    const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+
+    for (const char of 'MiniMax-M3,') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+
+    expect(changeModelIds).toHaveBeenLastCalledWith(
+      'MiniMax-M3',
+      expect.objectContaining({ activeCustomModelId: undefined }),
+    );
+    unmount();
+  });
+
+  it('does not protect a custom-input token after focus leaves the input', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of 'MiniMax-M3') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('down');
+    });
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'MiniMax-M2.7',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
   it('notes a failed lookup without hiding the built-in recommendations', () => {
     const flow = createModelIdsFlow();
     const state = flow.state as unknown as Record<string, unknown>;
@@ -1175,6 +1241,18 @@ describe('resplitCustomModelIdsText', () => {
       ),
     ).toBe(',');
     expect(remapCaretAcrossResplit('foo,,bar', ',', 4)).toBe(0);
+  });
+
+  it('does not re-add an unoffered selected built-in from flow state', () => {
+    expect(
+      resplitCustomModelIdsText(
+        'foo,MiniMax-M3',
+        ['foo', 'MiniMax-M3', 'MiniMax-M2.7'],
+        new Set(['MiniMax-M2.7']),
+        BUILT_INS,
+        1,
+      ),
+    ).toBe('foo');
   });
 });
 

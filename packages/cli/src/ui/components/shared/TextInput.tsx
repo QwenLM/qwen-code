@@ -90,7 +90,15 @@ export function TextInput({
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
+  const onCursorChangeRef = useRef(onCursorChange);
+  useEffect(() => {
+    onCursorChangeRef.current = onCursorChange;
+  }, [onCursorChange]);
+  const latestCursorOffsetRef = useRef(
+    initialCursorOffset ?? cpLen(value || ''),
+  );
   const stableOnChange = useCallback((text: string) => {
+    onCursorChangeRef.current?.(latestCursorOffsetRef.current);
     onChangeRef.current?.(text);
   }, []);
 
@@ -108,16 +116,13 @@ export function TextInput({
     preferredEditor,
   });
 
-  const onCursorChangeRef = useRef(onCursorChange);
-  useEffect(() => {
-    onCursorChangeRef.current = onCursorChange;
-  }, [onCursorChange]);
   const [cursorRow, cursorCol] = buffer.cursor;
   const bufferLines = buffer.lines;
   const cursorOffset = useMemo(
     () => cursorOffsetOf(bufferLines, cursorRow, cursorCol),
     [bufferLines, cursorRow, cursorCol],
   );
+  latestCursorOffsetRef.current = cursorOffset;
   useEffect(() => {
     onCursorChangeRef.current?.(cursorOffset);
   }, [cursorOffset]);

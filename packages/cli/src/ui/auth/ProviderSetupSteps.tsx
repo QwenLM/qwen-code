@@ -328,7 +328,11 @@ export function resplitCustomModelIdsText(
     parts.push(segment);
   }
   for (const id of selectedModelIds) {
-    if (recommendedModelIds.has(id) || keptIds.has(id)) {
+    if (
+      recommendedModelIds.has(id) ||
+      keptIds.has(id) ||
+      builtInModelIds.has(id)
+    ) {
       continue;
     }
     keptIds.add(id);
@@ -579,8 +583,14 @@ function ModelIdsStep({
   }, []);
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
-    const caret = modelIdsCaretRef.current;
-    const activeModelId = modelIdAtCaret(customModelIdsText, caret);
+    const caret =
+      focusedModelIndex === MODEL_CUSTOM_INPUT_FOCUS_INDEX
+        ? modelIdsCaretRef.current
+        : undefined;
+    const activeModelId =
+      caret === undefined
+        ? undefined
+        : modelIdAtCaret(customModelIdsText, caret);
     const nextCustomModelIdsText = resplitCustomModelIdsText(
       customModelIdsText,
       selectedModelIds,
@@ -639,15 +649,15 @@ function ModelIdsStep({
         mergeModelIds(customText, recommendationKeys).join(', '),
         {
           customModelIds: normalizeModelIds(customText),
-          activeCustomModelId: modelIdAtCaret(
-            customText,
-            modelIdsCaretRef.current,
-          ),
+          activeCustomModelId:
+            focusedModelIndex === MODEL_CUSTOM_INPUT_FOCUS_INDEX
+              ? modelIdAtCaret(customText, modelIdsCaretRef.current)
+              : undefined,
           ...(removedRecommendationId ? { removedRecommendationId } : {}),
         },
       );
     },
-    [flow],
+    [flow, focusedModelIndex],
   );
 
   const handleSubmitModelIds = useCallback(() => {
