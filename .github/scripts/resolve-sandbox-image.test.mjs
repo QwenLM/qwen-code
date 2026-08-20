@@ -566,7 +566,7 @@ test('the resolver refuses to export when the pull reports no Digest line', () =
 // repo-hygiene.yml runs the same resolver/consumer shape and needs the same
 // binding, but it is outside this PR's footprint and the gate rejects the
 // change here; it is tracked in the deferred review findings queue (#9527).
-const SANDBOX_WORKFLOWS = ['qwen-autofix.yml', 'qwen-autofix-recovery.yml'];
+const SANDBOX_WORKFLOWS = ['qwen-autofix.yml'];
 
 test('every sandbox-image consumer binds the resolver step output', () => {
   const workflowsDir = join(

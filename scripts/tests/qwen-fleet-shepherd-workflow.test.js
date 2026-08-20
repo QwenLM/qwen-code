@@ -1566,13 +1566,16 @@ exit 1`;
       (h) =>
         h.includes('a setup step failed') ||
         h.includes('will retry on the next scan') ||
-        h.includes('Could not produce a passing fix for this feedback'),
+        h.includes('Could not produce a passing fix for this feedback') ||
+        h.includes('deferred this item to a human under instruction') ||
+        h.includes('wrote a handoff but left a dirty workspace') ||
+        h.includes('wrote a handoff but the round HAS a commit'),
     );
     const unclassified = headlines.filter(
       (h) => !terminal.includes(h) && !transient.includes(h),
     );
     expect(terminal.length).toBe(5);
-    expect(transient).toHaveLength(4);
+    expect(transient).toHaveLength(7);
     expect(unclassified).toEqual([]);
     const matches = (h) =>
       execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {
