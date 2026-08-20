@@ -19,6 +19,7 @@ import {
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
+  LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   type Ledger,
   type LedgerFinding,
@@ -625,5 +626,204 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
     expect(l.dropped).toBeGreaterThan(0);
     expect(l.sha).toBeUndefined();
     expect(l.posted).toBe(12);
+  });
+});
+
+describe('the convergence census and the churn streak', () => {
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  it('round-trips the census as a pair', () => {
+    const l = parseLedger(serializeLedger({ ...base, fresh: 11, induced: 7 }))!;
+    expect(l.fresh).toBe(11);
+    expect(l.induced).toBe(7);
+  });
+
+  it.each([
+    ['only a denominator', { fresh: 11 }],
+    ['only a numerator', { induced: 7 }],
+    ['a float denominator', { fresh: 11.5, induced: 7 }],
+    ['a negative numerator', { fresh: 11, induced: -1 }],
+    ['string digits', { fresh: '11', induced: '7' }],
+  ])('reads %s as no census at all', (_label, over) => {
+    // Half a ratio is not a smaller reading, it is an unreadable one: a
+    // numerator with no denominator would put a number in front of a reader
+    // that means less than the silence it replaced. The work list beside it
+    // must survive either way — this is a PR body any account can write.
+    const l = parseLedger(handCrafted(over))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.fresh).toBeUndefined();
+    expect(l.induced).toBeUndefined();
+  });
+
+  it('writes the census as a pair or not at all', () => {
+    // Same rule on the write side, independently: a serializer that can emit
+    // what its own parser refuses round-trips to nothing.
+    expect(serializeLedger({ ...base, fresh: 11 })).not.toContain('"fresh"');
+    expect(serializeLedger({ ...base, induced: 7 })).not.toContain('"induced"');
+  });
+
+  // The boundary is located by the PROPERTY, never by a byte count: the
+  // serializer self-sheds, so `serializeLedger(...).length` can never be
+  // observed above the cap and any arithmetic built on it measures the shed
+  // output rather than the pressure. (The first cut of these two tests did
+  // exactly that, and a hard-coded 50-finding fixture instead sheds all the
+  // way past both volumes into the work list — which proves nothing about
+  // either ordering.) So: grow the last entry's path a byte at a time until
+  // the census is the thing that stops fitting, and keep the render one byte
+  // BELOW that as the control.
+  const withCensus = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+      fresh: 11,
+      induced: 7,
+    });
+
+  const atTheCensusBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withCensus([...findings, next], over).includes('"fresh"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    // Whole findings are ~130 bytes each, so the coarse fill lands up to one
+    // entry short. Pad the last entry's PATH — the one capped field with room
+    // left — until the census is exactly what no longer fits.
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withCensus(grow(pad), over).includes('"fresh"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it("sheds the census on the FIRST byte squeeze, ahead of this round's volume", () => {
+    // Priority: the census (with the carried volume it shares a rung with)
+    // < this round's own volume < the anchor pair < the work list.  The body
+    // states these numbers in prose where the reader meets them; the marker
+    // copy only spares a later round the re-derivation.
+    const { over, under } = atTheCensusBoundary();
+
+    // The control proves the fixture is AT the boundary rather than merely
+    // over-fat: one byte less and the census fits.
+    expect(withCensus(under)).toContain('"fresh":11');
+
+    const written = withCensus(over);
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"fresh"');
+    expect(written).not.toContain('"induced"');
+    expect(written).not.toContain('"prevPosted"');
+    // ...and everything below that rung survives the bytes it paid.
+    expect(written).toContain('"posted":12');
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+    expect(parseLedger(written)?.dropped).toBeUndefined();
+  });
+
+  it('keeps the streak through that same squeeze', () => {
+    // The streak is NOT telemetry: it is the review's own standing claim
+    // about the pull request, and `compose-review` reads it back to decide
+    // whether to file the non-convergence finding. The pull request most
+    // likely to be churning is also the one whose marker is closest to its
+    // byte cap, so shedding the streak there would disarm the mechanism on
+    // exactly the pull requests it exists for.
+    const { over } = atTheCensusBoundary({ churnRounds: 3 });
+    const written = withCensus(over, { churnRounds: 3 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"fresh"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The census rung alone cannot tell the two placements apart: a streak
+    // wrongly nested inside the volume block still survives the first squeeze
+    // (the cascade's second rung still writes a volume). The discriminating
+    // fixture is the rung where `posted` ITSELF is shed — there the correct
+    // placement keeps the streak and the nested one drops it, which is
+    // exactly the pull request this mechanism is for: fifty findings, marker
+    // at its cap, and the one integer that can end the loop.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        fresh: 11,
+        induced: 7,
+        churnRounds: 3,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    // The fixture reached that rung at all — otherwise the assertions below
+    // are about a marker that never squeezed and prove nothing.
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    // A converging pull request is the common case; it should cost nothing.
+    const written = serializeLedger({ ...base, churnRounds: 0 });
+    expect(written).not.toContain('churnRounds');
+    expect(parseLedger(written)?.churnRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ churnRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.churnRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    // Same domain as `round`, same arithmetic hazard past the cap — and the
+    // raw text is asserted for the same reason the volume cap's is: a
+    // round-trip alone passes while the write side emits uncapped digits.
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, churnRounds: over });
+    expect(written).toContain(`"churnRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    expect(parseLedger(handCrafted({ churnRounds: over }))?.churnRounds).toBe(
+      LEDGER_MAX_ROUND,
+    );
   });
 });

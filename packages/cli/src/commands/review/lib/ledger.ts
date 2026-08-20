@@ -114,6 +114,35 @@ export interface Ledger {
    * fail-open, decides-nothing contract as `posted`.
    */
   prevPosted?: number;
+  /**
+   * This round's convergence census: `fresh` is how many findings first
+   * appeared this round, `induced` how many of those SKILL Step 6's
+   * fix-induced rule ATTRIBUTED to a previous entry's fix — not merely how
+   * many sit on newly pushed lines. Telemetry with the same fail-open contract as
+   * `posted`: the body already states the numbers in prose, and a marker
+   * that lost them costs a trend line, never a verdict.
+   */
+  fresh?: number;
+  induced?: number;
+  /**
+   * How many consecutive rounds — this one included — have come in above the
+   * churn bar. This is the ONE field here that is neither telemetry nor a
+   * gate on scope: it is the review's own standing claim about the pull
+   * request, carried exactly the way a finding id is, and `compose-review`
+   * reads it back to decide whether to file the non-convergence finding.
+   *
+   * So it does NOT ride in the volume tier that sheds first. It is a single
+   * small integer, and the pull request most likely to be churning is also
+   * the one whose marker is closest to its byte cap — shedding it there
+   * would disarm the mechanism on exactly the pull requests it exists for.
+   *
+   * It cannot decide alone, and that is deliberate: the body it rides on is
+   * another account's writable surface, so `compose-review` files nothing on
+   * a recovered streak unless THIS round's own census is also above the bar.
+   * A forged streak can then buy a genuinely-churning pull request its
+   * finding one round early, and nothing else.
+   */
+  churnRounds?: number;
 }
 
 /**
@@ -234,6 +263,21 @@ export function volumeOf(n: unknown): number | undefined {
 }
 
 /**
+ * The ONE reading of the churn streak: a non-negative whole number of rounds,
+ * clamped to the round cap it shares a domain with — or `undefined`.
+ *
+ * Separate from `volumeOf` because the ceilings mean different things: a
+ * volume is a comment count and caps where a review surface stops being one;
+ * a streak counts ROUNDS, and past `LEDGER_MAX_ROUND` the same float64
+ * argument that bounds `round` applies to it unchanged.
+ */
+export function streakOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_ROUND)
+    : undefined;
+}
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -296,8 +340,27 @@ export function serializeLedger(ledger: Ledger): string {
       if (volume === 'both') {
         const prevPostedOut = volumeOf(ledger.prevPosted);
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
+        // The census sheds on the FIRST squeeze, with the carried volume and
+        // ahead of this round's own: the body states these numbers in prose
+        // where the reader actually meets them, and the marker copy only
+        // spares a later round the re-derivation. The streak below is the
+        // half that decides anything, and it is not in this tier at all.
+        const freshOut = volumeOf(ledger.fresh);
+        const inducedOut = volumeOf(ledger.induced);
+        // Written as a pair or not at all, mirroring the parser: half a
+        // ratio is not a smaller reading, it is an unreadable one.
+        if (freshOut !== undefined && inducedOut !== undefined) {
+          payload.fresh = freshOut;
+          payload.induced = inducedOut;
+        }
       }
     }
+    // The streak rides ABOVE the shed cascade — see the field's own note. It
+    // is bounded like the round it counts (same domain, same arithmetic
+    // hazard past the cap) and omitted at zero, so a converging pull request
+    // spends no bytes on it at all.
+    const streak = streakOf(ledger.churnRounds);
+    if (streak !== undefined && streak > 0) payload.churnRounds = streak;
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -462,6 +525,21 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
+    const fresh = volumeOf(raw.fresh);
+    const induced = volumeOf(raw.induced);
+    // The census is read as a PAIR or not at all: `induced` alone names a
+    // numerator with no denominator, and `fresh` alone a denominator whose
+    // numerator a reader would have to guess at — either half on its own is
+    // a ratio nobody can compute, and rendering one would put a number in
+    // the body that means less than the silence it replaced.
+    const census = fresh !== undefined && induced !== undefined;
+    // The streak survives a truncated work list for the same reason the
+    // volumes do — it qualifies no range — and unlike them it is read even
+    // when the census beside it did not, because it is the field the
+    // non-convergence rule reads and the census is only what the body
+    // quotes. Clamped on read as on write; a shape the serializer would not
+    // have written does not survive.
+    const churnRounds = streakOf(raw.churnRounds);
     return {
       v: 1,
       round: raw.round,
@@ -471,6 +549,10 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(model ? { model } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
+      ...(census ? { fresh, induced } : {}),
+      ...(churnRounds === undefined || churnRounds === 0
+        ? {}
+        : { churnRounds }),
     };
   } catch {
     return null;

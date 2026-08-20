@@ -648,4 +648,70 @@ describe('bundled review skill', () => {
       'the URL a `pr-url` target carried, or else assemble',
     );
   });
+
+  it('pins the fix-witness mandate in all three of its halves', () => {
+    // The reviewer-side half of #9578. Three clauses have to survive together or
+    // the rule goes inert in a way the suite would not notice:
+    //   1. the finding format has to ASK for the criterion,
+    //   2. the comment has to CARRY it (a criterion recorded and never posted
+    //      reaches no fixer, which is the whole failure being repaired), and
+    //   3. the exemption has to stay `N/A` rather than a bar on reporting —
+    //      without it the next edit turns an acceptance criterion into a
+    //      precondition and the rule starts costing findings.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Fix witness** — the test that must go RED if that fix is removed',
+    );
+    expect(body).toContain(
+      'And a comment whose fix adds a guard carries the test that must pin it',
+    );
+    expect(body).toContain(
+      'name the test that must fail if the fix is removed, and ask for the mutation that proves it',
+    );
+    expect(body).toContain(
+      'this sentence never changes what the comment reports or at what severity',
+    );
+  });
+
+  it('pins the fix-induced disposition and both of its operands', () => {
+    // Attribution needs the DISPOSITION and the two-operand test together.
+    // With only the disposition, a round folds any adjacent defect into an
+    // old id and welds two claims to one entry later rounds cannot separate;
+    // with only the test, there is nothing to rule and the count the
+    // non-convergence rule reads never gets produced.
+    const body = skillBody();
+    expect(body).toContain('- **fix-induced** —');
+    expect(body).toContain(
+      'The test is mechanical on both operands, and both must hold',
+    );
+    expect(body).toContain('changed since the age reference');
+    expect(body).toContain('you can state the causal link in one clause');
+    // The three guardrails. The first keeps attribution from becoming a way
+    // to not report something, the second keeps a Critical id from quietly
+    // becoming a Suggestion, and the third fixes the fail direction at
+    // "mint a new id" — the behaviour every round had before the rule.
+    expect(body).toContain(
+      'Attribution is a **bookkeeping** decision and never a posting one',
+    );
+    expect(body).toContain(
+      'only when the new defect is at least as severe and as confident as the entry it carries',
+    );
+    expect(body).toContain('**mint the fresh id**');
+  });
+
+  it('pins the census contract and the module-owns-the-verdict split', () => {
+    // The census is the numerator/denominator the non-convergence finding is
+    // computed from, and three clauses have to survive together: what to
+    // count, that ABSENCE is not zero (the one input that silently retires a
+    // standing claim), and that the model does not get to rule on its own
+    // numbers — without the last, the narrated-away-cap failure reappears
+    // wearing a different hat.
+    const body = skillBody();
+    expect(body).toContain('convergence: {"fresh": N, "induced": M}');
+    expect(body).toContain('**Omitting is not the same as zero**');
+    expect(body).toContain('**You count; the module rules.**');
+    expect(body).toContain(
+      'it is not yours to soften, re-word, delete from the body, or explain away in the Summary',
+    );
+  });
 });
