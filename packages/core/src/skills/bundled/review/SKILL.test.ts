@@ -664,5 +664,10 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('self-PR detection has no Aone backing');
     expect(body).not.toContain('no dedup backing yet');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+    expect(body).not.toContain('come back neutral');
+    expect(body).not.toContain('`--new-findings` is unused');
+    expect(body).not.toContain(
+      '`pr-context` and `comment-status` have no Aone backing',
+    );
   });
 });

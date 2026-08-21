@@ -170,6 +170,17 @@ describe('classifyAoneChecks (a1 merge-gate states)', () => {
       class: 'any_failure',
       failedCheckNames: ['lint'],
     });
+    // The same placeholder degradation waits on the remaining tolerant
+    // name keys — pin each, or deleting them from the loop ships green.
+    expect(
+      classifyAoneChecks([{ check: 'typecheck', state: 'failed' }]),
+    ).toMatchObject({
+      class: 'any_failure',
+      failedCheckNames: ['typecheck'],
+    });
+    expect(
+      classifyAoneChecks([{ title: 'e2e', state: 'failed' }]),
+    ).toMatchObject({ class: 'any_failure', failedCheckNames: ['e2e'] });
     // A nameless entry still classifies — under a placeholder, never lost.
     expect(classifyAoneChecks([{ state: 'failed' }])).toMatchObject({
       class: 'any_failure',
@@ -207,6 +218,16 @@ describe('classifyAoneChecks (a1 merge-gate states)', () => {
         { name: 'test', result: 'inconclusive', status: 'passed' },
       ]),
     ).toMatchObject({ class: 'all_pass' });
+    // Recognized values in `result` itself too — the case above resolves
+    // via `status`, so deleting `result` from the scan otherwise ships
+    // green, and a gate reporting its verdict ONLY under `result` would
+    // read as pending and cap an otherwise all-green Approve.
+    expect(
+      classifyAoneChecks([{ name: 'test', result: 'passed' }]),
+    ).toMatchObject({ class: 'all_pass' });
+    expect(
+      classifyAoneChecks([{ name: 'test', result: 'failed' }]),
+    ).toMatchObject({ class: 'any_failure', failedCheckNames: ['test'] });
   });
 });
 
@@ -314,6 +335,10 @@ describe('presubmit handler (Aone backing)', () => {
       29295886,
       'maxcompute/odps_src',
     );
+    // ONE whoami per run (the auth gate doubles as the account read): a
+    // second success-path lookup throws outside any try/catch on a
+    // transient a1 blip and orphans the whole run without a report.
+    expect(mocks.ensureAoneAuthenticated).toHaveBeenCalledTimes(1);
   });
 
   it('drops a still-valid finding already on the MR at the same location', async () => {
@@ -368,6 +393,32 @@ describe('presubmit handler (Aone backing)', () => {
     const report = reportWritten();
     expect(report.existingComments.total).toBe(1);
     expect(report.existingComments.noConflict[0].id).toBe(110);
+  });
+
+  it('an unreadable account never recognizes an author-less marker comment as own', async () => {
+    // The `me !== ''` guard: a deleted-account or author-less payload maps
+    // to '' on BOTH sides, and without it the own-account comparison
+    // degenerates to '' === '' — a plantable marker comment is recognized
+    // as qwen's own posted finding, and a genuinely new one at its
+    // location is silently withheld.
+    mocks.ensureAoneAuthenticated.mockReturnValue('');
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 200,
+        note: '**[Critical]** confirmed',
+        path: 'a.ts',
+        line: 42,
+        author: {},
+      },
+    ]);
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify([{ path: 'a.ts', line: 42 }]),
+    );
+    await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+    const report = reportWritten();
+    expect(report.existingComments.total).toBe(0);
+    expect(report.existingComments.byBucket.overlap).toBe(0);
+    expect(report.blockOnExistingComments).toBe(false);
   });
 
   it('an OUTDATED thread is stale — a new finding at its rewritten line posts', async () => {
