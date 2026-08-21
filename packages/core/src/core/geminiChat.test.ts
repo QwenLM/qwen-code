@@ -15605,6 +15605,41 @@ describe('GeminiChat', async () => {
       expect(chat.getLastPromptTokenCount()).toBe(50_000);
     });
 
+    it('keeps a foreign count intact across a keyless display read (#9506)', () => {
+      // Counts stamped under one route key (e.g. the vision bridge's
+      // full-turn selector route) must survive a keyless read: /context
+      // calls the getters with no argument, which defaults to the ACTIVE
+      // route key and used to zero the only slot before the
+      // session-token-limit gate's keyed read got to it.
+      chat.setLastPromptTokenCount(500_000, false);
+      switchRoute('other-active@route');
+
+      // The foreign count must not leak to the active route...
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
+        0,
+      );
+      // ...and the crossing must not have destroyed it: the gate's keyed
+      // read for the original route restores the exact API-reported value.
+      expect(chat.getLastPromptTokenCount('gemini-pro@test0001')).toBe(500_000);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+    });
+
+    it('restores retained counts when the route switches back (#9506)', () => {
+      chat.seedResumeTokenCounts(321, 45, true);
+      switchRoute('anthropic-model@beef1234');
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+
+      // A turn returning to the original route reads its exact retained
+      // counts — prompt, previous-output, and provenance — instead of the
+      // destructive zero a foreign touch used to leave behind.
+      switchRoute('gemini-pro@test0001');
+      expect(chat.getLastPromptTokenCount()).toBe(321);
+      expect(chat.getLastOutputTokenCount()).toBe(45);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
     it('invalidates seeded resume counts after a later route change', () => {
       chat.seedResumeTokenCounts(321, 45, false);
       expect(chat.getLastPromptTokenCount()).toBe(321);

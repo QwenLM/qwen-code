@@ -470,6 +470,14 @@ interface TryCompressOptions {
   /** Per-request overrides needed to preserve the main request cache prefix. */
   requestGenerationConfig?: GenerateContentConfig;
   /**
+   * Route the enclosing send targets. The entry adoption compares against
+   * this instead of the active route, so an in-send compression never
+   * re-adopts counts the active route retained while the request targets
+   * another one (#9506). Omitted by between-sends callers (manual
+   * `/compress`), which compress the active route's state.
+   */
+  requestRouteKey?: string;
+  /**
    * Delay writing the compression checkpoint until the caller has run any
    * post-compression guards that may roll the in-memory chat state back.
    */
@@ -524,6 +532,14 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
  * large windows (the output ceiling binds long before the pad matters).
  */
 const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
+
+/**
+ * Cap on how many routes' token counts are retained while their route is
+ * not the one owning the chat's count slots (#9506). Route identities are
+ * bounded by the session's model routes, so this only guards pathological
+ * selector churn; eviction is FIFO.
+ */
+const MAX_RETAINED_ROUTE_COUNTS = 8;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -1855,6 +1871,26 @@ export class GeminiChat {
   private tokenCountsRouteKey: string | undefined = undefined;
 
   /**
+   * Token counts retained for routes other than the one currently owning
+   * the slots above, keyed by route identity (#9506). Crossing routes
+   * retains the current slots here and adopts the target's entry back
+   * instead of destroying the value: API-reported sizes are per-route
+   * state that a later turn on the same route still needs — most
+   * critically the session-token-limit gate, whose keyed read would
+   * otherwise see 0 after any foreign-route touch between turns.
+   * Invariant: never holds an entry for {@link tokenCountsRouteKey}.
+   */
+  private readonly tokenCountsByRouteKey = new Map<
+    string,
+    {
+      promptTokenCount: number;
+      promptTokenCountIsEstimated: boolean;
+      outputTokenCount: number;
+      cachedContentTokenCount: number;
+    }
+  >();
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -1975,13 +2011,23 @@ export class GeminiChat {
   }
 
   /**
-   * Drop token counts recorded for a different route (model, auth type, or
-   * endpoint). `/model` switches rebuild the content generator but keep
-   * this chat instance, so without this reset the previous route's
-   * API-authoritative counts would anchor admission, output clamping, and
-   * compression decisions for a different serialization (#9454). After
-   * invalidation those decisions fall back to the history-walk estimate,
-   * with reactive overflow recovery as the safety net.
+   * Make the single-slot token counters describe the route identified by
+   * `targetRouteKey` (default: the active route). Counts recorded for a
+   * different route must not anchor admission, output clamping, or
+   * compression decisions for this one (`/model` switches rebuild the
+   * content generator but keep this chat instance; #9454).
+   *
+   * The crossing is NON-DESTRUCTIVE (#9506): the current slots are
+   * retained in {@link tokenCountsByRouteKey} under their own route key,
+   * and the target's retained entry — if any — is adopted back into the
+   * slots. Zeroing a foreign count outright let any foreign-route touch
+   * between two turns destroy the value before the session-token-limit
+   * gate (the only yield site of `SessionTokenLimitExceeded`) could read
+   * it back keyed by its request route. With retention, a route with no
+   * counts of its own still falls back to the history-walk estimate
+   * (slots 0), with reactive overflow recovery as the safety net, while a
+   * turn returning to a route that has counts reads the exact
+   * API-reported values.
    *
    * Defaults to comparing against the ACTIVE route (lazy reads on the
    * getters). Send paths pass the route the upcoming request actually
@@ -1989,33 +2035,97 @@ export class GeminiChat {
    * when the active route owns it — e.g. an exact `\0` route selector, or
    * a non-exact send whose `model` param overrides the active model.
    *
-   * The telemetry mirror is display-only state: it is resynchronized here,
-   * at the next guarded read, so between a `/model` switch and the next
-   * chat touch the UI counters may briefly show the previous route's
-   * counts. Decision paths never read the mirror, only the route-aware
-   * chat getters above.
+   * The telemetry mirror is display-only state: it is resynchronized here
+   * (adopted or zeroed alongside the slots), so between a `/model` switch
+   * and the next chat touch the UI counters may briefly show the previous
+   * route's counts. Decision paths never read the mirror, only the
+   * route-aware chat getters above.
    */
-  private invalidateTokenCountsIfRouteChanged(targetRouteKey?: string): void {
-    if (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0) {
+  private adoptTokenCountsForRoute(targetRouteKey?: string): void {
+    if (
+      this.lastPromptTokenCount === 0 &&
+      this.lastOutputTokenCount === 0 &&
+      this.tokenCountsByRouteKey.size === 0
+    ) {
       return;
     }
     // Resolve the active-route default only AFTER the zero-count fast path:
     // computing a route identity (SHA-256 digest + config lookups) on every
-    // count read while both counts are 0 would defeat the guard above.
+    // count read while both counts are 0 (and nothing is retained) would
+    // defeat the guard above.
     targetRouteKey ??= this.currentRouteKey();
     if (this.tokenCountsRouteKey === targetRouteKey) {
       return;
     }
+    const retained = this.tokenCountsByRouteKey.get(targetRouteKey);
+    if (retained) {
+      this.tokenCountsByRouteKey.delete(targetRouteKey);
+      this.retainCurrentTokenCounts();
+      debugLogger.debug(
+        `[token-counts] restoring retained counts for route ${targetRouteKey}`,
+      );
+      this.lastPromptTokenCount = retained.promptTokenCount;
+      this.lastPromptTokenCountIsEstimated =
+        retained.promptTokenCountIsEstimated;
+      this.lastOutputTokenCount = retained.outputTokenCount;
+      this.tokenCountsRouteKey = targetRouteKey;
+      this.telemetryService?.setLastPromptTokenCount(retained.promptTokenCount);
+      this.telemetryService?.setLastCachedContentTokenCount(
+        retained.cachedContentTokenCount,
+      );
+      return;
+    }
     debugLogger.debug(
-      `[token-counts] route changed; invalidating counts recorded for ` +
+      `[token-counts] route changed; retaining counts recorded for ` +
         `${this.tokenCountsRouteKey ?? 'unknown'} (now ${targetRouteKey})`,
     );
-    this.setLastPromptTokenCount(0);
+    this.retainCurrentTokenCounts();
+    // Raw assignment on purpose: setLastPromptTokenCount would re-attribute
+    // the zero slot to the ACTIVE route. The slot is attributed to the
+    // TARGET route instead so it can never collide with the just-retained
+    // entry (retained under the evicted slot's key, which differs from the
+    // target) — a colliding key would make the next keyed read for the
+    // retained route early-return the zero slot without consulting the map.
+    this.lastPromptTokenCount = 0;
+    this.lastPromptTokenCountIsEstimated = false;
+    this.lastOutputTokenCount = 0;
+    this.tokenCountsRouteKey = targetRouteKey;
     // Keep the telemetry mirror in sync, or the UI context counters
     // and compression banners keep reading the foreign count. The cached
     // content count belongs to the same foreign route's last response.
     this.telemetryService?.setLastPromptTokenCount(0);
     this.telemetryService?.setLastCachedContentTokenCount(0);
+  }
+
+  /**
+   * Save the current slots into {@link tokenCountsByRouteKey} under their
+   * owning route key so a later read keyed back to that route restores the
+   * exact API-reported values. Zero slots carry nothing worth retaining;
+   * the telemetry mirror still holds the owning route's cached-content
+   * count at this point, so it is captured here too.
+   */
+  private retainCurrentTokenCounts(): void {
+    if (
+      this.tokenCountsRouteKey === undefined ||
+      (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0)
+    ) {
+      return;
+    }
+    if (this.tokenCountsByRouteKey.size >= MAX_RETAINED_ROUTE_COUNTS) {
+      const oldestKey = this.tokenCountsByRouteKey.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.tokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
+    this.tokenCountsByRouteKey.set(this.tokenCountsRouteKey, {
+      promptTokenCount: this.lastPromptTokenCount,
+      promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
+      outputTokenCount: this.lastOutputTokenCount,
+      // Optional chaining keeps partial telemetry test mocks from throwing
+      // (same convention as currentRouteKey's Config lookups).
+      cachedContentTokenCount:
+        this.telemetryService?.getLastCachedContentTokenCount?.() ?? 0,
+    });
   }
 
   /**
@@ -2026,13 +2136,13 @@ export class GeminiChat {
    * of whether the global telemetry is updated.
    */
   getLastPromptTokenCount(targetRouteKey?: string): number {
-    this.invalidateTokenCountsIfRouteChanged(targetRouteKey);
+    this.adoptTokenCountsForRoute(targetRouteKey);
     return this.lastPromptTokenCount;
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */
   getLastOutputTokenCount(): number {
-    this.invalidateTokenCountsIfRouteChanged();
+    this.adoptTokenCountsForRoute();
     return this.lastOutputTokenCount;
   }
 
@@ -2111,7 +2221,7 @@ export class GeminiChat {
   }
 
   isLastPromptTokenCountEstimated(): boolean {
-    this.invalidateTokenCountsIfRouteChanged();
+    this.adoptTokenCountsForRoute();
     return this.lastPromptTokenCountIsEstimated;
   }
 
@@ -2144,6 +2254,9 @@ export class GeminiChat {
     // a route that already differed at save time requires persisting route
     // identity in the session transcript; tracked as a follow-up to #9454.)
     this.tokenCountsRouteKey = this.currentRouteKey();
+    // A fresh seed supersedes any count this route retained while another
+    // route owned the slots (#9506).
+    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
   /**
@@ -2164,8 +2277,10 @@ export class GeminiChat {
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
     // Counts from a pre-switch route must not anchor compression admission
-    // or sizing for the active route (#9454).
-    this.invalidateTokenCountsIfRouteChanged();
+    // or sizing for this route (#9454). In-send callers pass the request
+    // route so the adoption never re-adopts the active route's retained
+    // counts mid-send (#9506).
+    this.adoptTokenCountsForRoute(options?.requestRouteKey);
     const originalTokenCountIsEstimated =
       options?.originalTokenCountOverride === undefined &&
       this.promptCountIsEstimateDerived();
@@ -2252,7 +2367,7 @@ export class GeminiChat {
   } {
     // A pre-switch route's count must not anchor fast-compression sizing
     // for the active route (#9454).
-    this.invalidateTokenCountsIfRouteChanged();
+    this.adoptTokenCountsForRoute();
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
@@ -2324,6 +2439,9 @@ export class GeminiChat {
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.tokenCountsRouteKey = this.currentRouteKey();
+    // The adjusted count supersedes anything this route retained while
+    // another route owned the slots (#9506).
+    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2417,8 +2535,9 @@ export class GeminiChat {
     // against the REQUEST route — resolved above — keeps an exact `\0`
     // route's decisions off the active route's counts, and a differing
     // `model` param gets its own identity instead of borrowing the active
-    // route's.
-    this.invalidateTokenCountsIfRouteChanged(requestRouteKey);
+    // route's. The crossing retains the current counts under their own
+    // route key so a later turn back on that route restores them (#9506).
+    this.adoptTokenCountsForRoute(requestRouteKey);
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
@@ -2603,6 +2722,7 @@ export class GeminiChat {
             pendingUserMessage: userContent,
             precomputedEffectiveTokens: effectiveTokens,
             requestGenerationConfig: params.config,
+            requestRouteKey,
             deferChatCompressionRecord: shouldForceFromHard,
             // Hard-rescue is force=true to bypass the cheap-gate breaker
             // but it remains a semantically AUTOMATIC trigger. Tag the
@@ -2653,6 +2773,14 @@ export class GeminiChat {
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
+          // Keep the retention-map invariant (no entry for the slot's key):
+          // the resurrected count supersedes anything retained for the
+          // request route while the rescue ran (#9506).
+          if (tokenCountsRouteKeyBeforeHardRescue !== undefined) {
+            this.tokenCountsByRouteKey.delete(
+              tokenCountsRouteKeyBeforeHardRescue,
+            );
+          }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
@@ -3303,6 +3431,7 @@ export class GeminiChat {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
                       requestGenerationConfig: params.config,
+                      requestRouteKey,
                       trigger: 'auto',
                     },
                   );
@@ -4935,6 +5064,9 @@ export class GeminiChat {
             // Attribute these counts to the route that reported them so a
             // later model switch invalidates them (#9454).
             this.tokenCountsRouteKey = routeKey;
+            // A fresh API report supersedes anything retained for this
+            // route while another route owned the slots (#9506).
+            this.tokenCountsByRouteKey.delete(routeKey);
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.

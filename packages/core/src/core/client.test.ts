@@ -3158,6 +3158,57 @@ describe('Gemini Client (client.ts)', () => {
       });
       expect(mockTurnRunFn).not.toHaveBeenCalled();
     });
+
+    it('keeps the session limit enforced when turns alternate routes (#9506)', async () => {
+      // Counts are retained per route (#9506): an intervening turn on
+      // another route must not destroy the count the gate later reads for
+      // the original route. Pre-fix, the foreign-route gate read zeroed
+      // the only slot, so the returning turn read 0 and was admitted
+      // regardless of size — steady alternation disabled the limit.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model === 'route-x' ? 'route-x@route' : 'route-a',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      // Route A's last response stamped an over-limit count.
+      client.getChat().setLastPromptTokenCount(101);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      // Intervening turn on route X: no counts recorded for X yet, so the
+      // gate admits it.
+      const foreignEvents = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'foreign route turn' }],
+          new AbortController().signal,
+          'prompt-alternate-foreign',
+          { type: SendMessageType.UserQuery, modelOverride: 'route-x' },
+        ),
+      );
+      expect(foreignEvents).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+
+      // Returning to route A must still trip the gate with the retained
+      // over-limit count — the alternation must not have zeroed it.
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'back on route a' }],
+          new AbortController().signal,
+          'prompt-alternate-return',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+    });
   });
 
   /**
