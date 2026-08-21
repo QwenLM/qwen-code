@@ -1662,19 +1662,28 @@ export function WebShellSidebar({
     [getIdentityForSession],
   );
   // Drop optimistic entries only after the RPC has settled and post-settle
-  // catalog refreshes corroborate the toggle's outcome. Evidence is keyed by
-  // catalog query identity, not array position: a page counts as refreshed
-  // only when the same query's loaded page reference changed after settle.
-  // Churn that recreates a row-carrying page without touching pin state
-  // (patchSession, live-state ticks), pages reshaped by a scope shift, and
-  // disabled/unloaded pages (undefined) are never evidence. A pinned entry
-  // drops once any refreshed page shows the row pinned, or once every tracked
-  // pinned-group page refreshed without the row pinned anywhere — the settled
-  // catalog wins then, even when it contradicts the toggle. An unpinned entry
-  // drops only once every page that carried the row at settle time refreshed
-  // and no refreshed page shows it pinned, so a partial refresh never exposes
-  // a stale sibling page; refreshed pages still showing it pinned keep the
-  // mask until a later refresh settles the identity.
+  // catalog page changes corroborate the toggle's outcome. Evidence is keyed
+  // by catalog query identity, not array position: a page counts as changed
+  // only when the same query's loaded page reference differs from the
+  // settle-time baseline. Churn that recreates a row-carrying page without
+  // touching pin state (patchSession, live-state ticks) also changes the
+  // reference, so churned pages DO enter the evidence set below; only pages
+  // reshaped by a scope shift (new keys) and disabled/unloaded pages
+  // (undefined) never do. The outcome checks neutralize churn, but
+  // asymmetrically: an unpinned entry corroborates only when no evidence
+  // page shows the row pinned, and churn preserves the pre-toggle pin state,
+  // so churn alone cannot corroborate it; a pinned entry's success arm
+  // likewise needs a page that actually shows the row pinned, but its
+  // absence arm counts a churned pinned-group page as refreshed — the
+  // residual churn-drop entrance tracked in the R5-1 review thread. A
+  // pinned entry drops once any refreshed page shows the row pinned, or
+  // once every tracked pinned-group page refreshed without the row pinned
+  // anywhere — the settled catalog wins then, even when it contradicts the
+  // toggle. An unpinned entry drops only once every page that carried the
+  // row at settle time refreshed and no refreshed page shows it pinned, so
+  // a partial refresh never exposes a stale sibling page; refreshed pages
+  // still showing it pinned keep the mask until a later refresh settles the
+  // identity.
   useEffect(() => {
     if (optimisticPins.size === 0) return;
     const slots = optimisticCatalogSlots;
