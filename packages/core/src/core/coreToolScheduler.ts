@@ -4,22 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolCallRequestInfo, ToolCallResponseInfo, ToolExecutionStatus } from './turn.js';
 import type {
-  ToolCallRequestInfo,
-  ToolCallResponseInfo,
-  ToolExecutionStatus,
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
-  ToolRegistry,
-  EditorType,
-  Config,
   ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
-  ChatRecordingService,
   ToolArtifact,
-} from '../index.js';
+} from '../tools/tools.js';
+import type { EditorType } from '../utils/editor.js';
+import type { Config } from '../config/config.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
@@ -46,15 +44,12 @@ import {
   finalizeToolResponses,
   toolResponseTextLength,
 } from '../utils/tool-response-finalizer.js';
-import {
-  ToolConfirmationOutcome,
-  ApprovalMode,
-  logToolCall,
-  ToolErrorType,
-  ToolCallEvent,
-  InputFormat,
-  Kind,
-} from '../index.js';
+import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { logToolCall } from '../telemetry/loggers.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { InputFormat } from '../output/types.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
