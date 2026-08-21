@@ -119,6 +119,7 @@ const artifactKindRecord = {
   audio: true,
   pdf: true,
   notebook: true,
+  document: true,
   other: true,
 } satisfies Record<ToolArtifactKind, true>;
 const artifactKinds = new Set<ToolArtifactKind>(

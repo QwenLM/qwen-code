@@ -2979,7 +2979,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         incremental: {
           since: 'a'.repeat(40),
           effective: false,
-          reason: 'hunks-outside-pr-diff',
+          reason: 'nothing-to-narrow',
           diffBase: 'de17aba5e',
         },
       },
@@ -6437,5 +6437,318 @@ describe('--all-chunks topology anomaly note (#9242)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('incremental-scope briefs', () => {
+  // A rescoped plan carries two scopes in one diff. The chunk brief must say
+  // which scope each of ITS files is in — an interaction file re-reviewed from
+  // scratch re-reports what the previous round already ruled on — and the
+  // whole-diff readers must be told the rest of the PR is absent on purpose,
+  // or they go find it in the worktree.
+  const chunk = (id: number, path: string, start: number) => ({
+    id,
+    startLine: start,
+    endLine: start + 9,
+    lines: 10,
+    chars: 400,
+    maxLineChars: 80,
+    oversized: false,
+    files: [{ path, newStart: 1, newEnd: 10 }],
+  });
+  const INCREMENTAL_PLAN = {
+    diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-7-diff-incremental.txt',
+    chunks: [chunk(1, 'src/changed.ts', 1), chunk(2, 'src/caller.ts', 11)],
+    incremental: {
+      scope: {
+        anchor: 'abc1234def5678900000',
+        deltaFiles: ['src/changed.ts'],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+        contextFileCount: 1,
+        fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
+      },
+    },
+  };
+
+  it('a delta chunk is briefed to review in full, an interaction chunk at the seam', () => {
+    const delta = buildChunkAgentPrompt(INCREMENTAL_PLAN, 1);
+    expect(delta).toContain('INCREMENTAL round');
+    expect(delta).toContain('abc1234def56');
+    expect(delta).toContain('changed since the last round');
+    expect(delta).not.toContain('INTERACTION only');
+
+    const seam = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
+    expect(seam).toContain('INCREMENTAL round');
+    expect(seam).toContain('cleared by the previous round');
+    expect(seam).toContain('INTERACTION only');
+    expect(seam).toContain('src/changed.ts');
+  });
+
+  it('whole-diff role briefs carry the frame once, up front', () => {
+    const p = buildRoleBrief(INCREMENTAL_PLAN, '2');
+    expect(p).toContain('Incremental round');
+    expect(p).toContain('deliberately absent');
+  });
+
+  it('a chunk-scoped ROLE brief lists its OWN files uncapped', () => {
+    // The reverse auditors are the sole reviewers of their territory; the
+    // globally capped list can elide their own files past entry 30, leaving
+    // no way to learn the class or recover the tail.
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: Array.from(
+            { length: 40 },
+            (_, i) => `src/d${i}.ts`,
+          ).concat(['src/changed.ts']),
+          interaction: [
+            { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+          ],
+        },
+      },
+    };
+    const brief = buildRoleBrief(wide, 'reverse-audit', { chunk: 2 });
+    expect(brief).toContain("Your territory's files, by scope class:");
+    expect(brief).toContain('src/caller.ts — **interaction only**');
+    // Chunk 1's delta file is named in ITS brief, not elided by the cap.
+    expect(buildRoleBrief(wide, 'reverse-audit', { chunk: 1 })).toContain(
+      'src/changed.ts — **changed since the last round**',
+    );
+  });
+
+  it('a full-range plan renders no incremental framing at all', () => {
+    expect(buildChunkAgentPrompt(PLAN, 13)).not.toContain('INCREMENTAL');
+    expect(buildRoleBrief(PLAN, '2')).not.toContain('Incremental round');
+  });
+
+  it('a malformed incremental block degrades to full-scope briefs — chunk AND role', () => {
+    for (const bad of [
+      { anchor: 42 },
+      // A bad anchor with VALID lists — the only shape the anchor guard
+      // alone can reject, and the reason this case exists. Every OTHER case
+      // in this list degrades through the empty-lists exit as well, so until
+      // this one was added, deleting `typeof raw.anchor !== 'string'` left the
+      // whole suite green: the plan is `JSON.parse`d with an unchecked cast,
+      // and `anchor: 42` would render "since 42" into an agent's frame. With
+      // it, that deletion is a one-test failure — any non-string anchor lands
+      // here, `{}` and `42` alike.
+      {
+        anchor: 42,
+        deltaFiles: ['src/changed.ts'],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
+      // …and an anchor that is a string but EMPTY, which the same guard's
+      // second conjunct covers.
+      {
+        anchor: '',
+        deltaFiles: ['src/changed.ts'],
+        interaction: [],
+      },
+      // Valid anchor, but no scope list survives validation: rendering the
+      // frame with zero bullets is not a degrade, it is a confusion.
+      { anchor: 'abc1234def567890', deltaFiles: [], interaction: [] },
+      // An interaction entry whose edges were all invalid names a seam
+      // pointing at nothing ("because it imports , which changed").
+      {
+        anchor: 'abc1234def567890',
+        deltaFiles: [],
+        interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
+      },
+      // A PARTIALLY corrupt delta list — one valid entry beside junk —
+      // degrades wholesale, aligned with the roster's guard: the roster
+      // invalidates the block on any non-string entry ("no trustworthy
+      // delta list"), so the brief renderer must not keep narrowing briefs
+      // on a list the roster declared untrustworthy while it widens.
+      {
+        anchor: 'abc1234def567890',
+        deltaFiles: ['src/changed.ts', 42],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
+    ]) {
+      // Under `scope`, which is where the validator looks. Replacing
+      // `incremental` wholesale made every case exit at `!raw` before a
+      // single field guard ran, so `typeof raw.anchor !== 'string'` and the
+      // non-string edge filter were pinned by nothing — deleting the anchor
+      // guard left all 273 tests green.
+      const mangled = { ...INCREMENTAL_PLAN, incremental: { scope: bad } };
+      expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+      expect(buildRoleBrief(mangled, '2')).not.toContain('Incremental round');
+    }
+  });
+
+  it('a mixed delta+interaction chunk renders BOTH scope bullets', () => {
+    // rescope's composite is cut on line count, not scope class, so one
+    // chunk can straddle the two kinds; an else-if between the bullet
+    // branches would silently drop the seam brief for exactly that chunk.
+    const mixed = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 20,
+          lines: 20,
+          chars: 800,
+          maxLineChars: 80,
+          oversized: false,
+          files: [
+            { path: 'src/changed.ts', newStart: 1, newEnd: 10 },
+            { path: 'src/caller.ts', newStart: 1, newEnd: 10 },
+          ],
+        },
+      ],
+    };
+    const p = buildChunkAgentPrompt(mixed, 1);
+    expect(p).toContain('changed since the last round');
+    expect(p).toContain('INTERACTION only');
+    expect(p).toContain('the scope class WINS');
+  });
+
+  it('caps the scope lists at 30 entries and 8 edges per entry', () => {
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`),
+          interaction: [
+            {
+              path: 'src/hub.ts',
+              importsChanged: Array.from(
+                { length: 20 },
+                (_, i) => `src/d${i}.ts`,
+              ),
+            },
+          ],
+        },
+      },
+    };
+    const p = buildRoleBrief(wide, '2');
+    expect(p).toContain('(+10 more)'); // 40 entries − 30 cap
+    expect(p).toContain('(+12 more)'); // 20 edges − 8 cap
+    // The markers alone do not pin the caps: their arithmetic is
+    // `items.length − CAP`, computed independently of the `.slice()` calls,
+    // so deleting the truncation leaves both markers correct while every
+    // entry floods the brief. Assert what was CUT.
+    expect(p).toContain('src/d29.ts'); // last kept
+    expect(p).not.toContain('src/d30.ts'); // first dropped
+    expect(p).not.toContain('src/d39.ts'); // and the tail
+    // …and the per-entry edges, whose cap is a different slice.
+    const seam = p.split('src/hub.ts')[1] ?? '';
+    expect(seam).toContain('src/d7.ts'); // last kept edge
+    expect(seam.split('(+12 more)')[0]).not.toContain('src/d8.ts');
+  });
+
+  it('past the cap, the chunk briefs AND the role brief stay uncapped', () => {
+    // The namesake property of the sibling test, which its one-file-per-chunk
+    // fixture could never reach: no count came near the cap, so adding
+    // `.slice(0, 30)` to `chunkScopeBullets` left the whole suite green. A
+    // reverse-audit territory chunked by line budget holds far more than
+    // thirty small files, and the agent holding that chunk is their SOLE
+    // reviewer — a silent tail is scope nobody covers.
+    const many = Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`);
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 400,
+          lines: 400,
+          chars: 16000,
+          maxLineChars: 80,
+          oversized: false,
+          files: many.map((path, i) => ({
+            path,
+            newStart: i * 10 + 1,
+            newEnd: i * 10 + 10,
+          })),
+        },
+      ],
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: many,
+          interaction: [],
+        },
+      },
+    };
+    const brief = buildChunkAgentPrompt(wide, 1);
+    expect(brief).toContain('INCREMENTAL');
+    // Every one of the forty, including the ones past the whole-diff cap.
+    for (const path of [
+      'src/d0.ts',
+      'src/d29.ts',
+      'src/d30.ts',
+      'src/d39.ts',
+    ]) {
+      expect(brief).toContain(path);
+    }
+    expect(brief).not.toContain('more)');
+    // The role-brief path too — the ONLY call site of `chunkScopeBullets`.
+    // The chunk-AGENT prompt renders its own bullets inline, so the
+    // assertions above never touched it, and the mutant this test exists to
+    // catch (`.slice(0, 30)` inside `chunkScopeBullets`) shipped green
+    // against them. `src/d30.ts` appears in no capped list — the global one
+    // shows d0..d29 and counts the rest — so its bullet can only come from
+    // the uncapped path.
+    const roleBrief = buildRoleBrief(wide, 'reverse-audit', { chunk: 1 });
+    expect(roleBrief).toContain('src/d30.ts');
+    expect(roleBrief).toContain(
+      'src/d39.ts — **changed since the last round**',
+    );
+  });
+
+  it('an interaction entry whose edges are all EMPTY strings degrades away', () => {
+    const mangled = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: [],
+          interaction: [{ path: 'src/caller.ts', importsChanged: ['', ''] }],
+        },
+      },
+    };
+    expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+  });
+
+  it('a chunk whose files carry NO scope class gets no incremental frame', () => {
+    // The block validates globally, but a frame with zero bullets implies
+    // the chunk is out of scope — say nothing instead.
+    const foreign = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 10,
+          lines: 10,
+          chars: 400,
+          maxLineChars: 80,
+          oversized: false,
+          files: [{ path: 'src/unrelated.ts', newStart: 1, newEnd: 10 }],
+        },
+      ],
+    };
+    expect(buildChunkAgentPrompt(foreign, 1)).not.toContain(
+      'INCREMENTAL round',
+    );
+  });
+
+  it('whole-diff briefs name each file with its scope class', () => {
+    const p = buildRoleBrief(INCREMENTAL_PLAN, '2');
+    expect(p).toContain(
+      'Changed since the last round (full review): src/changed.ts.',
+    );
+    expect(p).toContain('src/caller.ts (imports src/changed.ts)');
   });
 });

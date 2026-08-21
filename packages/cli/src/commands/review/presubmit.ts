@@ -27,7 +27,11 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
-import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
+import {
+  LEDGER_ID_READBACK,
+  LEDGER_ID_SHAPE,
+  LEDGER_ID_TOKEN,
+} from './lib/ledger.js';
 
 interface FindingAnchor {
   path: string;
@@ -70,8 +74,6 @@ interface CommentSummary {
   matchedIds?: string[];
 }
 
-/** Exact-shape check for ids read from the --new-findings file. */
-const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
   let line = carriedClaimLine(body);
