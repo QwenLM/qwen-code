@@ -1136,10 +1136,18 @@ export interface DaemonTranscriptState
   now: number;
   maxBlocks: number;
   retainSubagentBlocks: boolean;
+  /**
+   * Running estimate (bytes) of what `blocks` retains. Blocks carry raw tool
+   * payloads, so a block-count cap alone is not a memory ceiling; trimming
+   * also evicts until the estimate is back under `maxRetainedBytes`.
+   */
+  retainedBytes: number;
+  maxRetainedBytes: number;
 }
 
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
+  maxRetainedBytes?: number;
   now?: number;
   retainSubagentBlocks?: boolean;
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
@@ -1149,6 +1157,30 @@ export interface DaemonTranscriptTruncationDetail {
   kind: 'blocks' | 'text';
   blockId?: string;
   sourceRecordIds?: readonly string[];
+  /**
+   * Set for `kind: 'blocks'`: the oldest recordId still retained after the
+   * eviction, from the oldest retained block that carries one. Undefined when
+   * no retained block carries a recordId. Lets consumers reconcile exclusive
+   * pagination anchors with retention trimming.
+   */
+  oldestRetainedRecordId?: string;
+  /**
+   * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
+   * OLDEST end. True for retention trimming (oldest-first), which can evict
+   * the record an exclusive pagination anchor points at; false for a rewind
+   * (which drops the newest blocks and leaves the oldest anchor intact).
+   * Consumers should only re-anchor pagination when this is true.
+   */
+  evictedOldest?: boolean;
+  /**
+   * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
+   * decide whether a previously rejected history page would now be admitted,
+   * without reading a snapshot that may lag the in-flight dispatch.
+   */
+  blockCount?: number;
+  retainedBytes?: number;
+  maxBlocks?: number;
+  maxRetainedBytes?: number;
 }
 
 export interface DaemonTranscriptStore {
