@@ -32,13 +32,13 @@ import type {
 } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  baseUrlAfterProtocolChange,
   canonicalBaseUrl,
   customModelIdsAfterEdit,
   defaultBaseUrl,
   defaultModelIds,
   initialApiKey,
   parseModelIds,
-  protocolBaseUrl,
   seedProtocolModelState,
   seedProviderModelState,
   switchEndpointModelState,
@@ -221,11 +221,20 @@ export function ProviderConnectForm({
     (nextProtocol: string) => {
       setProtocol(nextProtocol);
       if (!selectedProvider || nextProtocol === protocol) return;
-      const savedBaseUrl = protocolBaseUrl(selectedProvider, nextProtocol);
-      const nextBaseUrl = canonicalBaseUrl(
+      const nextBaseUrl = baseUrlAfterProtocolChange(
         selectedProvider,
-        savedBaseUrl ?? defaultBaseUrl(selectedProvider),
+        nextProtocol,
       );
+      if (nextBaseUrl === undefined) {
+        // No saved bucket for this protocol yet: keep the user's typed
+        // endpoint, model field, and per-endpoint state untouched. Falling
+        // back to the provider default here would overwrite the endpoint
+        // with the DEFAULT protocol's placeholder — e.g. switching a
+        // Custom Provider from openai to anthropic would stamp
+        // https://api.openai.com/v1 into the field.
+        setFormError(null);
+        return;
+      }
       setBaseUrl(nextBaseUrl);
       committedBaseUrlRef.current = nextBaseUrl;
       const seeded = seedProtocolModelState(
@@ -517,7 +526,13 @@ export function ProviderConnectForm({
                 value={baseUrl}
                 onChange={(event) => setBaseUrl(event.target.value)}
                 onBlur={() => {
-                  const nextBaseUrl = baseUrl.trim();
+                  // Canonicalize (trim + strip trailing slashes) so the
+                  // committed/submitted endpoint matches the producer's
+                  // slash-stripped per-endpoint keys.
+                  const nextBaseUrl = canonicalBaseUrl(
+                    selectedProvider,
+                    baseUrl,
+                  );
                   const committed = committedBaseUrlRef.current;
                   if (!nextBaseUrl || nextBaseUrl === committed) return;
                   // Same reconciliation as the endpoint-options select:
@@ -581,21 +596,29 @@ export function ProviderConnectForm({
               const value = event.target.value;
               setModelIdsText(value);
               const ids = parseModelIds(value);
-              const defaults = new Set(
-                defaultModelIds(selectedProvider, baseUrl),
-              );
+              const endpoint = canonicalBaseUrl(selectedProvider, baseUrl);
+              const defaults = [...defaultModelIds(selectedProvider, endpoint)];
               customModelIdsRef.current = customModelIdsAfterEdit(
-                [...defaults],
+                defaults,
                 customModelIdsRef.current,
                 ids,
               );
+              // Same provenance-preserving write the endpoint-switch path
+              // uses: a bare `field − defaults` would erase ids carried from
+              // a sibling endpoint that collide with this endpoint's
+              // built-ins, so the next endpoint switch would read an emptied
+              // entry and silently drop the tracked custom model.
               customModelIdsByBaseUrlRef.current.set(
-                baseUrl,
-                ids.filter((id) => !defaults.has(id)),
+                endpoint,
+                customModelIdsAfterEdit(
+                  defaults,
+                  customModelIdsByBaseUrlRef.current.get(endpoint) ?? [],
+                  ids,
+                ),
               );
               trimmedDefaultModelIdsRef.current.set(
-                baseUrl,
-                trimmedDefaultModelIds(selectedProvider, baseUrl, ids),
+                endpoint,
+                trimmedDefaultModelIds(selectedProvider, endpoint, ids),
               );
             }}
             placeholder={t('providerConnect.modelsPlaceholder')}

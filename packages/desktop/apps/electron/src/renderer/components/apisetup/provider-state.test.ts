@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { QwenProviderSummary } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  baseUrlAfterProtocolChange,
   canonicalBaseUrl,
   customModelIdsAfterEdit,
   defaultBaseUrl,
@@ -754,5 +755,169 @@ describe('protocol-axis model seeding (R35-12)', () => {
     const geminiSeed = seedProtocolModelState(provider, 'gemini', proxyUrl);
     expect(geminiSeed.modelIds).toEqual(['default-model']);
     expect(geminiSeed.customModelIds).toEqual([]);
+  });
+});
+
+describe('round-37 regressions', () => {
+  const codingUrl = 'https://api.kimi.com/coding/v1';
+  const chinaUrl = 'https://api.moonshot.cn/v1';
+  const intlUrl = 'https://api.moonshot.ai/v1';
+
+  const freeForm: QwenProviderSummary = {
+    ...kimi,
+    id: 'custom-openai-compatible',
+    protocolOptions: ['openai', 'anthropic', 'gemini'],
+    baseUrl: undefined,
+    defaultModelIds: [],
+    models: [],
+    baseUrlPlaceholder: 'https://api.openai.com/v1',
+  };
+
+  it('canonicalizes free-form endpoint URLs like the producer keys', () => {
+    // The ACP producer slash-strips the per-endpoint map keys
+    // (normalizeBaseUrlForMatching); free-form lookups must normalize the
+    // form-state URL the same way or a trailing-slash spelling misses the
+    // destination's saved state.
+    expect(canonicalBaseUrl(freeForm, 'https://b.example/v1/')).toBe(
+      'https://b.example/v1',
+    );
+    expect(canonicalBaseUrl(freeForm, '  https://b.example/v1  ')).toBe(
+      'https://b.example/v1',
+    );
+    // Preset endpoints keep canonicalizing to the option URL.
+    expect(canonicalBaseUrl(kimi, 'https://api.moonshot.ai/v1/')).toBe(intlUrl);
+  });
+
+  it('restores a free-form destination saved state when the typed URL adds a trailing slash', () => {
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      existingConfig: {
+        protocol: 'openai',
+        baseUrl: 'https://a.example/v1',
+        modelIds: ['m1'],
+        modelIdsByBaseUrl: {
+          'https://a.example/v1': ['m1'],
+          'https://b.example/v1': ['m2'],
+        },
+      },
+    };
+    const seeded = seedProviderModelState(provider, 'https://a.example/v1');
+    expect(seeded.modelIds).toEqual(['m1']);
+
+    // The user types the destination with a trailing slash; the lookup must
+    // still hit the producer's slash-stripped key and restore m2 instead of
+    // treating the destination as unseen and re-homing the previous
+    // endpoint's m1 onto it (which the server-side merge would then pay for
+    // by deleting m2).
+    const next = switchEndpointModelState(
+      provider,
+      'https://a.example/v1',
+      'https://b.example/v1/',
+      seeded.modelIds.join(', '),
+      seeded.customModelIds,
+      seeded.customModelIdsByBaseUrl,
+      seeded.trimmedDefaultModelIds,
+    );
+    expect(next.modelIds).toEqual(['m2']);
+    expect(next.customModelIds).toEqual(['m2']);
+  });
+
+  it('keeps the typed endpoint when switching to a protocol without a saved bucket', () => {
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      existingConfig: {
+        baseUrlByProtocol: { openai: 'https://proxy.example/v1/' },
+      },
+    };
+    // A connected protocol restores its saved bucket's canonical endpoint.
+    expect(baseUrlAfterProtocolChange(provider, 'openai')).toBe(
+      'https://proxy.example/v1',
+    );
+    // An unsaved bucket yields undefined — the form keeps the user's typed
+    // endpoint and model state; it must never fall back to the DEFAULT
+    // protocol's placeholder (baseUrlPlaceholder).
+    expect(
+      baseUrlAfterProtocolChange(provider, 'anthropic'),
+    ).toBeUndefined();
+    expect(baseUrlAfterProtocolChange(provider, 'gemini')).toBeUndefined();
+  });
+
+  it('keeps sibling-provenance ids through a net-zero edit at the colliding endpoint', () => {
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: codingUrl,
+          envKey: 'KIMI_CODE_API_KEY',
+          models: [{ id: 'k3-256k' }],
+        },
+        {
+          id: 'api-china',
+          label: 'API Key (China)',
+          url: chinaUrl,
+          envKey: 'MOONSHOT_API_KEY',
+          models: [{ id: 'kimi-k3' }],
+        },
+        {
+          id: 'api-international',
+          label: 'API Key (International)',
+          url: intlUrl,
+          envKey: 'MOONSHOT_API_KEY',
+          models: [{ id: 'kimi-k3' }],
+        },
+      ],
+      existingConfig: {
+        protocol: 'openai',
+        baseUrl: intlUrl,
+        modelIds: ['kimi-k3', 'k3-256k'],
+        modelIdsByBaseUrl: { [intlUrl]: ['kimi-k3', 'k3-256k'] },
+      },
+    };
+
+    const seeded = seedProviderModelState(provider, intlUrl);
+    expect(seeded.modelIds).toEqual(['kimi-k3', 'k3-256k']);
+    // k3-256k is tracked as a custom of the API endpoint (sibling
+    // provenance: it is Coding Plan's built-in).
+    expect(seeded.customModelIdsByBaseUrl.get(intlUrl)).toEqual(['k3-256k']);
+
+    // Switch to Coding Plan: the carried id lands in that endpoint's entry.
+    const atCoding = switchEndpointModelState(
+      provider,
+      intlUrl,
+      codingUrl,
+      seeded.modelIds.join(', '),
+      seeded.customModelIds,
+      seeded.customModelIdsByBaseUrl,
+      seeded.trimmedDefaultModelIds,
+    );
+    expect(atCoding.modelIds).toEqual(['k3-256k']);
+    expect(seeded.customModelIdsByBaseUrl.get(codingUrl)).toEqual(['k3-256k']);
+
+    // A net-zero edit of the models field at Coding Plan must write the
+    // per-endpoint entry with the same provenance-preserving computation
+    // the switch path uses; a bare `field − defaults` would erase k3-256k
+    // here because it is Coding Plan's own built-in.
+    const edited = customModelIdsAfterEdit(
+      defaultModelIds(provider, codingUrl),
+      seeded.customModelIdsByBaseUrl.get(codingUrl) ?? [],
+      parseModelIds(atCoding.modelIds.join(', ')),
+    );
+    seeded.customModelIdsByBaseUrl.set(codingUrl, edited);
+    expect(edited).toEqual(['k3-256k']);
+
+    // Switch to the unseen China endpoint: k3-256k must be carried through
+    // instead of silently dropping out of the form and the next connect.
+    const atChina = switchEndpointModelState(
+      provider,
+      codingUrl,
+      chinaUrl,
+      atCoding.modelIds.join(', '),
+      atCoding.customModelIds,
+      seeded.customModelIdsByBaseUrl,
+      seeded.trimmedDefaultModelIds,
+    );
+    expect(atChina.modelIds).toEqual(['kimi-k3', 'k3-256k']);
   });
 });

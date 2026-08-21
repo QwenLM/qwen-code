@@ -2396,8 +2396,11 @@ function readExistingProviderConfig(
           Object.fromEntries(
             existing.models.reduce<Map<string, string[]>>(
               (byEndpoint, model) => {
-                const endpoint = normalizeBaseUrlForMatching(
-                  model.baseUrl ?? baseUrl,
+                // Sanitize like every other wire-bound baseUrl in this
+                // payload: a saved URL may carry basic-auth userinfo, which
+                // must not be serialized into the response map keys.
+                const endpoint = sanitizeProviderBaseUrl(
+                  normalizeBaseUrlForMatching(model.baseUrl ?? baseUrl),
                 );
                 const ids = byEndpoint.get(endpoint) ?? [];
                 if (!ids.includes(model.id)) ids.push(model.id);
@@ -2442,8 +2445,11 @@ function readExistingProviderConfig(
       baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
       const byEndpoint: Record<string, string[]> = {};
       for (const model of savedForProto.models) {
-        const endpoint = normalizeBaseUrlForMatching(
-          model.baseUrl ?? protoBaseUrl,
+        // Sanitize like baseUrlByProtocol above so the bucket's keys and
+        // baseUrl agree on the wire (a saved URL may carry basic-auth
+        // userinfo).
+        const endpoint = sanitizeProviderBaseUrl(
+          normalizeBaseUrlForMatching(model.baseUrl ?? protoBaseUrl),
         );
         const ids = byEndpoint[endpoint] ?? [];
         if (!ids.includes(model.id)) ids.push(model.id);

@@ -13254,6 +13254,94 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('qwen/providers/list sanitizes userinfo out of per-endpoint map keys', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { CUSTOM_FF_KEY: 'sk-custom' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'proxy-model',
+              baseUrl: 'https://user:sk-tunnel@proxy.corp.example/v1',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'custom-freeform',
+        label: 'Custom Free Form',
+        description: 'Free form access',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic'],
+        baseUrl: undefined,
+        envKey: (_protocol: string, _baseUrl: string) => 'CUSTOM_FF_KEY',
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: '',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'CUSTOM_FF_KEY',
+        uiGroup: 'custom',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: [
+            expect.objectContaining({ id: 'deepseek' }),
+            expect.objectContaining({
+              id: 'custom-freeform',
+              existingConfig: {
+                protocol: 'openai',
+                baseUrl: 'https://proxy.corp.example/v1',
+                hasApiKey: true,
+                modelIds: ['proxy-model'],
+                // Both per-endpoint views must key by the sanitized URL,
+                // matching the sibling baseUrl fields of the same payload —
+                // the saved basic-auth userinfo never rides the wire.
+                modelIdsByBaseUrl: {
+                  'https://proxy.corp.example/v1': ['proxy-model'],
+                },
+                modelIdsByBaseUrlByProtocol: {
+                  openai: {
+                    'https://proxy.corp.example/v1': ['proxy-model'],
+                  },
+                },
+                baseUrlByProtocol: {
+                  openai: 'https://proxy.corp.example/v1',
+                },
+              },
+            }),
+          ],
+        },
+      );
+
+      const listed = await agent.extMethod('qwen/providers/list', {});
+      expect(JSON.stringify(listed)).not.toContain('sk-tunnel');
+      expect(JSON.stringify(listed)).not.toContain('user:sk-tunnel');
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {
     mockConfig.getSkillManager = vi.fn().mockReturnValue({
       parseSkillContent: vi.fn(),

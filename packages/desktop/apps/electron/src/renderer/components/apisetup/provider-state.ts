@@ -25,12 +25,20 @@ export function canonicalBaseUrl(
   provider: QwenProviderSummary,
   baseUrl: string,
 ): string {
-  if (!Array.isArray(provider.baseUrl)) return baseUrl;
+  if (!Array.isArray(provider.baseUrl)) {
+    // Free-form providers: the per-endpoint state maps are seeded from the
+    // ACP list response, whose keys the producer slash-strips
+    // (normalizeBaseUrlForMatching). Lookups must normalize the form-state
+    // URL the same way, or a spelling variance (trailing slash) makes an
+    // endpoint switch miss the destination's saved state — the exact
+    // failure this module exists to prevent.
+    return normalizeBaseUrl(baseUrl);
+  }
   const normalized = normalizeBaseUrl(baseUrl);
   return (
     provider.baseUrl.find(
       (option) => normalizeBaseUrl(option.url) === normalized,
-    )?.url ?? baseUrl
+    )?.url ?? normalized
   );
 }
 
@@ -118,6 +126,26 @@ export function protocolBaseUrl(
   protocol: string,
 ): string | undefined {
   return provider.existingConfig?.baseUrlByProtocol?.[protocol];
+}
+
+/**
+ * Resolves the endpoint to show after switching the protocol Select: the
+ * saved bucket's canonical baseUrl when the protocol was connected before,
+ * or `undefined` to signal that the form must keep the user's current
+ * endpoint and model state untouched. The producer only populates
+ * `baseUrlByProtocol` for protocols that already have saved models, so an
+ * `undefined` bucket means "not yet connected" — substituting the provider
+ * default there would overwrite the typed endpoint with the DEFAULT
+ * protocol's URL (multi-protocol setups on one server share the endpoint).
+ */
+export function baseUrlAfterProtocolChange(
+  provider: QwenProviderSummary,
+  nextProtocol: string,
+): string | undefined {
+  const savedBaseUrl = protocolBaseUrl(provider, nextProtocol);
+  return savedBaseUrl === undefined
+    ? undefined
+    : canonicalBaseUrl(provider, savedBaseUrl);
 }
 
 /**
