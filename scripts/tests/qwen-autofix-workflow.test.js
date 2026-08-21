@@ -486,10 +486,14 @@ describe('qwen-autofix workflow', () => {
       'review-address already in flight or queued — skipping',
     );
     // The live-run listing filters status SERVER-side (in_progress + queued
-    // union): a client-side filter over the N newest runs loses a long-lived
-    // fanned-out run once cron traffic pushes it past the window, and its
-    // queued PRs silently stop looking busy.
-    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
+    // + pending union): a client-side filter over the N newest runs loses a
+    // long-lived fanned-out run once cron traffic pushes it past the window,
+    // and its queued PRs silently stop looking busy. 'pending' is part of the
+    // union because GitHub reports a run neither queued nor in_progress while
+    // its jobs wait on concurrency groups (#9596).
+    expect(reviewScanJob).toContain(
+      'for LIVE_STATUS in in_progress queued pending',
+    );
     expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
     expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its

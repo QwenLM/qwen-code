@@ -2544,7 +2544,7 @@ jobs:
           BUSY_ENUM_OK=1
           LIVE_RUNS=''
           BUSY_ENUM_ERR="$(mktemp)"
-          for LIVE_STATUS in in_progress queued; do
+          for LIVE_STATUS in in_progress queued pending; do
             if ! PART="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
               --status "${LIVE_STATUS}" --limit 50 --json databaseId \
               --jq '.[].databaseId' 2>> "${BUSY_ENUM_ERR}")"; then
