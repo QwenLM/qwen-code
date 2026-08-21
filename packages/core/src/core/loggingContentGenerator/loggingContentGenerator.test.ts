@@ -15,6 +15,7 @@ import type { Config } from '../../config/config.js';
 import type { ContentGenerator } from '../contentGenerator.js';
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
+import { toDashScopeApiError } from '../dashscopeContentGenerator/errors.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import {
@@ -1738,10 +1739,12 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('logs errors with status code and request id, then rethrows', async () => {
-    const error = Object.assign(new Error('boom'), {
+    const error = toDashScopeApiError({
       status: 429,
-      request_id: 'req-99',
-      type: 'rate_limit',
+      rawBody: JSON.stringify({
+        message: 'boom',
+        request_id: 'req-99',
+      }),
     });
     const wrapped = createWrappedGenerator(
       vi.fn().mockRejectedValue(error),
@@ -1771,14 +1774,13 @@ describe('LoggingContentGenerator', () => {
     const [, errorEvent] = vi.mocked(logApiError).mock.calls[0];
     expect(errorEvent.response_id).toBe('req-99');
     expect(errorEvent.status_code).toBe(429);
-    expect(errorEvent.error_type).toBe('rate_limit');
+    expect(errorEvent.error_type).toBe('DashScopeApiError');
     expect(errorEvent.prompt_id).toBe('prompt-2');
 
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
     const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
-    expect(loggedError).toBeInstanceOf(Error);
-    expect((loggedError as Error).message).toBe('boom');
+    expect(loggedError).toBe(error);
 
     const spanRecord = getGenerateContentSpanRecord();
     expect(spanRecord.statuses).toEqual([

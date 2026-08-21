@@ -9,6 +9,7 @@ import { ROOT_CONTEXT, type Attributes, type Span } from '@opentelemetry/api';
 import {
   createGenAiRequestObserverContext,
   extractAnthropicRequestAttributes,
+  extractDashScopeRequestAttributes,
   extractGeminiRequestAttributes,
   extractOpenAiRequestAttributes,
   reportOpenAiRequest,
@@ -138,6 +139,29 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.max_tokens': 0,
       'gen_ai.request.temperature': -0.1,
       'gen_ai.request.top_p': 1,
+      'gen_ai.request.stop_sequences': ['done'],
+    });
+  });
+
+  it('extracts fields from the final DashScope parameters', () => {
+    expect(
+      extractDashScopeRequestAttributes({
+        model: 'qwen3.8-max',
+        parameters: {
+          max_tokens: 1024,
+          temperature: 0.2,
+          top_p: 0.8,
+          frequency_penalty: -0.1,
+          presence_penalty: 0.3,
+          stop: ['done'],
+        },
+      }),
+    ).toEqual({
+      'gen_ai.request.max_tokens': 1024,
+      'gen_ai.request.temperature': 0.2,
+      'gen_ai.request.top_p': 0.8,
+      'gen_ai.request.frequency_penalty': -0.1,
+      'gen_ai.request.presence_penalty': 0.3,
       'gen_ai.request.stop_sequences': ['done'],
     });
   });

@@ -12,6 +12,7 @@ import type { ProviderConfig } from './types.js';
 import { codingPlanProvider } from './presets/alibaba-coding-plan.js';
 import { tokenPlanProvider } from './presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from './presets/alibaba-standard.js';
+import { alibabaNativeProvider } from './presets/alibaba-native.js';
 import { openRouterProvider } from './presets/openrouter.js';
 import { requestyProvider } from './presets/requesty.js';
 import { deepseekProvider } from './presets/deepseek.js';
@@ -27,6 +28,7 @@ export {
   codingPlanProvider,
   tokenPlanProvider,
   alibabaStandardProvider,
+  alibabaNativeProvider,
   openRouterProvider,
   requestyProvider,
   deepseekProvider,
@@ -54,6 +56,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   codingPlanProvider,
   tokenPlanProvider,
   alibabaStandardProvider,
+  alibabaNativeProvider,
   deepseekProvider,
   grokProvider,
   minimaxProvider,

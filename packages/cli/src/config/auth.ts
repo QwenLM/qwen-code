@@ -23,6 +23,7 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
+  [AuthType.USE_DASHSCOPE]: 'DASHSCOPE_API_KEY',
 };
 
 /**
@@ -253,6 +254,32 @@ export function validateAuthMethod(
       // Default env key - can use either apiKey or env var
       return t(
         'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.',
+        { envKeyHint },
+      );
+    }
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_DASHSCOPE) {
+    const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
+      authMethod,
+      settings.merged,
+      config,
+    );
+    if (!hasKey) {
+      const envKeyHint = checkedEnvKey
+        ? `'${checkedEnvKey}'`
+        : "'DASHSCOPE_API_KEY'";
+      if (isExplicitEnvKey) {
+        // Explicit envKey configured - only suggest setting the env var
+        return t(
+          'Missing API key for DashScope native auth. Set the {{envKeyHint}} environment variable.',
+          { envKeyHint },
+        );
+      }
+      // Default env key - can use either apiKey or env var
+      return t(
+        'Missing API key for DashScope native auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.',
         { envKeyHint },
       );
     }

@@ -14,6 +14,7 @@ import {
 } from '@opentelemetry/api';
 import {
   extractAnthropicContent,
+  extractDashScopeContent,
   extractGeminiContent,
   extractOpenAiContent,
   GenAiOutputAccumulator,
@@ -158,6 +159,18 @@ export function extractAnthropicRequestAttributes(request: object): Attributes {
   assignNumber(attributes, 'gen_ai.request.top_p', ownValue(record, 'top_p'));
   assignStopSequences(attributes, ownValue(record, 'stop_sequences'), false);
   return attributes;
+}
+
+export function extractDashScopeRequestAttributes(request: object): Attributes {
+  const parameters = ownValue(request as RequestRecord, 'parameters');
+  if (
+    typeof parameters !== 'object' ||
+    parameters === null ||
+    Array.isArray(parameters)
+  ) {
+    return {};
+  }
+  return extractOpenAiRequestAttributes(parameters);
 }
 
 export function extractGeminiRequestAttributes(request: object): Attributes {
@@ -485,6 +498,18 @@ export function reportAnthropicRequest(
     request,
     extractAnthropicRequestAttributes,
     extractAnthropicContent,
+    requestContext,
+  );
+}
+
+export function reportDashScopeRequest(
+  request: object,
+  requestContext?: Context,
+): GenAiAttemptHandle | undefined {
+  return reportRequest(
+    request,
+    extractDashScopeRequestAttributes,
+    extractDashScopeContent,
     requestContext,
   );
 }

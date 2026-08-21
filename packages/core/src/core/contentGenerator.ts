@@ -59,6 +59,7 @@ export enum AuthType {
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
+  USE_DASHSCOPE = 'dashscope',
 }
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
@@ -98,9 +99,10 @@ export type ContentGeneratorConfig = {
   // Total-lifetime cap for one streaming response, NOT refreshed by chunk
   // arrival: a drip-fed stream resets the idle watchdog forever while never
   // completing the message (issue #8597), so that shape needs a bound the
-  // chunks cannot reset. `<= 0` disables it. Honored only by the
-  // OpenAI-compatible pipeline today — the Anthropic/Gemini generators do not
-  // implement it, so on those auth types the drip-fed shape stays unbounded.
+  // chunks cannot reset. `<= 0` disables it. Honored by the OpenAI-compatible
+  // pipeline and the native DashScope transport — the Anthropic/Gemini
+  // generators do not implement it, so on those auth types the drip-fed shape
+  // stays unbounded.
   streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
@@ -544,6 +546,13 @@ export async function createContentGenerator(
           './anthropicContentGenerator/index.js'
         );
         return createAnthropicContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.USE_DASHSCOPE) {
+      loadBaseGenerator = async () => {
+        const { createDashScopeContentGenerator } = await import(
+          './dashscopeContentGenerator/index.js'
+        );
+        return createDashScopeContentGenerator(generatorConfig, config);
       };
     } else if (
       authType === AuthType.USE_GEMINI ||

@@ -2380,7 +2380,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(slimSpy).not.toHaveBeenCalled();
   });
 
-  it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
+  it.each([
+    AuthType.QWEN_OAUTH,
+    AuthType.USE_OPENAI,
+    AuthType.USE_DASHSCOPE,
+  ])(
     'uses cache sharing for DashScope through %s',
     async (authType) => {
       const { chat, config, generateText } = makeFixture({ authType });

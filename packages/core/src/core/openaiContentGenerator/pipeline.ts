@@ -323,8 +323,12 @@ function clampProviderOutputBudgetKeys(
  * `ContentGeneratorConfig` field (programmatic, wins — including `0` to
  * disable) > the env deployment knob > the built-in default. A malformed env
  * value is ignored (with a `console.warn`) rather than failing the request.
+ *
+ * Exported so the native DashScope transport can share the exact same
+ * precedence, disable, and ceiling semantics for its idle/lifetime guards
+ * instead of re-implementing (and potentially diverging from) this logic.
  */
-function resolveStreamGuardMs(
+export function resolveStreamGuardMs(
   fromConfig: number | undefined,
   configLabel: string,
   envName: string,

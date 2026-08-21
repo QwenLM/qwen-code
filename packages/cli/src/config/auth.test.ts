@@ -36,6 +36,7 @@ describe('validateAuthMethod', () => {
     delete process.env['GOOGLE_API_KEY'];
     delete process.env['IDEALAB_KEY'];
     delete process.env['TOKEN_PLAN_KEY'];
+    delete process.env['DASHSCOPE_API_KEY'];
   });
 
   it('should return null for USE_OPENAI with default env key', () => {
@@ -46,6 +47,17 @@ describe('validateAuthMethod', () => {
   it('should return an error message for USE_OPENAI if no API key is available', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBe(
       "Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the 'OPENAI_API_KEY' environment variable.",
+    );
+  });
+
+  it('should return null for USE_DASHSCOPE with default env key', () => {
+    process.env['DASHSCOPE_API_KEY'] = 'fake-key';
+    expect(validateAuthMethod(AuthType.USE_DASHSCOPE)).toBeNull();
+  });
+
+  it('should return an error message for USE_DASHSCOPE if no API key is available', () => {
+    expect(validateAuthMethod(AuthType.USE_DASHSCOPE)).toBe(
+      "Missing API key for DashScope native auth. Set settings.security.auth.apiKey, or set the 'DASHSCOPE_API_KEY' environment variable.",
     );
   });
 

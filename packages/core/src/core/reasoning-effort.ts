@@ -27,6 +27,21 @@ export const REASONING_EFFORT_TIERS: readonly ReasoningEffort[] = [
   'max',
 ] as const;
 
+const QWEN_3_8_MAX_REASONING_EFFORT_TIERS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'xhigh',
+] as const;
+
+export function getSupportedReasoningEffortTiers(
+  authType?: string,
+  model?: string,
+): readonly ReasoningEffort[] {
+  return authType === 'dashscope' && model?.toLowerCase() === 'qwen3.8-max'
+    ? QWEN_3_8_MAX_REASONING_EFFORT_TIERS
+    : REASONING_EFFORT_TIERS;
+}
+
 /**
  * Numeric strength used when clamping a requested tier down to what a model
  * supports. Gaps are intentional so future intermediate tiers (e.g. a

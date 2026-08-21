@@ -31,6 +31,7 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
+  [AuthType.USE_DASHSCOPE]: ['DASHSCOPE_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
 };
 
@@ -212,6 +213,14 @@ export function getAuthTypeFromEnv(
     env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
+  }
+
+  // Placed AFTER the OpenAI branch above: a user already driving DashScope
+  // through OPENAI_* vars (the compat-mode shim) must never be silently
+  // migrated to the native provider just because DASHSCOPE_API_KEY/
+  // DASHSCOPE_MODEL also happen to be set in the same shell.
+  if (env['DASHSCOPE_API_KEY'] && env['DASHSCOPE_MODEL']) {
+    return AuthType.USE_DASHSCOPE;
   }
 
   if (env['GEMINI_API_KEY'] && env['GEMINI_MODEL']) {

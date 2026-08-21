@@ -37,7 +37,11 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { AuthState } from '../types.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  clampReasoningEffort,
+  getSupportedReasoningEffortTiers,
+} from '@qwen-code/qwen-code-core';
 import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
@@ -353,10 +357,20 @@ export const DialogManager = ({
     );
   }
   if (uiState.isEffortDialogOpen) {
+    const supportedEfforts = getSupportedReasoningEffortTiers(
+      config.getAuthType(),
+      config.getModel(),
+    );
+    const configuredEffort = config.getReasoningEffort();
     return (
       <Box flexDirection="column">
         <EffortDialog
-          currentEffort={config.getReasoningEffort()}
+          currentEffort={
+            configuredEffort
+              ? clampReasoningEffort(configuredEffort, supportedEfforts)
+              : undefined
+          }
+          supportedEfforts={supportedEfforts}
           onSelect={uiActions.handleEffortSelect}
         />
       </Box>

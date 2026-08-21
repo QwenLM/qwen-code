@@ -445,6 +445,9 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
+      expect(
+        getSettingsSchema().model.properties.reasoningEffort.showInDialog,
+      ).toBe(true);
 
       // Check that some settings are appropriately hidden
       expect(getSettingsSchema().ui.properties.theme.showInDialog).toBe(true);

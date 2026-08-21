@@ -18,6 +18,13 @@ export function buildAuthMethods(): AuthMethod[] {
         args: ['--auth-type=openai'],
       },
     },
+    {
+      id: AuthType.USE_DASHSCOPE,
+      name: 'Use DashScope API key (native)',
+      description:
+        'Requires setting the `DASHSCOPE_API_KEY` environment variable',
+      _meta: { type: 'terminal', args: ['--auth-type=dashscope'] },
+    },
   ];
 }
 

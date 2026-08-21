@@ -10,6 +10,7 @@ import {
   REASONING_EFFORT_TIERS,
   applyReasoningEffort,
   clampReasoningEffort,
+  getSupportedReasoningEffortTiers,
   normalizeReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
@@ -23,6 +24,26 @@ describe('REASONING_EFFORT_TIERS', () => {
       'xhigh',
       'max',
     ]);
+  });
+});
+
+describe('getSupportedReasoningEffortTiers', () => {
+  it('returns only documented tiers for native qwen3.8-max', () => {
+    expect(
+      getSupportedReasoningEffortTiers('dashscope', 'qwen3.8-max'),
+    ).toEqual(['low', 'medium', 'xhigh']);
+  });
+
+  it('does not constrain other providers or editable native models', () => {
+    expect(getSupportedReasoningEffortTiers('openai', 'qwen3.8-max')).toEqual(
+      REASONING_EFFORT_TIERS,
+    );
+    expect(
+      getSupportedReasoningEffortTiers('dashscope', 'custom-model'),
+    ).toEqual(REASONING_EFFORT_TIERS);
+    expect(
+      getSupportedReasoningEffortTiers('dashscope', 'qwen3.8-max-preview'),
+    ).toEqual(REASONING_EFFORT_TIERS);
   });
 });
 

@@ -2221,8 +2221,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
-  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
-    '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
+  'Set how hard reasoning-capable models think; available tiers depend on the active provider/model.':
+    '设置具备推理能力的模型思考的强度；可用档位取决于当前启用的提供方/模型。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',

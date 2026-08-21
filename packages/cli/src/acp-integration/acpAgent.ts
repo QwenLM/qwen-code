@@ -1185,6 +1185,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
   'vertex-ai': ['GOOGLE_API_KEY'],
+  dashscope: ['DASHSCOPE_API_KEY'],
 };
 
 /**

@@ -39,6 +39,7 @@ export {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
   alibabaStandardProvider,
+  alibabaNativeProvider,
   codingPlanProvider,
   CUSTOM_API_KEY_ENV_PREFIX,
   customProvider,

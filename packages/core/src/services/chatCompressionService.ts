@@ -373,6 +373,7 @@ function supportsCompressionCacheSharing(config: Config): boolean {
   }
   if (provider.enableCacheControl === false) return false;
   if (provider.authType === AuthType.USE_ANTHROPIC) return true;
+  if (provider.authType === AuthType.USE_DASHSCOPE) return true;
   return supportsOpenAIPrefixCaching(provider);
 }
 

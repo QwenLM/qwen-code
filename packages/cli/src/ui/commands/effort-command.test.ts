@@ -5,14 +5,18 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { effortCommand } from './effort-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 // t() returns the key verbatim so assertions can match on the key text.
 vi.mock('../../i18n/index.js', () => ({
-  t: vi.fn((key: string) => key),
+  t: vi.fn((key: string, values?: Record<string, unknown>) =>
+    key.replace(/\{\{(\w+)\}\}/g, (match: string, name: string) =>
+      values?.[name] === undefined ? match : String(values[name]),
+    ),
+  ),
 }));
 
 describe('effortCommand', () => {
@@ -33,6 +37,8 @@ describe('effortCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
+          getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+          getModel: vi.fn().mockReturnValue('default-model'),
           getReasoningEffort,
           setReasoningEffort,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
@@ -62,6 +68,29 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ type: 'message', messageType: 'info' });
     expect(getReasoningEffort).toHaveBeenCalled();
     expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('lists only native qwen3.8-max tiers and reports a clamped legacy value', async () => {
+    vi.mocked(context.services.config!.getAuthType).mockReturnValue(
+      AuthType.USE_DASHSCOPE,
+    );
+    vi.mocked(context.services.config!.getModel).mockReturnValue('qwen3.8-max');
+    getReasoningEffort.mockReturnValue('high');
+    const nonInteractive = { ...context, executionMode: 'non_interactive' };
+
+    const res = await effortCommand.action!(
+      nonInteractive as typeof context,
+      '',
+    );
+
+    expect((res as { content: string }).content).toContain(
+      'Current reasoning effort: xhigh',
+    );
+    expect((res as { content: string }).content).toContain(
+      'Available: low, medium, xhigh',
+    );
+    expect((res as { content: string }).content).not.toContain('medium, high');
+    expect((res as { content: string }).content).not.toContain('xhigh, max');
   });
 
   it('sets and persists a valid tier', async () => {
@@ -145,6 +174,31 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
   });
 
+  it('rejects high and max for native qwen3.8-max', async () => {
+    vi.mocked(context.services.config!.getAuthType).mockReturnValue(
+      AuthType.USE_DASHSCOPE,
+    );
+    vi.mocked(context.services.config!.getModel).mockReturnValue('qwen3.8-max');
+
+    for (const tier of ['high', 'max']) {
+      const res = await effortCommand.action!(context, tier);
+      expect(res).toMatchObject({ messageType: 'error' });
+    }
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('accepts xhigh for native qwen3.8-max', async () => {
+    vi.mocked(context.services.config!.getAuthType).mockReturnValue(
+      AuthType.USE_DASHSCOPE,
+    );
+    vi.mocked(context.services.config!.getModel).mockReturnValue('qwen3.8-max');
+
+    const res = await effortCommand.action!(context, 'xhigh');
+    expect(res).toMatchObject({ messageType: 'info' });
+    expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+  });
+
   it('rejects an unknown tier without mutating config or settings', async () => {
     const res = await effortCommand.action!(context, 'turbo');
     expect(setReasoningEffort).not.toHaveBeenCalled();
@@ -156,6 +210,6 @@ describe('effortCommand', () => {
     // No completion so bare `/effort` opens the picker instead of auto-picking
     // the first tier; `/effort <tier>` still parses in the action above.
     expect(effortCommand.completion).toBeUndefined();
-    expect(effortCommand.argumentHint).toBe('[low|medium|high|xhigh|max]');
+    expect(effortCommand.argumentHint).toBe('<tier>');
   });
 });

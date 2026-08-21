@@ -11,7 +11,8 @@ export type GenAiAuthType =
   | 'qwen-oauth'
   | 'gemini'
   | 'vertex-ai'
-  | 'anthropic';
+  | 'anthropic'
+  | 'dashscope';
 
 interface ProviderConfig {
   authType?: GenAiAuthType;
@@ -124,6 +125,8 @@ export function resolveGenAiProviderName(
   switch (config.authType) {
     case 'anthropic':
       return 'anthropic';
+    case 'dashscope':
+      return 'dashscope';
     case 'gemini':
       return 'gcp.gemini';
     case 'vertex-ai':

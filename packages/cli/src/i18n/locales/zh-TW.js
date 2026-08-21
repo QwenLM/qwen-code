@@ -2015,8 +2015,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)\n',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
-  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
-    '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
+  'Set how hard reasoning-capable models think; available tiers depend on the active provider/model.':
+    '設定具備推理能力的模型思考的強度；可用層級取決於目前啟用的供應商/模型。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',

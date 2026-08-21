@@ -248,6 +248,7 @@ export const useAuthCommand = (
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
+      AuthType.USE_DASHSCOPE,
     ];
     if (val && !valid.includes(val as AuthType)) {
       onAuthError(

@@ -95,11 +95,17 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  dashscope: {
+    apiKey: ['DASHSCOPE_API_KEY'],
+    baseUrl: ['DASHSCOPE_BASE_URL'],
+    model: ['DASHSCOPE_MODEL'],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
+  dashscope: 'qwen3.8-max',
 } as Partial<Record<AuthType, string>>;
 
 /**

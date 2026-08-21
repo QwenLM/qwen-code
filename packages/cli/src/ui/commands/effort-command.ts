@@ -15,27 +15,22 @@ import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   applyReasoningEffort,
+  clampReasoningEffort,
+  getSupportedReasoningEffortTiers,
   normalizeReasoningEffort,
-  REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
-
-const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
 export const effortCommand: SlashCommand = {
   name: 'effort',
   get description() {
     return t(
-      'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
-      { tiers: TIER_LIST },
+      'Set how hard reasoning-capable models think; available tiers depend on the active provider/model.',
     );
   },
-  // The tiers show up as a placeholder via argumentHint rather than as
-  // autocompletion suggestions: bare `/effort` should open the picker dialog
-  // (no tier auto-selected), while `/effort <tier>` still sets one directly. A
-  // completion function would surface the tiers as submenu-like entries and let
-  // Enter auto-pick the first one, which we don't want here.
-  argumentHint: '[low|medium|high|xhigh|max]',
+  // Keep the static hint generic because the supported tiers are model-aware.
+  // Bare `/effort` opens the picker; `/effort <tier>` still sets one directly.
+  argumentHint: '<tier>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
@@ -53,6 +48,11 @@ export const effortCommand: SlashCommand = {
       };
     }
 
+    const supportedTiers = getSupportedReasoningEffortTiers(
+      config.getAuthType(),
+      config.getModel(),
+    );
+    const tierList = supportedTiers.join(', ');
     const args = context.invocation?.args?.trim() || actionArgs.trim();
 
     // No argument: open the interactive picker, or (non-interactive/ACP) report
@@ -61,18 +61,21 @@ export const effortCommand: SlashCommand = {
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'effort' };
       }
-      const current = config.getReasoningEffort();
+      const configuredEffort = config.getReasoningEffort();
+      const current = configuredEffort
+        ? clampReasoningEffort(configuredEffort, supportedTiers)
+        : undefined;
       return {
         type: 'message',
         messageType: 'info',
         content: current
           ? t(
               'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
-              { current, tiers: TIER_LIST },
+              { current, tiers: tierList },
             )
           : t(
               'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
-              { tiers: TIER_LIST },
+              { tiers: tierList },
             ),
       };
     }
@@ -84,7 +87,17 @@ export const effortCommand: SlashCommand = {
         messageType: 'error',
         content: t(
           'Unknown reasoning effort "{{value}}". Choose one of: {{tiers}}.',
-          { value: args, tiers: TIER_LIST },
+          { value: args, tiers: tierList },
+        ),
+      };
+    }
+    if (!supportedTiers.includes(tier)) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Reasoning effort "{{value}}" is not supported by the active provider/model. Choose one of: {{tiers}}.',
+          { value: args, tiers: tierList },
         ),
       };
     }

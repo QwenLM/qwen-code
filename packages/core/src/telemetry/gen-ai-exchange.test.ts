@@ -18,6 +18,8 @@ import {
   reportAnthropicFollowingRequest,
   reportAnthropicRequest,
   reportAnthropicResponse,
+  reportDashScopeRequest,
+  reportGeminiResponse,
   reportOpenAiChunk,
   reportOpenAiRequest,
   reportOpenAiResponse,
@@ -116,6 +118,77 @@ describe('GenAI exchange observer', () => {
         role: 'assistant',
         parts: [{ type: 'text', content: 'answer' }],
         finish_reason: 'stop',
+      },
+    ]);
+  });
+
+  it('records native DashScope request content and converted response content', () => {
+    const target = span();
+    const observed = exchange(target);
+    const attempt = reportDashScopeRequest(
+      {
+        model: 'qwen3.8-max',
+        input: {
+          messages: [
+            { role: 'system', content: [{ text: 'be concise' }] },
+            { role: 'user', content: [{ text: 'hello' }] },
+          ],
+        },
+        parameters: {
+          temperature: 0.2,
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'lookup',
+                parameters: { type: 'object' },
+              },
+            },
+          ],
+        },
+      },
+      observed.context,
+    );
+    reportGeminiResponse(attempt, {
+      candidates: [
+        {
+          index: 0,
+          content: { role: 'model', parts: [{ text: 'answer' }] },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+
+    expect(observed.controller.finalize(true)).toEqual(['STOP']);
+    expect(target.attributes['gen_ai.request.temperature']).toBe(0.2);
+    expect(
+      JSON.parse(target.attributes['gen_ai.input.messages'] as string),
+    ).toEqual([
+      {
+        role: 'system',
+        parts: [{ type: 'text', content: 'be concise' }],
+      },
+      {
+        role: 'user',
+        parts: [{ type: 'text', content: 'hello' }],
+      },
+    ]);
+    expect(
+      JSON.parse(target.attributes['gen_ai.tool.definitions'] as string),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'lookup',
+        parameters: { type: 'object' },
+      },
+    ]);
+    expect(
+      JSON.parse(target.attributes['gen_ai.output.messages'] as string),
+    ).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'answer' }],
+        finish_reason: 'STOP',
       },
     ]);
   });

@@ -1,0 +1,35 @@
+id:1
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[],"reasoning_content":"Let"}}]},"usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22,"output_tokens_details":{"reasoning_tokens":2,"text_tokens":2},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:2
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[],"reasoning_content":" me think"}}]},"usage":{"input_tokens":20,"output_tokens":4,"total_tokens":24,"output_tokens_details":{"reasoning_tokens":4,"text_tokens":4},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:3
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[],"reasoning_content":" about that."}}]},"usage":{"input_tokens":20,"output_tokens":6,"total_tokens":26,"output_tokens_details":{"reasoning_tokens":6,"text_tokens":6},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:4
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[{"text":"The"}],"reasoning_content":""}}]},"usage":{"input_tokens":20,"output_tokens":7,"total_tokens":27,"output_tokens_details":{"reasoning_tokens":6,"text_tokens":7},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:5
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[{"text":" answer"}],"reasoning_content":""}}]},"usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28,"output_tokens_details":{"reasoning_tokens":6,"text_tokens":8},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:6
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":[{"text":" is 42."}],"reasoning_content":""}}]},"usage":{"input_tokens":20,"output_tokens":9,"total_tokens":29,"output_tokens_details":{"reasoning_tokens":6,"text_tokens":9},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+
+id:7
+event:result
+:HTTP_STATUS/200
+data:{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[],"reasoning_content":""}}]},"usage":{"input_tokens":20,"output_tokens":9,"total_tokens":29,"output_tokens_details":{"reasoning_tokens":6,"text_tokens":9},"prompt_tokens_details":{"cached_tokens":0},"input_tokens_details":{"text_tokens":20}},"request_id":"a1b2c3d4-0000-0000-0000-000000000001"}
+

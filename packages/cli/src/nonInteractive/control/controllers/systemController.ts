@@ -29,6 +29,7 @@ import {
   MCPServerConfig,
   AuthProviderType,
   applyReasoningEffort,
+  getSupportedReasoningEffortTiers,
   normalizeReasoningEffort,
   loadUsageDashboard,
   type MCPOAuthConfig,
@@ -184,7 +185,11 @@ export class SystemController extends BaseController {
 
     if (payload.effort) {
       const normalized = normalizeReasoningEffort(payload.effort);
-      if (normalized) {
+      const supportedTiers = getSupportedReasoningEffortTiers(
+        this.context.config.getAuthType(),
+        this.context.config.getModel(),
+      );
+      if (normalized && supportedTiers.includes(normalized)) {
         try {
           const effortMatches = applyReasoningEffort(
             this.context.config,
@@ -220,7 +225,7 @@ export class SystemController extends BaseController {
         }
       } else {
         throw new Error(
-          'Invalid effort value. Supported: low, medium, high, xhigh, max',
+          `Invalid effort value. Supported: ${supportedTiers.join(', ')}`,
         );
       }
     }
@@ -552,9 +557,13 @@ export class SystemController extends BaseController {
     }
 
     const normalized = normalizeReasoningEffort(effort);
-    if (!normalized) {
+    const supportedTiers = getSupportedReasoningEffortTiers(
+      this.context.config.getAuthType(),
+      this.context.config.getModel(),
+    );
+    if (!normalized || !supportedTiers.includes(normalized)) {
       throw new Error(
-        'Invalid effort value. Supported: low, medium, high, xhigh, max',
+        `Invalid effort value. Supported: ${supportedTiers.join(', ')}`,
       );
     }
 

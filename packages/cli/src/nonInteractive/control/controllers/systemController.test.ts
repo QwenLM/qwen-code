@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { InputFormat } from '@qwen-code/qwen-code-core';
+import { AuthType, InputFormat } from '@qwen-code/qwen-code-core';
 import { createMinimalSettings } from '../../../config/settings.js';
 import type { StreamJsonOutputAdapter } from '../../io/StreamJsonOutputAdapter.js';
 import type { IControlContext } from '../ControlContext.js';
@@ -43,6 +43,8 @@ function createContext(
       setModel: vi.fn(),
       setReasoningEffort: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getModel: vi.fn().mockReturnValue('default-model'),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       getAvailableModels: vi.fn().mockReturnValue([]),
     } as unknown as IControlContext['config'],
@@ -365,6 +367,53 @@ describe('SystemController', () => {
       ).rejects.toThrow('Invalid effort value');
     });
 
+    it('rejects undocumented tiers for native qwen3.8-max', async () => {
+      const context = createContext();
+      (context.config.getAuthType as ReturnType<typeof vi.fn>).mockReturnValue(
+        AuthType.USE_DASHSCOPE,
+      );
+      (context.config.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        'qwen3.8-max',
+      );
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'set_effort', effort: 'high' },
+          'effort-qwen',
+        ),
+      ).rejects.toThrow('Supported: low, medium, xhigh');
+    });
+
+    it('does not constrain another editable native model', async () => {
+      const context = createContext();
+      (context.config.getAuthType as ReturnType<typeof vi.fn>).mockReturnValue(
+        AuthType.USE_DASHSCOPE,
+      );
+      (context.config.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        'custom-model',
+      );
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'set_effort', effort: 'high' },
+          'effort-custom',
+        ),
+      ).resolves.toMatchObject({ effort: 'high', applied: true });
+    });
+
     it('rejects empty effort string', async () => {
       const controller = new SystemController(
         createContext(),
@@ -625,6 +674,28 @@ describe('SystemController', () => {
           'init-effort-3',
         ),
       ).rejects.toThrow('Invalid effort value');
+    });
+
+    it('rejects undocumented effort during native qwen3.8-max initialize', async () => {
+      const context = createContext();
+      (context.config.getAuthType as ReturnType<typeof vi.fn>).mockReturnValue(
+        AuthType.USE_DASHSCOPE,
+      );
+      (context.config.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        'qwen3.8-max',
+      );
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          { subtype: 'initialize', effort: 'max' },
+          'init-effort-qwen',
+        ),
+      ).rejects.toThrow('Supported: low, medium, xhigh');
     });
   });
 });

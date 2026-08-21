@@ -1974,8 +1974,8 @@ export default {
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
-  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
-    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
+  'Set how hard reasoning-capable models think; available tiers depend on the active provider/model.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ; les niveaux disponibles dépendent du fournisseur/modèle actif.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

@@ -375,7 +375,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as ProviderProtocolConfig,
     description:
-      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.',
+      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth, dashscope) are routed automatically and need no entry.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },

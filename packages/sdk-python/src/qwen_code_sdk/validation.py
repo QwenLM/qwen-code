@@ -13,7 +13,14 @@ from .types import (
 )
 
 _VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
-_VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
+_VALID_AUTH_TYPES = {
+    "openai",
+    "anthropic",
+    "qwen-oauth",
+    "gemini",
+    "vertex-ai",
+    "dashscope",
+}
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
@@ -93,7 +100,8 @@ def validate_query_options(options: QueryOptions) -> None:
     if options.auth_type and options.auth_type not in _VALID_AUTH_TYPES:
         raise ValidationError(
             f"Invalid auth_type: {options.auth_type!r}. "
-            "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
+            "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai, "
+            "dashscope."
         )
 
     if options.effort and options.effort not in _VALID_EFFORTS:
