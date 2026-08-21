@@ -2936,6 +2936,7 @@ export class AcpDispatcher {
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService = new SessionService(this.boundWorkspace);
             let organizationSessionId = sessionId;
+            let caseAliasesResolvedToSession = false;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -2951,6 +2952,7 @@ export class AcpDispatcher {
                 await sessionService.findSessionIdIgnoringCase(sessionId);
               if (persistedSessionId !== undefined) {
                 organizationSessionId = persistedSessionId;
+                caseAliasesResolvedToSession = true;
                 exists = true;
               }
             } catch (error) {
@@ -2979,6 +2981,7 @@ export class AcpDispatcher {
                   : {}),
               },
               sessionId,
+              { caseAliasesResolvedToSession },
             );
             this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
             this.replyConn(conn, id, { sessionId, ...organization });

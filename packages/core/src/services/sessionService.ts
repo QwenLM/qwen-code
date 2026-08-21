@@ -874,10 +874,12 @@ export class SessionService {
           readable,
           candidates,
         );
-        if (aliased !== undefined) return aliased;
-        throw new SessionIdCaseConflictError(sessionId);
+        if (aliased.kind === 'resolved') return aliased.sessionId;
+        if (aliased.kind === 'conflict') {
+          throw new SessionIdCaseConflictError(sessionId);
+        }
       }
-      // No candidate recovered records. A transcript under a *different* spelling
+      // No candidate remains loadable. A transcript under a *different* spelling
       // still occupies the id, because minting the requested spelling beside it
       // would create the case-only twin that makes both permanently
       // unrestorable. The requested spelling's own file is a twin of nothing, so
@@ -920,11 +922,11 @@ export class SessionService {
   /**
    * Collapses readable candidates that are case-variant spellings of one
    * physical transcript, as happens on case-insensitive filesystems where
-   * every spelling opens the same file. Returns the spelling whose own
-   * directory entry backs that file, or undefined when the candidates are
-   * genuinely distinct transcripts (a real conflict) or when the filesystem
-   * cannot prove otherwise. An I/O failure other than a vanished file is not
-   * evidence of a conflict, so it propagates instead of being reported as one.
+   * every spelling opens the same file. Distinguishes the spelling whose own
+   * directory entry backs that file, a genuine or unprovable conflict, and the
+   * race where every readable candidate vanished. An I/O failure other than a
+   * vanished file is not evidence of a conflict, so it propagates instead of
+   * being reported as one.
    */
   private resolveAliasedReadableCandidate(
     readable: Array<{
@@ -932,7 +934,10 @@ export class SessionService {
       state: SessionArchiveState;
     }>,
     candidates: Map<string, Set<SessionArchiveState>>,
-  ): string | undefined {
+  ):
+    | { kind: 'resolved'; sessionId: string }
+    | { kind: 'all_vanished' }
+    | { kind: 'conflict' } {
     const identities = new Set<string>();
     const owners: string[] = [];
     for (const { candidateSessionId, state } of readable) {
@@ -949,16 +954,19 @@ export class SessionService {
       // Filesystems that do not expose inodes report 0 for every file, so
       // `dev:ino` would collapse genuinely distinct transcripts onto one
       // identity. Without that proof, report a conflict rather than pick one.
-      if (!hasVerifiableInode(stats.ino)) return undefined;
+      if (!hasVerifiableInode(stats.ino)) return { kind: 'conflict' };
       identities.add(`${stats.dev}:${stats.ino}`);
-      if (identities.size > 1) return undefined;
+      if (identities.size > 1) return { kind: 'conflict' };
       // The readable state was reached through a case-folded path unless this
       // spelling is itself a directory entry of that state.
       if (candidates.get(candidateSessionId)?.has(state)) {
         owners.push(candidateSessionId);
       }
     }
-    return owners.length === 1 ? owners[0] : undefined;
+    if (identities.size === 0) return { kind: 'all_vanished' };
+    return owners.length === 1
+      ? { kind: 'resolved', sessionId: owners[0]! }
+      : { kind: 'conflict' };
   }
 
   private removeFileIfExists(filePath: string): void {

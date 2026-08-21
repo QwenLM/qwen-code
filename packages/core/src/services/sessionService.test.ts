@@ -3094,6 +3094,26 @@ describe('SessionService', () => {
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBe(legacySessionId);
     });
+
+    it('resolves absent when every readable candidate vanishes mid-resolution', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      statSyncSpy.mockImplementation(() => {
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      });
+      existsSyncSpy.mockReturnValue(false);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+      expect(existsSyncSpy).toHaveBeenCalled();
+    });
   });
 
   describe('loadLastSession', () => {

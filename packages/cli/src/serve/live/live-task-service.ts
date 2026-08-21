@@ -1311,11 +1311,17 @@ export class LiveTaskService {
         const conflict = persistedAliases.find(
           (candidate) =>
             'error' in candidate &&
-            candidate.error instanceof SessionIdCaseConflictError,
+            candidate.error instanceof SessionIdCaseConflictError &&
+            candidate.error.reason === 'case_conflict',
         );
         if (conflict && 'error' in conflict) throw conflict.error;
         const failed = persistedAliases.find(
-          (candidate) => 'error' in candidate,
+          (candidate) =>
+            'error' in candidate &&
+            !(
+              candidate.error instanceof SessionIdCaseConflictError &&
+              candidate.error.reason === 'unreadable_transcript'
+            ),
         );
         if (failed && 'error' in failed) throw failed.error;
         if (

@@ -364,6 +364,57 @@ describe('SessionOrganizationService', () => {
     });
   });
 
+  it('collapses every verified case alias without dropping unchanged fields', async () => {
+    const persistedSessionId = sessionIdA.toUpperCase();
+    const legacySessionId = sessionIdA.replace('e29b', 'E29B');
+    const group = await service.createGroup({ name: 'Legacy', color: 'blue' });
+    await service.updateSessionOrganization(legacySessionId, {
+      groupId: group.id,
+      color: 'purple',
+    });
+
+    const organization = await service.updateSessionOrganization(
+      persistedSessionId,
+      { isPinned: true },
+      sessionIdA,
+      { caseAliasesResolvedToSession: true },
+    );
+
+    expect(organization).toMatchObject({
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.has(legacySessionId)).toBe(false);
+    expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+    expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+  });
+
+  it('keeps unverified case-twin organization entries distinct', async () => {
+    const caseTwinSessionId = sessionIdA.toUpperCase();
+    await service.updateSessionOrganization(sessionIdA, { color: 'red' });
+    await service.updateSessionOrganization(caseTwinSessionId, {
+      color: 'purple',
+    });
+
+    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toMatchObject({
+      isPinned: true,
+      color: 'red',
+    });
+    expect(snapshot.sessions.get(caseTwinSessionId)).toMatchObject({
+      isPinned: false,
+      color: 'purple',
+    });
+  });
+
   it('treats an empty session organization update as a no-op', async () => {
     const pinned = await service.updateSessionOrganization(sessionIdA, {
       isPinned: true,

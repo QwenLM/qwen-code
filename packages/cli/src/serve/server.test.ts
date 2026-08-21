@@ -15237,6 +15237,56 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('preserves a third organization spelling during a partial update', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+      const persistedSessionId = sessionId.toUpperCase();
+      const legacyOrganizationId = sessionId.replace('e29b', 'E29B');
+      await writeStoredSession({
+        sessionId: persistedSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'legacy organization alias',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+      const organizationService = new qwenCore.SessionOrganizationService(
+        WS_BOUND,
+      );
+      const group = await organizationService.createGroup({
+        name: 'Legacy organization update',
+        color: 'blue',
+      });
+      await organizationService.updateSessionOrganization(
+        legacyOrganizationId,
+        { groupId: group.id, color: 'purple' },
+      );
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+      );
+
+      const update = await request(app)
+        .patch(`/session/${sessionId}/organization`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ isPinned: true });
+
+      expect(update.status).toBe(200);
+      expect(update.body).toMatchObject({
+        isPinned: true,
+        groupId: group.id,
+        color: 'purple',
+      });
+      const snapshot = await organizationService.readSnapshot();
+      expect(snapshot.sessions.has(legacyOrganizationId)).toBe(false);
+      expect(snapshot.sessions.has(sessionId)).toBe(false);
+      expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
+        isPinned: true,
+        groupId: group.id,
+        color: 'purple',
+      });
+    });
+
     it('preserves organization when an exact lookup aliases a mixed-case persisted identity', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440009';
       const persistedSessionId = sessionId.toUpperCase();

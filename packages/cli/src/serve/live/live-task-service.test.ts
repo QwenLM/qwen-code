@@ -12,6 +12,7 @@ import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -1191,6 +1192,77 @@ describe('LiveTaskService', () => {
       }),
     ).rejects.toThrow(`Task id is ambiguous: ${storageSessionId}`);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('ignores an unreadable foreign case alias for a resident task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440022';
+    const storageSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+    sessionIdLookupErrors.set(
+      `/project:${storageSessionId}`,
+      new SessionIdCaseConflictError(
+        storageSessionId,
+        storageSessionId.replace('E29B', 'e29b'),
+        'unreadable_transcript',
+      ),
+    );
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: storageSessionId },
+      }),
+    ).resolves.toMatchObject({
+      thread: { id: storageSessionId, preview: 'first prompt' },
+      turns: [{ id: 'user-1' }],
+    });
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: { threadId: storageSessionId, prompt: 'continue' },
+      }),
+    ).resolves.toEqual({ threadId: storageSessionId });
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+    const wait = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: storageSessionId }],
+        timeoutMs: 0,
+      },
+    });
+    expect(wait).toMatchObject({
+      polls: [{ thread: { id: storageSessionId } }],
+    });
+    expect(wait['errors']).toBeUndefined();
+
+    const conflict = new SessionIdCaseConflictError(storageSessionId);
+    sessionIdLookupErrors.set(`/project:${storageSessionId}`, conflict);
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: storageSessionId },
+      }),
+    ).rejects.toBe(conflict);
   });
 
   it('rejects case twins inside the canonical live owner runtime', async () => {

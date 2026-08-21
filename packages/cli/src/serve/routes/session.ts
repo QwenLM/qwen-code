@@ -5438,6 +5438,7 @@ export function registerSessionRoutes(
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
             let organizationSessionId = sessionId;
+            let caseAliasesResolvedToSession = false;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -5453,6 +5454,7 @@ export function registerSessionRoutes(
                 await sessionService.findSessionIdIgnoringCase(sessionId);
               if (persistedSessionId !== undefined) {
                 organizationSessionId = persistedSessionId;
+                caseAliasesResolvedToSession = true;
                 exists = true;
               }
             } catch (error) {
@@ -5523,6 +5525,7 @@ export function registerSessionRoutes(
                   : {}),
               },
               sessionId,
+              { caseAliasesResolvedToSession },
             );
             invalidateSessionListsAndMarkCatalog(runtime, [
               'active',

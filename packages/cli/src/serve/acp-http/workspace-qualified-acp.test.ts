@@ -1032,6 +1032,44 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
   });
 
+  it('preserves a third organization spelling during a partial update', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440182';
+    const persistedSessionId = sessionId.toUpperCase();
+    const legacyOrganizationId = sessionId.replace('e29b', 'E29B');
+    await writeStoredSession(persistedSessionId, '/ws-b');
+    const organizationService = createSessionOrganizationService('/ws-b');
+    const group = await organizationService.createGroup({
+      name: 'Legacy organization update',
+      color: 'blue',
+    });
+    await organizationService.updateSessionOrganization(legacyOrganizationId, {
+      groupId: group.id,
+      color: 'purple',
+    });
+
+    const response = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/session/update_organization',
+      params: { sessionId, isPinned: true },
+    });
+
+    expect(response['result']).toMatchObject({
+      sessionId,
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+    const snapshot = await organizationService.readSnapshot();
+    expect(snapshot.sessions.has(legacyOrganizationId)).toBe(false);
+    expect(snapshot.sessions.has(sessionId)).toBe(false);
+    expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
+      isPinned: true,
+      groupId: group.id,
+      color: 'purple',
+    });
+  });
+
   it('preserves exact organization updates when the optional alias scan fails', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440181';
     await writeStoredSession(sessionId, '/ws-b');
