@@ -22,13 +22,20 @@ const {
   gitRawMock: vi.fn(),
 }));
 
-vi.mock('./aone-client.js', () => ({
-  a1Json: a1JsonMock,
-  a1JsonOnce: a1JsonOnceMock,
-  a1Once: a1OnceMock,
-  a1: vi.fn(),
-  ensureAoneAuthenticated: ensureAuthMock,
-}));
+vi.mock('./aone-client.js', async (importOriginal) => {
+  // The cause helper stays REAL: the composeUrl/resolveRepo catches must
+  // run the transport's actual extraction, not a mocked re-implementation.
+  const { execErrorCause } =
+    await importOriginal<typeof import('./aone-client.js')>();
+  return {
+    a1Json: a1JsonMock,
+    a1JsonOnce: a1JsonOnceMock,
+    a1Once: a1OnceMock,
+    a1: vi.fn(),
+    ensureAoneAuthenticated: ensureAuthMock,
+    execErrorCause,
+  };
+});
 
 vi.mock('../git.js', () => ({
   git: gitMock,
@@ -539,6 +546,22 @@ describe('aoneReader.composeUrl', () => {
     );
     expect(stderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('network down'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a single-line fetch failure warns without disclosing the preamble as the cause', () => {
+    // No cause line (a killed child with no stderr): the fallback must
+    // not be the preamble itself (the copy-time drift round 3 found) —
+    // the warning names the failure, nothing else.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      'WARNING: the Aone MR-link lookup failed; the Posted line degrades ' +
+        "to the target's coordinates.\n",
     );
     stderrSpy.mockRestore();
   });

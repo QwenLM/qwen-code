@@ -149,6 +149,23 @@ export function a1VersionAtLeast(
   return true;
 }
 
+/** The cause inside an execFileSync failure message, extracted ONCE for the
+ *  transport: the message BEGINS with the fixed "Command failed: <argv>"
+ *  preamble, so line zero is NEVER the cause — the cause is the first
+ *  NON-empty line after it. A failure with no cause line (a killed child
+ *  with no stderr) returns '': falling back to the preamble would disclose
+ *  a fixed constant AS the cause. Both a1 and git invocations share this
+ *  message shape. */
+export function execErrorCause(err: unknown): string {
+  const lines = (err instanceof Error ? err.message : String(err)).split('\n');
+  return (
+    lines
+      .slice(1)
+      .map((l) => l.trim())
+      .find(Boolean) ?? ''
+  );
+}
+
 /**
  * Fail fast with an actionable message when `a1` cannot run, and return the
  * authenticated account. Three failure states, three distinct remedies: a
@@ -180,25 +197,25 @@ export function ensureAoneAuthenticated(): string {
     // possible. Absent evidence, not evidence of absence: fall through to
     // the auth check rather than refusing an a1 whose `--version` this
     // check merely cannot read — disclosed, like the unparseable-output
-    // arm below. The cause extraction mirrors the whoami catch's: an
-    // execFileSync failure message BEGINS with the fixed preamble
-    // "Command failed: a1 --version", so line zero is the preamble, not
-    // the cause — segfault, unsupported flag and permission failure must
-    // stay distinguishable in the one place fail-open promises disclosure.
-    const lines = (err instanceof Error ? err.message : String(err)).split(
-      '\n',
-    );
-    const why =
-      lines
-        .slice(1)
-        .map((l) => l.trim())
-        .find(Boolean) ?? lines[0];
-    process.stderr.write(
-      `WARNING: the a1 version probe failed ` +
-        `(${JSON.stringify(why.slice(0, 80))}) — the review ` +
-        `provider requires a1 >= ${A1_MIN_VERSION}; continuing without a ` +
-        `floor ruling.\n`,
-    );
+    // arm below.
+    if ((err as { signal?: string }).signal) {
+      // The 120 s deadline kills the child — signal set, usually no
+      // stderr, so a single-line message no cause extraction can read.
+      // The whoami catch classifies the identical anomaly the same way.
+      process.stderr.write(
+        `WARNING: the a1 version probe timed out or was killed (check ` +
+          `the network / a1 install) — the review provider requires ` +
+          `a1 >= ${A1_MIN_VERSION}; continuing without a floor ruling.\n`,
+      );
+    } else {
+      const why = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the a1 version probe failed` +
+          (why ? ` (${JSON.stringify(why.slice(0, 80))})` : '') +
+          ` — the review provider requires a1 >= ${A1_MIN_VERSION}; ` +
+          `continuing without a floor ruling.\n`,
+      );
+    }
   }
   if (versionOut !== undefined) {
     // The constant parses — the `!` is a compile-time formality.
@@ -240,16 +257,7 @@ export function ensureAoneAuthenticated(): string {
         'a1 auth check timed out or was killed — check the network / a1 install.',
       );
     }
-    // execFileSync failure messages BEGIN with the fixed preamble
-    // "Command failed: a1 auth whoami --format json"; a1's real first stderr
-    // line is the first NON-empty line after it. `.split('\n')[0]` would
-    // render only the preamble and drop the cause.
-    const cause =
-      e.message
-        .split('\n')
-        .slice(1)
-        .map((l) => l.trim())
-        .find(Boolean) ?? '';
+    const cause = execErrorCause(err);
     // Neutral on purpose: this fall-through covers MORE than a missing login
     // — a persistent network failure whose message TRANSIENT_RE does not
     // match (ENOTFOUND, a proxy 403) lands here too, and `a1 auth login`

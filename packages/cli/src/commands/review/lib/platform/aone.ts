@@ -19,6 +19,7 @@ import {
   a1JsonOnce,
   a1Once,
   ensureAoneAuthenticated,
+  execErrorCause,
 } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -319,16 +320,7 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
-      // execFileSync failure messages BEGIN with the fixed preamble
-      // "Command failed: git remote get-url origin"; git's actual error is
-      // the first NON-empty line after it (same pitfall aone-client
-      // documents). `.split('\n')[0]` would render only the preamble.
-      const cause =
-        (err as Error).message
-          .split('\n')
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? '';
+      const cause = execErrorCause(err);
       throw new Error(
         `cannot resolve the repository: no \`origin\` remote` +
           (cause ? ` (${cause})` : ''),
@@ -650,19 +642,11 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       return mrView(prNumber, ownerRepo).detailUrl ?? '';
     } catch (err) {
-      // The execFileSync message shape: the first line is the fixed
-      // "Command failed: a1 …" preamble; the cause is the first non-empty
-      // line after it (same extraction the transport's other catches use).
-      const lines = ((err as Error).message ?? '').split('\n');
-      const cause =
-        lines
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? lines[0];
+      const cause = execErrorCause(err);
       process.stderr.write(
-        `WARNING: the Aone MR-link lookup failed ` +
-          `(${JSON.stringify((cause ?? '').slice(0, 80))}); the Posted ` +
-          `line degrades to the target's coordinates.\n`,
+        `WARNING: the Aone MR-link lookup failed` +
+          (cause ? ` (${JSON.stringify(cause.slice(0, 80))})` : '') +
+          `; the Posted line degrades to the target's coordinates.\n`,
       );
       return '';
     }

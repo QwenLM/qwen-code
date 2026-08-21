@@ -22,6 +22,7 @@ import {
   a1VersionAtLeast,
   A1_MIN_VERSION,
   ensureAoneAuthenticated,
+  execErrorCause,
   parseA1Version,
 } from './aone-client.js';
 
@@ -221,6 +222,34 @@ describe('parseA1Version / a1VersionAtLeast (the version-floor helpers)', () => 
   });
 });
 
+describe("execErrorCause — the transport's ONE cause extraction", () => {
+  // Four catches pasted this extraction and the fallbacks drifted at copy
+  // time (the two this PR added fell back to the preamble itself). The
+  // shape knowledge lives here now: line zero is execFileSync's fixed
+  // "Command failed: …" preamble, never the cause.
+  it('returns the first non-empty line after the preamble', () => {
+    expect(
+      execErrorCause(new Error('Command failed: a1 --version\nsegfault\n')),
+    ).toBe('segfault');
+    // Blank lines between preamble and cause are skipped; the cause is
+    // trimmed.
+    expect(
+      execErrorCause(new Error('Command failed: a1 x\n\n  the cause  \n')),
+    ).toBe('the cause');
+  });
+
+  it('returns empty when no cause line exists — the preamble is never the cause', () => {
+    // A killed child with no stderr leaves a single-line message; a
+    // lines[0] fallback would disclose the fixed preamble AS the cause.
+    expect(execErrorCause(new Error('Command failed: a1 --version'))).toBe('');
+    expect(execErrorCause(new Error('spawnSync a1 ETIMEDOUT'))).toBe('');
+  });
+
+  it('tolerates a non-Error throw', () => {
+    expect(execErrorCause('Command failed: a1 x\nboom')).toBe('boom');
+  });
+});
+
 describe('ensureAoneAuthenticated — presence, version floor, and the account', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -305,6 +334,55 @@ describe('ensureAoneAuthenticated — presence, version floor, and the account',
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('segfault'));
     expect(stderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('Command failed: a1 --version'),
+    );
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
+  });
+
+  it('a deadline-KILLED version probe gets the classified warning, not a raw extraction', () => {
+    // The 120 s deadline kills the child: signal set, usually no stderr —
+    // a single-line message no cause extraction can read. The whoami
+    // catch classifies the identical anomaly ("timed out or was killed —
+    // check the network / a1 install"); the probe arm must too, or the
+    // one fail-open arm whose purpose is disclosure emits a raw
+    // spawnSync line on exactly the degraded-machine state the gate
+    // exists to diagnose.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const killed = Object.assign(new Error('spawnSync a1 ETIMEDOUT'), {
+      signal: 'SIGTERM',
+    });
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw killed;
+      })
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('timed out or was killed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('check the network / a1 install'),
+    );
+    // Fail-open: the auth check still ran.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
+  });
+
+  it('a single-line probe failure warns without disclosing the preamble as the cause', () => {
+    // No signal, no stderr cause line — the fallback must NOT be the
+    // preamble itself (the copy-time drift round 3 found): the warning
+    // names the failure class and nothing else.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 --version');
+      })
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      `WARNING: the a1 version probe failed — the review provider ` +
+        `requires a1 >= ${A1_MIN_VERSION}; continuing without a floor ` +
+        `ruling.\n`,
     );
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     stderrSpy.mockRestore();
