@@ -356,6 +356,16 @@ describe('discoverPlugins', () => {
           version: '1.0.0',
           source: 'git@github.com:someone/numeric-root.git',
         },
+        {
+          name: '4096',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/numeric-https-root' },
+        },
+        {
+          name: 'embedded-numeric',
+          version: '1.0.0',
+          source: 'someone/repo:2048',
+        },
       ]),
     );
 
@@ -453,6 +463,26 @@ describe('discoverPlugins', () => {
       ),
     ).toEqual({
       repo: 'git@github.com:someone/numeric-root.git',
+      pluginName: '2048',
+    });
+    const numericHttpsRoot = discovered.find((p) => p.name === '4096')!;
+    expect(numericHttpsRoot).toMatchObject({
+      installSource: 'https://github.com/someone/numeric-https-root:4096',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(parseSourceAndPluginName(numericHttpsRoot.installSource)).toEqual({
+      repo: 'https://github.com/someone/numeric-https-root',
+      pluginName: '4096',
+    });
+    const embeddedNumeric = discovered.find(
+      (p) => p.name === 'embedded-numeric',
+    )!;
+    expect(embeddedNumeric).toMatchObject({
+      installSource: 'https://github.com/someone/repo:2048',
+      pluginSourceKind: 'marketplace-entry',
+    });
+    expect(parseSourceAndPluginName(embeddedNumeric.installSource)).toEqual({
+      repo: 'https://github.com/someone/repo',
       pluginName: '2048',
     });
   });

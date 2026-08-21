@@ -63,15 +63,18 @@ export function parseSourceAndPluginName(source: string): {
       if (lastColonIndex !== -1) {
         // Check if what follows the colon looks like a pluginName (not a port number or path)
         const potentialPluginName = afterScheme.substring(lastColonIndex + 1);
-        // Plugin names may begin with digits (for example, "2048-game"). Only
-        // a fully numeric suffix is a port rather than an appended alias.
+        const separatorIndex = scheme.length + lastColonIndex;
+        const firstPathSlashIndex = source.indexOf('/', scheme.length);
+        const isHttpPort =
+          (scheme === 'http://' || scheme === 'https://') &&
+          /^\d+$/.test(potentialPluginName) &&
+          (firstPathSlashIndex === -1 || separatorIndex < firstPathSlashIndex);
+        // HTTP(S) ports appear in the authority, before the first path slash.
+        // A suffix after the path is an appended plugin name, even if numeric.
         if (
           potentialPluginName &&
           !potentialPluginName.includes('/') &&
-          !(
-            (scheme === 'http://' || scheme === 'https://') &&
-            /^\d+$/.test(potentialPluginName)
-          )
+          !isHttpPort
         ) {
           repoEndIndex = scheme.length + lastColonIndex;
           hasPluginName = true;

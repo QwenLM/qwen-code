@@ -171,10 +171,35 @@ describe('parseInstallSource', () => {
     it('should not treat a trailing HTTPS port as a plugin name', async () => {
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
-      const result = await parseInstallSource('https://example.com:8080');
+      const result = await parseInstallSource('https://example.com:8080', {
+        pluginSourceKind: 'marketplace-entry',
+      });
 
       expect(result.source).toBe('https://example.com:8080');
       expect(result.pluginName).toBeUndefined();
+    });
+
+    it('preserves a non-numeric HTTPS alias without a path', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://example.com:root-plugin',
+      );
+
+      expect(result.source).toBe('https://example.com');
+      expect(result.pluginName).toBe('root-plugin');
+    });
+
+    it('parses an all-digit HTTPS marketplace selector after the URL path', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://github.com/owner/repo:2048',
+      );
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.pluginName).toBe('2048');
+      expect(result.pluginSourceKind).toBe('marketplace-entry');
     });
 
     it('should parse an uppercase HTTPS URL scheme as a git source', async () => {
