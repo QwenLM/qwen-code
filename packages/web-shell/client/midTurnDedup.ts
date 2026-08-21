@@ -10,7 +10,7 @@ export interface MidTurnQueueItem {
   files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
-  admissionOutcome?: 'unknown';
+  isInserting?: boolean;
 }
 
 export interface MidTurnInjectedBatch {
@@ -78,16 +78,11 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
       // are not pushed mid-turn. The text fallback below only runs for rows
       // the id can't reach (no ids in the batch, or a row still awaiting its
       // admission id).
-      // An admission-unknown row carries no `midTurnState` (re-added from
-      // the catch path when the admission response was lost), but the daemon
-      // owns it exactly like a queued one — accept it here, mirroring
-      // `applyMidTurnSnapshot`'s membership filter.
       let index =
         messageId !== undefined
           ? remaining.findIndex(
               (prompt) =>
-                (prompt.midTurnState !== undefined ||
-                  prompt.admissionOutcome === 'unknown') &&
+                (prompt.midTurnState !== undefined || prompt.isInserting) &&
                 prompt.midTurnMessageId === messageId &&
                 hasNoFiles(prompt),
             )
@@ -95,9 +90,9 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
       if (index < 0 && originatorMatches) {
         index = remaining.findIndex(
           (prompt) =>
-            prompt.midTurnState !== undefined &&
+            (prompt.midTurnState !== undefined || prompt.isInserting) &&
             (messageId === undefined ||
-              (prompt.midTurnState === 'submitting' &&
+              ((prompt.midTurnState === 'submitting' || prompt.isInserting) &&
                 (!strictMessageIds ||
                   prompt.midTurnMessageId === undefined))) &&
             prompt.text === message &&

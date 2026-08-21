@@ -49,6 +49,8 @@ import type {
   MemoryWriteCandidate,
   CronTaskDelivery,
   InvocationContextV1,
+  ChatRecordingService,
+  TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
@@ -168,7 +170,10 @@ import {
   promptIdContext,
   todoWorkChainContext,
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
   hasImageParts,
@@ -181,6 +186,9 @@ import {
   getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  normalizeTurnResultError,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
+  TURN_RESULT_TEXT_MAX_CHARS,
   runWithRuntimeContentGenerator,
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
@@ -200,13 +208,13 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
-  DAEMON_MEDIA_REFERENCES_META_KEY,
+  DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { SessionMediaReference } from '@qwen-code/acp-bridge/sessionMedia';
+import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -356,41 +364,41 @@ const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-const MAX_DAEMON_MEDIA_REFERENCES = 256;
-
-function readDaemonMediaReferences(
+const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
+function readDaemonAttachmentReferences(
   value: unknown,
-): SessionMediaReference[] | undefined {
+): SessionAttachmentReference[] | undefined {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
-    value.length > MAX_DAEMON_MEDIA_REFERENCES
+    value.length > MAX_DAEMON_ATTACHMENT_REFERENCES
   ) {
     return undefined;
   }
-  const references: SessionMediaReference[] = [];
+  const references: SessionAttachmentReference[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       return undefined;
     }
     const reference = item as Record<string, unknown>;
     if (
-      reference['type'] !== 'image' ||
-      typeof reference['mediaId'] !== 'string' ||
-      reference['mediaId'].length === 0 ||
-      reference['mediaId'].length > 128 ||
+      (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+      typeof reference['attachmentId'] !== 'string' ||
+      reference['attachmentId'].length === 0 ||
+      reference['attachmentId'].length > 255 ||
       typeof reference['mimeType'] !== 'string' ||
       reference['mimeType'].length === 0 ||
       reference['mimeType'].length > 128 ||
       typeof reference['size'] !== 'number' ||
       !Number.isSafeInteger(reference['size']) ||
-      reference['size'] <= 0
+      reference['size'] < 0 ||
+      (reference['type'] === 'image' && reference['size'] === 0)
     ) {
       return undefined;
     }
     references.push({
       type: reference['type'],
-      mediaId: reference['mediaId'],
+      attachmentId: reference['attachmentId'],
       mimeType: reference['mimeType'],
       size: reference['size'],
     });
@@ -474,7 +482,6 @@ function getAbortAwareEndTurnStopReason(
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
-  repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
@@ -949,7 +956,7 @@ type DrainedMidTurnMessage =
       kind: 'structured';
       content: ContentBlock[];
       displayText: string;
-      mediaReferences?: SessionMediaReference[];
+      attachmentReferences?: SessionAttachmentReference[];
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1056,31 +1063,90 @@ function isEmbeddedResourceResource(
   return typeof value['blob'] === 'string';
 }
 
-function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
-  return content.some((part) => part.type === 'image' || part.type === 'audio');
+function hasInlineAttachmentContentBlock(content: ContentBlock[]): boolean {
+  return content.some(
+    (part) =>
+      part.type === 'image' ||
+      part.type === 'audio' ||
+      part.type === 'resource',
+  );
 }
 
-function stripReferencedInlineDataParts(
+function extractTurnPromptText(content: ContentBlock[]): string {
+  let hasImage = false;
+  for (const block of content) {
+    if (block.type === 'image') hasImage = true;
+    if (block.type === 'text' && block.text.length > 0) return block.text;
+  }
+  return hasImage ? '[image]' : '';
+}
+
+interface InFlightTurnRecording {
+  promptId: string;
+  originatorClientId?: string;
+  abortController?: AbortController;
+  startedAt?: number;
+  promptText: string;
+  promptTextTruncated: boolean;
+  finalAnswer: { finalText: string };
+  /**
+   * Captured at turn start; settle writes against this instance (pinned to
+   * the turn-start session by `Config.startNewSession`) instead of
+   * re-resolving, so a mid-turn session rotation cannot redirect this turn's
+   * `turn_result` into the new session's transcript.
+   */
+  recordingService?: ChatRecordingService;
+}
+
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+}
+
+function stripReferencedAttachmentDataParts(
   parts: Part[],
   content: ContentBlock[],
 ): Part[] {
-  const coveredByKey = new Map<string, number>();
+  const inlineDataCounts = new Map<string, number>();
+  const textCounts = new Map<string, number>();
   for (const block of content) {
-    if (block.type !== 'image') continue;
-    const key = `${block.mimeType}\u0000${block.data}`;
-    coveredByKey.set(key, (coveredByKey.get(key) ?? 0) + 1);
-  }
-  if (coveredByKey.size === 0) return parts;
-  return parts.filter((part) => {
-    const inlineData = part.inlineData;
-    if (inlineData === undefined || typeof inlineData.data !== 'string') {
-      return true;
+    if (block.type === 'image') {
+      const key = `${block.mimeType}\u0000${block.data}`;
+      inlineDataCounts.set(key, (inlineDataCounts.get(key) ?? 0) + 1);
+      continue;
     }
-    const key = `${inlineData.mimeType ?? ''}\u0000${inlineData.data}`;
-    const remaining = coveredByKey.get(key) ?? 0;
-    if (remaining === 0) return true;
-    coveredByKey.set(key, remaining - 1);
-    return false;
+    if (block.type !== 'resource') continue;
+    const resource = block.resource;
+    if ('blob' in resource) {
+      const key = `${resource.mimeType ?? 'application/octet-stream'}\u0000${resource.blob}`;
+      inlineDataCounts.set(key, (inlineDataCounts.get(key) ?? 0) + 1);
+    } else if (resource.text) {
+      const text = `File: ${resource.uri}\n${resource.text}`;
+      textCounts.set(text, (textCounts.get(text) ?? 0) + 1);
+    }
+  }
+  return parts.filter((part) => {
+    if (part.inlineData && typeof part.inlineData.data === 'string') {
+      const key = `${part.inlineData.mimeType ?? ''}\u0000${part.inlineData.data}`;
+      const remaining = inlineDataCounts.get(key) ?? 0;
+      if (remaining > 0) {
+        inlineDataCounts.set(key, remaining - 1);
+        return false;
+      }
+    }
+    if (typeof part.text === 'string') {
+      const remaining = textCounts.get(part.text) ?? 0;
+      if (remaining > 0) {
+        textCounts.set(part.text, remaining - 1);
+        return false;
+      }
+    }
+    return true;
   });
 }
 
@@ -1146,13 +1212,13 @@ function getStructuredMidTurnDisplayText(
 
   if (text) return text;
 
-  // Only records that WILL persist media references keep '' (replay then
-  // projects the media ids). The gate must match #buildMidTurnParts'
+  // Only records that WILL persist attachment references keep '' (replay then
+  // projects the attachment ids). The gate must match #buildMidTurnParts'
   // persistence condition exactly; a record that will not carry references
   // needs the visible placeholder, because resume and replay fall back to the
   // recorded parts — which start with the raw internal prefix — when
   // displayText is empty.
-  if (!willPersistReferences && hasInlineMediaContentBlock(content)) {
+  if (!willPersistReferences && hasInlineAttachmentContentBlock(content)) {
     return '[User message with attachments]';
   }
 
@@ -1173,17 +1239,19 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
           item['displayText'],
         );
         if (content.length === 0) return [];
-        const mediaReferences = readDaemonMediaReferences(
-          item['mediaReferences'],
+        const attachmentReferences = readDaemonAttachmentReferences(
+          item['attachmentReferences'],
         );
         // Same gate #buildMidTurnParts uses to decide whether references are
         // persisted; display text must agree or a mixed inline+reference
         // message records displayText:'' with NO references — a shape replay
         // and resume cannot project.
         const willPersistReferences =
-          mediaReferences !== undefined &&
-          mediaReferences.length ===
-            content.filter((block) => block.type === 'image').length;
+          attachmentReferences !== undefined &&
+          attachmentReferences.length ===
+            content.filter(
+              (block) => block.type === 'image' || block.type === 'resource',
+            ).length;
         return [
           {
             kind: 'structured',
@@ -1193,7 +1261,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
-            ...(mediaReferences ? { mediaReferences } : {}),
+            ...(attachmentReferences ? { attachmentReferences } : {}),
           },
         ];
       },
@@ -1236,8 +1304,9 @@ function isValidMidTurnDrainResponse(
         Array.isArray(item['content']) &&
         item['content'].length > 0 &&
         item['content'].every(isContentBlock) &&
-        (item['mediaReferences'] === undefined ||
-          readDaemonMediaReferences(item['mediaReferences']) !== undefined),
+        (item['attachmentReferences'] === undefined ||
+          readDaemonAttachmentReferences(item['attachmentReferences']) !==
+            undefined),
     );
   }
 
@@ -1320,26 +1389,75 @@ interface AgentResponseCapture {
   channelDelivery?: {
     finalText: string;
   };
+  turnResult?: {
+    finalText: string;
+  };
   agentOutput: AgentOutputMessageCapture;
+}
+
+interface ChannelDeliveryResponseBlock {
+  parts: string[];
+  chars: number;
+  /**
+   * When set, stop accumulating once `chars` reaches the cap; settle then
+   * sees a length past the turn-result bound and flags truncation. Only set
+   * for turns without a channel delivery — the delivery needs the full text,
+   * and capped turns would otherwise retain a multi-megabyte answer in full
+   * just to keep a truncated prefix.
+   */
+  capChars?: number;
 }
 
 function beginChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-): string[] | undefined {
+): ChannelDeliveryResponseBlock | undefined {
   capture?.agentOutput.beginResponse();
-  if (!capture?.channelDelivery) return undefined;
-  capture.channelDelivery.finalText = '';
-  return [];
+  if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
+  if (capture?.turnResult) capture.turnResult.finalText = '';
+  if (!capture?.channelDelivery && !capture?.turnResult) return undefined;
+  return {
+    parts: [],
+    chars: 0,
+    ...(capture?.channelDelivery
+      ? {}
+      : { capChars: TURN_RESULT_TEXT_MAX_CHARS + 1 }),
+  };
+}
+
+function appendChannelDeliveryResponseText(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  text: string,
+): void {
+  if (!responseBlock) return;
+  if (
+    responseBlock.capChars !== undefined &&
+    responseBlock.chars >= responseBlock.capChars
+  ) {
+    return;
+  }
+  responseBlock.parts.push(text);
+  responseBlock.chars += text.length;
+}
+
+function rewindChannelDeliveryResponseBlock(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  checkpoint: number,
+): void {
+  if (!responseBlock) return;
+  const removed = responseBlock.parts.splice(checkpoint);
+  for (const part of removed) responseBlock.chars -= part.length;
 }
 
 function commitChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-  responseBlock: string[] | undefined,
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
   hasFunctionCalls: boolean,
 ): void {
   capture?.agentOutput.commitResponse(hasFunctionCalls);
-  if (capture?.channelDelivery && responseBlock && !hasFunctionCalls) {
-    capture.channelDelivery.finalText = responseBlock.join('');
+  if (responseBlock && !hasFunctionCalls) {
+    const finalText = responseBlock.parts.join('');
+    if (capture?.channelDelivery) capture.channelDelivery.finalText = finalText;
+    if (capture?.turnResult) capture.turnResult.finalText = finalText;
   }
 }
 
@@ -2090,8 +2208,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
+    let result: PromptResponse | undefined;
+    await this.#emitGoalStartTurn();
     try {
-      await this.prompt(
+      result = await this.prompt(
         {
           sessionId: this.sessionId,
           prompt: parts.map((part) => ({
@@ -2121,6 +2241,7 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
+      await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       void this.#drainCronQueue();
@@ -3489,6 +3610,13 @@ export class Session implements SessionContext {
       return false;
     }
 
+    // Deliberate twin divergence: the TUI twin (isUserTextContent in
+    // packages/cli/src/ui/utils/historyMapping.ts) excludes microcompaction
+    // media-clear placeholders ('[Old inline media cleared: ...]') from the
+    // rewind prompt count because a cleared media-only entry never produced
+    // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
+    // maps against per-prompt file-history snapshots, which ARE created for
+    // media-only prompts. Do not mirror that exclusion into this twin.
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
@@ -3581,6 +3709,66 @@ export class Session implements SessionContext {
     modelPrompt?: string,
     scheduledGoalTurn?: AcpGoalTurn,
   ): Promise<PromptResponse> {
+    if (
+      invocationContext !== undefined &&
+      invocationContext.sessionId !== this.config.getSessionId()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invocation context session does not match the active session',
+      );
+    }
+    const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    try {
+      const result = await this.#promptWithTurnRecording(
+        params,
+        invocationContext,
+        admissionCancellation,
+        modelPrompt,
+        scheduledGoalTurn,
+        turnRecording,
+      );
+      this.#settleTurnRecording(
+        result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+        turnRecording,
+        result,
+      );
+      return result;
+    } catch (error) {
+      const pendingSend = turnRecording?.abortController;
+      const abortReason =
+        pendingSend?.signal.aborted === true
+          ? pendingSend.signal.reason
+          : undefined;
+      // Mirror the send-loop's controlled-cancellation contract: explicit
+      // user cancels and session disposal settle as `cancelled`. A
+      // successor-prompt abort does so only when the thrown error is the
+      // abort itself; the send loop deliberately excludes NEW_PROMPT from
+      // controlled cancellation so infrastructure failures are not hidden
+      // as cancellations, and a non-abort error landing after a successor
+      // aborted this turn is a real failure that must surface the same way.
+      const controlledAbort =
+        abortReason === USER_CANCEL_ABORT_REASON ||
+        abortReason === SESSION_DISPOSE_ABORT_REASON ||
+        (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
+      if (controlledAbort) {
+        const result = { stopReason: 'cancelled' as const };
+        this.#settleTurnRecording('cancelled', turnRecording, result);
+        return result;
+      }
+      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      throw error;
+    }
+  }
+
+  async #promptWithTurnRecording(
+    params: PromptRequest,
+    invocationContext: InvocationContextV1 | undefined,
+    admissionCancellation: AbortSignal | undefined,
+    modelPrompt: string | undefined,
+    scheduledGoalTurn: AcpGoalTurn | undefined,
+    turnRecording: InFlightTurnRecording | null,
+  ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -3656,6 +3844,7 @@ export class Session implements SessionContext {
     // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
     const pendingSend = goalTurn?.controller ?? new AbortController();
+    if (turnRecording) turnRecording.abortController = pendingSend;
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -3801,6 +3990,7 @@ export class Session implements SessionContext {
     const channelDelivery = parsePromptChannelDelivery(params);
     const responseCapture: AgentResponseCapture = {
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
+      ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
     // One server-side channel classification, consumed by both the
@@ -3822,6 +4012,7 @@ export class Session implements SessionContext {
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailed = false;
+    if (turnRecording) turnRecording.startedAt = Date.now();
     try {
       const result = await this.#executePrompt(
         params,
@@ -3996,7 +4187,7 @@ export class Session implements SessionContext {
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
    * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
    * call, same `enableCacheSharing` flag forwarding, same curated
-   * history slice (`getHistory(true).slice(-40)`).
+   * history tail (`getHistoryTail(40, true)`).
    *
    * Differences from the CLI:
    *   - Triggers only on `stopReason === 'end_turn'` (the daemon
@@ -4036,24 +4227,27 @@ export class Session implements SessionContext {
 
     void (async () => {
       try {
-        const fullHistory = chat.getHistory(true);
-        const lastEntry = fullHistory[fullHistory.length - 1];
+        const conversationHistory = chat.getHistoryTail(40, true);
+        const lastEntry = conversationHistory[conversationHistory.length - 1];
         if (!lastEntry || lastEntry.role !== 'model') {
           debugLogger.debug(
             'Skipping followup suggestion: last history entry is not model',
           );
           return;
         }
-        const conversationHistory =
-          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
         const r = await generatePromptSuggestion(
           this.config,
           conversationHistory,
           ac.signal,
           {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value
+            // is `undefined` and a `=== true` gate left the cache-aware fork
+            // as dead code unless the flag was explicitly set (#9230). Mirrors
+            // AppContainer — only an explicit `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
@@ -4313,15 +4507,15 @@ export class Session implements SessionContext {
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
               // inside its action, so its record must land first (R20-9).
-              const mediaReferences = readDaemonMediaReferences(
-                promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+              const attachmentReferences = readDaemonAttachmentReferences(
+                promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined || mediaReferences) {
+              if (promptDisplayText !== undefined || attachmentReferences) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
                   displayText: promptDisplayText ?? promptText,
                   hookContext: '',
-                  ...(mediaReferences ? { mediaReferences } : {}),
+                  ...(attachmentReferences ? { attachmentReferences } : {}),
                 });
               } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
@@ -4650,7 +4844,9 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
-                let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined;
                 let channelDeliveryCheckpoint = 0;
 
                 try {
@@ -4691,7 +4887,7 @@ export class Session implements SessionContext {
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
                   channelDeliveryCheckpoint =
-                    channelDeliveryResponseBlock?.length ?? 0;
+                    channelDeliveryResponseBlock?.parts.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -4719,7 +4915,10 @@ export class Session implements SessionContext {
                           );
                           if (!part.thought) {
                             responseCapture.agentOutput.appendText(part.text);
-                            channelDeliveryResponseBlock?.push(part.text);
+                            appendChannelDeliveryResponseText(
+                              channelDeliveryResponseBlock,
+                              part.text,
+                            );
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -4754,10 +4953,10 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
-                          if (channelDeliveryResponseBlock) {
-                            channelDeliveryResponseBlock.length =
-                              channelDeliveryCheckpoint;
-                          }
+                          rewindChannelDeliveryResponseBlock(
+                            channelDeliveryResponseBlock,
+                            channelDeliveryCheckpoint,
+                          );
                         }
                         await finalizeToolCallPreparations(
                           preparationTracker,
@@ -5395,7 +5594,9 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
-      let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryResponseBlock:
+        | ChannelDeliveryResponseBlock
+        | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -5697,7 +5898,8 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
         );
-        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint =
+          channelDeliveryResponseBlock?.parts.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -5738,7 +5940,10 @@ export class Session implements SessionContext {
               );
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
-                channelDeliveryResponseBlock?.push(part.text);
+                appendChannelDeliveryResponseText(
+                  channelDeliveryResponseBlock,
+                  part.text,
+                );
                 messageDisplay?.addChunk(part.text);
               }
             }
@@ -5772,9 +5977,10 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
-              if (channelDeliveryResponseBlock) {
-                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
-              }
+              rewindChannelDeliveryResponseBlock(
+                channelDeliveryResponseBlock,
+                channelDeliveryCheckpoint,
+              );
             }
             await finalizeToolCallPreparations(
               preparationTracker,
@@ -6079,6 +6285,80 @@ export class Session implements SessionContext {
     timer.unref();
   }
 
+  #beginTurnRecording(
+    params: PromptRequest,
+    invocationContext: InvocationContextV1 | undefined,
+  ): InFlightTurnRecording | null {
+    if (!invocationContext) return null;
+    const promptMetadata = (params as { _meta?: Record<string, unknown> })
+      ._meta;
+    const rawPromptDisplayText =
+      promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // Treat an empty display text as absent so an image-only channel prompt
+    // still records `[image]` via the content fallback, without the bridge
+    // having to rewrite the forwarded value (which also feeds transcript
+    // displayText and telemetry outside this feature's surface).
+    const promptDisplayText =
+      typeof rawPromptDisplayText === 'string' && rawPromptDisplayText !== ''
+        ? rawPromptDisplayText
+        : undefined;
+    const { text, truncated } = truncateTurnText(
+      promptDisplayText ?? extractTurnPromptText(params.prompt),
+    );
+    const recordingService = this.config.getChatRecordingService();
+    return {
+      promptId: invocationContext.promptId,
+      ...(invocationContext.originatorClientId !== undefined
+        ? { originatorClientId: invocationContext.originatorClientId }
+        : {}),
+      promptText: text,
+      promptTextTruncated: truncated,
+      finalAnswer: { finalText: '' },
+      ...(recordingService !== undefined ? { recordingService } : {}),
+    };
+  }
+
+  #settleTurnRecording(
+    state: 'completed' | 'cancelled' | 'error',
+    recording: InFlightTurnRecording | null,
+    response?: PromptResponse,
+    error?: unknown,
+  ): void {
+    if (recording === null) return;
+    const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
+    const stopReason =
+      response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
+    const payload: TurnResultRecordPayload = {
+      promptId: recording.promptId,
+      state,
+      ...(stopReason !== undefined ? { stopReason } : {}),
+      ...(state === 'error' ? { error: normalizeTurnResultError(error) } : {}),
+      ...(recording.startedAt !== undefined
+        ? { startedAt: recording.startedAt }
+        : {}),
+      endedAt: Date.now(),
+      promptText: recording.promptText,
+      ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
+      ...(finalAnswer.text.length > 0 ? { resultText: finalAnswer.text } : {}),
+      ...(finalAnswer.truncated
+        ? {
+            resultTruncated: true,
+            resultCode: TURN_RESULT_CODE_TEXT_TRUNCATED,
+          }
+        : {}),
+      ...(recording.originatorClientId !== undefined
+        ? { originatorClientId: recording.originatorClientId }
+        : {}),
+    };
+    try {
+      recording.recordingService?.recordTurnResult(payload);
+    } catch (recordError) {
+      debugLogger.warn(
+        `Failed to record turn result: ${this.#formatError(recordError)}`,
+      );
+    }
+  }
+
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
   }
@@ -6359,13 +6639,6 @@ export class Session implements SessionContext {
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
-      return { message: null, hadMidTurnUserInput: false };
-    }
-    if (toolRun.repeatedDuplicateProviderToolCall) {
-      this.todoStopGuard.suspend();
-      debugLogger.debug(
-        'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
-      );
       return { message: null, hadMidTurnUserInput: false };
     }
     const drained = await this.#drainMidTurnInput(abortSignal, {
@@ -6802,23 +7075,25 @@ export class Session implements SessionContext {
         rawParts = [{ text: displayText }];
         if (
           message.kind === 'structured' &&
-          hasInlineMediaContentBlock(message.content)
+          hasInlineAttachmentContentBlock(message.content)
         ) {
           rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
       const recorder = this.config.getChatRecordingService();
-      if (message.kind === 'structured' && message.mediaReferences) {
-        const everyMediaBlockHasAReference =
-          message.mediaReferences.length ===
-          message.content.filter((block) => block.type === 'image').length;
-        if (everyMediaBlockHasAReference) {
+      if (message.kind === 'structured' && message.attachmentReferences) {
+        const everyAttachmentBlockHasAReference =
+          message.attachmentReferences.length ===
+          message.content.filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          ).length;
+        if (everyAttachmentBlockHasAReference) {
           recorder?.recordMidTurnUserMessage(
-            stripReferencedInlineDataParts(built, message.content),
+            stripReferencedAttachmentDataParts(built, message.content),
             displayText,
             undefined,
-            message.mediaReferences,
+            message.attachmentReferences,
           );
         } else {
           recorder?.recordMidTurnUserMessage(built, displayText);
@@ -7286,10 +7561,12 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
-                const channelDeliveryResponseBlock =
+                const channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined =
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
-                  channelDeliveryResponseBlock?.length ?? 0;
+                  channelDeliveryResponseBlock?.parts.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -7325,7 +7602,10 @@ export class Session implements SessionContext {
                         );
                         if (!part.thought) {
                           responseCapture.agentOutput.appendText(part.text);
-                          channelDeliveryResponseBlock?.push(part.text);
+                          appendChannelDeliveryResponseText(
+                            channelDeliveryResponseBlock,
+                            part.text,
+                          );
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -7360,10 +7640,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
                       ) {
-                        if (channelDeliveryResponseBlock) {
-                          channelDeliveryResponseBlock.length =
-                            channelDeliveryCheckpoint;
-                        }
+                        rewindChannelDeliveryResponseBlock(
+                          channelDeliveryResponseBlock,
+                          channelDeliveryCheckpoint,
+                        );
                       }
                       await finalizeToolCallPreparations(
                         preparationTracker,
@@ -8212,6 +8492,40 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Goal turns run inside this child via `prompt()` directly, so the daemon
+   * bridge never observes a `session/prompt` RPC boundary for them and would
+   * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
+   * SDK) with a streaming state that never settles.
+   */
+  async #emitGoalStartTurn(): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/start_turn', {
+        sessionId: this.sessionId,
+        source: 'goal',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal start-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
+  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason: result?.stopReason ?? 'cancelled',
+        source: 'goal',
+        promptId: this.config.getSessionId() + '########' + String(this.turn),
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       await this.sendAvailableCommandsUpdateOrThrow();
@@ -8701,28 +9015,62 @@ export class Session implements SessionContext {
     };
     type Batch = ExecutableBatch | DuplicateBatch;
     const batches: Batch[] = [];
-    const handledProviderToolCallIds = new Set(
-      this.#getCurrentChat().getHistoryFunctionResponseIds(),
+    // The accessor returns a fresh map per call; copy anyway so a future
+    // cached accessor cannot turn per-batch recording into shared-state
+    // mutation.
+    const handledToolCallFingerprints = new Map(
+      this.#getCurrentChat().getHistoryToolCallFingerprints(),
     );
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       dedupedFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       this.duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
       const providerCallId =
         getProviderToolCallId(repeatedDuplicateCall) ??
         repeatedDuplicateCall.id;
-      debugLogger.debug(
-        `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
-          `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
+      const message =
+        `Stopping ACP turn after repeated duplicate provider tool-call id: ` +
+        `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'}).`;
+      if (toolLoopState) {
+        recordDaemonLoopDetected(
+          this.config,
+          promptId,
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          message,
+          toolLoopState,
+        );
+      } else {
+        debugLogger.warn(message);
+      }
+      await Promise.all(
+        dedupedFunctionCalls.map((fc) =>
+          recordSkippedToolCall(
+            fc,
+            LOOP_DETECTED_SKIP_MESSAGE,
+            false,
+            ToolErrorType.UNKNOWN,
+          ),
+        ),
       );
-      return await finalizeRunToolResult({
+      const result = await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: true,
+        loopDetected: true,
       });
+      return { ...result, parts: [] };
     }
 
     const pushDuplicateBatch = (
@@ -8811,7 +9159,7 @@ export class Session implements SessionContext {
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           const callId = executionCallIds.get(fc)!;
           pushDuplicateBatch(fc, {
             callId,
@@ -8823,7 +9171,11 @@ export class Session implements SessionContext {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
 
       // Canonical names match core's isToolCallConcurrencySafe predicate,
@@ -9111,7 +9463,6 @@ export class Session implements SessionContext {
             return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: true,
-              repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
             });
           }
@@ -9149,7 +9500,6 @@ export class Session implements SessionContext {
               return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: true,
-                repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
               });
             }
@@ -9159,7 +9509,6 @@ export class Session implements SessionContext {
       return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
-        repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
       });
     } finally {
@@ -11547,7 +11896,11 @@ export class Session implements SessionContext {
     // with its content block by the "@path" token left in the prompt text and
     // the "--- Content from ... ---" delimiter labels, not by position, so
     // leading with the content is safe.
-    const referenceParts: Part[] = [...extensionParts, ...mcpServerParts];
+    const referenceParts: Part[] = [
+      ...partsToSend.filter((part) => 'inlineData' in part),
+      ...extensionParts,
+      ...mcpServerParts,
+    ];
 
     // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {

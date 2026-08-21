@@ -6,11 +6,24 @@ import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
-  existsSync: vi.fn(() => false),
+  existsSync: vi.fn((_path: string): boolean => false),
+  lstatSync: vi.fn(
+    (): { isSymbolicLink: () => boolean; isDirectory: () => boolean } => ({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    }),
+  ),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
-  readdirSync: vi.fn((): string[] => []),
+  readdirSync: vi.fn((_path: string): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  // statSync drives retention's mtime signal (runEpochMs + the per-entry
+  // comparison); unmocked it hit the REAL filesystem and the signal could
+  // only ever fail open here (#9259). The default is the same fail-open
+  // throw readFileSync carries.
+  statSync: vi.fn((_path: string): { mtimeMs: number } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
   rmSync: vi.fn(),
@@ -49,13 +62,17 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       existsSync: mocks.existsSync,
+      lstatSync: mocks.lstatSync,
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
+      statSync: mocks.statSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
+    lstatSync: mocks.lstatSync,
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
+    statSync: mocks.statSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -91,6 +108,7 @@ vi.mock('./lib/paths.js', () => ({
   worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
   probeWorktreePath: (path: string) => `${path}-probe`,
   baseWorktreePath: (path: string) => `${path}-base`,
+  scratchWorktreePrefix: (path: string) => `${path}-scratch-`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
   LEASE_PREFIX: 'qwen-review-lease-',
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
@@ -110,7 +128,31 @@ import {
 describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not implementations: a `mockReturnValue`
+    // set in one test would otherwise decide what the next one's directory
+    // sweep sees.
+    mocks.readdirSync.mockReturnValue([]);
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
+    // Implementations survive clearAllMocks — restore the fail-open throw
+    // so one retention test's mtimes cannot leak into the next test. The
+    // readFileSync default is the same story (#9272): a leaked
+    // marker-returning implementation short-circuits the retention `||`
+    // on the marker signal, and the mtime/plan-missing branches under
+    // test never even evaluate.
+    mocks.statSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // Same leak class for the listing (#9272): the retention tests install
+    // path-dependent implementations, and a later test reading the declared
+    // `[]` default would otherwise inherit them.
+    mocks.readdirSync.mockImplementation((_path: string): string[] => []);
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -132,7 +174,10 @@ describe('runCleanup', () => {
     expect(mocks.execFileSync).toHaveBeenCalledWith(
       'git',
       ['branch', '-D', 'qwen-review/pr-123'],
-      { stdio: 'pipe' },
+      // The env is sanitized: the check that gates this delete resolves the
+      // real repository, so the delete must not follow an exported `GIT_DIR`
+      // into another one.
+      expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
@@ -325,6 +370,159 @@ describe('runCleanup', () => {
     ]);
   });
 
+  it('sweeps every verifier scratch tree, which it can only find by prefix', () => {
+    // One per verifier shard, named for the shard's record key — so unlike the
+    // probe and base siblings, the sweeper cannot reconstruct the names and
+    // reads the directory instead. Missing them leaks a checkout per shard and
+    // wedges the next review's `git worktree add` on the leftovers.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockReturnValue([
+      'review-pr-123',
+      'review-pr-123-scratch-verify--round-1--aaa',
+      'review-pr-123-scratch-verify--round-2--bbb',
+      // Neither of these belongs to this review: one is another PR's scratch
+      // tree, the other an ordinary side file.
+      'review-pr-999-scratch-verify--round-1--ccc',
+      'qwen-review-pr-123-diff.txt',
+    ] as unknown as []);
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree.mock.calls.map((c) => c[0])).toEqual([
+      '/repo/.qwen/tmp/review-pr-123',
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      '/repo/.qwen/tmp/review-pr-123-base',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-1--aaa',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-2--bbb',
+    ]);
+  });
+
+  it('unlinks a dangling symlink at a family path, which releaseWorktree cannot see', () => {
+    // `releaseWorktree`'s `existsSync` follows the link, reports "never
+    // existed", and never runs its `rmSync` — while the link still wedges the
+    // next review's `git worktree add` with `already exists`.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockReturnValue([
+      'review-pr-123-scratch-verify--round-1--aaa',
+    ] as unknown as []);
+    mocks.existsSync.mockReturnValue(false);
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      // Only the family entry is a link; its parent directory is a directory.
+      isSymbolicLink: () => String(p).includes('-scratch-'),
+      isDirectory: () => !String(p).includes('-scratch-'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-1--aaa',
+      { force: true },
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed scratch worktree link'),
+    );
+  });
+
+  it('unlinks a symlink at the three NAMED family paths instead of releasing what it points at', () => {
+    // A LIVE link at any of them used to reach `releaseWorktree`: its
+    // `existsSync` followed the link and `git worktree remove --force`
+    // resolved it — together they deleted whichever registered worktree the
+    // link named, measured against the real function, while reporting the
+    // family path as swept. A DANGLING one was invisible to it and survived
+    // to wedge the next review's `worktree add`. Both shapes are unlinked
+    // the way the scratch family's always were.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    // The family paths are links; their ANCESTORS are ordinary directories —
+    // a symlink above the temp dir refuses the whole clean, which is a
+    // different test.
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-'),
+      isDirectory: () => !String(p).includes('review-pr-'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.rmSync).toHaveBeenCalledWith('/repo/.qwen/tmp/review-pr-123', {
+      force: true,
+    });
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      { force: true },
+    );
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-base',
+      { force: true },
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed probe worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed base worktree link'),
+    );
+    // The registration outlives the link. This branch returns before ever
+    // reaching `releaseWorktree`, which is where the pipeline's only other
+    // prune lives — so without one here the family paths were reported swept
+    // while their admin entries stayed behind and wedged the next
+    // `worktree add` with `already exists`.
+    expect(mocks.execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'prune'],
+      expect.anything(),
+    );
+  });
+
+  it('does not announce a clean sweep when it could not list the family', () => {
+    // A silent skip leaks a full checkout per shard while stdout says
+    // "Nothing to clean" and the lease is cleared.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('for scratch worktrees'),
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('refuses to clean anything when the temp dir hangs off a symlink', () => {
+    // The scratch sweep alone used to answer this: it announced the hazard and
+    // the same function kept deleting under it — the base-tree lock and every
+    // side file, all resolved through the same redirected ancestor.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p) === '/repo/.qwen',
+      isDirectory: () => String(p) !== '/repo/.qwen',
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
   it('sweeps a stale base-tree build lock left by a killed builder', () => {
     // The lock is a plain directory (`mkdirSync` test-and-set), not a worktree,
     // so `releaseWorktree` never touches it; a builder killed mid-build leaves it
@@ -443,6 +641,110 @@ describe('runCleanup', () => {
     expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-diff.txt');
     expect(removed).not.toContain(
       '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('keeps the record directory whose records predate the plan — a killed loop leaves no marker (#9206)', () => {
+    // Signal 2: a loop KILLED mid-round stops without converging and
+    // writes no marker; its records predate the retry's fresh plan
+    // capture. The mtime comparison is what keeps that history — pinned
+    // here against an inverted `<` or a slack/sign slip (#9259).
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockImplementation((p: string): string[] =>
+      p === '/repo/.qwen/tmp'
+        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        : ['reverse-audit--chunk-13--round-1--abc.txt'],
+    );
+    // No marker — the readFileSync default throws for budget-stop.json.
+    const planNow = Date.now();
+    mocks.statSync.mockImplementation((p: string) => ({
+      mtimeMs: p.endsWith('.json') ? planNow : Date.parse('2020-01-01'),
+    }));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('keeps the record directory whose plan is already gone — a second cleanup keeps what the first kept (#9213)', () => {
+    // Signal 3: the first cleanup preserved the directory and swept the
+    // plan beside it, so no marker read and no mtime comparison can run.
+    // The directory that survived on that evidence must survive again —
+    // and "Nothing to clean" must NOT print while something was kept.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation((p: string) => p === '/repo/.qwen/tmp');
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-fetch-prompts']);
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+  });
+
+  it('keeps the record directory on a PREVIOUS run’s marker — retention reads unfenced (#9213)', () => {
+    // The fence drops a marker older than the plan capture — exactly the
+    // marker a killed run left behind. Retention reading through the
+    // fenced `readBudgetStop` would sweep the evidence #9206 reports;
+    // this pins the unfenced read against that swap.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockImplementation((p: string): string[] =>
+      p === '/repo/.qwen/tmp'
+        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        : [],
+    );
+    const planNow = Date.now();
+    mocks.statSync.mockImplementation((p: string) => {
+      if (p.endsWith('.json')) return { mtimeMs: planNow };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.readFileSync.mockImplementation((path: string): string => {
+      if (path.endsWith('budget-stop.json')) {
+        // A stop from HOURS before the plan capture — the fenced reader
+        // (deadline.ts's own tests pin this) returns null for it.
+        return JSON.stringify({
+          cause: 'round-cap',
+          cap: 5,
+          entry: 'reverse audit — did not converge within the 5-round cap',
+          entryZh: '反向审计——在 5 轮的反审轮数上限内未收敛',
+          round: 6,
+          remainingSeconds: 0,
+          reserveSeconds: 0,
+          atMs: Date.parse('2020-01-01'),
+        });
+      }
+      return JSON.stringify({});
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -609,6 +911,14 @@ describe('runCleanup — bypass-write audit', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Implementations survive `clearAllMocks`, so a `mockReturnValue` set in
+    // the other describe would otherwise decide what this one's directory
+    // sweep sees — the same drift the sibling beforeEach pins against.
+    mocks.readdirSync.mockReturnValue([]);
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.readFileSync.mockImplementation(() => {
