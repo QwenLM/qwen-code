@@ -2018,6 +2018,17 @@ describe('renderLedgerSection', () => {
     expect(anchored).toContain(
       'pass it as `--since <sha> --since-model <model>`',
     );
+    // The REPLACE clause: the recovery must not append a second anchor
+    // pair to a command that already carries the cache path's refused one
+    // — a command that reads as two anchors is a command nobody can check.
+    expect(anchored).toContain(
+      'replacing any `--since` and any `--since-model` the command already carries',
+    );
+    // And the refusal the pairing exists to avoid: a re-run carrying only
+    // `--since` never passes the same-model gate.
+    expect(anchored).toContain(
+      'a re-run carrying only `--since` is refused as `cross-model-anchor`',
+    );
     expect(anchored).toContain('never run git against an anchor yourself');
     // The tail's other two load-bearing fragments, each deletable while this
     // file stayed green: the antecedent that says WHAT to pass, and the

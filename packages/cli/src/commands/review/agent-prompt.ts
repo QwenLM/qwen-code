@@ -305,12 +305,12 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
           importsChanged: strings(e.importsChanged),
         }))
     : [];
-  // The SAME validity notion the roster applies
-  // (`incrementalInteractionPaths`): a partially corrupt delta list
-  // invalidates the block wholesale. The two consumers used to disagree —
-  // the roster widened on a list this function still filtered and narrowed
-  // with, so one plan told a chunk agent "interaction only" for a file the
-  // roster said it could not safely classify.
+  // A partially corrupt delta list invalidates the block wholesale,
+  // where a corrupt interaction entry drops only its own seam: the delta
+  // list IS the classification the briefs key on, so narrowing briefs
+  // built on a list with junk still in it would classify files by a
+  // record that cannot be trusted. Full-scope briefs are the safe
+  // degrade, as for every malformation here.
   if (
     !Array.isArray(raw.deltaFiles) ||
     raw.deltaFiles.some((p) => typeof p !== 'string')

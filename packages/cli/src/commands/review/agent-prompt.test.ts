@@ -6353,7 +6353,6 @@ describe('incremental-scope briefs', () => {
           { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
         ],
         contextFileCount: 1,
-        fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
       },
     },
   };
@@ -6447,13 +6446,24 @@ describe('incremental-scope briefs', () => {
         interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
       },
       // A PARTIALLY corrupt delta list — one valid entry beside junk —
-      // degrades wholesale, aligned with the roster's guard: the roster
-      // invalidates the block on any non-string entry ("no trustworthy
-      // delta list"), so the brief renderer must not keep narrowing briefs
-      // on a list the roster declared untrustworthy while it widens.
+      // degrades wholesale: the delta list IS the classification the
+      // briefs key on, so junk surviving in it would keep narrowing
+      // briefs on a record that cannot be trusted. A corrupt interaction
+      // entry, by contrast, drops only its own seam.
       {
         anchor: 'abc1234def567890',
         deltaFiles: ['src/changed.ts', 42],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
+      // A MISSING delta list beside a valid interaction — a producer
+      // regression or a hand-edited plan. Degrades at the `!Array.isArray`
+      // conjunct: with the list gone there is no classification to brief
+      // on, and without the conjunct `.some` throws on the missing field
+      // inside brief construction instead of degrading.
+      {
+        anchor: 'abc1234def567890',
         interaction: [
           { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
         ],
@@ -6468,6 +6478,35 @@ describe('incremental-scope briefs', () => {
       expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
       expect(buildRoleBrief(mangled, '2')).not.toContain('Incremental round');
     }
+  });
+
+  it('drops interaction entries that are not objects or carry no path', () => {
+    // The plan is `JSON.parse`d with an unchecked cast, so an entry can be
+    // anything. The shape guards drop the junk and keep the valid entries;
+    // deleting `!!e` lets a null entry reach `.path`, and deleting the
+    // `typeof` conjunct lets an array path reach `inertPath` in the
+    // whole-diff lists, and both throw inside brief construction instead
+    // of degrading entry by entry. The role brief is the probe: it renders
+    // EVERY interaction entry, where a chunk brief renders only its own
+    // files and the junk path never reached the renderer.
+    const mangled = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/changed.ts'],
+          interaction: [
+            null,
+            { path: ['src/x.ts'], importsChanged: ['src/changed.ts'] },
+            { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+          ],
+        },
+      },
+    };
+    const p = buildRoleBrief(mangled, '2');
+    expect(p).toContain('Incremental round');
+    expect(p).toContain('src/caller.ts (imports src/changed.ts)');
+    expect(p).not.toContain('src/x.ts');
   });
 
   it('a mixed delta+interaction chunk renders BOTH scope bullets', () => {
