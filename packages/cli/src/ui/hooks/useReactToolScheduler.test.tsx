@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, renderHook } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import type { Part } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  ToolInvocationGuard,
+} from '@qwen-code/qwen-code-core';
 import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import {
   mapToDisplay,
   type TrackedToolCall,
@@ -109,6 +113,79 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
         .map((part) => part.inlineData),
     );
     expect(tool.omittedImageCount).toBe(2);
+  });
+});
+
+describe('useReactToolScheduler turn guard forwarding', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const request: ToolCallRequestInfo = {
+    callId: 'guarded-call',
+    name: 'read_file',
+    args: { file_path: 'README.md' },
+    isClientInitiated: false,
+    prompt_id: 'guarded-prompt',
+  };
+  const guard: ToolInvocationGuard = async () => ({ allowed: true });
+
+  function renderScheduler(config: Config) {
+    return renderHook(() =>
+      useReactToolScheduler(
+        async () => {},
+        config,
+        () => undefined,
+        () => {},
+      ),
+    );
+  }
+
+  function createConfig(overrides: Record<string, unknown> = {}): Config {
+    return {
+      getToolRegistry: vi.fn().mockReturnValue({}),
+      ...overrides,
+    } as unknown as Config;
+  }
+
+  it('forwards the guard on the ordinary scheduler path', () => {
+    const schedule = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockResolvedValue();
+    const config = createConfig();
+    const { result } = renderScheduler(config);
+    const signal = new AbortController().signal;
+
+    act(() => result.current[1](request, signal, undefined, guard));
+
+    expect(schedule).toHaveBeenCalledWith(request, signal, undefined, guard);
+  });
+
+  it('forwards the guard after resolving a full-turn model runtime', async () => {
+    const runtimeView = {};
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    const schedule = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockResolvedValue();
+    const config = createConfig({
+      getBaseLlmClient: vi.fn().mockReturnValue({ resolveForModel }),
+    });
+    const { result } = renderScheduler(config);
+    const signal = new AbortController().signal;
+
+    act(() => result.current[1](request, signal, 'guard-model\0', guard));
+
+    await waitFor(() => {
+      expect(schedule).toHaveBeenCalledWith(
+        request,
+        signal,
+        runtimeView,
+        guard,
+      );
+    });
+    expect(resolveForModel).toHaveBeenCalledWith('guard-model', {
+      failClosed: true,
+    });
   });
 });
 

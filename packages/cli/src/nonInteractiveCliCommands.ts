@@ -17,6 +17,7 @@ import {
   type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
+  type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -46,6 +47,7 @@ import {
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
 } from './utils/userPromptExpansionHook.js';
+import { combineToolInvocationGuards } from './utils/tool-invocation-guards.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
@@ -73,6 +75,10 @@ export type NonInteractiveSlashCommandResult = (
       outputHistoryItems?: HistoryItemWithoutId[];
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
+      /** Execution-time guard scoped to this submitted turn. */
+      toolInvocationGuard?: ToolInvocationGuard;
+      /** Callback invoked after the submitted turn completes successfully. */
+      onComplete?: () => Promise<void>;
       refreshContextFilesOnWrite?: boolean;
     }
   | {
@@ -145,6 +151,10 @@ function handleCommandResult(
         ...(result.modelOverride
           ? { modelOverride: result.modelOverride }
           : {}),
+        ...(result.toolInvocationGuard
+          ? { toolInvocationGuard: result.toolInvocationGuard }
+          : {}),
+        ...(result.onComplete ? { onComplete: result.onComplete } : {}),
         ...(result.refreshContextFilesOnWrite
           ? { refreshContextFilesOnWrite: true }
           : {}),
@@ -459,6 +469,7 @@ export const handleSlashCommand = async (
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
     let refreshContextFilesOnWrite = false;
+    const toolInvocationGuards: ToolInvocationGuard[] = [];
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
     const successfulSkillCommands: SlashCommand[] = [];
 
@@ -481,6 +492,9 @@ export const handleSlashCommand = async (
         refreshContextFilesOnWrite ||= Boolean(
           skillResult.refreshContextFilesOnWrite,
         );
+        if (skillResult.toolInvocationGuard) {
+          toolInvocationGuards.push(skillResult.toolInvocationGuard);
+        }
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
@@ -501,6 +515,8 @@ export const handleSlashCommand = async (
     }
 
     const mergedContent: PartListUnion = combinedContent.flat();
+    const toolInvocationGuard =
+      combineToolInvocationGuards(toolInvocationGuards);
 
     const hookResult = await fireUserPromptExpansionHook(
       config,
@@ -523,6 +539,7 @@ export const handleSlashCommand = async (
       ...(refreshContextFilesOnWrite
         ? { refreshContextFilesOnWrite: true }
         : {}),
+      ...(toolInvocationGuard ? { toolInvocationGuard } : {}),
       ...(onCompleteCallbacks.length
         ? {
             onComplete: async () => {

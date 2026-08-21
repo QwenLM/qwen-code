@@ -114,3 +114,20 @@ export async function evaluateToolInvocationGuard(
 
   return { allowed: false, reason: FAILED_MESSAGE };
 }
+
+/**
+ * Evaluate independent invocation guards in order, stopping at the first
+ * denial. This lets a caller add a turn-scoped guard without replacing the
+ * host-wide guard configured for the session.
+ */
+export async function evaluateToolInvocationGuards(
+  guards: ReadonlyArray<ToolInvocationGuard | undefined>,
+  context: ToolInvocationGuardContext,
+): Promise<EvaluatedToolInvocationGuardDecision> {
+  for (const guard of guards) {
+    if (!guard) continue;
+    const decision = await evaluateToolInvocationGuard(guard, context);
+    if (!decision.allowed) return decision;
+  }
+  return { allowed: true };
+}

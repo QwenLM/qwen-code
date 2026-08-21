@@ -12,6 +12,7 @@ import type {
   GoalStateCause,
   Logger,
   SessionListItem,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
@@ -256,6 +257,8 @@ export interface SubmitPromptActionReturn {
    * next user turn.
    */
   modelOverride?: string;
+  /** Optional execution-time guard applied only to this submitted turn. */
+  toolInvocationGuard?: ToolInvocationGuard;
 }
 
 /**
