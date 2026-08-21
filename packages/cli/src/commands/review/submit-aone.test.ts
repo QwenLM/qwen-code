@@ -2012,4 +2012,103 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       'src/foo.ts:12 — About the old side.',
     ]);
   });
+  it('relocates a newline or fence-bearing path through the PATH PLACEHOLDER — the entry stays one postable line', () => {
+    // The shape gate admits ANY non-empty string path, and the one-line
+    // body channel cannot carry either hostile shape: a newline collapses
+    // into a garbled attribution, a line-leading fence delimiter trips
+    // compose's fence refusal AFTER the relocation is disclosed — and the
+    // entry regenerates from the same path on every retry, so the
+    // re-compose loop cannot escape. Both fall to the placeholder, the
+    // same fallback the claim half uses.
+    const hostilePaths = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/a.ts\n```',
+          line: 9999,
+          body: '**[Critical]** Newline path cannot ride the one-line channel.',
+        },
+        {
+          path: '```ts',
+          line: 9998,
+          body: '**[Critical]** Fence-leading path cannot ride the one-line channel.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(hostilePaths) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      '(no path):9999 — Newline path cannot ride the one-line channel.',
+      '(no path):9998 — Fence-leading path cannot ride the one-line channel.',
+    ]);
+  });
+
+  it('stands the WHOLE gate down over a renders-as-nothing bodyCriticals entry compose will refuse', () => {
+    // A string array passes the SHAPE mirror, but compose refuses the
+    // marker-only entry's CONTENT. Degrading over a field compose is
+    // about to refuse announces a relocation the refusal then voids —
+    // the outcome the stand-down exists to prevent.
+    const rendersNothingBc = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** Real blocker on a bad anchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: ['**[Critical]**'] },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(rendersNothingBc) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    // Untouched: the marker-only entry reaches compose exactly as
+    // written, and the unanchorable comment was NOT relocated.
+    expect(input['bodyCriticals']).toEqual(['**[Critical]**']);
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    const out = postedJson();
+    expect(out['anchorsRelocated']).toBe(0);
+    expect(out['anchorsDiscarded']).toBe(0);
+  });
+
+  it('stands the WHOLE gate down over a fence-bearing bodyCriticals entry even when ONLY a discard needs it', () => {
+    // The fence gate is compose's other content refusal: an entry with a
+    // fence-delimiter line throws in ingestion. The stand-down reads the
+    // TOTAL acceptance, so the discard arm stays home too.
+    const fenceBc = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: ['```\nfoo\n```'] },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(fenceBc) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['```\nfoo\n```']);
+    // Untouched: the unanchorable Suggestion was NOT discarded.
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    expect(postedJson()['anchorsDiscarded']).toBe(0);
+  });
 });

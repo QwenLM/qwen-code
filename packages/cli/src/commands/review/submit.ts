@@ -62,6 +62,7 @@ import {
   ENTRY_FENCE_DELIMITER_RE,
   composeReview,
   normalizeSeverityFloor,
+  tryIngestBodyCriticals,
   tryToCount,
   type ComposeReviewInput,
 } from './compose-review.js';
@@ -131,8 +132,9 @@ function isDiffLine(n: unknown): n is number {
 /**
  * The body-Critical entry an Aone-unanchorable comment relocates as:
  * `path:line — <claim>` — the attribution the inline anchor carried, kept.
- * Single-line by construction (the claim is one line, the prefix has no
- * newline), so compose-review's one-line entry ingestion carries it as-is.
+ * Single-line by construction (the claim is one line, and the path guard
+ * below keeps the prefix one), so compose-review's one-line entry
+ * ingestion carries it as-is.
  */
 function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // The body arrives footer-appended — strip the canonical footer FIRST,
@@ -153,7 +155,21 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // fall back to the placeholder instead of posting dangling or raw.
   const visible =
     claim !== null && !ENTRY_FENCE_DELIMITER_RE.test(claim) ? claim : null;
-  return `${c.path ?? '(no path)'}:${c.line} — ${visible || 'finding'}`;
+  // The shape gate admits ANY non-empty string path, and the one-line
+  // channel cannot carry a hostile one: a newline collapses into a
+  // garbled attribution, a line-leading fence delimiter trips compose's
+  // fence refusal AFTER this relocation is disclosed, and the entry
+  // regenerates from the same path on every retry, so the re-compose
+  // loop cannot escape. Such a path falls back to the placeholder, the
+  // same fallback the claim half uses.
+  const path =
+    typeof c.path === 'string' &&
+    c.path !== '' &&
+    !/[\r\n]/.test(c.path) &&
+    !ENTRY_FENCE_DELIMITER_RE.test(c.path)
+      ? c.path
+      : '(no path)';
+  return `${path}:${c.line} — ${visible || 'finding'}`;
 }
 
 interface SubmitArgs {
@@ -904,27 +920,27 @@ export function runSubmit(
       const state = payload.state ?? ({} as ComposeReviewInput);
       const bc = state.bodyCriticals;
       // The stand-down: ANY degrade that touches the payload must not run
-      // over a field compose owns when that field is garbage. Relocating
-      // into a `bodyCriticals` that is not an array of strings shatters a
-      // string into per-character junk entries — each counted toward `C`
-      // and posted — or pollutes compose's pinned field-naming refusal
-      // with the gate's own entry; discarding ahead of an uncountable
-      // `suggestionsDiscarded` announces a degrade that compose's refusal
-      // then unpublishes. Either way the terminal would name a degrade
-      // that did not survive, over a payload compose never saw unchanged.
-      // Stand the WHOLE gate down instead: the payload reaches compose
-      // unchanged and dies the pinned death; nothing posts either way,
-      // and the findings stay in the saved report. The countability test
-      // reads compose's OWN acceptance table (tryToCount), so the two
-      // reads of the field can never drift.
-      const bcGarbage =
-        bc !== undefined &&
-        bc !== null &&
-        (!Array.isArray(bc) || bc.some((e) => typeof e !== 'string'));
+      // over a field compose owns when compose would REFUSE that field.
+      // Relocating into a refused `bodyCriticals` shatters a string into
+      // per-character junk entries — each counted toward `C` and posted —
+      // or pollutes compose's pinned refusal with the gate's own entry;
+      // discarding ahead of an uncountable `suggestionsDiscarded`
+      // announces a degrade that compose's refusal then unpublishes.
+      // Either way the terminal would name a degrade that did not
+      // survive, over a payload compose never saw unchanged. Stand the
+      // WHOLE gate down instead: the payload reaches compose unchanged
+      // and dies the pinned death; nothing posts either way, and the
+      // findings stay in the saved report. "Refused" reads compose's OWN
+      // total acceptance, not a mirror: for `bodyCriticals` the CONTENT
+      // gates too (the fence refusal, the renders-nothing refusal), a
+      // string array passing shape while compose refuses its entries;
+      // tryIngestBodyCriticals and tryToCount ARE those tables, so the
+      // two reads of each field can never drift.
+      const bcAccepted = tryIngestBodyCriticals(bc);
       const sdCount = tryToCount(state.suggestionsDiscarded);
       const standDown =
         (anchorsRelocated > 0 || anchorsDiscarded > 0) &&
-        (bcGarbage || sdCount === undefined);
+        (bcAccepted === undefined || sdCount === undefined);
       if (standDown) {
         anchorsRelocated = 0;
         anchorsDiscarded = 0;
