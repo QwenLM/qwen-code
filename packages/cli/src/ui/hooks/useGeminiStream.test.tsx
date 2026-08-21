@@ -10990,6 +10990,11 @@ describe('useGeminiStream', () => {
         });
         expect(mockRunVisionBridge).not.toHaveBeenCalled();
 
+        // The routed turn's prompt id; a tool continuation of this turn
+        // carries the same prompt id (the tool call was scheduled by it), so
+        // the exact-route marker stays scoped to this turn.
+        const routedPromptId = mockSendMessageStream.mock.calls[0][2];
+
         mockSendMessageStream.mockClear();
 
         // A skill tool completes with `modelOverride: undefined` (an
@@ -11003,7 +11008,7 @@ describe('useGeminiStream', () => {
               name: 'pdf-skill',
               args: {},
               isClientInitiated: false,
-              prompt_id: 'prompt-id-skill',
+              prompt_id: routedPromptId,
             },
             status: 'success',
             responseSubmittedToGemini: false,
@@ -11167,16 +11172,17 @@ describe('useGeminiStream', () => {
 
         mockSendMessageStream.mockClear();
 
-        // A background shell completes afterwards; the notification turn
-        // inherits the override (per #7114 it must not be cleared) but keeps
-        // the bare selector — the routed media belongs to turn 1, so the
-        // marker must not be re-applied to this media-free turn.
-        const callback = mockBackgroundShellRegistry.setNotificationCallback
-          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
-        act(() => {
-          callback(
-            'Background shell "npm test" completed.',
+        // A background completion drains afterwards as a standalone, text-only
+        // Notification turn under its own prompt id. It inherits the override
+        // (per #7114 it must not be cleared) but keeps the bare selector — the
+        // routed media belongs to turn 1, so the marker must not be re-applied
+        // to this media-free turn.
+        await act(async () => {
+          await result.current.submitQuery(
             '<task-notification>completed</task-notification>',
+            SendMessageType.Notification,
+            'notification-turn-prompt-id',
+            { notificationDisplayText: 'Background shell "npm test" completed.' },
           );
         });
 
