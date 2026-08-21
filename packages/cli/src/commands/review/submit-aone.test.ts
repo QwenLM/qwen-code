@@ -832,6 +832,13 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('`--host` flag'),
     );
+    // The flag arm has NO recorded host — its remedy is the re-run with a
+    // valid flag. Pin it positively: a mutant collapsing the remedy
+    // ternary to the recorded arm's re-record text ships green against
+    // the offender naming alone.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('Re-run with a valid'),
+    );
   });
 
   it('an INVALID cwd-origin host refuses naming the origin arm', () => {
@@ -854,6 +861,12 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining(`this clone's origin remote`),
+    );
+    // The same positive remedy pin as the flag arm: the origin arm has no
+    // recorded host either — a ternary-collapse mutant would print the
+    // re-record text here.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('Re-run with a valid'),
     );
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).not.toHaveBeenCalled();
@@ -1184,6 +1197,9 @@ describe('submit posts an authorised Aone target through a1', () => {
     });
     const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
     expect(stderr).toContain('the MR head moved');
+    // The refusal speaks the same prefix as the other refusal paths — the
+    // earlier "REFUSED to post the review to" broke the uniform shape.
+    expect(stderr).toContain('REFUSED to post to ');
     expect(stderr).not.toContain('do NOT re-run submit');
   });
 

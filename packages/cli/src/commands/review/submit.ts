@@ -536,6 +536,16 @@ export function runSubmit(
     );
   }
 
+  // Every refusal in this command speaks one shape: a stderr line, the
+  // `{"posted": false}` JSON on stdout, exit 3. One helper, used by every
+  // gate — seven inline copies of the same tail is how one site eventually
+  // forgets the exit code.
+  const refuse = (message: string, reason: string): void => {
+    writeStderrLine(message);
+    writeStdoutLine(JSON.stringify({ posted: false, reason }, null, 2));
+    process.exitCode = 3;
+  };
+
   const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
@@ -563,15 +573,12 @@ export function runSubmit(
         `needs a review invoked naming it, or --user-authorized after the ` +
         `user has asked, in a message they typed, for this review to be ` +
         `published.`;
-    writeStderrLine(
+    refuse(
       `REFUSED to post to ${args.repo}#${args.pr}: ${auth.why}.\n` +
         `Posting is a public, irreversible write, and this run has no ` +
         `authorisation for one. ${advice}`,
+      auth.why,
     );
-    writeStdoutLine(
-      JSON.stringify({ posted: false, reason: auth.why }, null, 2),
-    );
-    process.exitCode = 3;
     return;
   }
 
@@ -619,18 +626,15 @@ export function runSubmit(
   // sending the re-runner into a futile retry loop. Refuse it DISTINCTLY
   // so the two failure states are tellable apart.
   if (args.host !== undefined && explicitHost === undefined) {
-    writeStderrLine(
+    refuse(
       `REFUSED to post to ${args.repo}#${args.pr}: \`--host\` was ` +
         `passed but is EMPTY — an empty flag is not platform proof. ` +
         `Re-run with \`--host <host>\` naming the host the target lives ` +
         `on (or drop the flag entirely when the recorded review names ` +
         `the host). The findings are in the terminal output and the ` +
         `saved report.`,
+      'host-flag-empty',
     );
-    writeStdoutLine(
-      JSON.stringify({ posted: false, reason: 'host-flag-empty' }, null, 2),
-    );
-    process.exitCode = 3;
     return;
   }
   if (
@@ -638,7 +642,7 @@ export function runSubmit(
     recordedHost !== undefined &&
     !hostsEquivalent(explicitHost, recordedHost)
   ) {
-    writeStderrLine(
+    refuse(
       `REFUSED to post to ${args.repo}#${args.pr}: the explicit ` +
         `\`--host ${explicitHost}\` contradicts the host the recorded ` +
         `review names (\`${recordedHost}\`) — the two are not the same ` +
@@ -647,15 +651,8 @@ export function runSubmit(
         `repo. Re-run without \`--host\` to post where the recorded ` +
         `review ran, or re-run the review for ${explicitHost} first. ` +
         `The findings are in the terminal output and the saved report.`,
+      'target-platform-conflict',
     );
-    writeStdoutLine(
-      JSON.stringify(
-        { posted: false, reason: 'target-platform-conflict' },
-        null,
-        2,
-      ),
-    );
-    process.exitCode = 3;
     return;
   }
   const overrideHostless =
@@ -669,7 +666,7 @@ export function runSubmit(
     // Same exit-3 shape as an unauthorised refusal — Step 7 treats it as
     // a complete, correct outcome; a throw would surface as a failed
     // command an agent might retry or route around.
-    writeStderrLine(
+    refuse(
       `REFUSED to post to ${args.repo}#${args.pr}: nothing this gate ` +
         `can read names the platform the target lives on — ` +
         (auth.recordedUnbound === true
@@ -683,15 +680,8 @@ export function runSubmit(
         `Code. Re-run with \`--host <host>\` naming the host the target ` +
         `lives on. The findings are in the terminal output and the saved ` +
         `report.`,
+      'target-platform-unbound',
     );
-    writeStdoutLine(
-      JSON.stringify(
-        { posted: false, reason: 'target-platform-unbound' },
-        null,
-        2,
-      ),
-    );
-    process.exitCode = 3;
     return;
   }
   // The cwd arm probes the origin's host through the SAME canonical
@@ -739,7 +729,7 @@ export function runSubmit(
           ? `An explicit \`--host\` cannot override the recorded one ` +
             `— re-record the review with a valid \`--host\`.`
           : `Re-run with a valid \`--host\`.`;
-      writeStderrLine(
+      refuse(
         `REFUSED to post to ${args.repo}#${args.pr}: the host this ` +
           `write would route at (${JSON.stringify(boundHost)}, from ` +
           (explicitHost !== undefined
@@ -749,11 +739,8 @@ export function runSubmit(
               : `this clone's origin remote`) +
           `) is not a hostname (optionally :port). ${remedy} The ` +
           `findings are in the terminal output and the saved report.`,
+        'invalid-host',
       );
-      writeStdoutLine(
-        JSON.stringify({ posted: false, reason: 'invalid-host' }, null, 2),
-      );
-      process.exitCode = 3;
       return;
     }
     setGhHost(boundHost);
@@ -766,7 +753,7 @@ export function runSubmit(
       boundHost === undefined &&
       isAoneCanonicalHost(resolveGhHost(args.host))
     ) {
-      writeStderrLine(
+      refuse(
         `REFUSED to post to ${args.repo}#${args.pr}: nothing names the ` +
           `host this write should route at, and the ambient \`GH_HOST\` ` +
           `environment variable points at Aone Code ` +
@@ -774,15 +761,8 @@ export function runSubmit(
           `GH_HOST for this command (posts at github.com), or re-run ` +
           `with \`--host <host>\` naming the host the target lives on. ` +
           `The findings are in the terminal output and the saved report.`,
+        'ambient-gh-host-aone',
       );
-      writeStdoutLine(
-        JSON.stringify(
-          { posted: false, reason: 'ambient-gh-host-aone' },
-          null,
-          2,
-        ),
-      );
-      process.exitCode = 3;
       return;
     }
   }
@@ -1029,19 +1009,12 @@ export function runSubmit(
         if (!((err as Error)?.message ?? '').startsWith('refusing to post:')) {
           throw err;
         }
-        writeStderrLine(
-          `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
-            `Aone Code: ${(err as Error).message} Nothing was written; ` +
+        refuse(
+          `REFUSED to post to ${args.repo}#${args.pr} on Aone Code: ` +
+            `${(err as Error).message} Nothing was written; ` +
             `the findings are in the terminal output and the saved report.`,
+          'aone-post-refused',
         );
-        writeStdoutLine(
-          JSON.stringify(
-            { posted: false, reason: 'aone-post-refused' },
-            null,
-            2,
-          ),
-        );
-        process.exitCode = 3;
         return;
       }
       // A mid-batch failure: part of the review IS on the MR. The JSON
