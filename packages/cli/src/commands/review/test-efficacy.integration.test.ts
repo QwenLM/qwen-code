@@ -45,18 +45,25 @@ import { probeWorktreePath } from './lib/paths.js';
 // test that does not arm this override runs against it), and a test arms
 // `screenOverride.fn` per call.
 const screenOverride = vi.hoisted(() => ({
-  fn: null as null | ((worktree: string, context: string) => string | null),
-  real: null as null | ((worktree: string, context: string) => string | null),
+  fn: null as null | ((...args: unknown[]) => string | null),
+  real: null as null | ((...args: unknown[]) => string | null),
 }));
 vi.mock('./lib/worktree.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/worktree.js')>();
-  screenOverride.real = actual.localFilterRefusal;
+  screenOverride.real = actual.localFilterRefusal as (
+    ...args: unknown[]
+  ) => string | null;
   return {
     ...actual,
-    localFilterRefusal: (worktree: string, context: string) =>
+    // Forward EVERY argument: a seam that dropped the capture object would
+    // silently null every baseline and let baseline-plumbing regressions
+    // ship green.
+    localFilterRefusal: (
+      ...args: Parameters<typeof actual.localFilterRefusal>
+    ) =>
       screenOverride.fn !== null
-        ? screenOverride.fn(worktree, context)
-        : actual.localFilterRefusal(worktree, context),
+        ? screenOverride.fn(...args)
+        : actual.localFilterRefusal(...args),
   };
 });
 
@@ -2148,6 +2155,96 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(probeWorktreePath(wt))).toBe(false);
   });
 
+  it('reports the breach — and never scores — when the creation rollback itself fails', async () => {
+    // The creation breach rolls the tree back with `discardWorktree`, whose
+    // rmSync can still THROW (`force` suppresses ENOENT but not EPERM/EACCES).
+    // The flags used to be set AFTER that call: a throw left `created`
+    // true, the outer catch overwrote the breach, and the phase went on
+    // scoring the tree the re-read had just condemned. The armer's payload
+    // builds the throw — a mode-555 dir whose child rmSync cannot unlink —
+    // beside planting the key the re-read names.
+    const { wt, base } = scaffoldModifiedPr();
+    write('.gitattributes', '*.ts filter=armer\n');
+    commitAll('attributes');
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    git(wt, 'checkout', '-q', '--detach', head);
+    const probeTree = probeWorktreePath(wt);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        `git config filter.evil.smudge true; mkdir -p ${probeTree}/LOCK; touch ${probeTree}/LOCK/f; chmod 555 ${probeTree}/LOCK; cat`,
+      ],
+      { cwd: repo },
+    );
+
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      // The LOCK dir outlives the phase (both discards fail on it); give
+      // the afterEach its permissions back.
+      chmodSync(join(probeTree, 'LOCK'), 0o755);
+    }
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        verdict: 'inconclusive',
+        reason: 'not-run',
+      }),
+    ]);
+    expect(out.probed[0].detail).toContain('may have EXECUTED');
+    expect(out.probed[0].detail).toContain('filter.evil.smudge');
+  });
+
+  it('pairs the hunk reverse-apply — a plant arming between the restore and the apply never scores', async () => {
+    // `git apply --reverse` is not a checkout, but it EXECUTES content
+    // filters — both clean and smudge (probe, git 2.39: both fired on a
+    // reverse apply over a filtered path) — and it used to run unscreened:
+    // the one live filter-executing verb of the probe phase without a
+    // refusal before it or a re-read after it. The deterministic armer is
+    // a GLOBAL filter (the screen's disclosed limit), gated on the content
+    // only the reverse-apply writes — the base version — and passing
+    // content through untouched: every earlier checkout writes head
+    // content and nothing arms; the apply writes base, the armer fires,
+    // and the post-apply re-read must report the hunk breached, never
+    // scored killed/survived over the execution.
+    const { wt, base } = scaffoldModifiedPr();
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        `content=$(cat); case $content in *'f = () => 1'*) git config filter.evil.smudge true ;; esac; printf '%s\n' "$content"`,
+      ],
+      { cwd: repo },
+    );
+    const attrs = git(wt, 'rev-parse', '--git-path', 'info/attributes').trim();
+    appendFileSync(attrs, '*.ts filter=armer\n');
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.hunks.probed).toEqual([
+      expect.objectContaining({ verdict: 'inconclusive' }),
+    ]);
+    expect(out.hunks.probed[0].detail).toContain('may have EXECUTED');
+    expect(out.hunks.probed[0].detail).toContain('filter.evil.smudge');
+  });
+
   // The reap is POSIX-only by construction: on Windows the group kill is
   // a post-mortem `taskkill /pid <root> /T /F`, and `spawnSync` returns
   // only after the suite root has EXITED — taskkill walks the tree of a
@@ -2355,6 +2452,58 @@ process.stdout.write(JSON.stringify({
       expect.objectContaining({ verdict: 'inconclusive' }),
     ]);
     expect(out.probed[0].detail).toContain('relinked during the revert screen');
+  });
+
+  it('re-checks the probe tree identity after the revert screen — a .git swap during the screen never reaches the checkout', async () => {
+    // The revert checkout resolves through the probe tree's OWN `.git`
+    // pointer, so a pointer swapped DURING the screen's spawns writes the
+    // base content into whichever repository it names. The leaf re-checks
+    // catch symlinks; the IDENTITY re-read below the screen catches a
+    // gitfile swap — the screen's baseline recorded the repository it
+    // cleared, and the re-read refuses when the pointer no longer names
+    // it. The victim here is a clone of the repo: it holds the same
+    // objects, so an unrefused `checkout base -- <file>` against it
+    // succeeds and rewrites ITS copy.
+    const { wt, base } = scaffoldModifiedPr();
+    const probeTree = probeWorktreePath(wt);
+    const other = join(repo, 'other-repo');
+    execFileSync('git', ['clone', '-q', repo, other]);
+    expect(readFileSync(join(other, 'packages/lib/src/f.ts'), 'utf8')).toBe(
+      'export const f = () => 2;\n',
+    );
+    screenOverride.fn = (...args) => {
+      if (args[1] !== 'the revert checkout') {
+        return screenOverride.real!(...args);
+      }
+      screenOverride.fn = null; // one-shot
+      const result = screenOverride.real!(...args); // baseline captured
+      writeFileSync(
+        join(probeTree, '.git'),
+        `gitdir: ${join(other, '.git')}\n`,
+      );
+      return result;
+    };
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      screenOverride.fn = null;
+    }
+
+    // The revert checkout never landed in the other repository: its copy
+    // still holds the PR's own content, not the base content.
+    expect(readFileSync(join(other, 'packages/lib/src/f.ts'), 'utf8')).toBe(
+      'export const f = () => 2;\n',
+    );
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({ verdict: 'inconclusive' }),
+    ]);
+    expect(out.probed[0].detail).toContain('identity moved');
   });
 });
 

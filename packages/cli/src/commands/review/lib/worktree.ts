@@ -594,7 +594,9 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
  * Every checkout this pipeline runs executes these — fetch-pr's creation of
  * the review worktree, the base tree's creation, the scratch tree's reset
  * and rebuild, the probe tree's creation, its per-run restores and the
- * revert phase's checkout. Hooks are not this screen's subject: every one
+ * revert phase's checkout — and the hunk probes' `git apply --reverse`
+ * runs them the same way (clean AND smudge, live-measured), so it carries
+ * the same refusal/re-read pair. Hooks are not this screen's subject: every one
  * of those checkouts runs with the {@link INERT_GIT_ARGS} overrides. The
  * planting surface is two plain writes a probe can make into the COMMON dir
  * this command's report calls shared: `git config filter.evil.smudge CMD`
@@ -717,9 +719,13 @@ function resolveIncludeTarget(fromFile: string, value: string): string | null {
 
 export function localFilterCommands(
   worktree: string,
-  scannedFiles?: Map<string, { mtimeMs: number; size: number }>,
+  scannedFiles?: Map<string, BaselinedConfigFile>,
 ): LocalFilterScreen {
   const screen: LocalFilterScreen = { keys: [], unclearable: [] };
+  // One wording for every enumeration the screen cannot clear (R7-1's
+  // fail-open was two bare catches reading EACCES as "nothing registered").
+  const cannotList = (dir: string, err: unknown): string =>
+    `${dir}: cannot list (${(err as NodeJS.ErrnoException).code ?? 'unknown'})`;
   // One single-flag spawn per path, not one two-flag spawn split on
   // newlines: a repository path legally carries a newline (the user's own
   // clone location), and the split shredded such a path into fragments —
@@ -807,8 +813,16 @@ export function localFilterCommands(
         // checkout executes the filters planted there too.
         submoduleConfigs(join(modulesDir, mod, 'modules'));
       }
-    } catch {
-      // No (further) submodules registered here.
+    } catch (err) {
+      // ENOENT genuinely means no (further) submodules are registered here.
+      // Any other failure is an enumeration this screen cannot clear: an
+      // execute-only (`--x`) directory defeats readdirSync, which needs read,
+      // while git's path-based reads through it still succeed — they need
+      // only execute — so fail-closed like an unreadable candidate, never
+      // fail-open to "nothing registered".
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        screen.unclearable.push(cannotList(modulesDir, err));
+      }
     }
   };
   try {
@@ -817,8 +831,15 @@ export function localFilterCommands(
       candidates.push(join(admin, 'config.worktree'));
       submoduleConfigs(join(admin, 'modules'));
     }
-  } catch {
-    // No linked worktrees registered: the candidates above are all of it.
+  } catch (err) {
+    // ENOENT genuinely means no linked worktrees are registered: the
+    // candidates above are all of it. Any other failure — EACCES from an
+    // execute-only (`--x`) directory, which defeats readdirSync while git's
+    // path-based reads through it still succeed — is an enumeration this
+    // screen cannot clear, refused like a plant rather than read as clean.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      screen.unclearable.push(cannotList(join(common, 'worktrees'), err));
+    }
   }
   submoduleConfigs(join(common, 'modules'));
   const includeKey = /^(include\.path|includeif\..*\.path)$/;
@@ -847,16 +868,47 @@ export function localFilterCommands(
     const at = seen.get(dedupe);
     if (at !== undefined && at <= depth) return;
     seen.set(dedupe, depth);
-    if (!existsSync(file)) return;
+    if (!existsSync(file)) {
+      // Record the ABSENCE, not merely skip it: git reads these files BY
+      // PATH whenever they exist, so a candidate that APPEARS inside the
+      // guarded window — a per-worktree `config.worktree` or an include
+      // target planted after the screen — is executed by the checkout the
+      // screen just authorised, and the paired re-read must see the
+      // appearance. An unrecorded absence left both its halves blind.
+      if (scannedFiles !== undefined) {
+        scannedFiles.set(file, {
+          mtimeMs: 0,
+          size: 0,
+          ctimeMs: 0,
+          vanished: true,
+        });
+      }
+      return;
+    }
     if (scannedFiles !== undefined) {
       try {
         const st = statSync(file);
-        scannedFiles.set(file, { mtimeMs: st.mtimeMs, size: st.size });
+        scannedFiles.set(file, {
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          // ctime is the trace a payload that restores content and mtime
+          // byte-exact still leaves: every write to the file advances it,
+          // and no `utimensat`/`touch -d` restore can set it back
+          // (live-measured both halves).
+          ctimeMs: st.ctimeMs,
+        });
       } catch {
         // Vanished between existsSync and stat — record the absence so
         // the baseline comparison reads a reappearance as the change it
-        // is. `-1` is the sentinel; no real stat produces it.
-        scannedFiles.set(file, { mtimeMs: -1, size: -1 });
+        // is. The `vanished` flag is the sentinel: a real stat can carry
+        // ANY numeric mtime — `utimesSync(file, new Date(-1))` produces
+        // exactly `-1` (live-measured) — so no numeric value is one.
+        scannedFiles.set(file, {
+          mtimeMs: 0,
+          size: 0,
+          ctimeMs: 0,
+          vanished: true,
+        });
       }
     }
     // `-z` records are `key\nvalue\0`: subsection names legally carry
@@ -987,17 +1039,83 @@ function localFilterFindingText(
 }
 
 /**
- * The screened config files as the screen saw them — every candidate and
- * include target it READ, with its mtime and size. Captured beside a
- * clean screen and handed to the paired post-checkout re-read
- * ({@link localFilterBreach}): a plant that erases itself the instant
- * its smudge fires leaves no key for the re-read to find — the unset
- * lands in the config before the re-read starts — but it cannot leave
- * the file it wrote unchanged.
+ * One baselined candidate file as the screen saw it.
+ */
+export interface BaselinedConfigFile {
+  mtimeMs: number;
+  size: number;
+  /**
+   * ctime is baselined beside mtime because a fired plant with arbitrary
+   * shell restores content and mtime byte-exact (`truncate` + `touch -d`)
+   * while ctime advances on every write and `utimensat` cannot set it
+   * back — ctime is the trace that restore cannot reach (live-measured).
+   */
+  ctimeMs: number;
+  /**
+   * True when the screen saw the candidate ABSENT. The explicit flag is
+   * the sentinel: a real stat can carry any numeric mtime —
+   * `utimesSync(file, new Date(-1))` produces exactly `-1`
+   * (live-measured), which the old `-1` sentinel collided with.
+   */
+  vanished?: true;
+}
+
+/**
+ * The screened surface as the screen saw it — every candidate and include
+ * target it READ or saw absent, and the repository it all resolved to.
+ * Captured beside a clean screen and handed to the paired post-checkout
+ * re-read ({@link localFilterBreach}): a plant that erases itself the
+ * instant its smudge fires leaves no key for the re-read to find — the
+ * unset lands in the config before the re-read starts — but it cannot
+ * leave the file it wrote unchanged, because every write advances ctime
+ * and no restore sets it back. What this does NOT vouch for is named in
+ * {@link localFilterCommands}: a filter defined only in the GLOBAL config
+ * is the user's own contract and never a candidate; a file that is not a
+ * candidate at either read leaves nothing to compare; and a per-worktree
+ * `config.worktree` that APPEARS and VANISHES inside the guarded window
+ * is indistinguishable at re-read time from the checkout's own atomic
+ * admin writes (`HEAD.lock`/`index.lock` renames advance the same dir
+ * mtime the churn would), so it is a disclosed residual rather than a
+ * wedge-prone comparison.
  */
 export interface LocalFilterBaseline {
-  /** Each file the screen read, keyed by the path it was read at. */
-  files: Map<string, { mtimeMs: number; size: number }>;
+  /** Each candidate the screen saw, keyed by the path it was seen at. */
+  files: Map<string, BaselinedConfigFile>;
+  /**
+   * The realpath of the common dir the screen resolved, so the paired
+   * re-read can refuse when it re-discovers a DIFFERENT repository — a
+   * swapped `.git` pointer redirects the checkout the screen authorised
+   * while every read on the original answers clean.
+   */
+  commonDirRealpath: string;
+}
+
+/**
+ * The realpath of the common dir `worktree` resolves to, or null when
+ * discovery itself fails. The identity the screen/breach pair pins
+ * ({@link LocalFilterBaseline}): every read below a swapped `.git`
+ * pointer answers from the repository it names, so the reads alone can
+ * never notice the swap — only a recorded identity can.
+ */
+function discoverCommonDirRealpath(worktree: string): string | null {
+  const r = spawnSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      timeout: GIT_TIMEOUT_MS,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    return null;
+  }
+  try {
+    return realpathSync(resolve(worktree, r.stdout.replace(/\n$/, '')));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1017,13 +1135,31 @@ export function localFilterRefusal(
   context: string,
   capture?: { baseline: LocalFilterBaseline | null },
 ): string | null {
-  const scanned = new Map<string, { mtimeMs: number; size: number }>();
+  const scanned = new Map<string, BaselinedConfigFile>();
   const screen = localFilterCommands(
     worktree,
     capture !== undefined ? scanned : undefined,
   );
   if (screen.keys.length === 0 && screen.unclearable.length === 0) {
-    if (capture !== undefined) capture.baseline = { files: scanned };
+    if (capture !== undefined) {
+      const commonDirRealpath = discoverCommonDirRealpath(worktree);
+      if (commonDirRealpath === null) {
+        // Fail CLOSED the way the screen's own discovery failure does: the
+        // identity the paired re-read compares against is not capturable,
+        // and a baseline without one would read every later swap as clean.
+        return localFilterFindingText(
+          {
+            keys: [],
+            unclearable: [
+              `${worktree}: cannot resolve the repository's common dir`,
+            ],
+          },
+          context,
+          'would EXECUTE',
+        );
+      }
+      capture.baseline = { files: scanned, commonDirRealpath };
+    }
     return null;
   }
   return localFilterFindingText(screen, context, 'would EXECUTE');
@@ -1035,18 +1171,36 @@ export function localFilterRefusal(
  * reap did not reach (a setsid'd descendant, a concurrent shard's suite)
  * can plant between the screen's read and the checkout's config read, and
  * the checkout executes the plant while both reads this function's caller
- * makes on its own saw nothing. A key that APPEARED is reported as a
- * breach: detection, not prevention — the checkout already ran, and the run
- * must be reported breached rather than clean. Takes the baseline the
- * paired screen captured ({@link localFilterRefusal}), when one was: a
- * self-erasing plant leaves no key, and only the changed-file half sees
- * it. Null is the clean answer.
+ * makes on its own saw nothing. Four halves, any of which is a breach: a
+ * key that APPEARED; a baselined file or directory that CHANGED — the
+ * trace a self-erasing plant leaves, because every write advances ctime
+ * and no restore sets it back; a candidate the screen saw ABSENT that
+ * appeared; and a repository IDENTITY that differs from the one the
+ * paired screen resolved — every other half reads whichever repository
+ * discovery resolves NOW, so a swapped `.git` pointer answers clean from
+ * the attacker's repo unless the recorded identity is compared first.
+ * (A directory-mtime half was tried and removed: the checkout's OWN
+ * atomic admin writes — `HEAD.lock`/`index.lock` renames — advance the
+ * same mtime a plant's entry churn would, live-measured, so the
+ * comparison wedged healthy resets.) Detection, not prevention — the
+ * checkout already ran, and the run must be reported breached rather
+ * than clean. Null is the clean answer.
  */
 export function localFilterBreach(
   worktree: string,
   context: string,
   baseline?: LocalFilterBaseline | null,
 ): string | null {
+  if (baseline !== null && baseline !== undefined) {
+    const nowCommon = discoverCommonDirRealpath(worktree);
+    if (nowCommon === null || nowCommon !== baseline.commonDirRealpath) {
+      return localFilterIdentityText(
+        context,
+        baseline.commonDirRealpath,
+        nowCommon,
+      );
+    }
+  }
   const screen = localFilterCommands(worktree);
   const changed = changedScreenedFiles(baseline);
   if (
@@ -1060,12 +1214,54 @@ export function localFilterBreach(
 }
 
 /**
+ * The breach wording for an identity mismatch — kept apart from
+ * {@link localFilterFindingText} because the remediation is different:
+ * nothing was planted in the files the screen cleared; the tree's pointer
+ * itself moved, and the reads on the ORIGINAL repository all answer clean.
+ */
+function localFilterIdentityText(
+  context: string,
+  screened: string,
+  now: string | null,
+): string {
+  return (
+    `the paired screen cleared ${inertPath(screened)}, but this re-read ` +
+    (now === null
+      ? 'cannot resolve the repository at all'
+      : `resolves ${inertPath(now)}`) +
+    ` — a swapped .git pointer redirected ${context}, which may have ` +
+    'EXECUTED a plant that every read on the screened repository answers ' +
+    "clean for. Check what the tree's .git pointer names, and the " +
+    'common dir behind it, before running any further checkout.'
+  );
+}
+
+/**
+ * Whether the repository `worktree` resolves to MOVED since `baseline`
+ * captured it — the narrow re-check the guard sites run immediately
+ * before their checkout, AFTER the screen: the screen's own spawns are
+ * the window a swap lands in, and this narrows it back to one syscall,
+ * the same trade the leaf re-reads at those sites make.
+ */
+export function localFilterIdentityMoved(
+  worktree: string,
+  baseline: LocalFilterBaseline | null | undefined,
+): boolean {
+  if (baseline === null || baseline === undefined) return false;
+  const now = discoverCommonDirRealpath(worktree);
+  return now === null || now !== baseline.commonDirRealpath;
+}
+
+/**
  * Which of the files the screen read changed after it read them — the
  * baseline half of the paired re-read. A self-erasing plant (its command
  * unsets the key the instant the smudge fires, and the unset lands before
  * this re-read starts) leaves no key to find, but it cannot leave the
- * file it wrote unchanged. Absence counts as a change: the screen cleared
- * a file that is gone.
+ * file it wrote unchanged: every write advances ctime, and no restore
+ * sets it back. Absence counts as a change: the screen cleared a file
+ * that is gone. APPEARANCE counts as one too: git reads a candidate by
+ * path whenever it exists, so one the screen saw absent and the checkout
+ * saw present is the plant it executed, whatever its state at re-read.
  */
 function changedScreenedFiles(
   baseline: LocalFilterBaseline | null | undefined,
@@ -1075,13 +1271,19 @@ function changedScreenedFiles(
   for (const [file, was] of baseline.files) {
     try {
       const st = statSync(file);
-      if (st.mtimeMs !== was.mtimeMs || st.size !== was.size) {
+      if (was.vanished === true) {
+        changed.push(file);
+      } else if (
+        st.mtimeMs !== was.mtimeMs ||
+        st.size !== was.size ||
+        st.ctimeMs !== was.ctimeMs
+      ) {
         changed.push(file);
       }
     } catch {
-      // `-1` was the screen's own "vanished mid-scan" record; absent on
-      // BOTH sides is nothing happening.
-      if (was.mtimeMs !== -1) changed.push(file);
+      // Absent on BOTH sides is nothing happening; a baselined file that
+      // is gone is a change.
+      if (was.vanished !== true) changed.push(file);
     }
   }
   return changed;

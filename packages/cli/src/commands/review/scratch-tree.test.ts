@@ -26,18 +26,26 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 // act inside the window is from inside the screen call itself, so the
 // screen is mockable here: default behaviour is the REAL screen (every
 // test that does not arm this override runs against it), and a test arms
-// `screenOverride.fn` for one call.
+// `screenOverride.fn` for one call. The wrapper forwards EVERY argument —
+// a seam that dropped the capture object would silently null every
+// baseline and let the baseline-plumbing regressions ship green.
 const screenOverride = vi.hoisted(() => ({
-  fn: null as null | ((worktree: string, context: string) => string | null),
+  fn: null as null | ((...args: unknown[]) => string | null),
+  real: null as null | ((...args: unknown[]) => string | null),
 }));
 vi.mock('./lib/worktree.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  screenOverride.real = actual.localFilterRefusal as (
+    ...args: unknown[]
+  ) => string | null;
   return {
     ...actual,
-    localFilterRefusal: (worktree: string, context: string) =>
+    localFilterRefusal: (
+      ...args: Parameters<typeof actual.localFilterRefusal>
+    ) =>
       screenOverride.fn !== null
-        ? screenOverride.fn(worktree, context)
-        : actual.localFilterRefusal(worktree, context),
+        ? screenOverride.fn(...args)
+        : actual.localFilterRefusal(...args),
   };
 });
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -229,6 +237,45 @@ describe('runScratchTree', () => {
     expect(
       existsSync(scratchWorktreePath(worktree, 'shard--rebuild--breach')),
     ).toBe(false);
+  });
+
+  it('reports the reset breached when the checkout THREW after executing a self-erasing plant', () => {
+    // A checkout can throw AFTER executing a plant: the smudge fires,
+    // leaves its trace, and kills git — the spawn dies on the signal and
+    // `gitOut` throws. The reset's catch used to answer `{ ok: false }`
+    // without the paired re-read, and the same call's discard-and-rebuild
+    // then laundered the execution: the rebuild screened clean (the plant
+    // had erased itself) and certified a fresh tree over the run. The
+    // GLOBAL killer is the screen's disclosed limit — never a candidate —
+    // so the pre-read clears it; the trace it leaves is the set+unset in
+    // the common config, which restores the content but not the clock.
+    const first = run();
+    expect(first.available).toBe(true);
+    const marker = join(repo, 'PWNED-kill');
+    writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=killer\n');
+    git(worktree, 'add', '-A');
+    git(worktree, 'commit', '-qm', 'attributes');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.killer.smudge',
+        `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${marker}; kill -9 $PPID`,
+      ],
+      { cwd: worktree },
+    );
+    // Residue, so the reset's checkout rewrites a tracked file and the
+    // smudge fires.
+    writeFileSync(join(first.path!, 'a.ts'), 'prior-run residue\n');
+
+    const r = run();
+
+    // The plant EXECUTED (the marker), and the run is breached — not a
+    // create failure, which is what the laundered path reported.
+    expect(existsSync(marker)).toBe(true);
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('may have EXECUTED');
   });
 
   it('re-reads the leaf AFTER the screen — a swap during the screen never reaches the checkout', () => {

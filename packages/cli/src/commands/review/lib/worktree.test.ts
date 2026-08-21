@@ -22,7 +22,9 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -33,6 +35,7 @@ import {
   exposeDependencies,
   localFilterBreach,
   localFilterCommands,
+  localFilterIdentityMoved,
   localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -1699,6 +1702,204 @@ describe('localFilterCommands', () => {
     expect(breach).not.toBeNull();
     expect(breach!).toContain('may have EXECUTED');
     expect(breach!).toContain('changed');
+  });
+
+  it('refuses when a config directory cannot be enumerated — EACCES is not "nothing registered"', () => {
+    // The screen discovers candidates by listing directories; a catch that
+    // read EVERY enumeration failure as "no worktrees here" failed OPEN:
+    // an execute-only (`--x`) directory defeats readdirSync (needs read)
+    // while git's path-based reads through it still succeed (need only
+    // execute) — the plant inside screened clean and fired on the checkout
+    // (probe, git 2.39: readdir EACCES, path read and stat through the
+    // mode-100 dir both fine).
+    const worktreesDir = join(repo, '.git', 'worktrees');
+    chmodSync(worktreesDir, 0o100);
+    try {
+      const got = localFilterCommands(tree);
+      expect(got.keys).toEqual([]);
+      expect(got.unclearable).toHaveLength(1);
+      expect(got.unclearable[0]).toContain(worktreesDir);
+      expect(got.unclearable[0]).toContain('cannot list');
+      expect(localFilterRefusal(tree, 'a guarded checkout')).not.toBeNull();
+    } finally {
+      chmodSync(worktreesDir, 0o755);
+    }
+  });
+
+  it('refuses when the modules dir cannot be enumerated, and still clears an absent one', () => {
+    // The twin catch under the submodule walk gets the same split: only
+    // ENOENT genuinely means "no (further) submodules".
+    const modulesDir = join(repo, '.git', 'modules');
+    mkdirSync(modulesDir);
+    chmodSync(modulesDir, 0o100);
+    try {
+      const got = localFilterCommands(tree);
+      expect(got.keys).toEqual([]);
+      expect(got.unclearable).toHaveLength(1);
+      expect(got.unclearable[0]).toContain(modulesDir);
+    } finally {
+      chmodSync(modulesDir, 0o755);
+    }
+    // ENOENT stays the clean answer: nothing registered is nothing to
+    // clear (rmSync the dir, so the next line is the missing shape).
+    rmSync(modulesDir, { recursive: true, force: true });
+    expect(localFilterCommands(tree)).toEqual({ keys: [], unclearable: [] });
+  });
+
+  it('refuses on a non-directory where a config directory should be', () => {
+    // ENOTDIR is the shape that needs no permissions at all: a file where
+    // `worktrees/` should be. A repository with no linked worktrees keeps
+    // a working main checkout, so this screens the MAIN path.
+    const other = mkdtempSync(join(tmpdir(), 'qwen-filter-notdir-'));
+    try {
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: other, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(other, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      writeFileSync(join(other, '.git', 'worktrees'), 'a file, not a dir\n');
+      const got = localFilterCommands(other);
+      expect(got.keys).toEqual([]);
+      expect(got.unclearable).toHaveLength(1);
+      expect(got.unclearable[0]).toContain('cannot list');
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  // GNU `touch -d @<epoch>.<ns>` is what restores a plant's mtime
+  // BYTE-EXACT: `utimesSync` cannot — a Date truncates sub-ms, and a
+  // float seconds lands ~100 ns off (both measured) — so the witness
+  // needs the real binary, which the Windows/macOS runners do not carry.
+  it.skipIf(process.platform !== 'linux')(
+    'the paired re-read catches a plant that restores content and mtime byte-exact',
+    () => {
+      // The changed-file half used to compare mtime + size only: a fired
+      // plant with arbitrary shell writes its change back (`truncate` +
+      // `touch -d`) and leaves both EXACT — clean over the execution
+      // (probe: mtime/size equal after the restore, ctime still advanced;
+      // `utimensat` cannot set ctime, and a utimes call advances it).
+      const f = join(repo, '.git', 'config.worktree');
+      writeFileSync(f, 'AB\n');
+      const captured: { baseline: LocalFilterBaseline | null } = {
+        baseline: null,
+      };
+      expect(localFilterRefusal(tree, 'a guarded checkout', captured)).toBe(
+        null,
+      );
+      const was = statSync(f, { bigint: true });
+      writeFileSync(f, 'XY\n'); // same size, different bytes
+      const s = was.mtimeNs / 1000000000n;
+      const ns = (was.mtimeNs % 1000000000n).toString().padStart(9, '0');
+      execFileSync('touch', ['-d', `@${s}.${ns}`, f]);
+      // Compare the ns values: the bigint stat's `mtimeMs` truncates the
+      // fraction, so it is not the byte-exact the plant restores.
+      expect(statSync(f, { bigint: true }).mtimeNs).toBe(was.mtimeNs);
+      const breach = localFilterBreach(
+        tree,
+        'the guarded checkout',
+        captured.baseline,
+      );
+      expect(breach).not.toBeNull();
+      expect(breach!).toContain('may have EXECUTED');
+    },
+  );
+
+  it('a baseline at mtime -1 is a real stat, not the vanish sentinel', () => {
+    // The old `-1` sentinel collided with a real stat:
+    // `utimesSync(file, new Date(-1))` produces exactly `-1`
+    // (live-measured), and git reads a pre-epoch-mtime config normally —
+    // so a file baselined at -1 and DELETED after the plant fired read
+    // as "nothing happened". The vanished flag is the sentinel now.
+    const f = join(repo, '.git', 'config.worktree');
+    writeFileSync(f, '[core]\n');
+    utimesSync(f, new Date(-1), new Date(-1));
+    expect(statSync(f).mtimeMs).toBe(-1);
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
+    expect(localFilterRefusal(tree, 'a guarded checkout', captured)).toBe(null);
+    rmSync(f);
+    const breach = localFilterBreach(
+      tree,
+      'the guarded checkout',
+      captured.baseline,
+    );
+    expect(breach).not.toBeNull();
+    expect(breach!).toContain('changed');
+    // Name the SENTINEL file itself: under the old `-1` logic an
+    // unrelated vanished entry can supply a spurious "changed", while
+    // the -1-mtime file sails through.
+    expect(breach!).toContain(f);
+  });
+
+  it('the paired re-read catches a candidate that APPEARED inside the window', () => {
+    // The screen used to skip candidates absent at screen time before
+    // recording the baseline, so a config.worktree CREATED after the
+    // screen, EXECUTED by the guarded checkout, and still standing at the
+    // re-read was invisible to both halves. Absence is baselined now, and
+    // the appearance is the change — whatever the file holds (a benign
+    // `[core]` here: the appearing itself is what the checkout saw).
+    const f = join(repo, '.git', 'config.worktree');
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
+    expect(localFilterRefusal(tree, 'a guarded checkout', captured)).toBe(null);
+    writeFileSync(f, '[core]\n');
+    const breach = localFilterBreach(
+      tree,
+      'the guarded checkout',
+      captured.baseline,
+    );
+    expect(breach).not.toBeNull();
+    expect(breach!).toContain('changed');
+    // And absent on BOTH sides is still nothing happening.
+    rmSync(f);
+    expect(
+      localFilterBreach(tree, 'the guarded checkout', captured.baseline),
+    ).toBeNull();
+  });
+
+  it('the paired re-read catches a swapped .git pointer — identity is pinned', () => {
+    // Every half below the re-read resolves through whichever repository
+    // the `.git` pointer names NOW, so a swap redirects the authorised
+    // checkout into an armed repository while every read answers clean —
+    // unless the baseline's identity is compared first.
+    const other = mkdtempSync(join(tmpdir(), 'qwen-filter-swap-'));
+    try {
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: other, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(other, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      const captured: { baseline: LocalFilterBaseline | null } = {
+        baseline: null,
+      };
+      expect(localFilterRefusal(tree, 'a guarded checkout', captured)).toBe(
+        null,
+      );
+      expect(localFilterIdentityMoved(tree, captured.baseline)).toBe(false);
+      writeFileSync(join(tree, '.git'), `gitdir: ${join(other, '.git')}\n`);
+      expect(localFilterIdentityMoved(tree, captured.baseline)).toBe(true);
+      const breach = localFilterBreach(
+        tree,
+        'the guarded checkout',
+        captured.baseline,
+      );
+      expect(breach).not.toBeNull();
+      expect(breach!).toContain('swapped .git pointer');
+      // Without the baseline there is nothing to compare — the caller
+      // never paired a screen, so the identity half stays quiet.
+      expect(localFilterIdentityMoved(tree, null)).toBe(false);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 
   it('refuses on includeIf directives the screening tree cannot evaluate', () => {

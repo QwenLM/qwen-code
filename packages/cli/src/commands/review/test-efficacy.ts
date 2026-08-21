@@ -71,6 +71,7 @@ import {
   exposeDependencies,
   INERT_GIT_ARGS,
   localFilterBreach,
+  localFilterIdentityMoved,
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -2121,9 +2122,29 @@ export function runOneHunkProbe(
       detail: `the probe tree does not hold ${hunk.file}: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
+  // The screen pair for the apply itself: `git apply --reverse` is not a
+  // checkout, but it EXECUTES content filters — both clean and smudge,
+  // live-measured — and the window between the restore's post-checkout
+  // re-read above and this spawn is exactly the one the restore's pair
+  // does not cover. A toggler the reap did not reach plants inside it,
+  // the apply executes the plant, and without this pair the hunk scores
+  // killed/survived over the execution.
+  const captured: { baseline: LocalFilterBaseline | null } = {
+    baseline: null,
+  };
+  const applyRefusal = localFilterRefusal(
+    probeTree,
+    'the hunk reverse-apply',
+    captured,
+  );
+  if (applyRefusal !== null) {
+    return { ...meta, verdict: 'inconclusive', detail: applyRefusal };
+  }
   // Re-check at the write itself: the guard above and the apply below are a
   // check-then-use pair, and the threat this guard exists for has a shell
-  // inside these trees and picks its moment.
+  // inside these trees and picks its moment. Sitting BELOW the screen,
+  // not above it, so the screen's spawns do not re-widen the window it
+  // narrows.
   if (probeTargetEscapes(probeTree, hunk.file)) {
     return {
       ...meta,
@@ -2146,6 +2167,22 @@ export function runOneHunkProbe(
       verdict: 'inconclusive',
       detail: `the hunk could not be reverse-applied, so nothing was neutralised: ${(applied.stderr ?? applied.error?.message ?? '').toString().trim()}`,
     };
+  }
+  // Re-read the moment the apply completes, paired with the screen above:
+  // a plant landing between that read and the apply's own config read is
+  // executed by the apply, and the run must be reported breached — never
+  // scored — over the execution.
+  const applyBreach = localFilterBreach(
+    probeTree,
+    'the hunk reverse-apply',
+    captured.baseline,
+  );
+  if (applyBreach !== null) {
+    // Put the neutralised file back before reporting: the tree must not
+    // carry a reverted hunk into the next probe because this one stopped.
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, original, 'utf8');
+    return { ...meta, verdict: 'inconclusive', detail: applyBreach };
   }
   // Re-validation of the restore write must be able to STOP the phase — a
   // throw from inside the finally itself is not safe — so the attempt reports
@@ -2675,9 +2712,22 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           captured.baseline,
         );
         if (breach !== null) {
-          discardWorktree(worktree, probeTree);
-          createDetail = breach;
+          // The flags BEFORE the rollback: `discardWorktree`'s rmSync can
+          // still throw (`force` suppresses ENOENT but not EPERM/EBUSY),
+          // and a throw before them left `created` true — the outer catch
+          // then overwrote the breach, no inconclusive records were
+          // pushed, and the phase went on scoring the tree this re-read
+          // just condemned. The revert phase's finally wraps the same
+          // call for the same reason.
           created = false;
+          createDetail = breach;
+          try {
+            discardWorktree(worktree, probeTree);
+          } catch {
+            // The rollback failed; the breach detail already records why
+            // the phase stopped, and the next call's pre-sweep retakes
+            // the tree.
+          }
         }
       }
     } catch (e) {
@@ -3029,6 +3079,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             captured,
           );
           if (refusal !== null) throw new Error(refusal);
+          // Re-read the IDENTITY the screen resolved, below the screen for
+          // the same reason the escape re-check sits there: a pointer
+          // swapped during the screen's spawns aims this checkout at
+          // whatever it names.
+          if (localFilterIdentityMoved(probeTree, captured.baseline)) {
+            throw new Error(
+              "the probe tree's repository identity moved during the revert screen",
+            );
+          }
           // Re-run the root escape check AFTER the screen: the entry check
           // above narrowed the swap window to one syscall, and the screen's
           // spawns re-widened it to their full runtime — a root replaced

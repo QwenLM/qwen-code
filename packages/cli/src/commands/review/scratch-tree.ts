@@ -256,6 +256,12 @@ function resetScratchTree(
   } catch {
     return { ok: false };
   }
+  // Hoisted above the try: the catch below runs the paired re-read when a
+  // checkout THREW, and a re-read without the baseline the screen captured
+  // is blind to every self-erasing shape.
+  const captured: { baseline: LocalFilterBaseline | null } = {
+    baseline: null,
+  };
   try {
     // Screen DIRECTLY beside the checkout it guards, not at the phase's
     // entry: the screen is a point-in-time config read, and every spawn
@@ -269,9 +275,6 @@ function resetScratchTree(
     // post-checkout re-read below; closing the window itself takes a lock
     // shared with every suite run, which this round deliberately does not
     // add.
-    const captured: { baseline: LocalFilterBaseline | null } = {
-      baseline: null,
-    };
     if (
       localFilterRefusal(worktree, 'the reset this command runs', captured) !==
       null
@@ -336,7 +339,21 @@ function resetScratchTree(
       : { ok: false };
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
-    // discards and rebuilds it rather than handing back a half-known state.
+    // discards and rebuilds it rather than handing back a half-known
+    // state. But a checkout that THREW may still have executed a plant
+    // first — a smudge that kills git mid-checkout fires and only THEN
+    // makes the spawn throw — and the caller's same-call discard-and-
+    // rebuild would launder the execution into a clean certification: the
+    // next screen reads clean, the plant having erased itself. Attribute
+    // it before that, while the baseline the screen captured still stands.
+    if (captured.baseline !== null) {
+      const breach = localFilterBreach(
+        worktree,
+        'the reset this command ran',
+        captured.baseline,
+      );
+      if (breach !== null) return { ok: false, breach };
+    }
     return { ok: false };
   }
 }
@@ -533,8 +550,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // the screen's read and the add's own config read, and the add's
     // initial checkout executes the plant while both reads see nothing. A
     // key that APPEARED is reported as a breach and the just-added tree
-    // rolled back — never certified clean with a planted checkout behind
-    // it.
+    // rolled back — never certified clean with a REPO-LOCAL plant behind
+    // it. A filter defined only in the GLOBAL config is the screen's
+    // disclosed limit and leaves no repo-local trace the re-read can
+    // see.
     const breach = localFilterBreach(
       worktree,
       'the rebuild this command ran',

@@ -268,6 +268,12 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // The parameter re-narrows: TS narrowing does not cross function scopes.
   function buildBaseTree(baseSha: string): BaseTreeReport {
     let sweep: SweepResult | undefined;
+    // Hoisted above the try: the catch below runs the paired re-read when
+    // the add THREW, and a re-read without the baseline the screen
+    // captured is blind to every self-erasing shape.
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
     try {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
@@ -280,9 +286,6 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // destroyed and the add never reads, and a screen that ran first
       // refused on it forever: every retry re-screened the doomed state and
       // wedged the repository out of every review (measured live).
-      const captured: { baseline: LocalFilterBaseline | null } = {
-        baseline: null,
-      };
       const refusal = localFilterRefusal(
         worktree,
         'the worktree add this command runs',
@@ -298,8 +301,10 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // A key that APPEARED — or a screened file that CHANGED, the trace
       // a self-erasing plant leaves when its unset lands before this
       // re-read — is reported as a breach and the just-added tree rolled
-      // back: the run must be reported breached, never certified clean
-      // with a planted checkout behind it.
+      // back: the run is never certified clean with a REPO-LOCAL plant
+      // behind it. A filter defined only in the GLOBAL config is the
+      // screen's disclosed limit and leaves no repo-local trace the
+      // re-read can see.
       const breach = localFilterBreach(
         worktree,
         'the worktree add this command ran',
@@ -310,6 +315,20 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         return unavailable(breach);
       }
     } catch (e) {
+      // A checkout that THREW may still have executed a plant first — a
+      // smudge that kills git mid-checkout fires and only THEN makes the
+      // spawn throw — and the failure detail below would bury the
+      // execution under an add error. Attribute it while the baseline the
+      // screen captured still stands; the next call's screen may read
+      // clean, the plant having erased itself.
+      if (captured.baseline !== null) {
+        const breach = localFilterBreach(
+          worktree,
+          'the worktree add this command ran',
+          captured.baseline,
+        );
+        if (breach !== null) return unavailable(breach);
+      }
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
       );
