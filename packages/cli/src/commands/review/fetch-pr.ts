@@ -360,13 +360,18 @@ export interface AnchorProbe {
  *
  * `noAncestry` is the AGit-Flow rule (Aone; design D7). Under AGit-Flow,
  * updating a CR AMENDS the single commit in place: the amended H2 has H1's
- * parent, never H1 itself, so the old head is orphaned and BOTH ancestry
- * tests — the anchor-behind-head test and the clamp — fail for EVERY
- * update, and an amend-and-re-review never scoped. Neither is asked: after
+ * parent, never H1 itself, so the old head is orphaned and the
+ * anchor-behind-head test fails for EVERY update — the amended head never
+ * descends from the cached one. (The clamp additionally fails whenever the
+ * update also rebased onto newer master, since the merge base then moves
+ * past the cached head; a pure amend passes it.) Neither is asked: after
  * the fetch both heads are local, so `anchor..head` IS the update's delta
  * (for a pure amend, exactly the amended lines; if the author also rebased
- * onto newer master, the range additionally carries the rebase drift, which
- * the re-review should see anyway). The published scope is still assembled
+ * onto newer master, the range additionally carries the rebase drift; the
+ * narrowing join reads it only for which files changed and never lets a
+ * drift byte reach the published scope, falling back to the full range via
+ * `nothing-to-narrow` when the drift touched files outside the CR's diff).
+ * The published scope is still assembled
  * from the PR's own diff by the narrowing step, so it cannot carry a hunk
  * the platform does not display, and the `base-untrusted` refusal stays —
  * it guards a capture against a stale base, not a lineage. The existence
@@ -441,9 +446,12 @@ export function resolveIncrementalAnchor(
     };
   }
   // The clamp. Skipped under `noAncestry` with its sibling: on a rebase
-  // onto newer master the merge base moves PAST the cached head, and the
-  // delta carries exactly that drift — retiring the anchor there would
-  // full-review every amended-and-rebased update.
+  // onto newer master the merge base moves PAST the cached head, so the
+  // clamp fires for every amended-and-rebased update — retiring the anchor
+  // there would cost the full range even when the drift stays inside the
+  // CR's files and the narrowing join could still scope (it reads the
+  // delta for its file list only, so no drift byte is published; drift
+  // beyond the CR's files falls back to the full range there anyway).
   if (
     !options.noAncestry &&
     mergeBase?.sha != null &&
@@ -1175,10 +1183,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           },
           { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
           // The AGit-Flow rule (design D7): an Aone update AMENDS the single
-          // CR commit in place and orphans the cached head, so the ancestry
-          // tests would refuse every update's anchor — rule it without them;
-          // the two heads' diff is the update's delta. A force-pushed
-          // GitHub history keeps the tests: there they are the detection.
+          // CR commit in place and orphans the cached head, so the head test
+          // refuses every update's anchor (the clamp fires only when the
+          // update also rebased) — rule it without ancestry; the two heads'
+          // diff is the update's delta. A force-pushed GitHub history keeps
+          // the tests: there they are the detection.
           { noAncestry: platform.kind === 'aone' },
         );
       } catch (err) {

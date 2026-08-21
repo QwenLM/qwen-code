@@ -2528,12 +2528,13 @@ describe('fetch-pr report assembly', () => {
   describe('the Aone incremental rule (AGit-Flow, D7, #9618)', () => {
     // An AGit-Flow update AMENDS the single CR commit in place: the new
     // head has the cached head's parent, never the cached head itself, so
-    // every ancestry probe answers "no" for the cached anchor. The Aone
-    // rule must not ask them — after the fetch both heads are local, and
-    // `anchor..head` is the update's delta. Driven through the real
-    // handler with the Aone reader: an explicit Aone `--host` selects it,
-    // a mocked `a1` serves auth + MR view, and the git probes answer the
-    // orphan shape (existence yes, ancestry exit 1).
+    // the head test answers "no" for the cached anchor on EVERY update —
+    // and the clamp too once the update also rebased onto newer master.
+    // The Aone rule must not ask either — after the fetch both heads are
+    // local, and `anchor..head` is the update's delta. Driven through the
+    // real handler with the Aone reader: an explicit Aone `--host` selects
+    // it, a mocked `a1` serves auth + MR view, and the git probes answer
+    // the orphan shape (existence yes, ancestry exit 1).
 
     function serveAone(): void {
       producerMocks.execFileSync.mockImplementation(
@@ -2945,9 +2946,10 @@ describe('resolveIncrementalAnchor', () => {
   // ---- The AGit-Flow rule (design D7, #9618) ----------------------------
   // Under AGit-Flow an update AMENDS the single CR commit in place, so the
   // amended head has the cached head's parent, never the cached head itself
-  // — the ancestry test refuses EVERY update's anchor. The Aone rule rules
-  // without ancestry: after the fetch both heads are local, and their diff
-  // is the update's delta.
+  // — the anchor-behind-head test refuses EVERY update's anchor (the clamp
+  // fires only when the update also rebased). The Aone rule rules without
+  // ancestry: after the fetch both heads are local, and their diff is the
+  // update's delta.
 
   it('noAncestry scopes an orphaned anchor the ancestry test refuses', () => {
     // isAncestor answers "no" for everything — the exact amend shape. The

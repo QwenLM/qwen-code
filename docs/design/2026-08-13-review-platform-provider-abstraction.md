@@ -364,14 +364,19 @@ Enterprise paragraph.
     #9618).** `resolveIncrementalAnchor` gained a `noAncestry` mode that
     `fetch-pr` selects when the platform is Aone: an AGit-Flow update
     AMENDS the single CR commit in place, orphaning the cached head, so
-    `merge-base --is-ancestor` failed for EVERY update and an
+    the anchor-behind-head test failed for EVERY update and an
     amend-and-re-review never scoped. Both ancestry tests — the
     anchor-behind-head test and the behind-merge-base clamp — are
-    skipped; after the fetch both heads are local, so `anchor..head` IS
-    the update's delta, and the narrowing step assembles the published
-    scope from the CR's own diff exactly as it does for an ancestrally
-    valid GitHub anchor (a rebase onto newer master moves the merge base
-    past the cached head, and the delta deliberately carries that drift).
+    skipped (the clamp only ever fired when the update ALSO rebased onto
+    newer master, moving the merge base past the cached head; a pure
+    amend passed it); after the fetch both heads are local, so
+    `anchor..head` IS the update's delta, and the narrowing step
+    assembles the published scope from the CR's own diff exactly as it
+    does for an ancestrally valid GitHub anchor (an amended-and-rebased
+    update's delta carries the rebase drift, but the join reads it only
+    for which files changed — no drift byte reaches the published scope
+    — and drift touching a file outside the CR's diff falls back to the
+    full range there).
     The existence checks and the `base-untrusted` refusal stay — they
     guard presence and the base-derived capture, not the lineage. The
     head-drift checks Aone has were confirmed to compare the live
