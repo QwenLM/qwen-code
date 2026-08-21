@@ -7513,6 +7513,17 @@ export class Session implements SessionContext {
           },
           async () => {
             let turnCount = 0;
+            // Presentation-ledger rollback state (#6721): mirrors the main
+            // prompt loop — the most recent tool batch's pre-batch snapshot,
+            // cleared once its carrying message is delivered; the catch below
+            // restores the ledger to it when the carrying send throws before
+            // pushing to history.
+            let pendingPresentationSnapshot:
+              | ReadonlyMap<string, string>
+              | undefined;
+            let pendingPresentationGeneration = 0;
+            let presentationSendChat: GeminiChat | undefined;
+            let presentationPushCountBeforeSend = 0;
             try {
               await this.assertCanStartTurn();
               if (ac.signal.aborted) return;
@@ -7680,6 +7691,9 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                presentationSendChat = this.#getCurrentChat();
+                presentationPushCountBeforeSend =
+                  presentationSendChat.getUserContentPushCount?.() ?? 0;
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
                     promptId,
@@ -7698,6 +7712,11 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                // The carrying message was accepted by the send path, so the
+                // batch's committed presentations are now backed by history
+                // — drop the rollback snapshot (a later batch sets a fresh
+                // one).
+                pendingPresentationSnapshot = undefined;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -7846,6 +7865,14 @@ export class Session implements SessionContext {
                       toolLoopState,
                     );
                   nextMessage = nextAfterTools.message;
+                  // Track the batch's pre-batch snapshot so the carrying
+                  // message's send-failure path can roll the ledger back.
+                  // (The stopped/loop-detected early returns here preserve
+                  // the tool run into history, so a discarded snapshot is
+                  // harmless.)
+                  pendingPresentationSnapshot = toolRun.presentationSnapshot;
+                  pendingPresentationGeneration =
+                    toolRun.presentationSnapshotGeneration ?? 0;
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -7871,6 +7898,33 @@ export class Session implements SessionContext {
               }
               cronCompleted = stopReason === 'end_turn' && !ac.signal.aborted;
             } catch (error) {
+              // If a tool batch's presentations were committed but the
+              // carrying message never reached active history (the send
+              // threw before the push), roll the presentation ledger back to
+              // the pre-batch snapshot — mirrors the main prompt loop's
+              // send-failure rollback. Without it the mark survives, the
+              // session lives on, and a later model-emitted tool_call passes
+              // the #6721 gate on a schema that never entered model context.
+              if (
+                pendingPresentationSnapshot &&
+                (!presentationSendChat ||
+                  (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                    presentationPushCountBeforeSend)
+              ) {
+                // Test doubles may expose a registry without the restore API;
+                // a ledger rollback must never break the send-failure path.
+                try {
+                  this.config
+                    .getToolRegistry()
+                    .restoreProxySchemaPresentationSnapshot(
+                      pendingPresentationSnapshot,
+                      pendingPresentationGeneration,
+                    );
+                } catch {
+                  // Ignore — see above.
+                }
+                pendingPresentationSnapshot = undefined;
+              }
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
                 return;
@@ -8310,6 +8364,17 @@ export class Session implements SessionContext {
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
+        // Presentation-ledger rollback state (#6721): mirrors the main
+        // prompt loop — the most recent tool batch's pre-batch snapshot,
+        // cleared once its carrying message is delivered; the catch below
+        // restores the ledger to it when the carrying send throws before
+        // pushing to history.
+        let pendingPresentationSnapshot:
+          | ReadonlyMap<string, string>
+          | undefined;
+        let pendingPresentationGeneration = 0;
+        let presentationSendChat: GeminiChat | undefined;
+        let presentationPushCountBeforeSend = 0;
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;
@@ -8364,6 +8429,9 @@ export class Session implements SessionContext {
             let responseText = '';
             const streamStartTime = Date.now();
 
+            presentationSendChat = this.#getCurrentChat();
+            presentationPushCountBeforeSend =
+              presentationSendChat.getUserContentPushCount?.() ?? 0;
             const sendResult = await this.#sendMessageStreamWithAutoCompression(
               promptId,
               nextMessage.parts ?? [],
@@ -8382,6 +8450,10 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            // The carrying message was accepted by the send path, so the
+            // batch's committed presentations are now backed by history —
+            // drop the rollback snapshot (a later batch sets a fresh one).
+            pendingPresentationSnapshot = undefined;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -8504,6 +8576,14 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               nextMessage = nextAfterTools.message;
+              // Track the batch's pre-batch snapshot so the carrying
+              // message's send-failure path can roll the ledger back.
+              // (The stopped/loop-detected early returns here preserve the
+              // tool run into history, so a discarded snapshot is
+              // harmless.)
+              pendingPresentationSnapshot = toolRun.presentationSnapshot;
+              pendingPresentationGeneration =
+                toolRun.presentationSnapshotGeneration ?? 0;
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -8535,6 +8615,33 @@ export class Session implements SessionContext {
             ac.signal.aborted ? 'cancelled' : stopReason,
           );
         } catch (error) {
+          // If a tool batch's presentations were committed but the carrying
+          // message never reached active history (the send threw before the
+          // push), roll the presentation ledger back to the pre-batch
+          // snapshot — mirrors the main prompt loop's send-failure rollback.
+          // Without it the mark survives, the session lives on, and a later
+          // model-emitted tool_call passes the #6721 gate on a schema that
+          // never entered model context.
+          if (
+            pendingPresentationSnapshot &&
+            (!presentationSendChat ||
+              (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                presentationPushCountBeforeSend)
+          ) {
+            // Test doubles may expose a registry without the restore API; a
+            // ledger rollback must never break the send-failure path.
+            try {
+              this.config
+                .getToolRegistry()
+                .restoreProxySchemaPresentationSnapshot(
+                  pendingPresentationSnapshot,
+                  pendingPresentationGeneration,
+                );
+            } catch {
+              // Ignore — see above.
+            }
+            pendingPresentationSnapshot = undefined;
+          }
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
             await this.#emitBackgroundNotificationEndTurn('cancelled');

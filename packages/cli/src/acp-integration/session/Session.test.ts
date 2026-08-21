@@ -29588,6 +29588,144 @@ describe('Session', () => {
       ]);
     }
 
+    it('rolls the ledger back when the cron loop carrying send fails', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let cronCallback:
+        | ((job: { prompt: string; cronExpr?: string }) => void)
+        | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            cronCallback = callback;
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      // The carrying send throws BEFORE pushing to history; at send time
+      // the batch's mark must be committed (so this test proves the
+      // rollback removed it rather than it never being committed).
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('cron send blew up'));
+        });
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      cronCallback?.({ prompt: 'scheduled prompt', cronExpr: '* * * * *' });
+      // First wait until the carrying send was actually attempted (the
+      // drain starts asynchronously after the fire callback), then until
+      // the cron turn fully settled.
+      await vi.waitFor(
+        () => {
+          expect(markAtCarryingSend).toBe('fp');
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(
+            mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+          ).toHaveBeenCalled();
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(internals.cronCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      // The send-failure rollback restored the pre-batch snapshot (empty):
+      // the mark must not outlive a schema that never reached the model.
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+    });
+
+    it('rolls the ledger back when the background-notification loop carrying send fails', async () => {
+      setUpToolSearchCarryingCronSchema();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('notification send blew up'));
+        });
+      const internals = session as unknown as {
+        notificationCompletion: Promise<void> | null;
+      };
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      // First wait until the carrying send was actually attempted (the
+      // drain starts asynchronously after the notification callback), then
+      // until the notification turn fully settled.
+      await vi.waitFor(
+        () => {
+          expect(markAtCarryingSend).toBe('fp');
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(
+            mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+          ).toHaveBeenCalled();
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(internals.notificationCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+    });
+
     it('does not resurrect marks across a mid-send compression clear (main loop)', async () => {
       setUpToolSearchCarryingCronSchema();
       // Simulate what compression does to the ledger: tryCompressChat applies
