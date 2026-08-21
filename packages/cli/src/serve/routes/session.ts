@@ -59,6 +59,7 @@ import express, {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isValidSessionId,
+  normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
 } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -2100,6 +2101,14 @@ export function registerSessionRoutes(
     return [...new Set(sessionIds as string[])];
   };
 
+  // Mirrors the bridge's displayName control-character rule (ESLint forbids
+  // control-char regexes).
+  const hasControlCharacter = (value: string): boolean =>
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    });
+
   // Tri-state: absent → undefined (skip); invalid → null (400 already sent);
   // valid → the PR binding to apply.
   const parseSessionPrBody = (
@@ -2119,10 +2128,13 @@ export function registerSessionRoutes(
       number <= 0 ||
       typeof url !== 'string' ||
       url.length > SESSION_PR_URL_MAX_LENGTH ||
-      !/^https?:\/\//i.test(url)
+      !/^https?:\/\//i.test(url) ||
+      // The url lands in the bridge's stderr audit line — control
+      // characters would let a caller forge log lines.
+      hasControlCharacter(url)
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters`,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -5253,19 +5265,25 @@ export function registerSessionRoutes(
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
+    // Gate BEFORE runtime resolution (withOwnerMutableSession): a
+    // traversal id must be rejected identically on single- and
+    // multi-workspace daemons — runtime resolution would 404 it first on a
+    // multi-entry registry, making the error contract
+    // configuration-dependent.
+    (req, res, next) => {
+      const raw = req.params['id'];
+      if (raw && !isValidSessionId(normalizeSessionIdForLookup(raw))) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
+      next();
+    },
     withOwnerMutableSession(
       'PATCH /session/:id/metadata',
       async (req, res, sessionId, runtime) => {
-        // The session id is embedded in the sidecar filesystem path; reject
-        // anything that is not a session id before it can reach the chats
-        // directory.
-        if (!isValidSessionId(sessionId)) {
-          res.status(400).json({
-            error: '`sessionId` must be a valid session id',
-            code: 'invalid_session_id',
-          });
-          return;
-        }
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -5294,10 +5312,18 @@ export function registerSessionRoutes(
           // close/reload, and archive/restore. Hydrate the persisted
           // binding history before the mutation so the
           // `session_metadata_updated` event the bridge publishes carries
-          // the full list, not just this daemon lifetime's bindings.
-          const hydratedPrs = await readSessionPrs(
-            service.getPrSessionPathForArchiveState(sessionId, 'active'),
-          );
+          // the full list, not just this daemon lifetime's bindings. The
+          // read is best-effort: readSessionPrs rethrows non-ENOENT I/O
+          // errors (EISDIR/EACCES/EIO), and an unreadable sidecar must
+          // degrade the event's history, not block a pr-less rename.
+          let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+          try {
+            hydratedPrs = await readSessionPrs(
+              service.getPrSessionPathForArchiveState(sessionId, 'active'),
+            );
+          } catch {
+            hydratedPrs = null;
+          }
           if (hydratedPrs && hydratedPrs.length > 0) {
             runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
           }
@@ -5436,10 +5462,18 @@ export function registerSessionRoutes(
               // persisted binding history before the mutation so the
               // `session_metadata_updated` event the bridge publishes
               // carries the full list, not just this daemon lifetime's
-              // bindings.
-              const hydratedPrs = await readSessionPrs(
-                service.getPrSessionPathForArchiveState(sessionId, 'active'),
-              );
+              // bindings. The read is best-effort: readSessionPrs rethrows
+              // non-ENOENT I/O errors (EISDIR/EACCES/EIO), and an
+              // unreadable sidecar must degrade the event's history, not
+              // block a pr-less rename.
+              let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+              try {
+                hydratedPrs = await readSessionPrs(
+                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                );
+              } catch {
+                hydratedPrs = null;
+              }
               if (hydratedPrs && hydratedPrs.length > 0) {
                 runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
               }

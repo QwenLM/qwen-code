@@ -15607,6 +15607,35 @@ describe('createServeApp', () => {
       expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
     });
 
+    it('survives PR sidecars on the metadata-filtered listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { sourceType: 'scheduled_task', sourceId: 'task-1' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
     it('passes fractional cursor values to SessionService without truncating', async () => {
       const listSessionsSpy = vi
         .spyOn(SessionService.prototype, 'listSessions')
@@ -26179,6 +26208,21 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('invalid_session_id');
       expect(bridge.updateMetadataCalls).toHaveLength(0);
       await expect(fsp.access(escapedPath)).rejects.toThrow();
+    });
+
+    it('400 invalid_session_id for a traversal id on a multi-workspace registry', async () => {
+      // The gate sits before runtime resolution, so the answer is 400 even
+      // when the registry has two entries (runtime resolution would
+      // otherwise 404 the unknown id first, making the error contract
+      // configuration-dependent).
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch('/session/..%2F..%2Fpwn/metadata'),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
     });
 
     it('200 on pr-only update on the workspace route', async () => {

@@ -26722,6 +26722,11 @@ describe('createAcpSessionBridge', () => {
       ['empty url', { number: 1, url: '' }],
       ['non-http url', { number: 1, url: 'javascript:alert(1)' }],
       [
+        'url with a control character',
+        // \n in the url would forge a second line in the stderr audit log.
+        { number: 1, url: 'https://github.com/o/r/pull/1\nforged' },
+      ],
+      [
         'url over 2048 characters',
         { number: 1, url: `https://github.com/${'a'.repeat(2048)}` },
       ],

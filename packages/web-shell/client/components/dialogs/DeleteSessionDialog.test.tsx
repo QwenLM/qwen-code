@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { dp } from './dialogStyles';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -11,21 +12,24 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-let sessions = [
+let sessions: DaemonSessionSummary[] = [
   {
     sessionId: 's0',
+    workspaceCwd: '/work/repo',
     displayName: 'S0',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
   },
   {
     sessionId: 's1',
+    workspaceCwd: '/work/repo',
     displayName: 'S1',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
   },
   {
     sessionId: 'me',
+    workspaceCwd: '/work/repo',
     displayName: 'Current Session',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
@@ -225,6 +229,7 @@ describe('DeleteSessionDialog selection', () => {
     sessions = [
       {
         sessionId: 'pr-session',
+        workspaceCwd: '/work/repo',
         displayName: 'Fix CI',
         clientCount: 1,
         updatedAt: '2026-01-01T00:00:00Z',
@@ -232,6 +237,7 @@ describe('DeleteSessionDialog selection', () => {
       },
       {
         sessionId: 'other',
+        workspaceCwd: '/work/repo',
         displayName: 'Unrelated',
         clientCount: 1,
         updatedAt: '2026-01-01T00:00:00Z',

@@ -70,6 +70,10 @@ describe('readSessionPrs', () => {
       { prs: [{ ...entry(1), url: 'javascript:alert(1)' }] },
     ],
     [
+      'entry url with a control character',
+      { prs: [{ ...entry(1), url: 'https://github.com/o/r/pull/1\nforged' }] },
+    ],
+    [
       'entry url over 2048 characters',
       { prs: [{ ...entry(1), url: `https://github.com/${'a'.repeat(2048)}` }] },
     ],

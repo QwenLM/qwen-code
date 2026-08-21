@@ -35,6 +35,15 @@ interface SessionPrList {
   prs: SessionPr[];
 }
 
+// Mirrors the bridge's hasControlCharacter (ESLint forbids control-char
+// regexes).
+function hasControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
 /**
  * Runtime shape check for one entry. The url is rendered as a link target,
  * so only http(s) URLs are accepted.
@@ -49,6 +58,9 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     typeof v['url'] === 'string' &&
     v['url'].length <= SESSION_PR_URL_MAX_LENGTH &&
     /^https?:\/\//i.test(v['url']) &&
+    // The url is interpolated into a stderr audit line by the bridge —
+    // control characters would forge log lines.
+    !hasControlCharacter(v['url']) &&
     typeof v['createdAt'] === 'string'
   );
 }

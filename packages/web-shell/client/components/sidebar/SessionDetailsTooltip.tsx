@@ -147,8 +147,15 @@ export function SessionDetailsTooltip({
         {[...(session.prs ?? [])]
           .reverse()
           .filter((pr) => isExternalOpenUrl(pr.url))
-          .map((pr) => (
-            <div className={styles.sessionDetailsRow} key={pr.number}>
+          .map((pr, index) => (
+            // Index composite: a hand-edited sidecar can carry duplicate
+            // numbers (the reader validates shape, not uniqueness), and a
+            // duplicate key would reconcile rows against each other. The
+            // list is a stable per-snapshot order, so index keys are safe.
+            <div
+              className={styles.sessionDetailsRow}
+              key={`${index}-${pr.number}`}
+            >
               <GitPullRequestIcon aria-hidden="true" />
               <a
                 href={pr.url}

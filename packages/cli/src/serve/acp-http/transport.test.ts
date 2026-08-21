@@ -431,11 +431,16 @@ class FakeBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }> = [];
+  /** Shared seed/update call sequence — pins that hydration runs BEFORE the
+   * mutation (a seed-after-mutation order would let the bridge publish an
+   * event carrying only this-daemon-lifetime bindings). */
+  metadataCallLog: Array<'seed' | 'update'> = [];
 
   seedSessionPrs(
     sessionId: string,
     prs: Array<{ number: number; url: string }>,
   ) {
+    this.metadataCallLog.push('seed');
     this.seedSessionPrsCalls.push({ sessionId, prs });
     const existing = this.metadataPrsBySession.get(sessionId) ?? [];
     if (existing.length > 0) return;
@@ -449,6 +454,7 @@ class FakeBridge {
     sessionId: string,
     metadata: { displayName?: string; pr?: { number: number; url: string } },
   ) {
+    this.metadataCallLog.push('update');
     if (metadata.pr) {
       const bound = metadata.pr;
       const existing = this.metadataPrsBySession.get(sessionId) ?? [];
@@ -5463,6 +5469,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
+      expect(bridge.metadataCallLog).toEqual(['seed', 'update']);
       expect(bridge.seedSessionPrsCalls).toHaveLength(1);
       expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
       expect(

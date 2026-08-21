@@ -9674,11 +9674,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (pr as SessionPrInfo).number <= 0 ||
           typeof (pr as SessionPrInfo).url !== 'string' ||
           (pr as SessionPrInfo).url.length > SESSION_PR_URL_MAX_LENGTH ||
-          !/^https?:\/\//i.test((pr as SessionPrInfo).url)
+          !/^https?:\/\//i.test((pr as SessionPrInfo).url) ||
+          // The url is interpolated into the stderr audit line — control
+          // characters would let a client forge log lines (the displayName
+          // branch rejects them for the same reason).
+          hasControlCharacter((pr as SessionPrInfo).url)
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters`,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
           );
         }
       }

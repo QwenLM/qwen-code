@@ -14,6 +14,7 @@ import {
   SessionService,
   Storage,
   createDebugLogger,
+  readSessionPrs,
   resetDebugLoggingState,
   setDebugLogSession,
 } from '@qwen-code/qwen-code-core';
@@ -619,7 +620,10 @@ function makeBridge(
     },
     updateSessionMetadata(
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        pr?: { number: number; url: string };
+      },
       context?: BridgeClientRequestContext,
     ) {
       metadataCalls.push({
@@ -629,6 +633,7 @@ function makeBridge(
       });
       return {
         displayName: `${workspaceCwd}:${metadata.displayName ?? ''}`,
+        ...(metadata.pr ? { prs: [metadata.pr] } : {}),
       };
     },
     async generateSessionRecap(
@@ -2662,6 +2667,46 @@ describe('multi-workspace session dispatch', () => {
       primaryBridge.goalClearCalls,
     ]) {
       expect(calls).toEqual([]);
+    }
+  });
+
+  it('persists a cross-workspace pr sidecar in the OWNING workspace chats dir', async () => {
+    // A primary-route metadata PATCH against a secondary-owned session must
+    // write the sidecar under the SECONDARY runtime — landing it under the
+    // primary would hide the binding from the owning workspace's listing.
+    const { app, secondaryBridge } = makeHarness({ token: TEST_TOKEN });
+    const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+    const secondaryPath = new SessionService(
+      SECONDARY_CWD,
+    ).getPrSessionPathForArchiveState(
+      '22222222-2222-4222-a222-222222222222',
+      'active',
+    );
+    const primaryPath = new SessionService(
+      PRIMARY_CWD,
+    ).getPrSessionPathForArchiveState(
+      '22222222-2222-4222-a222-222222222222',
+      'active',
+    );
+    await fsp.rm(secondaryPath, { force: true });
+    await fsp.rm(primaryPath, { force: true });
+
+    try {
+      const res = await request(app)
+        .patch('/session/22222222-2222-4222-a222-222222222222/metadata')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.prs).toEqual([pr]);
+      expect(secondaryBridge.metadataCalls[0]?.metadata).toEqual({ pr });
+
+      const persisted = await readSessionPrs(secondaryPath);
+      expect(persisted?.map((entry) => entry.number)).toEqual([9517]);
+      await expect(fsp.access(primaryPath)).rejects.toThrow();
+    } finally {
+      await fsp.rm(secondaryPath, { force: true });
     }
   });
 
