@@ -249,12 +249,18 @@ describe('setupStartupWorktree', () => {
     });
     await fs.rm(path.join(context.worktreePath, '.qwen-session'));
 
+    await exec('git', ['tag', context.branch, context.originalHeadCommit], {
+      cwd: tempRepo,
+    });
     await fs.writeFile(
       path.join(context.worktreePath, 'committed.txt'),
       'work',
     );
     await exec('git', ['add', 'committed.txt'], { cwd: context.worktreePath });
     await exec('git', ['commit', '-m', 'work from another process'], {
+      cwd: context.worktreePath,
+    });
+    const { stdout: branchHead } = await exec('git', ['rev-parse', 'HEAD'], {
       cwd: context.worktreePath,
     });
     await expect(discardCreatedStartupWorktree(context)).resolves.toEqual({
@@ -264,6 +270,12 @@ describe('setupStartupWorktree', () => {
     });
 
     expect((await fs.stat(context.worktreePath)).isDirectory()).toBe(true);
+    const { stdout: preservedBranchHead } = await exec(
+      'git',
+      ['rev-parse', `refs/heads/${context.branch}`],
+      { cwd: tempRepo },
+    );
+    expect(preservedBranchHead.trim()).toBe(branchHead.trim());
   });
 
   it('keeps a reattached worktree on an early startup exit', async () => {

@@ -383,7 +383,7 @@ export async function discardCreatedStartupWorktree(
         preserved: `worktree ${context.worktreePath} has uncommitted changes`,
       };
     }
-    const branchHead = await service.resolveRef(context.branch);
+    const branchHead = await service.resolveRef(`refs/heads/${context.branch}`);
     if (branchHead !== context.originalHeadCommit) {
       return {
         preserved: `worktree branch ${context.branch} changed after startup`,
