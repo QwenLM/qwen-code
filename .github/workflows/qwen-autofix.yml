@@ -5187,6 +5187,7 @@ jobs:
             WORKDIR="${WORKDIR}" \
             BRANCH="${BRANCH}" \
             GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
@@ -5390,6 +5391,7 @@ jobs:
             WORKDIR="${WORKDIR}" \
             BRANCH="${BRANCH}" \
             GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"

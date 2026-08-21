@@ -11183,6 +11183,41 @@ exit 1
     expect(reviewVerificationGateStep).not.toContain(
       'bash .github/scripts/run-autofix-review-verification.sh',
     );
+    // The gate launches through an env -i clean child with a SANCTIONED
+    // allowlist (R5-1): every variable the gate's own build/test checks need
+    // must be passed, and the runner-provided CI=true is one of them — without
+    // it the gate's checks run with inverted CI semantics and the 18
+    // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
+    // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
+    // A contains-only pin accepts a symmetric DROP, so enumerate the full
+    // allowlist of BOTH gate launches (first pass + repair pass) as a sorted
+    // multiset — a symmetric duplicate or a dropped entry both fail here.
+    const gateAllowlist = (step) => {
+      const argStart = step.indexOf('/usr/bin/env -i \\');
+      expect(argStart, 'gate step lacks the env -i launch').toBeGreaterThan(-1);
+      const argList = step.slice(argStart, step.indexOf('bash --norc'));
+      const passed = (
+        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+      )
+        .map((m) => m.split('=')[0])
+        .sort();
+      expect(passed).toEqual(
+        [
+          'PATH',
+          'HOME',
+          'RUNNER_TEMP',
+          'WORKDIR',
+          'BRANCH',
+          'GITHUB_OUTPUT',
+          'CI',
+          'KISS_AUDIT',
+          'FOOTPRINT_ENFORCE',
+        ].sort(),
+      );
+      expect(argList).toContain('CI="${CI:-true}"');
+    };
+    gateAllowlist(reviewVerificationGateStep);
+    gateAllowlist(repairVerificationGateStep);
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
