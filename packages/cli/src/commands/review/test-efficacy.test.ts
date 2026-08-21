@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
@@ -34,6 +34,26 @@ import {
   committedSymlinkProbes,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+
+// A screen->checkout WINDOW cannot be interleaved from a single thread —
+// every git spawn on this path is synchronous. The one deterministic way to
+// act inside the window is from inside the screen call itself, so the
+// screen is mockable here: default behaviour is the REAL screen (every
+// test that does not arm this override runs against it), and a test arms
+// `screenOverride.fn` for one call.
+const screenOverride = vi.hoisted(() => ({
+  fn: null as null | ((worktree: string, context: string) => string | null),
+}));
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  return {
+    ...actual,
+    localFilterRefusal: (worktree: string, context: string) =>
+      screenOverride.fn !== null
+        ? screenOverride.fn(worktree, context)
+        : actual.localFilterRefusal(worktree, context),
+  };
+});
 import {
   mkdtempSync,
   mkdirSync,
@@ -650,6 +670,104 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the restore breached when the plant is an INCLUDE the clean removes', () => {
+    // The re-read that detects a plant appearing during the checkout used
+    // to run AFTER the restore's own `clean -ffdx` — and an
+    // include-mediated plant keeps its target inside the tree: the
+    // checkout resolves the include and executes it, the clean deletes the
+    // target, and the re-read then skips the dangling path and answers
+    // clean — the pipeline destroying the very evidence it exists to
+    // report. The global armer (the user's contract, never screened) sets
+    // the include + its target DURING the checkout: present at a read
+    // between the two spawns, gone after the clean.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-include-breach-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      asCheckout(dir);
+      const evil = join(dir, 'evil.txt');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          // Arm the include and create its target: a filter definition the
+          // post-checkout read finds, and `clean -ffdx` removes.
+          `cat > /dev/null; git config include.path ${evil}; ` +
+            `printf '[filter "evil"]\\n\\tsmudge = true\\n' > ${evil}; echo`,
+        ],
+        { cwd: dir },
+      );
+      mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(dir, '.git', 'info', 'attributes'),
+        '*.ts filter=armer\n',
+      );
+      writeFileSync(join(dir, 'a.ts'), 'prior-run residue\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('may have EXECUTED');
+      expect(r.detail).toContain('include.path');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-runs the swap reads after the screen — a relink during the screen never reaches the restore', () => {
+    // The identity guards used to sit ONLY above the screen, whose spawns
+    // re-widened the swap window to their full runtime: a root replaced
+    // during them aimed the restore's checkout and clean at the shared
+    // review worktree while every downstream read resolved through the
+    // swap and answered clean. The deterministic swapper acts from inside
+    // the screen call (the seam armed above); the post-screen re-check
+    // must refuse before either spawn runs.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-relink-restore-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-relink-target-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // The outside stands where the shared review worktree stands in
+      // production: its own checkout, dirty tracked work and an untracked
+      // file, so any restore landing there is observable.
+      writeFileSync(join(outside, 'victim.ts'), 'committed content\n');
+      asCheckout(outside);
+      writeFileSync(join(outside, 'victim.ts'), 'uncommitted work\n');
+      writeFileSync(join(outside, 'notes.txt'), 'untracked\n');
+
+      screenOverride.fn = () => {
+        screenOverride.fn = null; // one-shot
+        rmSync(dir, { recursive: true, force: true });
+        symlinkSync(outside, dir);
+        return null; // "clean screen"
+      };
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      // The swap never reached the checkout/clean pair.
+      expect(readFileSync(join(outside, 'victim.ts'), 'utf8')).toBe(
+        'uncommitted work\n',
+      );
+      expect(existsSync(join(outside, 'notes.txt'))).toBe(true);
+    } finally {
+      screenOverride.fn = null;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 

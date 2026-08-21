@@ -1493,6 +1493,46 @@ export function probeCleanupFailureDetail(
 }
 
 /**
+ * The swap reads the restore runs around its screen: a symlink at the
+ * tree's root, or one above it on the way to the repository it belongs to.
+ * Run twice — once before the screen, once after — because a root swapped
+ * DURING the screen's spawns aims the checkout and the clean at whatever it
+ * names while every identity comparison resolves through the swap and
+ * agrees with itself.
+ */
+function probeTreeRelinked(
+  probeTree: string,
+  commonDir: string,
+): string | null {
+  try {
+    // The LEAF first: every comparison the restore makes realpaths both
+    // sides, so a probe tree that is itself a symlink into the shared
+    // review worktree agrees with itself all the way down — and the
+    // restore's `checkout --force` and `clean -ffdx` would then run in the
+    // tree every other agent is reading.
+    if (lstatSync(probeTree).isSymbolicLink()) {
+      return `${probeTree} is a symlink, so the restore would land wherever it points`;
+    }
+    // Only a LINKED worktree has ancestors between the tree and the
+    // repository it belongs to: a standalone checkout IS the repository
+    // root, and an unbounded walk above it meets the system links (`/var`
+    // on macOS) this bound exists to stay below.
+    if (lstatSync(join(probeTree, '.git')).isFile()) {
+      const redirected = redirectedAncestor(
+        dirname(resolve(probeTree)),
+        dirname(realpathSync(commonDir)),
+      );
+      if (redirected !== null) {
+        return `${redirected} is a symlink, so the restore would land wherever it points`;
+      }
+    }
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  return null;
+}
+
+/**
  * Put the probe tree's TRACKED files back to the commit, before a run.
  *
  * The tree is reused across the baseline, the control, every mutant and every
@@ -1546,13 +1586,8 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   }
   const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
   try {
-    // The LEAF first. Every comparison below realpaths both sides, so a probe
-    // tree that is itself a symlink into the shared review worktree agrees
-    // with itself all the way down — and the restore's `checkout --force` and
-    // `clean -ffdx` would then run in the tree every other agent is reading.
-    if (lstatSync(probeTree).isSymbolicLink()) {
-      return `${probeTree} is a symlink, so the restore would land wherever it points`;
-    }
+    const relinked = probeTreeRelinked(probeTree, commonDir);
+    if (relinked !== null) return relinked;
     if (realpathSync(toplevel) !== realpathSync(probeTree)) {
       return `the tree at ${probeTree} is not the root of its own checkout`;
     }
@@ -1574,20 +1609,6 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
       ) {
         return `${probeTree}'s admin entry does not point back at it`;
       }
-      // And every ancestor between the tree and the repository it belongs to:
-      // a link above the tree redirects the checkout and the clean together,
-      // while every check here resolves through it and agrees with itself.
-      // Only for a LINKED worktree — a standalone checkout IS the repository
-      // root, so there is nothing between it and the stop point to walk, and
-      // an unbounded walk above it meets the system links (`/var` on macOS)
-      // this bound exists to stay below.
-      const redirected = redirectedAncestor(
-        dirname(resolve(probeTree)),
-        dirname(realpathSync(commonDir)),
-      );
-      if (redirected !== null) {
-        return `${redirected} is a symlink, so the restore would land wherever it points`;
-      }
     }
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
@@ -1600,22 +1621,20 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // land between the phase's entry screen and any one of them.
   const refusal = localFilterRefusal(probeTree, "this tree's restore");
   if (refusal !== null) return refusal;
+  // Re-run the swap reads AFTER the screen: its spawns take real time, and
+  // a root swapped in during them aims the checkout and the clean below at
+  // the shared review worktree while nothing downstream catches it — the
+  // breach re-read and the bits check both resolve through the swap and
+  // answer clean, and the per-file re-checks run only later, at the
+  // mutation write.
+  const relinkedDuringScreen = probeTreeRelinked(probeTree, commonDir);
+  if (relinkedDuringScreen !== null) return relinkedDuringScreen;
   // `--` and a pathspec: this restores FILES and never moves HEAD. A
   // pathspec checkout still fires `post-checkout` (flag 0, measured live)
   // and `core.fsmonitor` — the config that decides that lives in a tree this
   // code is defending against, so it is emptied here the way every other
   // checkout in this pipeline empties it.
-  for (const args of [
-    [...INERT_GIT_ARGS, 'checkout', '--force', 'HEAD', '--', '.'],
-    // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
-    // commit under test, so a plant named to match one of them (a committed
-    // `.gitignore` line and a file to match it) survived every restore. The
-    // one exception is the dependency farm: it is ignored, it is borrowed
-    // rather than built, and it is the only ignored thing in this tree the
-    // probes cannot run without. Everything else ignored — a built `dist`, a
-    // planted config — goes.
-    [...INERT_GIT_ARGS, 'clean', '-ffdx', '-e', 'node_modules'],
-  ]) {
+  const runRestore = (op: string, args: string[]): string | null => {
     const r = spawnSync('git', args, {
       cwd: probeTree,
       encoding: 'utf8',
@@ -1624,20 +1643,49 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     if (r.error) return r.error.message;
     if (r.status !== 0) {
       return (
-        (r.stderr ?? '').toString().trim() ||
-        `git ${args[2]} exited ${r.status}`
+        (r.stderr ?? '').toString().trim() || `git ${op} exited ${r.status}`
       );
     }
-  }
-  // Re-read the screen the moment the checkout completes: the read above is
-  // point-in-time, and a toggler this run's reap could not reach (a setsid'd
-  // descendant, a concurrent shard's suite) can plant between that read and
-  // the checkout's own config read — the checkout then executes the plant
-  // although BOTH reads made before it saw nothing. A key that APPEARED is
-  // reported as a breach, never clean; the restore's caller must not keep
-  // scoring a tree this read cannot vouch for.
+    return null;
+  };
+  const checkoutFailure = runRestore('checkout', [
+    ...INERT_GIT_ARGS,
+    'checkout',
+    '--force',
+    'HEAD',
+    '--',
+    '.',
+  ]);
+  if (checkoutFailure !== null) return checkoutFailure;
+  // Re-read the screen BETWEEN the two spawns, not after the clean: the
+  // read above is point-in-time, and a toggler this run's reap could not
+  // reach (a setsid'd descendant, a concurrent shard's suite) can plant
+  // between that read and the checkout's own config read — the checkout
+  // then executes the plant although BOTH reads made before it saw
+  // nothing. A key that APPEARED is reported as a breach, never clean; the
+  // restore's caller must not keep scoring a tree this read cannot vouch
+  // for. The re-read sits BEFORE the clean because `clean -ffdx` deletes
+  // include targets planted inside the tree — an include-mediated plant
+  // the checkout just EXECUTED reads back clean once the clean has removed
+  // its target, the pipeline destroying the very evidence the re-read
+  // exists to report.
   const breach = localFilterBreach(probeTree, "this tree's restore");
   if (breach !== null) return breach;
+  // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
+  // commit under test, so a plant named to match one of them (a committed
+  // `.gitignore` line and a file to match it) survived every restore. The
+  // one exception is the dependency farm: it is ignored, it is borrowed
+  // rather than built, and it is the only ignored thing in this tree the
+  // probes cannot run without. Everything else ignored — a built `dist`, a
+  // planted config — goes.
+  const cleanFailure = runRestore('clean', [
+    ...INERT_GIT_ARGS,
+    'clean',
+    '-ffdx',
+    '-e',
+    'node_modules',
+  ]);
+  if (cleanFailure !== null) return cleanFailure;
   // `checkout --force` SILENTLY skips a file carrying the skip-worktree bit,
   // and `clean` never touches a tracked file — so a bit the suite set with
   // `update-index` leaves its tampered content standing through a restore that
@@ -1725,8 +1773,17 @@ function runProbeSuite(
   // this run (every restore, the revert's checkout) read config and then run
   // a checkout, and a process the PR's own test code left running can toggle
   // the filter config between the read and the checkout — measured live at
-  // ~3% of trials with a fast atomic toggler. Killing the group the moment
-  // the run completes removes every descendant that stayed in it. A
+  // ~3% of trials with a fast atomic toggler. On POSIX, killing the group
+  // the moment the run completes removes every descendant that stayed in
+  // it — `process.kill(-pgid)` reaches orphaned members. On Windows the
+  // same call is a post-mortem `taskkill /pid <pid> /T /F`, and taskkill
+  // walks the tree of a LIVE pid: spawnSync returns only after the suite
+  // root exits, so the reap errors on the dead pid, the catch swallows it,
+  // and every descendant survives there — the post-checkout re-reads
+  // (localFilterBreach) are the only half that covers them on that
+  // platform. Collecting the suite's descendants while the root is alive
+  // (a child-process walk or a Job Object assigned at spawn) is the
+  // Windows fix this round does not add. A
   // descendant that called setsid is in its OWN group and survives this
   // reap, and against a TOGGLING escapee the point-in-time screens alone
   // cannot help — a plant absent at the screen's read and present at the
@@ -2931,6 +2988,16 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // the matching files and executed the plant.
           const refusal = localFilterRefusal(probeTree, 'the revert checkout');
           if (refusal !== null) throw new Error(refusal);
+          // Re-run the root escape check AFTER the screen: the entry check
+          // above narrowed the swap window to one syscall, and the screen's
+          // spawns re-widened it to their full runtime — a root replaced
+          // during them aims this checkout at the shared review worktree,
+          // and the post-checkout re-read resolves through the swap too.
+          if (probeTargetEscapes(probeTree, '.')) {
+            throw new Error(
+              'the probe tree was relinked during the revert screen',
+            );
+          }
           git(probeTree, 'checkout', base, '--', ...modified);
           // Same pair as every restore: a toggler the reap did not reach can
           // plant between the screen's read and this checkout's own, so the

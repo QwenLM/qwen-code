@@ -57,6 +57,7 @@ import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
   INERT_GIT_ARGS,
+  localFilterBreach,
   localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -284,6 +285,22 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       );
       if (refusal !== null) return unavailable(refusal);
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
+      // Re-read AFTER the checkout, paired with the screen above: the
+      // screen is a point-in-time read, and a concurrent writer the
+      // pipeline itself schedules (a sibling shard's suite, a toggler the
+      // reap did not reach) can plant between the two reads — the add's
+      // initial checkout executes the plant while both reads see nothing.
+      // A key that APPEARED is reported as a breach and the just-added
+      // tree rolled back: the run must be reported breached, never
+      // certified clean with a planted checkout behind it.
+      const breach = localFilterBreach(
+        worktree,
+        'the worktree add this command ran',
+      );
+      if (breach !== null) {
+        discardWorktree(worktree, tree);
+        return unavailable(breach);
+      }
     } catch (e) {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),

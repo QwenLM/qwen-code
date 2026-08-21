@@ -38,7 +38,11 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { localFilterRefusal, sanitizedGitEnv } from './lib/worktree.js';
+import {
+  localFilterBreach,
+  localFilterRefusal,
+  sanitizedGitEnv,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -951,6 +955,28 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );
+    }
+    // Re-read AFTER the add, paired with the screen above: a toggler an
+    // EARLIER review's suite left running (rounds reuse one repository; the
+    // reap runs per-suite, not per-round) can plant between the screen's
+    // read and the add's own config read, and the initial checkout executes
+    // the plant while both reads see nothing. A key that APPEARED is
+    // reported as a breach — the run is breached, never certified clean.
+    const filterBreach = localFilterBreach(
+      process.cwd(),
+      'the review worktree add this command ran',
+    );
+    if (filterBreach !== null) {
+      // Release what the add created and roll back the fetched ref, the way
+      // the refusal above does.
+      releaseWorktree(wt);
+      tryRemove(() =>
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          env: sanitizedGitEnv(),
+        }),
+      );
+      throw new Error(filterBreach);
     }
 
     mkdirSync(REVIEW_TMP_DIR, { recursive: true });

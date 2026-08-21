@@ -38,6 +38,28 @@ import {
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { probeWorktreePath } from './lib/paths.js';
 
+// A screen->checkout WINDOW cannot be interleaved from a single thread —
+// every git spawn on this path is synchronous. The one deterministic way to
+// act inside the window is from inside the screen call itself, so the
+// screen is mockable here: default behaviour is the REAL screen (every
+// test that does not arm this override runs against it), and a test arms
+// `screenOverride.fn` per call.
+const screenOverride = vi.hoisted(() => ({
+  fn: null as null | ((worktree: string, context: string) => string | null),
+  real: null as null | ((worktree: string, context: string) => string | null),
+}));
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  screenOverride.real = actual.localFilterRefusal;
+  return {
+    ...actual,
+    localFilterRefusal: (worktree: string, context: string) =>
+      screenOverride.fn !== null
+        ? screenOverride.fn(worktree, context)
+        : actual.localFilterRefusal(worktree, context),
+  };
+});
+
 type Handler = (args: {
   report: string;
   worktree: string;
@@ -2230,6 +2252,50 @@ process.stdout.write(JSON.stringify({
       }),
     ]);
     expect(out.probed[0].detail).toContain('may have EXECUTED');
+  });
+
+  it('re-checks the probe tree after the revert screen — a relink during the screen never reaches the checkout', async () => {
+    // The revert phase's entry check narrows the root-swap window to one
+    // syscall, and the screen inserted before the checkout re-widened it
+    // to the screen's full runtime: a toggler the reap did not reach can
+    // replace the probe tree's root with a link to the shared review
+    // worktree DURING the screen, and the revert's `git checkout base --
+    // ...` then writes base content into the PR's modified files inside
+    // the tree every other agent reads. The deterministic swapper acts
+    // from inside the screen call (the seam armed above); the post-screen
+    // escape check must refuse the checkout.
+    const { wt, base } = scaffoldModifiedPr();
+    const probeTree = probeWorktreePath(wt);
+    screenOverride.fn = (worktree, context) => {
+      if (context !== 'the revert checkout') {
+        return screenOverride.real!(worktree, context);
+      }
+      screenOverride.fn = null; // one-shot
+      rmSync(probeTree, { recursive: true, force: true });
+      symlinkSync(wt, probeTree);
+      return null; // "clean screen"
+    };
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      screenOverride.fn = null;
+    }
+
+    // The revert checkout never landed in the shared review worktree: it
+    // still holds the PR's own content.
+    expect(readFileSync(join(wt, 'packages/lib/src/f.ts'), 'utf8')).toBe(
+      'export const f = () => 2;\n',
+    );
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({ verdict: 'inconclusive' }),
+    ]);
+    expect(out.probed[0].detail).toContain('relinked during the revert screen');
   });
 });
 

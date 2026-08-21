@@ -677,15 +677,28 @@ function resolveIncludeTarget(fromFile: string, value: string): string | null {
 
 export function localFilterCommands(worktree: string): LocalFilterScreen {
   const screen: LocalFilterScreen = { keys: [], unclearable: [] };
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return screen;
-  }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  // One single-flag spawn per path, not one two-flag spawn split on
+  // newlines: a repository path legally carries a newline (the user's own
+  // clone location), and the split shredded such a path into fragments —
+  // every candidate landed under a nonexistent directory, every read
+  // skipped, and the screen answered clean with the plant standing in the
+  // REAL common config. A trailing CR is legal path content too, so strip
+  // only the final newline — `trim()` ate it. (`rev-parse -z` is not a
+  // flag these options accept; git echoes it back as an argument.)
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', flag], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    return r.stdout.replace(/\n$/, '');
+  };
+  const commonDir = discover('--git-common-dir');
+  const gitDir = discover('--git-dir');
+  if (commonDir === null || gitDir === null) return screen;
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
@@ -711,10 +724,24 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   // `submodule update --init` run inside a linked tree lands the submodule's
   // gitdir at `<common>/worktrees/<label>/modules/<name>/`, and the filters
   // planted in its config were never candidates.
-  const submoduleConfigs = (modulesDir: string, depth: number): void => {
-    // Bounds a planted symlink cycle (`modules/a` -> the dir above it); real
-    // submodule nesting is nowhere near the cap.
-    if (depth > 16) return;
+  // Dedupe visited directories by REALPATH instead of bounding depth: the
+  // depth cap bounded recursion DEPTH but not total work — several symlinks
+  // in a `modules/` dir resolving back to an already-walked dir branched
+  // the walk exponentially (≈ n^16 calls toward the cap of 16) and
+  // OOM-crashed the process in place of the refusal the screen exists to
+  // give, persisting in the user's `.git` across retries. Real submodule
+  // nesting is nowhere near deep enough to need a cap, and a dir already
+  // walked has no new candidates to give.
+  const seenModuleDirs = new Set<string>();
+  const submoduleConfigs = (modulesDir: string): void => {
+    let dedupe = modulesDir;
+    try {
+      dedupe = realpathSync(modulesDir);
+    } catch {
+      // Unresolvable: the literal path still dedupes the plain cycle.
+    }
+    if (seenModuleDirs.has(dedupe)) return;
+    seenModuleDirs.add(dedupe);
     try {
       for (const mod of readdirSync(modulesDir)) {
         candidates.push(join(modulesDir, mod, 'config'));
@@ -722,7 +749,7 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         // A NESTED submodule's gitdir lands one level deeper under the same
         // common dir (`modules/<a>/modules/<b>/`), and a `submodule.recurse`
         // checkout executes the filters planted there too.
-        submoduleConfigs(join(modulesDir, mod, 'modules'), depth + 1);
+        submoduleConfigs(join(modulesDir, mod, 'modules'));
       }
     } catch {
       // No (further) submodules registered here.
@@ -732,14 +759,25 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       const admin = join(common, 'worktrees', entry);
       candidates.push(join(admin, 'config.worktree'));
-      submoduleConfigs(join(admin, 'modules'), 0);
+      submoduleConfigs(join(admin, 'modules'));
     }
   } catch {
     // No linked worktrees registered: the candidates above are all of it.
   }
-  submoduleConfigs(join(common, 'modules'), 0);
+  submoduleConfigs(join(common, 'modules'));
   const includeKey = /^(include\.path|includeif\..*\.path)$/;
-  const seen = new Set<string>();
+  // The SHALLOWEST depth each physical file was scanned at, not mere
+  // membership: git gives every top-level config source a FRESH depth-10
+  // budget and skips `includeIf` directives whose condition does not match,
+  // while this screen walks every target regardless of condition. A
+  // never-matching decoy chain the screen walked consumed the old shared
+  // budget, and the first-scan collapse then truncated the include closure
+  // of a candidate file git re-reads fresh at the checkout being authorised
+  // — a full bypass with a static plant, live-reproduced on git 2.43. A
+  // file first reached deep re-scans with its full budget when its own
+  // shallower turn arrives; cycles still terminate because every lap
+  // arrives deeper than the last.
+  const seen = new Map<string, number>();
   const scan = (file: string, depth: number): void => {
     // git's own include limit is depth 10; a chain beyond it never executes,
     // so it clears the screen rather than feeding an unbounded walk.
@@ -750,8 +788,9 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     } catch {
       // Unresolvable: the literal path still dedupes the plain cycle.
     }
-    if (seen.has(dedupe)) return;
-    seen.add(dedupe);
+    const at = seen.get(dedupe);
+    if (at !== undefined && at <= depth) return;
+    seen.set(dedupe, depth);
     if (!existsSync(file)) return;
     // `-z` records are `key\nvalue\0`: subsection names legally carry
     // spaces and values legally carry newlines, so the line-oriented

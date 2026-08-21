@@ -31,6 +31,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import type { BuildTestReport } from './build-test.js';
 
 const okBuild = {
@@ -320,6 +321,45 @@ describe('runBaseTree', () => {
     expect(r.note).toContain('filter.evil.smudge');
     expect(existsSync(pwned)).toBe(false);
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('reports the add breached — never available — when a plant appears during the checkout', () => {
+    // The screen is a point-in-time read; the deterministic shape for its
+    // window with the add uses the screen's own disclosed limit — a filter
+    // in the GLOBAL config is the user's contract and never screened. Here
+    // its smudge arms a repo-LOCAL filter when the add's initial checkout
+    // executes it (attributes selecting it are committed at the base):
+    // absent at the pre-read, standing at every read after — so the report
+    // is breached and the just-added tree rolled back, never
+    // `available: true` over an executed plant.
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(repo, '.gitattributes'), '*.txt filter=armer\n');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-qam', 'base-with-attributes');
+      const armedBase = git(repo, 'rev-parse', 'HEAD');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          "git config filter.evil.smudge 'touch /tmp/qwen-never'",
+        ],
+        { cwd: repo },
+      );
+
+      const r = run({ plan: { mergeBaseSha: armedBase } });
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('may have EXECUTED');
+      expect(r.note).toContain('filter.evil.smudge');
+      // The breached tree is rolled back, not left planted for the next
+      // shard.
+      expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+    } finally {
+      isolation.dispose();
+    }
   });
 
   it('sweeps a stale tree whose own admin config holds a plant, instead of wedging on it', () => {

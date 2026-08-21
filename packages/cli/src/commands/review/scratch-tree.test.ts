@@ -20,6 +20,26 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+
+// A screen->checkout WINDOW cannot be interleaved from a single thread —
+// every git spawn on this path is synchronous. The one deterministic way to
+// act inside the window is from inside the screen call itself, so the
+// screen is mockable here: default behaviour is the REAL screen (every
+// test that does not arm this override runs against it), and a test arms
+// `screenOverride.fn` for one call.
+const screenOverride = vi.hoisted(() => ({
+  fn: null as null | ((worktree: string, context: string) => string | null),
+}));
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  return {
+    ...actual,
+    localFilterRefusal: (worktree: string, context: string) =>
+      screenOverride.fn !== null
+        ? screenOverride.fn(worktree, context)
+        : actual.localFilterRefusal(worktree, context),
+  };
+});
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
@@ -140,6 +160,117 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.clean');
     expect(run().available).toBe(true);
+  });
+
+  it('reports the reset breached — never reused — when a plant appears during the checkout', () => {
+    // The screen is a point-in-time read; the deterministic shape for its
+    // window with the reset's checkout uses the screen's own disclosed
+    // limit — a filter in the GLOBAL config is the user's contract and
+    // never screened. Here its smudge arms a repo-LOCAL filter when the
+    // reset's checkout executes it (the tree's own info/attributes select
+    // it, and residue makes the checkout rewrite a file carrying it):
+    // absent at the pre-read, standing at the post-checkout re-read — so
+    // the report is breached, never `reused: true` over an executed plant.
+    const first = run();
+    expect(first.available).toBe(true);
+    const tree = first.path!;
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        "git config filter.evil.smudge 'touch /tmp/qwen-never'",
+      ],
+      { cwd: worktree },
+    );
+    // `info/attributes` resolves to the COMMON dir even for a linked
+    // worktree (probe: a per-worktree copy never fires), which is exactly
+    // the planting surface the screen polices.
+    const attrs = git(worktree, 'rev-parse', '--git-path', 'info/attributes');
+    appendFileSync(attrs, '*.ts filter=armer\n');
+    writeFileSync(join(tree, 'a.ts'), 'prior-run residue\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.reused).toBe(false);
+    expect(r.note).toContain('may have EXECUTED');
+    expect(r.note).toContain('filter.evil.smudge');
+  });
+
+  it('reports the rebuild breached — never available — when a plant appears during the add', () => {
+    // The same window at the fresh-add site: a `.gitattributes` committed
+    // beside the review HEAD selects a GLOBAL armer (never screened — the
+    // user's contract), whose smudge arms a repo-LOCAL plant during the
+    // add's initial checkout. Absent at the pre-read, standing at the
+    // post-add re-read — so the report is breached and the just-added tree
+    // rolled back, never `available: true` over an executed plant.
+    writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=armer\n');
+    git(worktree, 'add', '-A');
+    git(worktree, 'commit', '-qm', 'attributes');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        "git config filter.evil.smudge 'touch /tmp/qwen-never'",
+      ],
+      { cwd: worktree },
+    );
+
+    const r = run('shard--rebuild--breach');
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('may have EXECUTED');
+    expect(r.note).toContain('filter.evil.smudge');
+    // The breached tree is rolled back, not left planted for the next call.
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'shard--rebuild--breach')),
+    ).toBe(false);
+  });
+
+  it('re-reads the leaf AFTER the screen — a swap during the screen never reaches the checkout', () => {
+    // The leaf re-read used to sit ABOVE the screen, widening the swap
+    // window from one syscall to the screen's full runtime: a link swapped
+    // in during the screen aimed the checkout and the clean at whatever it
+    // named. The deterministic swapper acts from inside the screen call
+    // (the seam armed above); the re-read below the screen must refuse the
+    // reset, and the rebuild path must recover WITHOUT touching the link's
+    // target.
+    const first = run();
+    expect(first.available).toBe(true);
+    const tree = first.path!;
+    // A second checkout of the same repo standing where the shared review
+    // worktree stands in production: dirty tracked work and an untracked
+    // file, so any checkout/clean landing there is observable.
+    const outside = join(repo, 'outside-target');
+    git(repo, 'worktree', 'add', '-q', outside, headSha);
+    writeFileSync(join(outside, 'a.ts'), 'uncommitted work\n');
+    writeFileSync(join(outside, 'notes.txt'), 'untracked\n');
+
+    screenOverride.fn = () => {
+      screenOverride.fn = null; // one-shot: the rebuild re-screens for real
+      rmSync(tree, { recursive: true, force: true });
+      symlinkSync(outside, tree);
+      return null; // "clean screen"
+    };
+    try {
+      const r = run();
+
+      // The swap never reached the checkout: the outside worktree is
+      // byte-for-byte as this test left it.
+      expect(readFileSync(join(outside, 'a.ts'), 'utf8')).toBe(
+        'uncommitted work\n',
+      );
+      expect(existsSync(join(outside, 'notes.txt'))).toBe(true);
+      // ...and the command recovered through discard-and-rebuild.
+      expect(r.available).toBe(true);
+      expect(r.reused).toBe(false);
+    } finally {
+      screenOverride.fn = null;
+    }
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {

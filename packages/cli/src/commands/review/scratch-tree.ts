@@ -58,6 +58,7 @@ import {
   discardWorktree,
   exposeDependencies,
   INERT_GIT_ARGS,
+  localFilterBreach,
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -176,7 +177,7 @@ function resetScratchTree(
   tree: string,
   headSha: string,
   worktree: string,
-): boolean {
+): { ok: boolean; breach?: string } {
   // The gate that makes the rest of this function safe to run. A LINKED
   // worktree has a `.git` file pointing at the common dir; a bare directory
   // left by a crashed `worktree add` (or by a cleanup whose `rmSync` failed)
@@ -187,13 +188,13 @@ function resetScratchTree(
   // sha that makes this function report success (measured on a real repo). The
   // caller's discard-and-rebuild path handles the bare directory correctly;
   // this one must never touch it.
-  if (!existsSync(join(tree, '.git'))) return false;
+  if (!existsSync(join(tree, '.git'))) return { ok: false };
   // And the tree must BE the tree: a symlink at the scratch path, or a `.git`
   // naming another repository, would aim everything below at whatever it
   // resolves to. Discard-and-rebuild is the correct answer to all of it —
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
   try {
-    if (!lstatSync(tree).isDirectory()) return false;
+    if (!lstatSync(tree).isDirectory()) return { ok: false };
     // A genuine linked worktree carries its `.git` as a FILE naming its admin
     // entry, and its gitdir is `<common>/worktrees/<name>`. A tree claiming
     // to be the MAIN checkout — gitdir === commondir, reached by a `.git`
@@ -206,7 +207,7 @@ function resetScratchTree(
       realpathSync(gitOut(tree, 'rev-parse', '--show-toplevel')) !==
       realpathSync(tree)
     ) {
-      return false;
+      return { ok: false };
     }
     // And it must be a worktree of THIS repository. `--show-toplevel` prints
     // the directory the `.git` file sits in, whatever that file points at, so a
@@ -217,7 +218,7 @@ function resetScratchTree(
       realpathSync(
         gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
       );
-    if (commonOf(tree) !== commonOf(worktree)) return false;
+    if (commonOf(tree) !== commonOf(worktree)) return { ok: false };
     // EVERY ancestor, not just the parent. The first cut lstat'd `dirname(tree)`
     // on the stated premise that `.qwen/tmp` is the one component above the leaf
     // anything here can replace — which is false one hop higher: a link at
@@ -231,12 +232,12 @@ function resetScratchTree(
     if (
       redirectedAncestor(dirname(resolve(tree)), dirname(commonOf(worktree)))
     ) {
-      return false;
+      return { ok: false };
     }
     const gitdir = realpathSync(
       gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
-    if (gitdir === commonOf(worktree)) return false;
+    if (gitdir === commonOf(worktree)) return { ok: false };
     // The admin entry must point back at THIS tree. A planted gitfile naming
     // a SIBLING worktree's admin entry passes every check above — directory,
     // gitfile, toplevel resolving to itself, common dirs comparing equal,
@@ -249,35 +250,42 @@ function resetScratchTree(
     if (
       realpathSync(dirname(resolve(gitdir, backpointer))) !== realpathSync(tree)
     ) {
-      return false;
+      return { ok: false };
     }
   } catch {
-    return false;
+    return { ok: false };
   }
   try {
-    // Re-read the leaf immediately before the mutation. The gate above is a
-    // handful of spawns long, and what it authorises is a `checkout --force`
-    // and a `clean -ffdx`: a link swapped in during that window aims both at
-    // whatever it names. The window cannot be closed from here — this narrows
-    // it to one syscall, which is the same trade the hunk probe's pre-write
-    // re-check makes.
-    if (lstatSync(tree).isSymbolicLink()) return false;
     // Screen DIRECTLY beside the checkout it guards, not at the phase's
     // entry: the screen is a point-in-time config read, and every spawn
     // between an early read and this checkout widens the window a writer
     // can plant in — including this tree's own stale admin
     // `config.worktree`, which an entry screen would refuse on although
     // the discard-and-rebuild path destroys it without ever reading it
-    // (a permanent wedge, measured live). The guarantee this buys holds
-    // only against NON-concurrent writers: a sibling shard's suite can
-    // still toggle the config between this read and the pair's own spawns
-    // (the checkout, then the clean) — the window is this pair now, and
-    // closing it takes a lock shared with every suite run, which this
-    // round deliberately does not add.
+    // (a permanent wedge, measured live). Against a CONCURRENT writer (a
+    // sibling shard's suite, a toggler the reap did not reach) the screen
+    // alone cannot help — the detection half for that window is the
+    // post-checkout re-read below; closing the window itself takes a lock
+    // shared with every suite run, which this round deliberately does not
+    // add.
     if (localFilterRefusal(worktree, 'the reset this command runs') !== null) {
-      return false;
+      return { ok: false };
     }
+    // Re-read the leaf immediately before the mutation, and BELOW the
+    // screen: the gate above and the screen's own spawns are the window a
+    // link swapped in during them aims at whatever it names, and this
+    // check sitting ABOVE the screen widened that window from one syscall
+    // to the screen's full runtime. This narrows it back to one syscall —
+    // the same trade the hunk probe's pre-write re-check makes.
+    if (lstatSync(tree).isSymbolicLink()) return { ok: false };
     git(tree, 'checkout', '--force', '--detach', headSha);
+    // Re-read the screen the moment the checkout completes, BEFORE the
+    // clean: the detection half for the window named above, placed between
+    // the two spawns because `clean -ffdx` deletes include targets planted
+    // inside the tree — a re-read after it reports clean for a plant the
+    // checkout just executed.
+    const breach = localFilterBreach(worktree, 'the reset this command ran');
+    if (breach !== null) return { ok: false, breach };
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
     // report calls pristine — and `-x` because IGNORED paths are where the rest
@@ -295,7 +303,7 @@ function resetScratchTree(
     const hidden = gitOut(tree, 'ls-files', '-v')
       .split('\n')
       .some((line) => /^[a-zS]/.test(line));
-    if (hidden) return false;
+    if (hidden) return { ok: false };
     // Nor does any of it reach INSIDE a submodule: `checkout --force` without
     // `--recurse-submodules` leaves its working tree alone, `clean` never
     // touches a tracked gitlink, and `rev-parse HEAD` is the superproject's. A
@@ -311,12 +319,14 @@ function resetScratchTree(
     const hasSubmodules = gitOut(tree, 'ls-files', '-s')
       .split('\n')
       .some((line) => line.startsWith('160000'));
-    if (hasSubmodules) return false;
-    return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
+    if (hasSubmodules) return { ok: false };
+    return gitOut(tree, 'rev-parse', 'HEAD') === headSha
+      ? { ok: true }
+      : { ok: false };
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
     // discards and rebuilds it rather than handing back a half-known state.
-    return false;
+    return { ok: false };
   }
 }
 
@@ -426,7 +436,24 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+  const reset = existsSync(tree)
+    ? resetScratchTree(tree, headSha, worktree)
+    : null;
+  // A plant the reset's own checkout executed is reported as a breach, not
+  // laundered through the discard-and-rebuild below: the next screen may
+  // read clean (the toggler unplants), but THIS run is breached.
+  if (reset !== null && reset.breach !== undefined) {
+    return {
+      available: false,
+      reused: false,
+      dependencies: null,
+      sharedTreeResidue,
+      sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
+      note: reset.breach,
+    };
+  }
+  if (reset !== null && reset.ok) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
     // `node_modules` is where a probe is told it may install, and anything a
@@ -486,6 +513,26 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       };
     }
     git(worktree, 'worktree', 'add', '--detach', tree, headSha);
+    // Paired with the screen above, the way the reset pair re-reads: a
+    // concurrent writer the pipeline itself schedules can plant between
+    // the screen's read and the add's own config read, and the add's
+    // initial checkout executes the plant while both reads see nothing. A
+    // key that APPEARED is reported as a breach and the just-added tree
+    // rolled back — never certified clean with a planted checkout behind
+    // it.
+    const breach = localFilterBreach(worktree, 'the rebuild this command ran');
+    if (breach !== null) {
+      discardWorktree(worktree, tree);
+      return {
+        available: false,
+        reused: false,
+        dependencies: null,
+        sharedTreeResidue,
+        sharedTreeResidueTotal: residue.total,
+        sharedTreeUnmeasured: residue.unmeasured,
+        note: breach,
+      };
+    }
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose
     // note names contaminated paths while its `sharedTreeResidue` field says

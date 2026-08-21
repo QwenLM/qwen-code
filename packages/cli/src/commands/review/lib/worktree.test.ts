@@ -1515,19 +1515,28 @@ describe('localFilterCommands', () => {
     // the screen performs (a cycle in the common config itself makes
     // EVERY git command in the repository fatal — nothing runs, and the
     // screen's empty answer is the loud failure's own).
+    // Forward slashes on every interpolated path: `join()` yields
+    // backslashes on Windows, and git's config parser rejects them in
+    // hand-written config text (probe, git 2.43: `fatal: bad config line
+    // 2`), turning the fixture's own `config.worktree` into an
+    // unclearable candidate — while git accepts `/` separators there on
+    // every platform.
+    const fwd = (p: string) => p.replace(/\\/g, '/');
     writeFileSync(
       join(repo, '.git', 'config.worktree'),
-      '[include]\n\tpath = ' + join(repo, '.git', 'include-chain-entry') + '\n',
+      '[include]\n\tpath = ' +
+        fwd(join(repo, '.git', 'include-chain-entry')) +
+        '\n',
     );
     const dir = mkdtempSync(join(tmpdir(), 'qwen-include-chain-'));
     const a = join(dir, 'a');
     const b = join(dir, 'b');
     writeFileSync(
       join(repo, '.git', 'include-chain-entry'),
-      `[include]\n\tpath = ${a}\n`,
+      `[include]\n\tpath = ${fwd(a)}\n`,
     );
-    writeFileSync(a, `[include]\n\tpath = ${b}\n`);
-    writeFileSync(b, `[include]\n\tpath = ${a}\n`);
+    writeFileSync(a, `[include]\n\tpath = ${fwd(b)}\n`);
+    writeFileSync(b, `[include]\n\tpath = ${fwd(a)}\n`);
 
     expect(localFilterCommands(tree)).toEqual({
       keys: [],
@@ -1537,7 +1546,7 @@ describe('localFilterCommands', () => {
     // The same chain with the filter planted at the far end.
     writeFileSync(
       b,
-      `[include]\n\tpath = ${a}\n[filter "deep"]\n\tsmudge = x\n`,
+      `[include]\n\tpath = ${fwd(a)}\n[filter "deep"]\n\tsmudge = x\n`,
     );
     expect(localFilterCommands(tree)).toEqual({
       keys: ['filter.deep.smudge', 'include.path'],
@@ -1865,5 +1874,130 @@ describe('localFilterCommands', () => {
     expect(got.keys).toEqual([]);
     expect(got.unclearable).toHaveLength(1);
     expect(got.unclearable[0]).toContain('config.worktree');
+  });
+
+  it('terminates through a planted symlink cycle under modules — and still reads real configs', () => {
+    // The old depth cap bounded recursion DEPTH but not total work: five
+    // links in `modules/` resolving back to the dir above branched the
+    // walk exponentially (≈ n^16 calls toward the cap of 16) and
+    // OOM-crashed the process in place of the refusal the screen exists
+    // to give — a denial of the whole review run planted by the very
+    // artifact the screen polices, persisting in the user's `.git` across
+    // retries. Deduping visited directories by realpath makes the walk
+    // acyclic regardless of branching; a real config beside the cycle must
+    // still be read.
+    const modules = join(repo, '.git', 'modules');
+    mkdirSync(modules, { recursive: true });
+    for (let i = 0; i < 5; i++) {
+      // `..` from inside `modules/` names the common dir, so
+      // `modules/loopN/modules` resolves back to `modules` itself.
+      symlinkSync('..', join(modules, `loop${i}`));
+    }
+    mkdirSync(join(modules, 'real'), { recursive: true });
+    writeFileSync(
+      join(modules, 'real', 'config'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual(['filter.evil.smudge']);
+    expect(got.unclearable).toEqual([]);
+  });
+
+  // A newline is a legal character in a repository's path (the user's own
+  // clone location — not attacker-controlled), and the screen's discovery
+  // used to split one two-flag `rev-parse` output on newlines: such a path
+  // parsed into fragments, every candidate landed under a nonexistent
+  // directory, and the screen answered clean with the plant standing.
+  it.skipIf(process.platform === 'win32')(
+    'screens a repository whose path legally contains a newline',
+    () => {
+      const oddRoot = join(
+        mkdtempSync(join(tmpdir(), 'qwen-odd-')),
+        'foo\nbar',
+      );
+      mkdirSync(oddRoot, { recursive: true });
+      const oddRepo = join(oddRoot, 'repo');
+      const g = (...a: string[]) =>
+        execFileSync('git', a, { cwd: oddRepo, encoding: 'utf8' }).trim();
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main', oddRepo], {
+          cwd: oddRoot,
+        });
+        g('config', 'user.email', 't@t.t');
+        g('config', 'user.name', 't');
+        writeFileSync(join(oddRepo, 'a.txt'), 'a\n');
+        g('add', '-A');
+        g('commit', '-qm', 'head');
+        const oddTree = join(oddRoot, 'wt');
+        g('worktree', 'add', '--detach', '-q', oddTree, 'HEAD');
+        // Planted in the common config, screened FROM the linked worktree:
+        // discovery's output is absolute there, and carries the newline.
+        g('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
+
+        expect(localFilterCommands(oddTree)).toEqual({
+          keys: ['filter.evil.smudge'],
+          unclearable: [],
+        });
+      } finally {
+        rmSync(oddRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('gives each config source a fresh include-depth budget, the way git does', () => {
+    // git resets its depth-10 budget per top-level config source and skips
+    // `includeIf` directives whose condition does not match; the screen
+    // walks every target regardless of condition, and the old shared
+    // membership set let a never-matching DECOY directive consume the
+    // budget — it walked the candidate's chain once, deep, and the
+    // first-scan collapse then skipped the candidate file's OWN depth-0
+    // scan outright, truncating a closure git re-reads fresh at the
+    // checkout being authorised. A full bypass with a static plant,
+    // live-reproduced on git 2.43. Tracking the shallowest depth each
+    // file was scanned at re-scans it with a fresh budget instead.
+    const fwd = (p: string) => p.replace(/\\/g, '/');
+    const adminConfigWorktree = join(
+      repo,
+      '.git',
+      'worktrees',
+      basename(tree),
+      'config.worktree',
+    );
+    // The decoy: a never-matching includeIf in the common config names the
+    // admin dir's config.worktree DIRECTLY. The screen walks it at depth 1
+    // and its chain z1..z9 at depths 2..10 — z10 lands beyond the cap and
+    // nothing is recorded — while git skips the condition and never reads
+    // the decoy at all.
+    gitRepo(
+      'config',
+      'includeIf.gitdir:/nonexistent-xyz/.path',
+      adminConfigWorktree,
+    );
+    // The candidate's OWN chain: config.worktree -> z1..z9 -> z10 holding
+    // the filter. On its fresh depth-0 scan z10 lands at depth 10 —
+    // exactly git's limit — and is honoured.
+    const zDir = mkdtempSync(join(tmpdir(), 'qwen-real-chain-'));
+    for (let i = 1; i < 10; i++) {
+      writeFileSync(
+        join(zDir, `z${i}`),
+        `[include]\n\tpath = ${fwd(join(zDir, `z${i + 1}`))}\n`,
+      );
+    }
+    writeFileSync(
+      join(zDir, 'z10'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+    writeFileSync(
+      adminConfigWorktree,
+      `[include]\n\tpath = ${fwd(join(zDir, 'z1'))}\n`,
+    );
+
+    const got = localFilterCommands(tree);
+    expect(got.unclearable).toEqual([]);
+    expect(got.keys).toContain('filter.evil.smudge');
+    expect(localFilterRefusal(tree, 'x')).not.toBeNull();
+
+    rmSync(zDir, { recursive: true, force: true });
   });
 });

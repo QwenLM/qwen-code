@@ -586,6 +586,41 @@ describe('fetch-pr report assembly', () => {
     ).toBe(true);
   });
 
+  it('reports the add breached — never clean — when a plant appears during the worktree add', async () => {
+    // The screen is a point-in-time read; the pipeline's own comments admit
+    // a toggler an earlier review's suite left running. The deterministic
+    // shape for that window here: the mocked `worktree add` IS the add, so
+    // let it plant a filter the way an escapee would mid-checkout — absent
+    // at the pre-read, standing at the post-add re-read, which must report
+    // the run breached and roll the add back instead of certifying it
+    // clean.
+    producerMocks.git.mockImplementation((...args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        spawnSync(
+          'git',
+          ['config', 'filter.evil.smudge', 'touch /tmp/qwen-never'],
+          { cwd: fixtureRepo },
+        );
+        return '';
+      }
+      return args[0] === 'rev-parse' ? 'f00df00df00d' : '';
+    });
+
+    await expect(reportFor({})).rejects.toThrow('may have EXECUTED');
+    // Rolled back the way the refusal path does: the worktree released and
+    // the fetched ref deleted.
+    expect(producerMocks.releaseWorktree).toHaveBeenCalled();
+    expect(
+      producerMocks.execFileSync.mock.calls.some(
+        ([cmd, args]: unknown[]) =>
+          cmd === 'git' &&
+          Array.isArray(args) &&
+          args[0] === 'branch' &&
+          args[1] === '-D',
+      ),
+    ).toBe(true);
+  });
+
   it('screens BELOW cleanStale — a plant in the stale tree admin dir does not wedge the fetch gate', async () => {
     // The screen's candidate set reads every `<common>/worktrees/*/
     // config.worktree`, and it used to run ABOVE `cleanStale`'s release of
