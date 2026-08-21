@@ -97,8 +97,11 @@ export function TextInput({
   const latestCursorOffsetRef = useRef(
     initialCursorOffset ?? cpLen(value || ''),
   );
+  const textChangeCursorOffsetRef = useRef<number | undefined>(undefined);
   const stableOnChange = useCallback((text: string) => {
-    onCursorChangeRef.current?.(latestCursorOffsetRef.current);
+    const cursorOffset = latestCursorOffsetRef.current;
+    textChangeCursorOffsetRef.current = cursorOffset;
+    onCursorChangeRef.current?.(cursorOffset);
     onChangeRef.current?.(text);
   }, []);
 
@@ -124,6 +127,11 @@ export function TextInput({
   );
   latestCursorOffsetRef.current = cursorOffset;
   useEffect(() => {
+    if (textChangeCursorOffsetRef.current === cursorOffset) {
+      textChangeCursorOffsetRef.current = undefined;
+      return;
+    }
+    textChangeCursorOffsetRef.current = undefined;
     onCursorChangeRef.current?.(cursorOffset);
   }, [cursorOffset]);
 

@@ -431,7 +431,7 @@ export function remapCaretAcrossResplit(
     previous[index].text.trim().length === 0 &&
     index === previous.length - 1
   ) {
-    return nextLength;
+    return previousText.includes(',') ? nextLength : clamped;
   }
 
   const within = clamped - previous[index].start;

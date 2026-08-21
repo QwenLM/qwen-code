@@ -406,6 +406,50 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps typing separate from an id reclaimed into an empty input', async () => {
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: 'X-discovered' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['recommendedModels'] = [{ id: 'X-discovered' }];
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    const submitModelIds = vi.fn();
+    const after = createModelIdsFlow({
+      modelIds: 'X-discovered',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M3' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+
+    await act(async () => {
+      swapFlow(after);
+    });
+    for (const char of 'priv') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['priv', 'X-discovered'],
+    });
+    unmount();
+  });
+
   it('keeps an in-progress search and its focus across a recommendation swap', async () => {
     // R4-6: the step used to be remounted by a `key` on the revision, which
     // also re-ran its one-shot `useState` initializers — so a lookup landing
@@ -1400,6 +1444,10 @@ describe('remapCaretAcrossResplit', () => {
     // The re-derive appends what it reclaimed in front of that separator, so
     // the position they are typing at is the end.
     expect(remapCaretAcrossResplit('a,', 'a, reclaimed,', 2)).toBe(13);
+  });
+
+  it('keeps a caret at the start when an id is reclaimed into an empty input', () => {
+    expect(remapCaretAcrossResplit('', ', X-discovered', 0)).toBe(0);
   });
 
   it('counts in code points, not UTF-16 units', () => {
