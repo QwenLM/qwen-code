@@ -4181,6 +4181,30 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('rejects a vision-only image generation route', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'vision-only-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              visionOnly: true,
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(
+          `openai:vision-only-model\0${baseUrl}`,
+        ),
+      ).toBeUndefined();
+    });
+
     it('rejects an image generation route without an environment key', () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({

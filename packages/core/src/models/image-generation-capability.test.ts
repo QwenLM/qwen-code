@@ -9,13 +9,13 @@ import { isImageGenerationCapable } from './image-generation-capability.js';
 
 describe('isImageGenerationCapable', () => {
   it.each([
-    [{}, false],
-    [{ supportsImageGeneration: false }, false],
-    [{ supportsImageGeneration: true }, true],
-    [{ imageOnly: true }, true],
-    [{ supportsImageGeneration: true, imageOnly: true }, true],
-    [{ supportsImageGeneration: false, imageOnly: true }, true],
-  ] as const)('returns %s for %o', (model, expected) => {
+    [false, {}],
+    [false, { supportsImageGeneration: false }],
+    [true, { supportsImageGeneration: true }],
+    [true, { imageOnly: true }],
+    [true, { supportsImageGeneration: true, imageOnly: true }],
+    [true, { supportsImageGeneration: false, imageOnly: true }],
+  ] as const)('returns %s for %o', (expected, model) => {
     expect(isImageGenerationCapable(model)).toBe(expected);
   });
 });

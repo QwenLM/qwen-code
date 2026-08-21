@@ -365,7 +365,12 @@ function getAvailableModelIds(
       : config.getAvailableModels();
   const availableModels = models.filter((m) => {
     if (mode === 'image')
-      return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
+      return (
+        isImageGenerationCapable(m) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !m.visionOnly
+      );
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
     if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
     if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
@@ -953,7 +958,8 @@ export const modelCommand: SlashCommand = {
         (model) =>
           isImageGenerationCapable(model) &&
           !model.fastOnly &&
-          !model.voiceOnly,
+          !model.voiceOnly &&
+          !model.visionOnly,
       );
       const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,

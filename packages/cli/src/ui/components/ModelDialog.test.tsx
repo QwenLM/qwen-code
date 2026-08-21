@@ -876,6 +876,15 @@ describe('<ModelDialog />', () => {
             imageOnly: true,
           },
           {
+            id: 'vision-only-model',
+            label: 'Vision-only model',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://vision.example.com/api/v1',
+            envKey: 'IMAGE_API_KEY',
+            visionOnly: true,
+            supportsImageGeneration: true,
+          },
+          {
             id: 'image-without-credentials',
             label: 'Image without credentials',
             authType: AuthType.USE_OPENAI,
@@ -895,6 +904,13 @@ describe('<ModelDialog />', () => {
             return {
               model: 'qwen-image-2.0',
               baseUrl: 'https://legacy-images.example.com/api/v1',
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          if (selector.includes('vision-only-model')) {
+            return {
+              model: 'vision-only-model',
+              baseUrl: 'https://vision.example.com/api/v1',
               apiKeyEnv: 'IMAGE_API_KEY',
             };
           }
@@ -928,6 +944,35 @@ describe('<ModelDialog />', () => {
 
   it('keeps dual-role models in the main dialog and excludes legacy image-only models', () => {
     renderComponent({}, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'dual-role-model',
+          label: 'Dual-role model',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::dual-role-model`);
+  });
+
+  it.each([
+    ['fast', { isFastModelMode: true }],
+    ['voice', { isVoiceModelMode: true }],
+    ['vision', { isVisionModelMode: true }],
+    ['compaction', { isCompactionModelMode: true }],
+  ] as const)('keeps dual-role models in the %s dialog', (_mode, modeProps) => {
+    renderComponent(modeProps, {
       getAuthType: vi.fn(() => AuthType.USE_OPENAI),
       getAllConfiguredModels: vi.fn(() => [
         {
