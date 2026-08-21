@@ -1863,9 +1863,20 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // spellings the message claims to reject (`0x10`, `1e3`, `5.0`), and the
   // raw string then labels the heading and the side file while the fetch
   // targets the normalized number — fragmenting prev-ledger continuity
-  // across spellings of the same PR.
+  // across spellings of the same PR. The predicate alone still admits two
+  // spellings of the same class: leading zeros (`007` fetches 7 but labels
+  // the heading and the prev-ledger side file `007`, so a later `7` run
+  // reads a different side file and the round counter restarts) and digit
+  // strings above `Number.MAX_SAFE_INTEGER` (`Number()` silently rounds
+  // them, fetching a different PR than the labels announce). Both refused,
+  // as fetch-pr's `[1-9]\d*` does, so every admitted input round-trips:
+  // `String(Number(x)) === x`.
   const prNum = Number(prNumber);
-  if (!isPositivePrNumber(prNumber)) {
+  if (
+    !isPositivePrNumber(prNumber) ||
+    !Number.isSafeInteger(prNum) ||
+    /^0\d/.test(prNumber)
+  ) {
     throw new TypeError(
       `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
     );

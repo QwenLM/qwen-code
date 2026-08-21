@@ -578,7 +578,7 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(postedJson().posted).toBe(true);
-    // The force applies ONLY to the Aone path — a GitHub write hands the
+    // No path forces the claim anymore — a GitHub write hands the
     // state's own context claim through RAW (the reads are backed there):
     // this fixture state carries no claim, so undefined reaches compose —
     // coercing it to false here would also coerce a malformed non-boolean

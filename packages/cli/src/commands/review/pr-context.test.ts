@@ -3053,6 +3053,38 @@ describe('runPrContext identity failure (handler level)', () => {
     expect(ctx).toContain("MERGED over this account's own latest findings");
     expect(ctx).not.toContain('THEIR claims');
   });
+
+  it('round-trips the review commit_id through the GitHub reader into the side file', async () => {
+    // The age reference crosses TWO mapping seams: the reader's
+    // `commit_id → commitId` spread and `toRawReview`'s `commitId →
+    // commit_id` spread before `recoverLedger` ever sees it. Every
+    // recovery test above builds its RawReviews by hand, so dropping
+    // EITHER spread left the suite green — the reader seam had no
+    // witness. The persisted side file is where compose-review later
+    // reads the age reference back.
+    currentUserMock.mockReturnValue('bot');
+    const head = 'e'.repeat(40);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 31,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"S","file":"a.ts","title":"t"}]} -->',
+          commit_id: head,
+        },
+      ]);
+    await run();
+    const sideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(sideWrite).toBeDefined();
+    expect(String(sideWrite?.[1])).toContain(`"commitId": "${head}"`);
+  });
 });
 
 describe('runPrContext host baking (handler level)', () => {
@@ -3145,23 +3177,35 @@ describe('runPrContext pr_number guard (handler level)', () => {
   // dropping the guard — or restoring a bare `Number()` check that admits
   // `0x10`/`5.`/`1e3` — lets the malformed number reach the platform
   // reader, surfacing a confusing a1/gh error instead of the usage-class
-  // refusal.
-  it.each(['0', '-3', '5.', '5.0', '0x10', '1e3'])(
-    'refuses pr_number %s before any platform call',
-    async (bad) => {
-      getPlatformReaderMock.mockClear();
-      await expect(
-        (prContextCommand.handler as (a: unknown) => Promise<void>)({
-          _: [],
-          $0: 'qwen',
-          pr_number: bad,
-          owner_repo: 'o/r',
-          out: '/tmp/ctx.md',
-        }),
-      ).rejects.toThrow(/pr_number must be a positive integer/);
-      expect(getPlatformReaderMock).not.toHaveBeenCalled();
-    },
-  );
+  // refusal. The leading-zero and over-safe-magnitude spellings pin the
+  // round-trip half: both PASS `isPositivePrNumber`, but `Number()`
+  // normalizes them away from the raw string that labels the heading and
+  // the prev-ledger side file — a `007` run and a `7` run would then
+  // write/read different side files and the round counter would restart.
+  it.each([
+    '0',
+    '-3',
+    '5.',
+    '5.0',
+    '0x10',
+    '1e3',
+    '007',
+    '0123',
+    '9007199254740993',
+    '99999999999999999999',
+  ])('refuses pr_number %s before any platform call', async (bad) => {
+    getPlatformReaderMock.mockClear();
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: bad,
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/pr_number must be a positive integer/);
+    expect(getPlatformReaderMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('prContextCommand handler — Aone routing', () => {
