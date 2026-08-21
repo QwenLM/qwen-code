@@ -947,7 +947,12 @@ export async function start_sandbox(
 // Helper functions to ensure sandbox image is present
 async function imageExists(sandbox: string, image: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const args = ['images', '-q', image];
+    // `images -q` lists repository:tag entries only, so a digest reference
+    // (`repo@sha256:…`) lists empty even when its content is local — forcing
+    // a needless registry round-trip for content already present. `image
+    // inspect` resolves digest references against local content offline
+    // (#9527).
+    const args = ['image', 'inspect', '--format', '{{.Id}}', image];
     const checkProcess = spawn(sandbox, args);
 
     let stdoutData = '';

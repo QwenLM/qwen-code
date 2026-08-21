@@ -31,7 +31,7 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(sab), 0, 0, ms);
 }
 
-function execA1WithRetry(args: string[]): string {
+function execA1(args: string[], retry: boolean): string {
   for (let attempt = 0; ; attempt++) {
     try {
       return execFileSync(A1_BINARY, args, {
@@ -56,7 +56,11 @@ function execA1WithRetry(args: string[]): string {
           e.stderr?.toString() ?? '',
         ].join('\n'),
       );
-      if (attempt < MAX_RETRIES && TRANSIENT_RE.test(rebuilt.message)) {
+      if (
+        retry &&
+        attempt < MAX_RETRIES &&
+        TRANSIENT_RE.test(rebuilt.message)
+      ) {
         const delay = BASE_DELAY_MS * (attempt + 1);
         // The sibling gh.ts prints one trace line per retry; a silent 3–9 s
         // blocking sleep reads as a hang in CI logs.
@@ -71,9 +75,18 @@ function execA1WithRetry(args: string[]): string {
   }
 }
 
-/** Run `a1` with args and return trimmed stdout. */
+/** Run `a1` with args and return trimmed stdout. Idempotent reads ride a
+ *  transient retry. */
 export function a1(...args: string[]): string {
-  return execA1WithRetry(args);
+  return execA1(args, true);
+}
+
+/** Run `a1` for a WRITE — exactly once, never retried. A transient retry
+ *  after the server ACCEPTED the call would duplicate the write (a
+ *  double-posted comment), so a write surfaces its first error and the
+ *  caller reports what already landed. */
+export function a1Once(...args: string[]): string {
+  return execA1(args, false);
 }
 
 /** Run `a1 … --format json` and parse the result. The long `--format` flag is
@@ -82,14 +95,40 @@ export function a1Json<T>(...args: string[]): T {
   return JSON.parse(a1(...args, '--format', 'json')) as T;
 }
 
-/**
- * Fail fast with an actionable message when `a1` cannot run. A missing
- * binary (ENOENT — the dominant first-run state for this new dependency) is
- * a different remedy than an unauthenticated one.
- */
-export function ensureAoneAuthenticated(): void {
+/** The JSON shape of `a1Once` — the WRITE that reads its result back (the
+ *  created comment's id). TOLERANT on purpose, and only here: an exec
+ *  failure propagates (the write genuinely failed), but once the exec
+ *  SUCCEEDED the write is ACCEPTED — an answer that then fails to parse is
+ *  a platform anomaly, not a failed post, and must degrade to `undefined`
+ *  ("landed, result unreadable"). A throw instead would let the caller
+ *  count an accepted comment as unposted and re-run it into a duplicate. */
+export function a1JsonOnce<T>(...args: string[]): T | undefined {
+  const raw = a1Once(...args, '--format', 'json');
   try {
-    a1('auth', 'whoami');
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fail fast with an actionable message when `a1` cannot run, and return the
+ * authenticated account. Runs `a1 auth whoami --format json` ONCE — the
+ * JSON spelling fully subsumes a plain auth gate, so presubmit reads its
+ * self-PR comparison account off this call instead of spawning a second
+ * whoami (which retried its own delays a second time under the same
+ * transient outage, and could throw uncaught after the report's graceful
+ * path had already been decided). A missing binary (ENOENT — the dominant
+ * first-run state for this new dependency) is a different remedy than an
+ * unauthenticated one. An EXEC-successful answer that does not parse or
+ * names no account returns '': the exec's success already proves the auth
+ * state, and an unreadable account fails presubmit's self-PR comparison
+ * soft, like the GitHub path's empty login.
+ */
+export function ensureAoneAuthenticated(): string {
+  let raw: string;
+  try {
+    raw = a1('auth', 'whoami', '--format', 'json');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
@@ -104,9 +143,9 @@ export function ensureAoneAuthenticated(): void {
       );
     }
     // execFileSync failure messages BEGIN with the fixed preamble
-    // "Command failed: a1 auth whoami"; a1's real first stderr line is the
-    // first NON-empty line after it. `.split('\n')[0]` would render only the
-    // preamble and drop the cause.
+    // "Command failed: a1 auth whoami --format json"; a1's real first stderr
+    // line is the first NON-empty line after it. `.split('\n')[0]` would
+    // render only the preamble and drop the cause.
     const cause =
       e.message
         .split('\n')
@@ -123,5 +162,11 @@ export function ensureAoneAuthenticated(): void {
         (cause ? ` — ${cause}` : '') +
         ` (if you have not logged in, run \`a1 auth login\`)`,
     );
+  }
+  try {
+    const out = JSON.parse(raw) as { account?: unknown };
+    return typeof out.account === 'string' ? out.account.trim() : '';
+  } catch {
+    return '';
   }
 }
