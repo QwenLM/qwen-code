@@ -167,7 +167,8 @@ interface OptimisticPinEntry {
   /** Pin timestamp assigned optimistically (present when pinning). */
   pinnedAt?: string;
   rpcSettled: boolean;
-  catalogPages: readonly (DaemonSessionSummary[] | undefined)[];
+  /** Catalog pages observed when the organization RPC settled. */
+  catalogPages?: readonly (DaemonSessionSummary[] | undefined)[];
 }
 
 function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
@@ -1056,18 +1057,19 @@ export function WebShellSidebar({
   }, [sessionsPage, sessionSource]);
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
-  const { sessions: primaryPinnedSessions } = useWebShellSessions({
-    autoLoad:
-      sessionCatalogRequestsEnabled &&
-      loadPinnedSessions &&
-      !primaryWorkspaceSessionLiveStateEnabled,
-    enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
-    pageSize: SESSION_LIST_PAGE_SIZE,
-    archiveState: 'active',
-    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
-    view: 'organized',
-    group: 'pinned',
-  });
+  const { sessions: primaryPinnedSessions, data: primaryPinnedSessionsPage } =
+    useWebShellSessions({
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        loadPinnedSessions &&
+        !primaryWorkspaceSessionLiveStateEnabled,
+      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+      pageSize: SESSION_LIST_PAGE_SIZE,
+      archiveState: 'active',
+      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+      view: 'organized',
+      group: 'pinned',
+    });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
   // Pin toggles applied optimistically while the daemon organization RPC
@@ -1385,13 +1387,15 @@ export function WebShellSidebar({
   );
   const optimisticCatalogPages = useMemo(
     () => [
-      ...(includePrimaryWorkspaceSessions ? [primaryPinnedSessions] : []),
+      ...(includePrimaryWorkspaceSessions ? [primaryPinnedSessionsPage] : []),
       ...secondaryPinnedSnapshots.map((snapshot) => snapshot.page?.sessions),
       sessionsPage,
+      ...secondaryActiveSnapshots.map((snapshot) => snapshot.page?.sessions),
     ],
     [
       includePrimaryWorkspaceSessions,
-      primaryPinnedSessions,
+      primaryPinnedSessionsPage,
+      secondaryActiveSnapshots,
       secondaryPinnedSnapshots,
       sessionsPage,
     ],
@@ -1573,20 +1577,34 @@ export function WebShellSidebar({
     },
     [optimisticPins, getIdentityForSession],
   );
-  // Drop optimistic entries only after the RPC has settled and a catalog page
-  // changed afterwards. Before that point, an old page can contradict the
-  // toggle or omit a row while its refresh is still in flight.
+  // Drop optimistic entries only after the RPC has settled and every loaded
+  // catalog page that changed afterwards corroborates the target state. One
+  // page can refresh before its sibling, so a partial refresh must not expose
+  // stale data from the page that has not settled yet.
   useEffect(() => {
     if (optimisticPins.size === 0) return;
     const pages = optimisticCatalogPages;
     const staleIdentities: string[] = [];
     for (const [identity, entry] of optimisticPins) {
-      if (!entry.rpcSettled) continue;
+      if (!entry.rpcSettled || !entry.catalogPages) continue;
       const pagesChanged = pages.some(
-        (page, index) => page !== entry.catalogPages[index],
+        (page, index) => page !== entry.catalogPages?.[index],
       );
       if (!pagesChanged) continue;
-      staleIdentities.push(identity);
+      const matchingSessions = pages.flatMap((page) =>
+        (page ?? []).filter(
+          (candidate) => getIdentityForSession(candidate) === identity,
+        ),
+      );
+      const firstPinned = matchingSessions[0]?.isPinned === true;
+      const pagesAgree =
+        matchingSessions.length > 0 &&
+        matchingSessions.every(
+          (session) => (session.isPinned === true) === firstPinned,
+        );
+      const corroborated =
+        pagesAgree || (!entry.pinned && matchingSessions.length === 0);
+      if (corroborated) staleIdentities.push(identity);
     }
     if (staleIdentities.length === 0) return;
     setOptimisticPins((previous) => {
@@ -1594,7 +1612,7 @@ export function WebShellSidebar({
       for (const identity of staleIdentities) next.delete(identity);
       return next;
     });
-  }, [optimisticPins, optimisticCatalogPages]);
+  }, [getIdentityForSession, optimisticPins, optimisticCatalogPages]);
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     const addCandidate = (
@@ -3133,7 +3151,6 @@ export function WebShellSidebar({
             session,
             pinned: targetPinned,
             rpcSettled: false,
-            catalogPages: optimisticCatalogPages,
             ...(targetPinned ? { pinnedAt: new Date().toISOString() } : {}),
           });
           return next;
@@ -3188,7 +3205,6 @@ export function WebShellSidebar({
       sessionCatalogController,
       setSessionBusy,
       t,
-      optimisticCatalogPages,
     ],
   );
 

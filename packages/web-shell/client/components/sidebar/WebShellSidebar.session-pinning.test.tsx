@@ -109,7 +109,8 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     }
     return {
       ...state,
-      data: state.data ?? state.sessions,
+      sessions: state.data === undefined ? [] : state.sessions,
+      data: state.data,
       catalogQuery,
     };
   },
@@ -530,9 +531,10 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
-  it('keeps an optimistic pin until a refreshed catalog settles', async () => {
+  it('keeps an optimistic pin while the pinned catalog is unloaded', async () => {
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
+    pinned.data = undefined;
     workspaceActions.updateSessionOrganization.mockResolvedValue({});
 
     renderSidebar();
@@ -541,16 +543,62 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     expect(pinnedListTitles()).toEqual(['Plain session']);
 
+    // The real catalog hook returns a fresh sessions=[] on each render while
+    // data remains undefined. Render churn must not count as authoritative
+    // evidence that contradicts the successful pin.
     renderSidebar();
     await flushSidebar();
     expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
-  it('keeps an in-flight optimistic pin when unrelated catalog pages change', async () => {
+  it('keeps an optimistic unpin until all loaded pages corroborate it', async () => {
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+
+    // The all-sessions page settles first, while the pinned page still has
+    // stale data. The optimistic unpin must continue masking that stale row.
+    active.sessions = [
+      makeSession('pinned-session', {
+        displayName: 'Pinned session',
+        isPinned: false,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('uses the settle-time catalog baseline after an in-flight page change', async () => {
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
+    let resolvePin: (() => void) | undefined;
     workspaceActions.updateSessionOrganization.mockReturnValue(
-      new Promise(() => {}),
+      new Promise<void>((resolve) => {
+        resolvePin = resolve;
+      }),
     );
 
     renderSidebar();
@@ -559,9 +607,9 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     expect(pinnedListTitles()).toEqual(['Plain session']);
 
-    // An unrelated catalog update (polling, another client) swaps page
-    // references while the pin RPC is still pending. The entry has not
-    // settled yet, so the reconciliation must not drop it.
+    // A catalog update swaps the tracked page while the RPC is pending. The
+    // settle-time baseline must capture this new page, rather than the page
+    // from the click-time closure.
     active.sessions = [
       makeSession('plain', {
         displayName: 'Plain session',
@@ -570,6 +618,9 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     ];
     active.data = active.sessions;
     renderSidebar();
+    await flushSidebar();
+
+    act(() => resolvePin?.());
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Plain session']);
