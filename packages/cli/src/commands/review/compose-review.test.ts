@@ -9883,6 +9883,36 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('Mechanism health:');
     expect(r.body).toContain('engaged in name and not in effect');
 
+    // The clause renders ONCE. It is spread into three body-assembly
+    // branches, and a second spread in one of them printed it twice.
+    expect(r.body.split('engaged in name and not in effect')).toHaveLength(2);
+
+    // A round that posted NO Suggestion is a round where the gap had no
+    // manifestation — and the sentence asserts one. The first two conjuncts
+    // hold on every default-config round from 6 on, so stopping there
+    // accused the posture of failing on rounds where it was not even asked
+    // to do anything.
+    const criticalsOnly = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(criticalsOnly.body).not.toContain('engaged in name');
+
+    // Neither is a round with nothing to report at all. (Its anchor chain
+    // disclosure still stands — that check is about the machinery and does
+    // not depend on what the round found.)
+    const nothing = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [],
+    });
+    expect(nothing.body).not.toContain('engaged in name');
+
     // With the floor NAMED, both readings agree and nothing is disclosed.
     const named = composeReview({
       planPath: plan(),

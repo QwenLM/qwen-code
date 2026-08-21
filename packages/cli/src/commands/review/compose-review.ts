@@ -3736,16 +3736,26 @@ function composeReviewBody(
     ? renderMechanismHealth({
         // Nominally engaged, mechanically not: the floor resolved to
         // critical and Suggestion-level findings posted inline anyway.
-        // The REPORTING reading resolved the floor to critical and the
-        // enforcement backstop did not — the two differ only in folding an
-        // absent floor to `auto`, so this is the default configuration's
-        // standing gap, and it is invisible from either side alone. Not a
-        // count of what posted: `floorEnforcedReroute` deliberately leaves
-        // deterministic `[test]`/`[build]` findings inline at any floor, and
-        // reading those as a malfunction would flag the carve-out working.
+        // The REPORTING reading resolved the floor to critical, the
+        // enforcement backstop did not, AND a Suggestion posted inline
+        // because of it. All three, because the sentence asserts all three.
+        //
+        // The first two hold on EVERY default-config round from 6 on — the
+        // readings differ only in folding an absent floor to `auto` — so
+        // stopping there accused a Criticals-only round, and an APPROVE
+        // round, of a manifestation that had not happened. The gap without
+        // a consequence is not a malfunction anyone can act on; the gap
+        // WITH one is.
+        //
+        // Gating on the posted count is safe here precisely because the
+        // enforcement reading is false: `floorEnforcedReroute` never ran, so
+        // no inline Suggestion can be its deliberate deterministic
+        // carve-out. When enforcement DOES engage, the second conjunct is
+        // false and the carve-out can never trip this.
         postureNotEngaging:
           convergence.criticalFloorKind !== undefined &&
-          convergence.floorEnforcementEngaged === false,
+          convergence.floorEnforcementEngaged === false &&
+          suggestionsInline > 0,
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
@@ -3849,8 +3859,17 @@ function composeReviewBody(
         ...repositoryContextBlock,
         ...unlicensedDeferralBlock,
         ...deferredSuggestionsBlock,
+        // Both of these are spread for symmetry with the branches above and
+        // cannot actually fire here — the same shape as the convergence
+        // invariant this branch already carries. The posture half needs a
+        // Suggestion to have posted, which makes the event COMMENT; the
+        // anchor half needs a fail-closed scope, which caps the verdict off
+        // this branch. Verified by probe (event APPROVE, health block
+        // empty). Kept rather than dropped so a later reader adding a check
+        // that CAN fire here does not have to rediscover the wiring — and
+        // spread ONCE: a second spread printed the clause twice on any round
+        // that did reach it.
         ...convergenceBlock,
-        ...healthBlock,
         ...healthBlock,
         ...continuityBlock,
       ],
