@@ -38,6 +38,7 @@ vi.mock('../git.js', () => ({
 import {
   AonePartialPostError,
   aoneReader,
+  mrPresubmitFacts,
   parseRemoteUrl,
   submitAoneReview,
 } from './aone.js';
@@ -416,6 +417,38 @@ describe('aoneReader.getCommentBody', () => {
   });
 });
 
+describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('maps mr view onto PrMeta (head sha, web url)', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha123',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    expect(aoneReader.getPrMeta(7, 'g/p')).toEqual({
+      number: 7,
+      headSha: 'sha123',
+      webUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+    });
+  });
+
+  it('trims a padded sourceBranch — one normalization for every head read', () => {
+    // Step 7's reviewed-SHA fallback reads meta.headSha while presubmit's
+    // drift check compares the TRIMMED live head; the pre-fix untrimmed
+    // copy made a padded server value read as drift ("PR head advanced
+    // during review") on an MR that never moved — and as a submit-time
+    // refusal at the pre-write gate (#9629 review).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: '  sha123\n', detailUrl: '' },
+    });
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('sha123');
+  });
+});
+
 describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -439,6 +472,16 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
     expect(meta.additions).toBeUndefined();
     expect(meta.deletions).toBeUndefined();
     expect(meta.changedFiles).toBeUndefined();
+  });
+
+  it('trims a padded sourceBranch into headRefOid — one normalization for the head', () => {
+    // fetch-pr compares headRefOid against the fetched SHA; the pre-fix
+    // untrimmed copy read a padded server value as a different head
+    // (#9629 review).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: '  sha123\n', targetBranch: 'master' },
+    });
+    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe('sha123');
   });
 
   it('uses the merge-requests refspec with the global id', () => {
@@ -611,6 +654,95 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     expect(aoneReader.getCurrentUser()).toBe('acc-1');
     a1JsonMock.mockReturnValueOnce({});
     expect(aoneReader.getCurrentUser()).toBe('');
+  });
+});
+
+describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('reads the author account and the live head from ONE mr view fetch', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha123',
+        author: { username: 'wenshao' },
+      },
+    });
+    expect(mrPresubmitFacts(29295886, 'maxcompute/odps_src')).toEqual({
+      author: 'wenshao',
+      headSha: 'sha123',
+    });
+    expect(a1JsonMock).toHaveBeenCalledTimes(1);
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'view',
+      '29295886',
+      '--repo',
+      'maxcompute/odps_src',
+    );
+  });
+
+  it('fails soft (empty author) when the author was deleted or is absent', () => {
+    // The GitHub path's `author: null` parity: a readable MR with no author
+    // must yield isSelfPr false, not a throw that kills the presubmit.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha123' },
+    });
+    expect(mrPresubmitFacts(7, 'g/p')).toEqual({
+      author: '',
+      headSha: 'sha123',
+    });
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha123', author: {} },
+    });
+    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+  });
+
+  it('type-guards a non-string username instead of letting it crash presubmit', () => {
+    // `username` is server-controlled; a non-string surviving `?? ''` would
+    // reach `.toLowerCase()` outside presubmit's fetch try/catch and die
+    // with no report. Parity with the gate's account read (`typeof === 'string'`).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha123', author: { username: 42 } },
+    });
+    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha123', author: { username: null } },
+    });
+    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+  });
+
+  it('trims a padded sourceBranch and username, tolerating their absence', () => {
+    // A padded head must not manufacture drift against a clean commit sha,
+    // and a padded username must not miss the self-PR comparison against a
+    // clean whoami account (fail-open on exactly the protection this exists
+    // for). Absent values report '' — drift stays off, isSelfPr false.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: '  sha123\n',
+        author: { username: '  wenshao\n' },
+      },
+    });
+    expect(mrPresubmitFacts(7, 'g/p')).toEqual({
+      author: 'wenshao',
+      headSha: 'sha123',
+    });
+    a1JsonMock.mockReturnValue({ mergeRequest: { author: {} } });
+    expect(mrPresubmitFacts(7, 'g/p').headSha).toBe('');
+  });
+
+  it('rejects a malformed owner/repo before any a1 call', () => {
+    expect(() => mrPresubmitFacts(7, 'bogus')).toThrow(TypeError);
+    expect(a1JsonMock).not.toHaveBeenCalled();
+  });
+
+  it('propagates a missing mergeRequest as a throw (fail-closed upstream)', () => {
+    // presubmit catches this as metaUnavailable and caps the verdict; the
+    // seam itself must not paper over it with empty facts.
+    a1JsonMock.mockReturnValue({});
+    expect(() => mrPresubmitFacts(7, 'g/p')).toThrow(/no mergeRequest for #7/);
   });
 });
 
