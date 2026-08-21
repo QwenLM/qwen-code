@@ -2651,64 +2651,6 @@ function composeReviewBody(
   // last `bodyCriticals.push`, because the stray-marker leg and the
   // script-lint gate both add blockers after the list is declared.
   const openCriticals = criticalsInline + bodyCriticals.length;
-  const diagnosis = convergence
-    ? diagnoseConvergence({
-        // Clamped like every other public round surface in this function —
-        // the ledger marker stamp and the deferred-posture clause both clamp
-        // identically. An unclamped `+1` at the cap names round 10001 in the
-        // posted prose beside a marker stamping 10000, with this round's own
-        // findings stamped `R10000-*`.
-        round: Math.min(prevRound + 1, LEDGER_MAX_ROUND),
-        // The SAME count the marker and the VOLUME line carry, not a second
-        // derivation of it.
-        posted: postedInline,
-        prev: convergence.prev,
-        drafts: draftedFindingsOf(input.draftedComments),
-        ...(convergence.floor === undefined
-          ? {}
-          : { floor: convergence.floor }),
-        ...(convergence.criticalFloorKind === undefined
-          ? {}
-          : { criticalFloorKind: convergence.criticalFloorKind }),
-        // Only when the blocker state is ESTABLISHED. A round capped
-        // `cannot-tell-existing-critical` posts zero Criticals precisely
-        // BECAUSE existing ones could not be ruled on — the entries ride
-        // their own channel, are never counted here, and were never shown
-        // fixed — and `findings-unverified-at-compose` is the same shape.
-        // The module's own rule then withholds `land-and-defer`: an absent
-        // count is not a count of none. Passed anyway, the body would carry
-        // "Unresolved, please confirm:" and "no Critical is open" at once,
-        // and the artifact would tell a machine consumer to merge.
-        ...(cannotTell.length === 0 && !findingsUnverifiedAtCompose
-          ? { openCriticals }
-          : {}),
-      })
-    : null;
-  // A fact about the round, not about the diagnosis: it rides in the marker
-  // whether or not a signal fired, because the NEXT round's trend needs this
-  // round's point either way.
-  const carriedIds = convergence
-    ? new Set(
-        convergence.prev.findings
-          .map((f) => f?.id)
-          .filter((id): id is string => typeof id === 'string'),
-      )
-    : undefined;
-  const postedFresh =
-    volumeOf(
-      draftedFindingsOf(input.draftedComments).filter((d) =>
-        isFreshDraft(
-          d,
-          Math.min(prevRound + 1, LEDGER_MAX_ROUND),
-          carriedIds,
-          convergence?.prev.complete === true,
-        ),
-      ).length,
-    ) ?? 0;
-  const convergenceNote = diagnosis
-    ? renderConvergenceDiagnosis(diagnosis)
-    : undefined;
-  const recommendations = diagnosis ? recommendationsFor(diagnosis) : undefined;
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored, discarded, or dropped
@@ -2757,6 +2699,80 @@ function composeReviewBody(
     uncoverable.length > 0 ||
     contextUnavailable ||
     coverageEntries.some((entry) => entry !== budgetEntry);
+
+  const diagnosis = convergence
+    ? diagnoseConvergence({
+        // Clamped like every other public round surface in this function —
+        // the ledger marker stamp and the deferred-posture clause both clamp
+        // identically. An unclamped `+1` at the cap names round 10001 in the
+        // posted prose beside a marker stamping 10000, with this round's own
+        // findings stamped `R10000-*`.
+        round: Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+        // The SAME count the marker and the VOLUME line carry, not a second
+        // derivation of it.
+        posted: postedInline,
+        prev: convergence.prev,
+        drafts: draftedFindingsOf(input.draftedComments),
+        ...(convergence.floor === undefined
+          ? {}
+          : { floor: convergence.floor }),
+        ...(convergence.criticalFloorKind === undefined
+          ? {}
+          : { criticalFloorKind: convergence.criticalFloorKind }),
+        // Only when the blocker state is ESTABLISHED. A round capped
+        // `cannot-tell-existing-critical` posts zero Criticals precisely
+        // BECAUSE existing ones could not be ruled on — the entries ride
+        // their own channel, are never counted here, and were never shown
+        // fixed — and `findings-unverified-at-compose` is the same shape.
+        // The module's own rule then withholds `land-and-defer`: an absent
+        // count is not a count of none. Passed anyway, the body would carry
+        // "Unresolved, please confirm:" and "no Critical is open" at once,
+        // and the artifact would tell a machine consumer to merge.
+        // Only when the blocker state is ESTABLISHED — which needs the
+        // SCOPE established too. A round capped
+        // `cannot-tell-existing-critical` posts zero Criticals precisely
+        // BECAUSE existing ones could not be ruled on;
+        // `findings-unverified-at-compose` is the same shape; and an
+        // unproven scope (a chunk nobody read, an uncoverable chunk, an idle
+        // agent, context unavailable) means prior-round Criticals sitting in
+        // the unread territory are read as fixed by the non-repost inference
+        // alone. The module's own rule then withholds `land-and-defer`: an
+        // absent count is not a count of none. Passed anyway, the body would
+        // carry "cannot show that any of the diff was read" and "no Critical
+        // is open" at once, and the artifact would tell a machine consumer
+        // to merge over an unreviewed chunk.
+        ...(cannotTell.length === 0 &&
+        !findingsUnverifiedAtCompose &&
+        !scopeUnproven
+          ? { openCriticals }
+          : {}),
+      })
+    : null;
+  // A fact about the round, not about the diagnosis: it rides in the marker
+  // whether or not a signal fired, because the NEXT round's trend needs this
+  // round's point either way.
+  const carriedIds = convergence
+    ? new Set(
+        convergence.prev.findings
+          .map((f) => f?.id)
+          .filter((id): id is string => typeof id === 'string'),
+      )
+    : undefined;
+  const postedFresh =
+    volumeOf(
+      draftedFindingsOf(input.draftedComments).filter((d) =>
+        isFreshDraft(
+          d,
+          Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+          carriedIds,
+          convergence?.prev.complete === true,
+        ),
+      ).length,
+    ) ?? 0;
+  const convergenceNote = diagnosis
+    ? renderConvergenceDiagnosis(diagnosis)
+    : undefined;
+  const recommendations = diagnosis ? recommendationsFor(diagnosis) : undefined;
 
   // Is every dimension gap the orchestrator disclosed about DEPTH rather than
   // about which lines were read?

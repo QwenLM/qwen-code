@@ -327,7 +327,6 @@ function validateVerdict(value: unknown): PersistedVerdict {
       zh: string(c['zh'], 'Composed verdict.convergence.zh'),
     };
   }
-  // The fresh count reads by the same rules as the total it is part of.
   // The machine-readable half of the observation. Dropped by this
   // allow-list, a caller reading the durable record sees the prose and not
   // the codes it would key on.

@@ -9825,15 +9825,27 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   it('carries the matched recommendations on the composed result', () => {
     // The machine-readable half: a caller applies ITS policy to these codes
     // without parsing prose, and without this module owning a threshold.
-    sideFile({
-      round: 4,
-      posted: 9,
-      fresh: 9,
-      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    // A COVERED plan: `land-and-defer` needs an established scope as well as
+    // an established blocker count, so a round that cannot show the diff was
+    // read never offers merging as an ending.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
     });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 4,
+        posted: 9,
+        fresh: 9,
+        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      }),
+    );
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath,
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 0,
       suggestionsInline: 1,
       draftedComments: [
@@ -10172,10 +10184,21 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // Passed as a confirmed zero, the body would carry "Unresolved, please
     // confirm:" and "no Critical is open" at once, and the artifact would
     // tell a machine consumer to merge.
-    sideFile({ round: 5, posted: 1, fresh: 1, findings: [] });
+    // A COVERED plan on purpose: with an unproven scope the sibling leg
+    // would withhold the code anyway, and this assertion would not be
+    // measuring the cannot-tell leg at all.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 5, posted: 1, fresh: 1, findings: [] }),
+    );
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath,
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 0,
       suggestionsInline: 1,
       cannotTellCriticals: ['a.ts:12 — an existing blocker, unruled'],
@@ -10183,7 +10206,62 @@ describe('convergence diagnosis reaches the POSTED body', () => {
         { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
       ],
     });
+    expect(r.scopeUnproven).toBe(false);
     expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('withholds land-and-defer while the round cannot show the diff was read', () => {
+    // An unproven scope means prior-round Criticals sitting in the unread
+    // territory are read as fixed by the non-repost inference alone. A
+    // machine consumer keyed on the code would be told to merge over an
+    // unreviewed chunk.
+    sideFile({ round: 5, posted: 1, fresh: 1, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('withholds land-and-defer while a finding is still unverified', () => {
+    // The second unestablished shape the gate names, and it had no test: a
+    // cumulative findings file still carrying an `— [unverified]` tag means
+    // the verifier never ruled, so the round's zero is not a confirmed zero.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 5, posted: 1, fresh: 1, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      findingsPath: findingsFile(TAGGED),
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.body).toContain('Convergence:');
     expect(r.body).not.toContain('No Critical finding is open');
     expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(

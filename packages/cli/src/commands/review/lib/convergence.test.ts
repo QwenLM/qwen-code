@@ -768,6 +768,12 @@ describe('renderMechanismHealth — is the machinery working', () => {
     })!;
     expect(r.en).toContain('re-reads the whole diff');
     expect(r.zh).toContain('重读整个 diff');
+    // The termination condition is "an anchor again", not "a clean close":
+    // the marker also withholds on a missing fetched sha and on a model
+    // identity drift, both of which a cleanly-closed round can carry.
+    expect(r.en).toContain("until a round's marker carries an anchor again");
+    expect(r.en).not.toContain('until a round closes cleanly');
+    expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
     // The design once prescribed a re-anchor round here; the measurements
     // did not bear out its premise, so the shape is disclosed and nothing
     // is recommended.
