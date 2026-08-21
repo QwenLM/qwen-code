@@ -515,6 +515,33 @@ describe('SessionPicker', () => {
       expect(output).toContain('feature-branch');
     });
 
+    it('keeps long Agent View metadata within one item line', async () => {
+      const session = Object.assign(createMockSession(), {
+        agentViewManaged: true,
+        agentViewLastResult: 'x'.repeat(300),
+        messageCount: undefined,
+        gitBranch: undefined,
+      });
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={createMockSessionService([session]) as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      const lines = (lastFrame() ?? '').split('\n');
+      const promptLine = lines.findIndex((line) =>
+        line.includes('Test prompt'),
+      );
+      expect(promptLine).toBeGreaterThanOrEqual(0);
+      expect(lines[promptLine + 1]).toMatch(/just now · bg/);
+    });
+
     it('renders the metadata line cleanly when messageCount is undefined', async () => {
       // `listSessions()` now omits `messageCount` for perf, so this is the
       // default production shape. Pin the row's render contract: time and

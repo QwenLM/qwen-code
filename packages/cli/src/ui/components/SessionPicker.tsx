@@ -16,6 +16,7 @@ import {
 } from '../utils/sessionPickerUtils.js';
 import {
   cleanSingleLineText,
+  getCachedStringWidth,
   stripUnsafeCharacters,
 } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -144,11 +145,24 @@ function SessionListItemView({
     typeof session.messageCount === 'number'
       ? formatMessageCount(session.messageCount)
       : undefined;
+  const metadataSuffix = [
+    timeAgo,
+    session.agentViewManaged ? 'bg' : undefined,
+    messageText,
+    session.gitBranch,
+    isDisabled ? disabledHint : undefined,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' · ');
+  const agentViewMetaWidth = Math.max(
+    0,
+    maxPromptWidth - getCachedStringWidth(metadataSuffix) - 3,
+  );
   const agentViewMeta =
     session.agentViewManaged && session.agentViewLastResult
       ? truncateText(
           cleanSingleLineText(session.agentViewLastResult),
-          maxPromptWidth,
+          agentViewMetaWidth,
         )
       : undefined;
 
@@ -228,11 +242,7 @@ function SessionListItemView({
       <Box paddingLeft={2}>
         <Text color={theme.text.secondary}>
           {agentViewMeta ? `${agentViewMeta} · ` : ''}
-          {timeAgo}
-          {session.agentViewManaged && ' · bg'}
-          {messageText !== undefined && ` · ${messageText}`}
-          {session.gitBranch && ` · ${session.gitBranch}`}
-          {isDisabled && disabledHint ? ` · ${disabledHint}` : ''}
+          {metadataSuffix}
         </Text>
       </Box>
     </Box>

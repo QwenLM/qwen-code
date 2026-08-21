@@ -138,13 +138,6 @@ export async function answerAgentViewPendingToolCall(
   // Questions deliver the text as the answer payload; the negative-text
   // heuristic below must not turn a real "no" answer into a refusal.
   const isQuestion = confirmationDetails.type === 'ask_user_question';
-  if (
-    isQuestion &&
-    confirmationDetails.questions.length > 1 &&
-    !isRecord(event.payload)
-  ) {
-    return false;
-  }
   const outcome = toToolConfirmationOutcome(
     event.outcome,
     event.text,
@@ -153,7 +146,7 @@ export async function answerAgentViewPendingToolCall(
   if (isQuestion) {
     await confirmationDetails.onConfirm(
       outcome,
-      getAgentViewAnswerPayload(event),
+      getAgentViewAnswerPayload(event, confirmationDetails.questions.length),
     );
     return true;
   }
@@ -307,6 +300,7 @@ function toToolConfirmationOutcome(
 
 function getAgentViewAnswerPayload(
   event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
+  questionCount: number,
 ): ToolConfirmationPayload | undefined {
   if (isRecord(event.payload)) {
     return event.payload as unknown as ToolConfirmationPayload;
@@ -315,7 +309,11 @@ function getAgentViewAnswerPayload(
   if (!text) {
     return undefined;
   }
-  return { answers: { 0: text } };
+  return {
+    answers: Object.fromEntries(
+      Array.from({ length: questionCount }, (_, index) => [index, text]),
+    ),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

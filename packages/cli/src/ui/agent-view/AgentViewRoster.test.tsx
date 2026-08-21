@@ -155,18 +155,21 @@ describe('AgentViewRoster', () => {
     expect(onDispatch).toHaveBeenCalledWith(false, 'ship it');
   });
 
-  it('dispatches and attaches legacy VSCode Shift+Enter without a backslash', () => {
-    const onDispatch = vi.fn(() => true);
+  it.each(['\\\r', '\\\r\n'])(
+    'dispatches and attaches legacy VSCode Shift+Enter %j',
+    (input) => {
+      const onDispatch = vi.fn(() => true);
 
-    renderRoster({
-      prompt: 'ship it',
-      onDispatch,
-    });
+      renderRoster({
+        prompt: 'ship it',
+        onDispatch,
+      });
 
-    press('\\\r', {});
+      press(input, {});
 
-    expect(onDispatch).toHaveBeenCalledWith(true, 'ship it');
-  });
+      expect(onDispatch).toHaveBeenCalledWith(true, 'ship it');
+    },
+  );
 
   it('attaches the selected session on empty Enter or right arrow', () => {
     const onAttachSession = vi.fn();
@@ -258,8 +261,11 @@ describe('AgentViewRoster', () => {
     press('[27;2;13~', {});
     expect(onPromptChange).not.toHaveBeenCalled();
 
+    press('[f', {});
+    expect(onPromptChange).toHaveBeenLastCalledWith('[f');
+
     press('[Info] check', {});
-    expect(onPromptChange).toHaveBeenLastCalledWith('[Info] check');
+    expect(onPromptChange).toHaveBeenLastCalledWith('[f[Info] check');
   });
 
   it('does not append terminal responses to peek replies', () => {
@@ -536,6 +542,20 @@ describe('AgentViewRoster', () => {
     expect(onDispatch).not.toHaveBeenCalled();
   });
 
+  it('submits content coalesced with Enter instead of accepting completion', async () => {
+    const onDispatch = vi.fn(() => true);
+    renderRoster({
+      prompt: '/qu',
+      onDispatch,
+      slashCommands: slashCommands([{ name: 'quit' }]),
+    });
+    await settleCompletion();
+
+    press('it\r', {});
+
+    expect(onDispatch).toHaveBeenCalledWith(false, '/quit');
+  });
+
   it('edits the peek prompt separately from the main dispatch prompt', () => {
     const onPromptChange = vi.fn();
     const onPeekPromptChange = vi.fn();
@@ -687,6 +707,22 @@ describe('AgentViewRoster', () => {
     expect(output).toContain('space to close');
     expect(output).not.toContain('Summary: ready');
     expect(output).not.toContain('State: idle / alive');
+  });
+
+  it('bounds long and multi-line peek content', () => {
+    const longLine = 'x'.repeat(3_000);
+    const { lastFrame } = renderRoster({
+      peekPanel: sessionPanel({
+        content: 'message',
+        lines: [longLine, 'two', 'three', 'four', 'five', 'six'],
+      }),
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain(longLine);
+    expect(output).toContain('x…');
+    expect(output).toContain('…');
+    expect(output).not.toContain('six');
   });
 
   it('shows error panel lines over stale row output', () => {

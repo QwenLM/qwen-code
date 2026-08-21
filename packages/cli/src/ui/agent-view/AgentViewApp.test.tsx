@@ -391,6 +391,46 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).not.toContain('late activity');
   });
 
+  it('clears a stale reply error when the retry succeeds', async () => {
+    const sendToSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('worker is gone'))
+      .mockResolvedValueOnce({ sent: true });
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          sendToSession,
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: ready']),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await flushInk();
+    for (const char of 'hello') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await waitForFrame(lastFrame, 'worker is gone');
+    await flushInk();
+    expect(lastFrame()).toContain('enter to send');
+    expect(lastFrame()?.match(/hello/g)).toHaveLength(2);
+
+    stdin.write('!');
+    await Promise.resolve();
+    stdin.write('\r');
+    await flushInk();
+    await vi.waitFor(() => expect(sendToSession).toHaveBeenCalledTimes(2));
+    await flushInk();
+
+    expect(lastFrame()).not.toContain('worker is gone');
+    expect(lastFrame()).not.toContain('Prompt: hello');
+  });
+
   it('shows a submitted reply while delivery is in flight', async () => {
     const sendToSession = vi.fn(() => new Promise(() => {}));
     const { stdin, lastFrame } = render(

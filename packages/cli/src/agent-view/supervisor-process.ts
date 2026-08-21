@@ -511,6 +511,11 @@ class AgentViewSupervisorProcessHandler
           alreadyManaged: true,
         };
       }
+      if (existingState?.ownership === 'removing') {
+        throw new Error(
+          `Agent View session ${adoption.sessionId} is being removed. Retry the removal before adopting it.`,
+        );
+      }
       if (existingState?.ownership === 'adopting') {
         const connected =
           this.workers.has(adoption.sessionId) ||

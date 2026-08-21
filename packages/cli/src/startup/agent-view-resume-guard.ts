@@ -84,8 +84,8 @@ export async function isManagedAgentViewContinueBlocked(
 
 /**
  * `/delete` removes transcripts, archives and file-history backups, so a
- * managed session that is still alive must not be deletable mid-run. An
- * exited managed session has no live writer and is safe to delete.
+ * managed session that is still alive must not be deletable mid-run. Ownership
+ * transitions are blocked because their host liveness is not yet settled.
  */
 export async function isManagedAgentViewDeleteBlocked(
   sessionId: string,
@@ -96,7 +96,8 @@ export async function isManagedAgentViewDeleteBlocked(
     const state = await readAgentViewSessionStateStrict(sessionId);
     return (
       (state?.ownership === 'managed' && state.processState !== 'exited') ||
-      state?.ownership === 'adopting'
+      state?.ownership === 'adopting' ||
+      state?.ownership === 'removing'
     );
   } catch {
     return true;

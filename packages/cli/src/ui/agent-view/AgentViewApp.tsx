@@ -342,7 +342,8 @@ export function AgentViewApp({
       setPeekPanel((current) => {
         if (
           current?.kind === 'session' &&
-          current.sessionId === target.sessionId
+          current.sessionId === target.sessionId &&
+          current.tone !== 'error'
         ) {
           return current;
         }

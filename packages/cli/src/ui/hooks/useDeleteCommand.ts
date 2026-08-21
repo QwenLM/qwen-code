@@ -12,6 +12,7 @@ import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 import {
   isManagedAgentViewDeleteBlocked,
   MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+  releaseExitedManagedSessionForContinue,
 } from '../../startup/agent-view-resume-guard.js';
 
 export interface UseDeleteCommandOptions {
@@ -82,6 +83,16 @@ export function useDeleteCommand(
           {
             type: 'info',
             text: MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+          },
+          Date.now(),
+        );
+        return;
+      }
+      if (!(await releaseExitedManagedSessionForContinue(sessionId))) {
+        addItem?.(
+          {
+            type: 'error',
+            text: t('Failed to release Agent View session before deletion.'),
           },
           Date.now(),
         );
@@ -173,7 +184,10 @@ export function useDeleteCommand(
         const deletable: string[] = [];
         let blockedManaged = 0;
         for (const id of filtered) {
-          if (await isManagedAgentViewDeleteBlocked(id)) {
+          if (
+            (await isManagedAgentViewDeleteBlocked(id)) ||
+            !(await releaseExitedManagedSessionForContinue(id))
+          ) {
             blockedManaged++;
           } else {
             deletable.push(id);

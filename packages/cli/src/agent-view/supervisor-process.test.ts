@@ -839,6 +839,52 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('refuses to adopt a session while removal is incomplete', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const now = new Date().toISOString();
+    await writeAgentViewSessionState(
+      {
+        schemaVersion: 1,
+        sessionId,
+        ownership: 'removing',
+        sessionState: 'idle',
+        processState: 'alive',
+        attachState: 'detached',
+        projectCwd: globalDir,
+        originalCwd: globalDir,
+        activeCwd: globalDir,
+        createdAt: now,
+        updatedAt: now,
+        worktree: { mode: 'none' },
+      },
+      { globalDir },
+    );
+    const launchPtyHost = vi.fn(async () => fakePtyHost());
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost,
+    });
+
+    await expect(
+      handler.adopt?.({
+        sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        terminal: { columns: 80, rows: 24 },
+      }),
+    ).rejects.toThrow('is being removed');
+    expect(launchPtyHost).not.toHaveBeenCalled();
+    await expect(
+      readAgentViewSessionState(sessionId, { globalDir }),
+    ).resolves.toMatchObject({ ownership: 'removing' });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('fails closed on adopting records with live unverified pids', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),

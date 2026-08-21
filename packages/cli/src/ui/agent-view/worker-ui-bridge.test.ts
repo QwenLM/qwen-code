@@ -203,7 +203,7 @@ describe('answerAgentViewPendingToolCall', () => {
     );
   });
 
-  it('keeps multi-question confirmations waiting for structured answers', async () => {
+  it('applies a text answer to every question in a multi-question confirmation', async () => {
     const onConfirm = vi.fn(async () => {});
     const pendingCall = {
       status: 'awaiting_approval',
@@ -229,9 +229,12 @@ describe('answerAgentViewPendingToolCall', () => {
         },
         [pendingCall],
       ),
-    ).resolves.toBe(false);
+    ).resolves.toBe(true);
 
-    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      { answers: { 0: 'src/index.ts', 1: 'src/index.ts' } },
+    );
   });
 
   it('maps negative text answers to cancel', async () => {

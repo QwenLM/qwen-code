@@ -208,6 +208,9 @@ describe('managed Agent View resume guards', () => {
     await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
       true,
     );
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
+      true,
+    );
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(true);

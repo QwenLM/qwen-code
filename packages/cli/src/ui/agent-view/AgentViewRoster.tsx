@@ -307,7 +307,7 @@ export function AgentViewRoster({
 
     const returnPrefix = getReturnInputPrefix(input, key);
     const isReturn = returnPrefix !== undefined;
-    const legacyShiftEnter = input === '\\\r';
+    const legacyShiftEnter = input === '\\\r' || input === '\\\r\n';
 
     if (
       isReturn &&
@@ -476,7 +476,8 @@ function isReturnInput(input: string, key: RosterInputKey): boolean {
   return getReturnInputPrefix(input, key) !== undefined;
 }
 
-const CSI_RESIDUE_PATTERN = /^(?:\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e])+$/;
+const CSI_RESIDUE_PATTERN =
+  /^(?:\[(?:[\x30-\x3f]+[\x20-\x2f]*|[\x20-\x2f]+)[\x40-\x7e])+$/;
 
 function isUnresolvedTerminalControlInput(input: string): boolean {
   return input.includes('\x1b') || CSI_RESIDUE_PATTERN.test(input);
@@ -489,7 +490,7 @@ function getReturnInputPrefix(
   if (key.return) {
     return '';
   }
-  if (input === '\\\r') {
+  if (input === '\\\r' || input === '\\\r\n') {
     return '';
   }
   // Ink reports pasted LF chunks without key.return. Keep them in the
@@ -696,7 +697,7 @@ function useAgentViewPromptInput({
         return true;
       }
       if (
-        isReturnInput(_input, key) &&
+        getReturnInputPrefix(_input, key) === '' &&
         completion.completionMode === CompletionMode.SLASH
       ) {
         const targetIndex =
@@ -897,7 +898,8 @@ function SessionPeekBox({
   inputMode: 'answer' | 'send' | undefined;
   queuedPrompts: string[] | undefined;
 }) {
-  const lines = getSessionPeekLines(row, panel, queuedPrompts);
+  const maxLineWidth = Math.max(1, (process.stdout.columns ?? 80) - 4);
+  const lines = getSessionPeekLines(row, panel, queuedPrompts, maxLineWidth);
   const blockingWait = isAgentRosterBlockingWait(row);
   const inputActive = Boolean(
     inputMode && (!queuedPrompts?.length || blockingWait),
@@ -995,18 +997,24 @@ function getSessionPeekLines(
   row: AgentRosterRow,
   panel: AgentViewSessionPanel,
   queuedPrompts: readonly string[] | undefined,
+  maxWidth: number,
 ): string[] {
-  if (panel.content === 'message') {
-    return panel.lines.map(stripUnsafeCharacters);
+  const lines =
+    panel.content === 'message'
+      ? panel.lines
+      : [
+          cleanRowText(row.lastResult) ?? cleanRowText(row.summary),
+          formatWaitingLine(row.waitingFor),
+          getQueuedPromptLine(queuedPrompts),
+        ].filter((line): line is string => Boolean(line));
+  const normalized = lines
+    .map((line) => cleanSingleLineText(stripUnsafeCharacters(line)))
+    .filter(Boolean);
+  const visible = normalized.slice(0, 5);
+  if (normalized.length > visible.length) {
+    visible[visible.length - 1] = '…';
   }
-  // Render from the structured row fields; never re-parse rendered text.
-  // The blocking-wait line is shown alongside (not replaced by) the queued
-  // prompt line.
-  return [
-    cleanRowText(row.lastResult) ?? cleanRowText(row.summary),
-    formatWaitingLine(row.waitingFor),
-    getQueuedPromptLine(queuedPrompts),
-  ].filter((line): line is string => Boolean(line));
+  return visible.map((line) => truncateToWidth(line, maxWidth));
 }
 
 function getPanelTitle(panel: AgentViewPanel): string {
