@@ -331,6 +331,93 @@ describe('buildProviderSetupInputs', () => {
     expect(inputs.modelIds).toEqual(['a']);
     expect(inputs.preserveModels).toEqual(existingModels);
   });
+
+  it('leaves a baseUrl-less custom-provider legacy model to endpoint-key-scoped ownership', () => {
+    // A baseUrl-less legacy entry (predating baseUrl stamping) carries no
+    // endpoint of its own. An explicit selection at a sibling endpoint that
+    // omits it must not fold it into preserveModels stamped with the sibling
+    // baseUrl — that migrated/rewrote the entry under the sibling endpoint
+    // while keeping the old env key (R38-3).
+    const aBaseUrl = 'https://a.example/v1';
+    const bBaseUrl = 'https://b.example/v1';
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const existingModels = [
+      {
+        id: 'a-model',
+        baseUrl: aBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          aBaseUrl,
+        ),
+      },
+      legacyModel,
+    ];
+
+    const explicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+        modelIds: ['b-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(explicit.preserveModels).toBeUndefined();
+
+    // Explicitly requesting the legacy id migrates it (stamped with B).
+    const requested = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+        modelIds: ['b-model', 'legacy-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(requested.preserveModels).toEqual([
+      { ...legacyModel, baseUrl: bBaseUrl },
+    ]);
+
+    // Implicit reconnects (no modelIds) keep everything as-is: the merge-only
+    // route carries the legacy entry stamped with the selected endpoint.
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(implicit.preserveModels).toEqual([
+      { ...legacyModel, baseUrl: bBaseUrl },
+    ]);
+  });
 });
 
 describe('createBoundChannelDeliveryHandler', () => {
@@ -3773,7 +3860,8 @@ describe('runQwenServe TLS (--tls-cert / --tls-key)', () => {
     fs.writeFileSync(keyPath, TEST_TLS_KEY);
 
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
       new Promise<qwenCore.ResolvedTelemetrySettings>((resolve) => {
         resolveTelemetry = resolve;
@@ -4377,12 +4465,14 @@ describe('runQwenServe runtime startup failures', () => {
       bootBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );
     let disposeWorkspace:
-      ReturnType<typeof vi.fn<(workspaceId: string) => void>> | undefined;
+      | ReturnType<typeof vi.fn<(workspaceId: string) => void>>
+      | undefined;
     const originalCreateServeApp = serverModule.createServeApp;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       const app = originalCreateServeApp(...args);
       const acpHandle = app.locals['acpHandle'] as
-        { disposeWorkspace?: (workspaceId: string) => void } | undefined;
+        | { disposeWorkspace?: (workspaceId: string) => void }
+        | undefined;
       if (acpHandle?.disposeWorkspace) {
         disposeWorkspace = vi.fn(acpHandle.disposeWorkspace);
         acpHandle.disposeWorkspace = disposeWorkspace;
@@ -4758,7 +4848,8 @@ describe('runQwenServe runtime startup failures', () => {
         >,
       );
     let workspaceRegistry:
-      import('./workspace-registry.js').WorkspaceRegistry | undefined;
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         workspaceRegistry = deps?.workspaceRegistry;
@@ -4862,7 +4953,8 @@ describe('runQwenServe runtime startup failures', () => {
         }
       | undefined;
     let primaryRuntime:
-      import('./workspace-registry.js').WorkspaceRuntime | undefined;
+      | import('./workspace-registry.js').WorkspaceRuntime
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
@@ -5121,7 +5213,8 @@ describe('runQwenServe runtime startup failures', () => {
         >,
       );
     let workspaceRegistry:
-      import('./workspace-registry.js').WorkspaceRegistry | undefined;
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
@@ -5904,7 +5997,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-route-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -5955,7 +6049,8 @@ describe('runQwenServe runtime startup failures', () => {
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -6206,7 +6301,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-start-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -7125,7 +7221,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-trailing-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -7496,7 +7593,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-running-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -7554,7 +7652,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-late-app-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -7901,7 +8000,8 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
     );
     let resolveTelemetry:
-      ((settings: qwenCore.ResolvedTelemetrySettings) => void) | undefined;
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
     const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
@@ -9115,7 +9215,8 @@ describe('runQwenServe channel worker supervisor', () => {
     worker.deliverChannelMessage.mockResolvedValueOnce({ delivered: true });
     const originalCreateServeApp = serverModule.createServeApp;
     let capturedDeps:
-      Parameters<typeof serverModule.createServeApp>[2] | undefined;
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       capturedDeps = args[2];
       return originalCreateServeApp(...args);
@@ -9174,7 +9275,8 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const originalCreateServeApp = serverModule.createServeApp;
     let capturedDeps:
-      Parameters<typeof serverModule.createServeApp>[2] | undefined;
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       capturedDeps = args[2];
       return originalCreateServeApp(...args);
@@ -9424,7 +9526,8 @@ describe('runQwenServe channel worker supervisor', () => {
       JSON.stringify({ channels: { telegram: { type: 'telegram' } } }),
     );
     let capturedDeps:
-      Parameters<typeof serverModule.createServeApp>[2] | undefined;
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
     const originalCreateServeApp = serverModule.createServeApp;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       capturedDeps = args[2];
@@ -9482,7 +9585,8 @@ describe('runQwenServe channel worker supervisor', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-runtime-drain-')),
     );
     let capturedDeps:
-      Parameters<typeof serverModule.createServeApp>[2] | undefined;
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
     const originalCreateServeApp = serverModule.createServeApp;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       capturedDeps = args[2];
@@ -9717,7 +9821,8 @@ describe('runQwenServe channel worker supervisor', () => {
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       const app = originalCreateServeApp(...args);
       const acpHandle = app.locals['acpHandle'] as
-        { attachServer?: (server: unknown) => void } | undefined;
+        | { attachServer?: (server: unknown) => void }
+        | undefined;
       if (acpHandle) acpHandle.attachServer = attachServer;
       return app;
     });
@@ -10396,7 +10501,8 @@ describe('runQwenServe channel worker supervisor', () => {
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       const app = originalCreateServeApp(...args);
       const acpHandle = app.locals['acpHandle'] as
-        { attachServer?: (server: unknown) => void } | undefined;
+        | { attachServer?: (server: unknown) => void }
+        | undefined;
       if (acpHandle) {
         acpHandle.attachServer = vi.fn(() => startupOrder.push('runtime'));
       }

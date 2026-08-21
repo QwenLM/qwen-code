@@ -994,11 +994,14 @@ describe('applyProviderInstallPlan', () => {
   it('removes a deselected baseUrl-less legacy custom model', async () => {
     const baseUrl = 'https://new.example/v1';
     const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
-    // Legacy entry predating baseUrl stamping (old env-key shape, no baseUrl).
+    // Legacy entry predating baseUrl stamping: no baseUrl, but its stored env
+    // key already names this endpoint. Ownership of a baseUrl-less entry
+    // follows its endpoint key (R38-3), so a deselection at the entry's own
+    // endpoint must remove it like any other omitted entry.
     const legacyModel = {
       id: 'legacy-custom',
       name: 'legacy-custom',
-      envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`,
+      envKey,
     };
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [legacyModel],
@@ -1028,6 +1031,91 @@ describe('applyProviderInstallPlan', () => {
         name: 'my-model',
         baseUrl,
         envKey,
+      },
+    ]);
+  });
+
+  it("keeps another endpoint's baseUrl-less legacy model when connecting a sibling endpoint", async () => {
+    const aBaseUrl = 'https://a.example/v1';
+    const bBaseUrl = 'https://b.example/v1';
+    const aEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, aBaseUrl);
+    const bEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, bBaseUrl);
+    // Endpoint A's legacy entry predates baseUrl stamping: no baseUrl and an
+    // old-shape env key that is not endpoint B's key. Connecting endpoint B
+    // must neither delete nor rewrite it (R38-3).
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`,
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        { id: 'a-model', name: 'a-model', baseUrl: aBaseUrl, envKey: aEnvKey },
+        legacyModel,
+        { id: 'b-model', name: 'b-model', baseUrl: bBaseUrl, envKey: bEnvKey },
+      ],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: bBaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['b-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[bEnvKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'a-model', name: 'a-model', baseUrl: aBaseUrl, envKey: aEnvKey },
+      legacyModel,
+      { id: 'b-model', name: 'b-model', baseUrl: bBaseUrl, envKey: bEnvKey },
+    ]);
+  });
+
+  it('replaces a baseUrl-less legacy model when its id is requested at another endpoint', async () => {
+    const bBaseUrl = 'https://b.example/v1';
+    const bEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, bBaseUrl);
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`,
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [legacyModel],
+    });
+    // The submitted id list is authoritative: requesting the legacy id at
+    // this endpoint regenerates it here instead of leaving a duplicate
+    // baseUrl-less copy behind.
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: bBaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['legacy-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[bEnvKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      {
+        id: 'legacy-model',
+        name: 'legacy-model',
+        baseUrl: bBaseUrl,
+        envKey: bEnvKey,
       },
     ]);
   });

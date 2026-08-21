@@ -2610,7 +2610,13 @@ function readProviderSetupInputs(
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const defaultModelIdSet = new Set(defaultModelIds);
   const requestedModelIdSet = new Set(resolvedModelIds);
-  const hasExplicitModelIds = params['modelIds'] !== undefined;
+  // `readStringArray` accepts JSON `null` exactly like `undefined` (both
+  // resolve to the endpoint defaults), so the preserve decision must too:
+  // with `!== undefined` a `modelIds: null` reconnect resolved default models
+  // while treating the request as an explicit selection that deselects every
+  // saved custom model — silently deleting them via the install plan, while
+  // the identical request with the key omitted preserved them (R38-1).
+  const hasExplicitModelIds = params['modelIds'] != null;
   const existingModels = findExistingProviderModels(
     config,
     modelProviders,

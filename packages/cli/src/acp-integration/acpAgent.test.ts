@@ -12921,6 +12921,147 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect treats null modelIds like an omitted key', async () => {
+    // readStringArray collapses JSON `null` to [] exactly like `undefined`
+    // (the request resolves endpoint defaults either way), so the preserve
+    // decision must too: with `null` a saved custom model used to be treated
+    // as deselected and deleted by the install plan, while the identical
+    // request with the key omitted preserved it (R38-1).
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: null,
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        modelIds: ['kimi-k3'],
+        preserveModels: [savedCustom],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it("qwen/providers/connect leaves a sibling endpoint's baseUrl-less legacy model out of an explicit selection", async () => {
+    // A baseUrl-less legacy entry carries no endpoint of its own; ownership
+    // is decided by its stored env key in buildInstallPlan. The ACP surface
+    // must therefore not fold it into preserveModels (stamped with the
+    // selected endpoint) when an explicit selection at a sibling endpoint
+    // does not request it — that turned the entry into a "migration" and let
+    // the connect rewrite it with the sibling's baseUrl (R38-3).
+    const customEnvKey = (protocol: string, baseUrl: string) =>
+      `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(/[^A-Za-z0-9]/g, '_')}`;
+    const aBaseUrl = 'https://a.example/v1';
+    const bBaseUrl = 'https://b.example/v1';
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: {
+          openai: [
+            {
+              id: 'a-model',
+              name: 'a-model',
+              baseUrl: aBaseUrl,
+              envKey: customEnvKey('openai', aBaseUrl),
+            },
+            legacyModel,
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: bBaseUrl,
+        apiKey: 'sk-b',
+        modelIds: ['b-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+
+    // The legacy entry is neither requested nor stamped into preserveModels;
+    // buildInstallPlan's endpoint-key-scoped ownership leaves it untouched.
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+
+    // Explicitly requesting the legacy id at the sibling endpoint migrates
+    // it: it is preserved stamped with the selected endpoint.
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: bBaseUrl,
+        apiKey: 'sk-b',
+        modelIds: ['legacy-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        preserveModels: [{ ...legacyModel, baseUrl: bBaseUrl }],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers/connect preserves a same-id proxy model for a non-merge provider', async () => {
     const baseSettings = makeSessionSettings();
     const proxyModel = {

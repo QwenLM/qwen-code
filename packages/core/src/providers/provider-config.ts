@@ -394,20 +394,33 @@ export function buildInstallPlan(
       .map((model) => model.id) ?? [],
   );
   const freeFormProvider = config.baseUrl === undefined;
+  const plannedModelIds = new Set(models.map((model) => model.id));
   const ownsModel = config.mergeModelsByIdentity
-    ? (Array.isArray(config.baseUrl) || freeFormProvider) &&
-      providerOwnsModel
+    ? (Array.isArray(config.baseUrl) || freeFormProvider) && providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
           (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
             (model.baseUrl === undefined &&
-              // A free-form provider (custom-openai-compatible) seeds every
-              // baseUrl-less entry into its models field, so a deselected one
-              // must be removed like any other omitted entry; otherwise the
-              // deselection silently no-ops. Endpoint-scoped (baseUrl array)
-              // providers only own a baseUrl-less entry when it was preserved
-              // (and thus migrated) in this very run.
-              (freeFormProvider || migratedLegacyModelIds.has(model.id))))
+              // A baseUrl-less entry predates baseUrl stamping, so nothing on
+              // the entry itself names its endpoint — except its env key,
+              // which generateCustomEnvKey derives endpoint-uniquely. A
+              // free-form provider therefore owns such an entry only when the
+              // stored key is the selected endpoint's own key (a deselection
+              // at the entry's endpoint must remove it like any other omitted
+              // entry; otherwise the deselection silently no-ops), or when
+              // the entry was preserved with a baseUrl in this very run (an
+              // explicitly requested migration), or when this plan writes a
+              // same-id model for the selected endpoint (the legacy entry
+              // gives way to its replacement instead of duplicating the id).
+              // Claiming every baseUrl-less entry — regardless of which
+              // endpoint's key it carries — let a connect at one endpoint
+              // delete another endpoint's legacy models (R38-3).
+              // Endpoint-scoped (baseUrl array) providers only own a
+              // baseUrl-less entry when it was preserved (and thus migrated)
+              // in this very run.
+              (migratedLegacyModelIds.has(model.id) ||
+                (freeFormProvider &&
+                  (model.envKey === envKey || plannedModelIds.has(model.id))))))
       : undefined
     : providerOwnsModel;
   const firstModel = models[0];
