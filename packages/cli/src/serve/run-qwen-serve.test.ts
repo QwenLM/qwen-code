@@ -27,6 +27,7 @@ import {
   type RunQwenServeDeps,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
+  verifyWorkerTlsTrust,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
@@ -10874,6 +10875,74 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(log).toContain('exact CA bundle workers receive');
     expect(log).toContain('INVALID_PURPOSE');
     expect(log).toContain('unsuitable certificate purpose');
+  });
+
+  it('normalizes a TLS trust probe process exit code before logging it', async () => {
+    const failure = await verifyWorkerTlsTrust({
+      daemonUrl: 'not a URL',
+      caCertPath: path.join(os.tmpdir(), 'qwen-missing-ca.pem'),
+      timeoutMs: 250,
+    });
+
+    expect(failure?.code).toEqual(expect.any(String));
+  });
+
+  it('does not start channel workers after close begins during TLS verification', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-close-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    let finishVerification!: () => void;
+    const verification = new Promise<undefined>((resolve) => {
+      finishVerification = () => resolve(undefined);
+    });
+    const workerTlsTrustVerifier = vi.fn(() => verification);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        resolveOnListen: true,
+        workerTlsTrustVerifier,
+      },
+    );
+
+    const runtimeReady = handle.runtimeReady.catch(() => undefined);
+    try {
+      await vi.waitFor(() => {
+        expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      });
+      const closing = handle.close();
+      finishVerification();
+      await closing;
+      await runtimeReady;
+
+      expect(factory).not.toHaveBeenCalled();
+      expect(worker.start).not.toHaveBeenCalled();
+    } finally {
+      finishVerification();
+      await handle.close();
+    }
   });
 
   const issuedLeafServing = {

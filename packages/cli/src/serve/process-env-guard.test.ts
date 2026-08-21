@@ -150,7 +150,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'NODE_EXTRA_CA_CERTS is read from the daemon process environment on purpose: it is the trust store Node itself ' +
         'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
         "an operator has already supplied the issuing CA. Read once into a local: the check now needs the file's " +
-        'contents, not just the path, and a second read could see a different value.',
+        'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
+        'daemon environment into the TLS trust probe child.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
@@ -165,7 +166,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 5,
+        whole: 6,
       },
     },
   ],

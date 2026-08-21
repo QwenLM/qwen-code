@@ -766,7 +766,10 @@ export async function verifyWorkerTlsTrust(opts: {
         } catch {
           const failure = error as NodeJS.ErrnoException | null;
           resolve({
-            code: failure?.code ?? 'WORKER_TLS_VERIFY_FAILED',
+            code:
+              failure?.code !== undefined
+                ? String(failure.code)
+                : 'WORKER_TLS_VERIFY_FAILED',
             message: failure?.message ?? 'TLS verification probe failed.',
           });
         }
@@ -8013,6 +8016,11 @@ async function runQwenServeImpl(
               daemonUrl: workerDaemonUrl,
               caCertPath: workerCaCertPath,
             });
+            if (shuttingDown || runtimeStartupSettled) {
+              throw new Error(
+                'Daemon stopped while the channel worker TLS trust check was running.',
+              );
+            }
             if (trustFailure) {
               if (predictedGaps.length > 0) {
                 for (const gap of predictedGaps) daemonLog.warn(gap);
