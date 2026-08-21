@@ -157,7 +157,7 @@ function resolveInLockfile(packageName, packages, resolveFrom) {
  * @param {Map<string, {version: string, resolvedKey: string}>} dependenciesMap - Accumulated results
  * @param {string} resolveFrom - Lockfile key prefix to resolve from (e.g. "packages/vscode-ide-companion")
  */
-function collectDependencies(
+export function collectDependencies(
   packageName,
   packageLock,
   dependenciesMap,
@@ -195,7 +195,7 @@ function collectDependencies(
           depName,
           packageLock,
           dependenciesMap,
-          resolveFrom,
+          packageInfo.resolved,
           visitedKeys,
         );
       }

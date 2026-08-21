@@ -32,6 +32,13 @@
 export { DaemonSessionProvider } from './daemon/index.js';
 
 /**
+ * Default transcript block-count window applied by `DaemonSessionProvider`
+ * when no `maxBlocks` prop is given. Exported so UI surfaces can reference
+ * the provider default instead of hard-coding a copy that can drift.
+ */
+export { DEFAULT_MAX_BLOCKS as DAEMON_SESSION_DEFAULT_MAX_BLOCKS } from './daemon/session/index.js';
+
+/**
  * Wraps children with workspace-level daemon context.
  * Provides access to cross-session resources: tools, skills, MCP servers,
  * memory, agents, and file system operations.

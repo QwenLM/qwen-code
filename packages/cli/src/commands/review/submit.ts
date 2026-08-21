@@ -251,8 +251,9 @@ function compose(
   /**
    * The Aone write path FORCES context-unavailable, whatever the
    * model-written state claims: this phase has no Aone backing for
-   * pr-context/comment-status/presubmit, so no Aone run can have read the
-   * MR's existing discussion. Letting the state's `contextUnavailable`
+   * pr-context/comment-status (presubmit is backed only for self-PR
+   * detection and head drift), so no Aone run can have read the MR's
+   * existing discussion. Letting the state's `contextUnavailable`
    * decide would let a forged or omitted field compose an APPROVE that the
    * a1 path then turns into a REAL platform approval — the exact forgery
    * class this command exists to defeat. The cap lives HERE, where
@@ -1003,6 +1004,12 @@ export function runSubmit(
       // post with ZERO inline Criticals (they were all body-level), and
       // then nothing mechanically blocks the merge — say which shape this
       // was, counted off the same comments the consistency gate marked.
+      // The blocking GATE is named too: a1 cannot mark a comment as an AI
+      // comment (probed 2026-08-21 on a scratch CR — no auto-flag for the
+      // posting identity, no explicit flag; issue #9614), so the posted
+      // comments sit in the generic discussion gate only, and a repo's
+      // dedicated ai_comment merge gate never sees them. Until a1 ships a
+      // flag, this note is the disclosure.
       const criticalsPosted = (payload.comments ?? []).filter(
         (c) => severityOf(c) === 'critical',
       ).length;
@@ -1011,7 +1018,11 @@ export function runSubmit(
           ? `Note: Aone Code has no native request-changes state — the ` +
               `summary comment carries the blocking header, and the ` +
               `${criticalsPosted} inline Critical(s) block the merge ` +
-              `while their discussions stay unresolved.`
+              `while their discussions stay unresolved. They are NOT ` +
+              `marked as AI comments — \`a1 repo mr comment create\` ` +
+              `cannot set the flag — so they join the generic ` +
+              `discussion gate only; a repo's dedicated ai_comment ` +
+              `merge gate does not track them.`
           : `Note: Aone Code has no native request-changes state — the ` +
               `summary comment carries the blocking header, but this ` +
               `review posted NO inline Critical discussions, so nothing ` +
