@@ -118,7 +118,7 @@ The literal prefix must match `@qwen-code /takeover` byte-for-byte and the tail
 must be a bare 1–2 digit integer. The command has to be the very first thing in
 the comment: **no leading whitespace of any kind** — space, tab, or blank line.
 The router prefilters on the _raw_ comment body with `startsWith`, so a body
-that does not begin with the command never starts a job at all, and the trim
+with leading whitespace never starts a job at all, and the trim
 that runs inside that job never gets the chance
 ([af-004](./qwen-autofix.md#af-004)). Trailing whitespace is harmless. Anything
 else fails closed — no label, no seed, no partial effect, and, when the router
