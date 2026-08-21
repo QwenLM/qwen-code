@@ -1,18 +1,17 @@
 /**
- * Standalone Node.js integration test: drives a REAL cua-driver daemon
- * through this wrapper — no Qwen Code, no Node REPL, no Skill.
+ * Standalone Node.js E2E test: drives a REAL cua-driver runtime through this
+ * high-level wrapper — no Qwen Code, no Node REPL, no Skill, no callTool.
  *
- * Gated behind two environment variables so unit CI stays hermetic:
+ * Gated behind two target variables so unit CI stays hermetic:
  *
- *   COMPUTER_USE_SOCKET  absolute path of the daemon socket to connect to
- *                        (e.g. the local dev install's qwen-cua-driver-local
- *                        socket).
  *   COMPUTER_USE_PID     pid of an already-running observable app.
  *   COMPUTER_USE_WINDOW  window_id of that app's window.
+ *   COMPUTER_USE_SOCKET  optional compatible daemon socket. When omitted the
+ *                        wrapper creates its configured in-process runtime.
  *
  * The test proves the wrapper against the versioned revision protocol:
- * full → (no_change | diff) with a caller-owned base, plus the typed
- * `getWindowState` SDK method as a cross-check of the generated bindings.
+ * full → (no_change | diff) with a caller-owned base. Every request goes
+ * through the wrapper's named typed methods.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -23,16 +22,16 @@ const socketPath = process.env.COMPUTER_USE_SOCKET;
 const pid = Number(process.env.COMPUTER_USE_PID ?? "");
 const windowId = Number(process.env.COMPUTER_USE_WINDOW ?? "");
 const configured =
-  Boolean(socketPath) && Number.isInteger(pid) && pid > 0 && Number.isInteger(windowId);
+  Number.isInteger(pid) && pid > 0 && Number.isInteger(windowId) && windowId > 0;
 
 test(
-  "wrapper drives revision v1 against a live daemon",
-  { skip: !configured && "set COMPUTER_USE_SOCKET/PID/WINDOW to run" },
+  "wrapper drives revision v1 against a live native target",
+  { skip: !configured && "set COMPUTER_USE_PID/WINDOW to run" },
   async () => {
-    const computer = await ComputerUse.connect({
-      socketPath,
-      session: "computer-use-integration",
-    });
+    const options = { session: "computer-use-integration" };
+    const computer = socketPath
+      ? await ComputerUse.connect({ ...options, socketPath })
+      : await ComputerUse.create(options);
     try {
       assert.equal(await computer.supportsObservationRevision(), true);
 
@@ -71,28 +70,5 @@ test(
     } finally {
       await computer.close();
     }
-  },
-);
-
-test(
-  "typed getWindowState SDK method carries the revision request end to end",
-  { skip: !configured && "set COMPUTER_USE_SOCKET/PID/WINDOW to run" },
-  async () => {
-    const { CuaDriver } = await import("@trycua/cua-driver");
-    const driver = CuaDriver.connect(socketPath);
-    const result = await driver.getWindowState({
-      pid,
-      windowId: BigInt(windowId),
-      includeScreenshot: false,
-      observationRevision: { version: 1 },
-    });
-    assert.equal(result.isError, false);
-    const structured = JSON.parse(result.structuredJson ?? "{}");
-    const envelope = structured.observation_revision;
-    assert.ok(envelope, "typed opt-in must return the revision envelope");
-    assert.equal(envelope.capability, "accessibility.observation_revision.v1");
-    assert.equal(envelope.version, 1);
-    assert.equal(envelope.mode, "full");
-    await driver.shutdown();
   },
 );

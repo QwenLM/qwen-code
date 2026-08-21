@@ -51,7 +51,7 @@ A response reports:
 
 - `full | diff | no_change` mode;
 - current and actual base revision IDs;
-- lineage and serializer versions;
+- lineage, serializer, and projection versions;
 - stable-element support;
 - a closed resynchronization reason when full output is required.
 

@@ -12,6 +12,7 @@
 //! `perform_action`, `set_value`, and `get_element_bounds` index into that same
 //! ordered set.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
 use atspi::{CoordType, Interface, State, StateSet};
 
-use super::AtspiNode;
+use super::{AtspiIdentity, AtspiNode};
 
 /// Per-call D-Bus timeout: a single unresponsive accessible (common in large,
 /// lazily-built trees like Chromium's) must not stall the whole walk.
@@ -256,7 +257,41 @@ struct Visited<'a> {
     /// tree; this is what lets a caller that named an exact native window prove
     /// which of those windows a node actually lives in.
     frame_ordinal: usize,
+    identity: Option<AtspiIdentity>,
     acc: AccessibleProxy<'a>,
+}
+
+#[derive(Debug)]
+struct WalkStatus {
+    complete: bool,
+    truncated: bool,
+    incomplete_notes: Vec<String>,
+}
+
+impl WalkStatus {
+    fn complete() -> Self {
+        Self {
+            complete: true,
+            truncated: false,
+            incomplete_notes: Vec::new(),
+        }
+    }
+
+    fn incomplete(&mut self, note: &'static str) {
+        self.complete = false;
+        if !self
+            .incomplete_notes
+            .iter()
+            .any(|existing| existing == note)
+        {
+            self.incomplete_notes.push(note.into());
+        }
+    }
+
+    fn truncate(&mut self, note: &'static str) {
+        self.truncated = true;
+        self.incomplete(note);
+    }
 }
 
 /// Role names that denote embedded web/document content. An editable beneath
@@ -342,6 +377,20 @@ impl RawObjectRef {
             path: oref.path_as_str().to_owned(),
         })
     }
+}
+
+async fn canonical_unique_owner(
+    dbus: &atspi::zbus::fdo::DBusProxy<'_>,
+    name: &str,
+) -> Option<String> {
+    if name.starts_with(':') {
+        return Some(name.to_owned());
+    }
+    let bus_name = atspi::zbus::names::BusName::try_from(name.to_owned()).ok()?;
+    call(dbus.get_name_owner(bus_name))
+        .await
+        .and_then(Result::ok)
+        .map(|owner| owner.to_string())
 }
 
 /// Read Accessible.GetChildren without deserializing the bus-name field as a
@@ -531,7 +580,7 @@ async fn collect_visited<'a>(
 ) -> Result<Option<Vec<Visited<'a>>>> {
     collect_visited_bounded(conn, pid, 0, None, None)
         .await
-        .map(|walked| walked.map(|(visited, _)| visited))
+        .map(|walked| walked.map(|(visited, _, _)| visited))
 }
 
 /// Screen-space distance between an AT-SPI frame's extents and a native
@@ -665,12 +714,16 @@ async fn collect_visited_bounded<'a>(
     xid: u64,
     max_elements: Option<usize>,
     max_depth: Option<usize>,
-) -> Result<Option<(Vec<Visited<'a>>, Option<usize>)>> {
+) -> Result<Option<(Vec<Visited<'a>>, Option<usize>, WalkStatus)>> {
     let app = match app_for_pid(conn, pid).await? {
         Some(a) => a,
         None => return Ok(None),
     };
     let zconn = conn.connection();
+    let dbus = atspi::zbus::fdo::DBusProxy::new(zconn)
+        .await
+        .map_err(|error| anyhow!("DBus proxy unavailable: {error}"))?;
+    let mut status = WalkStatus::complete();
 
     // Stack of (object ref, depth, in_web_doc, frame_ordinal). Seed with the
     // app's windows; push children reversed so siblings pop left-to-right and
@@ -684,7 +737,10 @@ async fn collect_visited_bounded<'a>(
             .into_iter()
             .filter_map(|child| RawObjectRef::from_atspi(&child))
             .collect(),
-        _ => Vec::new(),
+        _ => {
+            status.incomplete("application_children_unavailable");
+            Vec::new()
+        }
     };
 
     // Resolve which seed is the caller's window before walking, from the same
@@ -696,6 +752,9 @@ async fn collect_visited_bounded<'a>(
     } else {
         resolve_window_frame(conn, pid, xid, &seeds).await
     };
+    if xid != 0 && scoped_frame.is_none() {
+        status.incomplete("window_scope_unresolved");
+    }
 
     let mut stack: Vec<(RawObjectRef, usize, bool, usize)> = seeds
         .into_iter()
@@ -723,14 +782,17 @@ async fn collect_visited_bounded<'a>(
     // time out too. Give up after a few so type_text falls back to XTEST in a
     // few seconds rather than ~25s.
     let mut consecutive_timeouts = 0u32;
+    let mut owner_cache: HashMap<String, Option<String>> = HashMap::new();
 
     while let Some((oref, depth, inherited_web_doc, frame_ordinal)) = stack.pop() {
         if budget == 0 {
             dlog!("node budget exhausted; truncating walk");
+            status.truncate("max_elements_reached");
             break;
         }
         if std::time::Instant::now() >= deadline {
             dlog!("collect_visited time budget exhausted; returning partial walk");
+            status.truncate("walk_deadline_reached");
             break;
         }
         budget -= 1;
@@ -750,15 +812,18 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(a)) => a,
             Some(Err(error)) => {
                 dlog!("  accessible_for failed: {error:#}");
+                status.incomplete("accessible_proxy_unavailable");
                 continue;
             }
             None => {
+                status.incomplete("accessible_proxy_timeout");
                 consecutive_timeouts += 1;
                 if consecutive_timeouts >= 3 {
                     dlog!(
                         "{} consecutive AT-SPI timeouts (accessible_for); app unresponsive, bailing walk",
                         consecutive_timeouts
                     );
+                    status.truncate("provider_unresponsive");
                     break;
                 }
                 continue;
@@ -775,17 +840,20 @@ async fn collect_visited_bounded<'a>(
             // A completed-but-errored call is node-specific; keep walking.
             Some(Err(error)) => {
                 dlog!("  get_interfaces failed: {error:#}");
+                status.incomplete("interfaces_unavailable");
                 continue;
             }
             // A timeout means the app didn't answer in CALL_TIMEOUT. A run of
             // these means the whole app is wedged — bail so callers fall back.
             None => {
+                status.incomplete("interfaces_timeout");
                 consecutive_timeouts += 1;
                 if consecutive_timeouts >= 3 {
                     dlog!(
                         "{} consecutive AT-SPI timeouts; app unresponsive, bailing walk",
                         consecutive_timeouts
                     );
+                    status.truncate("provider_unresponsive");
                     break;
                 }
                 continue;
@@ -806,6 +874,18 @@ async fn collect_visited_bounded<'a>(
             call(acc.get_state()),
             call(raw_children(zconn, &oref)),
         );
+        if !matches!(&role_r, Some(Ok(_))) {
+            status.incomplete("role_unavailable");
+        }
+        if !matches!(&name_r, Some(Ok(_))) {
+            status.incomplete("name_unavailable");
+        }
+        if !matches!(&state_r, Some(Ok(_))) {
+            status.incomplete("state_unavailable");
+        }
+        if !matches!(&children_r, Some(Ok(_))) {
+            status.incomplete("children_unavailable");
+        }
         let role = match role_r {
             Some(Ok(r)) => r,
             _ => String::new(),
@@ -897,6 +977,8 @@ async fn collect_visited_bounded<'a>(
                         }
                     }
                 }
+            } else {
+                status.incomplete("interface_proxies_unavailable");
             }
         }
 
@@ -913,16 +995,34 @@ async fn collect_visited_bounded<'a>(
         // would exceed the cap.
         let descend = max_depth.map(|d| depth + 1 <= d).unwrap_or(true);
         if descend {
-            match children_r {
+            match &children_r {
                 Some(Ok(children)) => {
-                    for c in children.into_iter().rev() {
+                    for c in children.iter().rev().cloned() {
                         stack.push((c, depth + 1, child_in_web_doc, frame_ordinal));
                     }
                 }
                 Some(Err(error)) => dlog!("  get_children failed: {error:#}"),
                 None => dlog!("  get_children timed out"),
             }
+        } else if matches!(&children_r, Some(Ok(children)) if !children.is_empty()) {
+            status.truncate("max_depth_reached");
         }
+
+        let unique_owner = match owner_cache.get(&oref.name) {
+            Some(owner) => owner.clone(),
+            None => {
+                let owner = canonical_unique_owner(&dbus, &oref.name).await;
+                owner_cache.insert(oref.name.clone(), owner.clone());
+                owner
+            }
+        };
+        if unique_owner.is_none() {
+            status.incomplete("unique_owner_unavailable");
+        }
+        let identity = unique_owner.map(|unique_owner| AtspiIdentity {
+            unique_owner,
+            object_path: oref.path.clone(),
+        });
 
         visited.push(Visited {
             depth,
@@ -941,12 +1041,13 @@ async fn collect_visited_bounded<'a>(
             in_web_doc,
             on_web_process_bus: is_web_process_bus(&oref.name),
             frame_ordinal,
+            identity,
             acc,
         });
     }
 
     dlog!("walked pid {pid}: {} node(s)", visited.len());
-    Ok(Some((visited, scoped_frame)))
+    Ok(Some((visited, scoped_frame, status)))
 }
 
 /// Render visited nodes into the markdown + node list `walk_tree` returns.
@@ -1029,6 +1130,7 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 depth: v.depth,
                 parent_element_index,
                 in_web_content: v.in_web_doc,
+                identity: v.identity.clone(),
             });
             // Record this actionable index at its depth, and invalidate any
             // deeper entries from a previous subtree.
@@ -1096,6 +1198,41 @@ fn is_indexable(v: &Visited) -> bool {
     )
 }
 
+fn select_indexable_target<'v, 'a>(
+    visited: &'v [Visited<'a>],
+    idx: usize,
+    identity: Option<&AtspiIdentity>,
+) -> Result<&'v Visited<'a>> {
+    if let Some(identity) = identity {
+        let mut matches = visited
+            .iter()
+            .filter(|node| is_indexable(node) && node.identity.as_ref() == Some(identity));
+        let target = matches.next().ok_or_else(|| {
+            anyhow!(
+                "stale AT-SPI identity {}{}: owner disappeared or object was removed",
+                identity.unique_owner,
+                identity.object_path
+            )
+        })?;
+        if matches.next().is_some() {
+            return Err(anyhow!(
+                "ambiguous AT-SPI identity {}{}",
+                identity.unique_owner,
+                identity.object_path
+            ));
+        }
+        return Ok(target);
+    }
+    let action_nodes = visited
+        .iter()
+        .filter(|node| is_indexable(node))
+        .collect::<Vec<_>>();
+    action_nodes
+        .get(idx)
+        .copied()
+        .ok_or_else(|| anyhow!("element {idx} not found (total: {})", action_nodes.len()))
+}
+
 fn is_indexable_capabilities(
     role: &str,
     has_action: bool,
@@ -1135,6 +1272,9 @@ pub struct WalkedTree {
     /// top-level and the snapshot contains only that window's nodes. False
     /// means the snapshot spans every window the application publishes.
     pub window_scoped: bool,
+    pub complete: bool,
+    pub truncated: bool,
+    pub incomplete_notes: Vec<String>,
 }
 
 /// Walk the AT-SPI tree with caller-supplied node + depth caps.
@@ -1172,7 +1312,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 return Ok(None);
             }
         };
-        let Some((visited, scoped_frame)) = walked else {
+        let Some((visited, scoped_frame, mut status)) = walked else {
             return Ok(None);
         };
         let (markdown, nodes) = render(&visited, scoped_frame);
@@ -1185,6 +1325,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
             Ok(bounds) => bounds,
             Err(_) => {
                 dlog!("element bounds timed out for pid {pid}");
+                status.incomplete("element_bounds_timeout");
                 Vec::new()
             }
         };
@@ -1205,6 +1346,9 @@ pub(super) fn walk_tree_bounded_with_timeout(
             nodes,
             bounds,
             window_scoped: scoped_frame.is_some(),
+            complete: status.complete,
+            truncated: status.truncated,
+            incomplete_notes: status.incomplete_notes,
         }))
     })
 }
@@ -1489,18 +1633,19 @@ pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
 }
 
 /// Write into the exact indexed editable exposed by the caller's snapshot.
-pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
+pub fn type_into_editable_at(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+    text: &str,
+) -> Result<()> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
-                .iter()
-                .filter(|node| is_indexable(node))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             if write_into_editable_target(target, text).await? {
                 Ok(())
             } else {
@@ -1510,13 +1655,8 @@ pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
                 let refreshed = collect_visited(conn, pid)
                     .await?
                     .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-                let refreshed_target = refreshed
-                    .iter()
-                    .filter(|node| is_indexable(node))
-                    .nth(idx)
-                    .ok_or_else(|| {
-                        anyhow!("element {idx} disappeared after AT-SPI focus refresh")
-                    })?;
+                let refreshed_target = select_indexable_target(&refreshed, idx, identity.as_ref())
+                    .map_err(|_| anyhow!("element {idx} disappeared after AT-SPI focus refresh"))?;
                 if write_into_editable_target(refreshed_target, text).await? {
                     Ok(())
                 } else {
@@ -1857,17 +1997,18 @@ pub fn invoke_menu_path(pid: u32, path: &[String]) -> Result<()> {
     )
 }
 
-pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
+pub fn perform_action(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+) -> Result<(String, bool)> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes.get(idx).ok_or_else(|| {
-                anyhow!("element {idx} not found (total: {})", action_nodes.len())
-            })?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
 
             // Suspected no-op: actuating `do_action(0)` on a passive display role
             // (a `label`/`static`/`image` indexed only for its Value interface) or a
@@ -1915,23 +2056,76 @@ pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
     )
 }
 
-/// Invoke an indexed scroll target's directional AT-SPI action.
-///
-/// Chromium exposes scrollable web regions as named actions such as
-/// `scrollDown`/`scrollForward`; using that accessibility route avoids the
-/// X11 `Button5` event path that Chromium silently drops in background mode.
-pub fn scroll_element(pid: u32, idx: usize, direction: &str, amount: usize) -> Result<()> {
+pub fn perform_secondary_action(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+    requested: &str,
+) -> Result<String> {
+    let requested = requested.to_owned();
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
+            let target = select_indexable_target(&visited, idx, Some(&identity))?;
+            if target.enabled == Some(false) {
+                return Err(anyhow!("element {idx} is disabled"));
+            }
+            if requested.is_empty() {
+                return Err(anyhow!("secondary action must not be empty"));
+            }
+            let matches = target
+                .actions
                 .iter()
-                .filter(|v| is_indexable(v))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+                .enumerate()
+                .filter(|(_, action)| action.as_str() == requested)
+                .collect::<Vec<_>>();
+            let [(action_index, action_name)] = matches.as_slice() else {
+                return Err(anyhow!(
+                    "secondary action '{requested}' is unavailable or ambiguous; advertised actions: {}",
+                    target.actions.join(", ")
+                ));
+            };
+            let action = target
+                .acc
+                .proxies()
+                .await
+                .map_err(|error| anyhow!("interface proxies unavailable: {error}"))?
+                .action()
+                .await
+                .map_err(|error| anyhow!("Action unavailable: {error}"))?;
+            match call(action.do_action(*action_index as i32)).await {
+                Some(Ok(true)) => Ok((*action_name).clone()),
+                Some(Ok(false)) => Err(anyhow!("secondary action returned false")),
+                Some(Err(error)) => Err(anyhow!("secondary action failed: {error}")),
+                None => Err(anyhow!("secondary action timed out")),
+            }
+        },
+        || Err(anyhow!("secondary action timed out for pid {pid}")),
+    )
+}
+
+/// Invoke an indexed scroll target's directional AT-SPI action.
+///
+/// Chromium exposes scrollable web regions as named actions such as
+/// `scrollDown`/`scrollForward`; using that accessibility route avoids the
+/// X11 `Button5` event path that Chromium silently drops in background mode.
+pub fn scroll_element(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+    direction: &str,
+    amount: usize,
+) -> Result<()> {
+    bounded(
+        async {
+            let conn = shared_connection().await?;
+            let visited = collect_visited(conn, pid)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             let proxies = target
                 .acc
                 .proxies()
@@ -2030,18 +2224,14 @@ pub fn scroll_element(pid: u32, idx: usize, direction: &str, amount: usize) -> R
 /// after the acknowledgement can therefore split one string between the old
 /// and new controls. Wait for the target's Focused state to become observable;
 /// an acknowledgement without read-back is not sufficient for global input.
-pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
+pub fn focus_element(pid: u32, idx: usize, identity: Option<AtspiIdentity>) -> Result<bool> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
-                .iter()
-                .filter(|v| is_indexable(v))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             let proxies = target
                 .acc
                 .proxies()
@@ -2328,17 +2518,14 @@ fn select_click_target(
     best_active.or(best_passive).map(|(_, idx)| idx)
 }
 
-pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
+pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &str) -> Result<()> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes.get(idx).ok_or_else(|| {
-                anyhow!("element {idx} not found (total: {})", action_nodes.len())
-            })?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
 
             let proxies = target
                 .acc
@@ -2393,7 +2580,11 @@ pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
     )
 }
 
-pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {
+pub fn get_element_bounds(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+) -> Result<(i32, i32, u32, u32)> {
     bounded(
         async {
             let conn = shared_connection().await?;
@@ -2403,10 +2594,7 @@ pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> 
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
                 .unwrap_or((0, 0));
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes
-                .get(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found"))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             if !target.has_component {
                 return Err(anyhow!("element {idx} exposes no Component interface"));
             }

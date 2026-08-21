@@ -101,9 +101,11 @@ fn def() -> &'static ToolDef {
                 "observation_revision": {
                     "type": "object",
                     "description": "Opt in to accessibility.observation_revision.v1. Requires a bound driver session. Omit to preserve the legacy full-snapshot contract.",
-                    "required": ["version"],
+                    "required": ["version", "serializer_version", "projection_version"],
                     "properties": {
                         "version": { "type": "integer", "const": 1 },
+                        "serializer_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "projection_version": { "type": "string", "minLength": 1, "maxLength": 128 },
                         "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                         "force_full": { "type": "boolean", "default": false }
                     },
@@ -573,6 +575,9 @@ impl Tool for GetWindowStateTool {
         } else {
             None
         };
+        if observation_revision.is_some() && scope_matched && !observation_only {
+            self.state.watch_target(pid, window_id);
+        }
 
         let revision_capture_complete = observation_revision
             .as_ref()
@@ -658,6 +663,7 @@ impl Tool for GetWindowStateTool {
                 "capability": "accessibility.observation_revision.v1",
                 "version": cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
                 "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
+                "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
                 "mode": revision.mode.as_str(),
                 "lineage_id": revision.lineage_id,
                 "revision_id": revision.revision_id,
@@ -670,6 +676,9 @@ impl Tool for GetWindowStateTool {
                 "retained": revision_capture_complete,
                 "selected_bytes": revision.text.len(),
                 "full_bytes": revision.full_text.len(),
+                "estimated_tokens": revision.text.len().div_ceil(4),
+                "serializer_duration_us": revision.serializer_duration_us,
+                "cache_estimate_bytes": revision.cache_estimate_bytes,
             });
             if let Some(reason) = revision.full_resync_reason {
                 structured["observation_revision"]["resync_reason"] =
@@ -1571,6 +1580,8 @@ mod tests {
                 body: "AXButton \"Save\"".to_owned(),
                 actionable_index: Some(4),
             }],
+            serializer_duration_us: 10,
+            cache_estimate_bytes: 256,
         };
 
         let entries = build_revision_elements_array(&nodes, &revision);

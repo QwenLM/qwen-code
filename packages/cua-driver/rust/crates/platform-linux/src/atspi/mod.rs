@@ -13,8 +13,15 @@ use anyhow::Result;
 
 pub mod cache;
 pub mod native;
+pub mod revision;
 pub use cache::ElementCache;
 pub use native::ensure_listener_active;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AtspiIdentity {
+    pub unique_owner: String,
+    pub object_path: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct AtspiNode {
@@ -42,6 +49,13 @@ pub struct AtspiNode {
     /// True when the native AT-SPI walker observed this node below renderer
     /// web content. Browser-owned consent UI must never match such nodes.
     pub in_web_content: bool,
+    pub identity: Option<AtspiIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtspiBackend {
+    Atspi,
+    X11,
 }
 
 pub struct AtspiTreeResult {
@@ -60,6 +74,10 @@ pub struct AtspiTreeResult {
     /// snapshot of a multi-window app carries every window's controls; callers
     /// that act on behalf of an exact native window must require this.
     pub window_scoped: bool,
+    pub backend: AtspiBackend,
+    pub complete: bool,
+    pub truncated: bool,
+    pub incomplete_notes: Vec<String>,
 }
 
 /// Walk the AT-SPI tree for a window identified by (pid, xid).
@@ -89,6 +107,10 @@ pub(crate) fn walk_tree_for_recording(
                 trusted: true,
                 degraded_reason: None,
                 window_scoped: walked.window_scoped,
+                backend: AtspiBackend::Atspi,
+                complete: walked.complete && walked.window_scoped,
+                truncated: walked.truncated,
+                incomplete_notes: walked.incomplete_notes,
             };
         }
     }
@@ -137,6 +159,10 @@ pub fn walk_tree_bounded(
                         trusted: true,
                         degraded_reason: None,
                         window_scoped: walked.window_scoped,
+                        backend: AtspiBackend::Atspi,
+                        complete: walked.complete && walked.window_scoped,
+                        truncated: walked.truncated,
+                        incomplete_notes: walked.incomplete_notes,
                     };
                 }
             }
@@ -160,16 +186,47 @@ pub fn walk_tree_bounded(
 /// display role, or no advertised action), so the caller can surface
 /// `effect: "suspected_noop"`.
 pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
-    native::perform_action(pid, idx)
+    native::perform_action(pid, idx, None)
+}
+
+pub fn perform_action_exact(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+) -> Result<(String, bool)> {
+    native::perform_action(pid, idx, Some(identity))
+}
+
+pub fn perform_secondary_action(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+    action: &str,
+) -> Result<String> {
+    native::perform_secondary_action(pid, idx, identity, action)
 }
 
 /// Give an indexed AT-SPI element keyboard focus without activating its window.
 pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
-    native::focus_element(pid, idx)
+    native::focus_element(pid, idx, None)
+}
+
+pub fn focus_element_exact(pid: u32, idx: usize, identity: AtspiIdentity) -> Result<bool> {
+    native::focus_element(pid, idx, Some(identity))
 }
 
 pub fn scroll_element(pid: u32, idx: usize, direction: &str, amount: usize) -> Result<()> {
-    native::scroll_element(pid, idx, direction, amount)
+    native::scroll_element(pid, idx, None, direction, amount)
+}
+
+pub fn scroll_element_exact(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+    direction: &str,
+    amount: usize,
+) -> Result<()> {
+    native::scroll_element(pid, idx, Some(identity), direction, amount)
 }
 
 /// Enumerate top-level windows from the AT-SPI registry. The window-listing
@@ -214,14 +271,27 @@ pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
 
 /// Type into the exact indexed editable from the caller's accessibility snapshot.
 pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
-    native::type_into_editable_at(pid, idx, text)
+    native::type_into_editable_at(pid, idx, None, text)
+}
+
+pub fn type_into_editable_exact(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+    text: &str,
+) -> Result<()> {
+    native::type_into_editable_at(pid, idx, Some(identity), text)
 }
 
 /// Set the text value of element `idx` within pid's app tree via AT-SPI.
 /// Tries `EditableText.set_text_contents(value)` first, then
 /// `Value.set_current_value(float)`.
 pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
-    native::set_value(pid, idx, value)
+    native::set_value(pid, idx, None, value)
+}
+
+pub fn set_value_exact(pid: u32, idx: usize, identity: AtspiIdentity, value: &str) -> Result<()> {
+    native::set_value(pid, idx, Some(identity), value)
 }
 
 /// Insert `text` into a GUI app's editable field via AT-SPI EditableText —
@@ -243,7 +313,15 @@ pub fn focused_is_editable(pid: u32) -> Result<Option<bool>> {
 }
 
 pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {
-    native::get_element_bounds(pid, idx)
+    native::get_element_bounds(pid, idx, None)
+}
+
+pub fn get_element_bounds_exact(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+) -> Result<(i32, i32, u32, u32)> {
+    native::get_element_bounds(pid, idx, Some(identity))
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -262,6 +340,10 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
                 trusted: false,
                 degraded_reason: None,
                 window_scoped: false,
+                backend: AtspiBackend::X11,
+                complete: false,
+                truncated: false,
+                incomplete_notes: vec!["x11_property_fallback".into()],
             }
         }
     };
@@ -299,6 +381,7 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
         depth: 0,
         parent_element_index: None,
         in_web_content: false,
+        identity: None,
     };
     md.push_str(&format!(
         "- [0] window \"{}\" [actions=[activate]]\n",
@@ -323,7 +406,46 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
         // proving anything a caller acts on.
         window_scoped: true,
         degraded_reason: None,
+        backend: AtspiBackend::X11,
+        complete: false,
+        truncated: false,
+        incomplete_notes: vec!["x11_property_fallback".into()],
     }
+}
+
+pub(crate) fn format_revision_body(node: &AtspiNode) -> String {
+    let label = node
+        .name
+        .as_deref()
+        .or(node.value.as_deref())
+        .or(node.description.as_deref())
+        .unwrap_or_default();
+    let mut fields = vec![
+        format!("<{}>", node.role),
+        serde_json::to_string(label).expect("string labels serialize"),
+    ];
+    if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
+        fields.push(format!(
+            "value={}",
+            serde_json::to_string(value).expect("string values serialize")
+        ));
+    }
+    if let Some(enabled) = node.enabled {
+        fields.push(format!("enabled={enabled}"));
+    }
+    if let Some(selected) = node.selected.or(node.checked) {
+        fields.push(format!("selected={selected}"));
+    }
+    if !node.actions.is_empty() {
+        fields.push(format!(
+            "actions={}",
+            serde_json::to_string(&node.actions).expect("string actions serialize")
+        ));
+    }
+    if node.in_web_content {
+        fields.push("in_web_content=true".into());
+    }
+    fields.join(" ")
 }
 
 fn get_x11_title(conn: &x11rb::rust_connection::RustConnection, window: u32) -> Option<String> {

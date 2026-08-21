@@ -96,9 +96,11 @@ fn observation_revision_schema(_: &mut SchemaGenerator) -> Schema {
     // provable subset of every runtime `get_window_state` schema.
     json_schema!({
         "type": "object",
-        "required": ["version"],
+        "required": ["version", "serializer_version", "projection_version"],
         "properties": {
             "version": { "type": "integer", "const": 1 },
+            "serializer_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "projection_version": { "type": "string", "minLength": 1, "maxLength": 128 },
             "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
             "force_full": { "type": "boolean", "default": false }
         },
@@ -126,12 +128,20 @@ fn drag_steps_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer", "minimum": 1, "maximum": 200 })
 }
 
+fn delivery_mode_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "enum": ["background", "foreground"] })
+}
+
 fn scroll_amount_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer", "minimum": 1, "maximum": 50 })
 }
 
 fn cursor_theme_id_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "minLength": 1, "maxLength": 200 })
+}
+
+fn element_token_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "minLength": 1, "maxLength": 512 })
 }
 
 fn escalation_detail_schema(_: &mut SchemaGenerator) -> Schema {
@@ -218,6 +228,13 @@ impl EscalationReason {
 pub enum DesktopScope {
     #[serde(rename = "desktop")]
     Desktop,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    Background,
+    Foreground,
 }
 
 fn desktop_scope_schema(generator: &mut SchemaGenerator) -> Schema {
@@ -477,6 +494,28 @@ impl ToolInput for GetDesktopStateInput {
     const TOOL_NAME: &'static str = "get_desktop_state";
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct ListAppsInput {}
+
+impl ToolInput for ListAppsInput {
+    const TOOL_NAME: &'static str = "list_apps";
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct ListWindowsInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_screen_only: Option<bool>,
+}
+
+impl ToolInput for ListWindowsInput {
+    const TOOL_NAME: &'static str = "list_windows";
+}
+
 /// Opt in to the versioned `accessibility.observation_revision.v1` protocol on
 /// `get_window_state`. Omitting the whole record preserves the legacy
 /// full-snapshot contract byte for byte.
@@ -486,6 +525,12 @@ pub struct ObservationRevisionInput {
     /// Protocol version. Only `1` is defined; any other value is rejected
     /// with a closed `invalid_observation_revision` error.
     pub version: u32,
+    /// Canonical accessibility serializer expected by the caller. A mismatch
+    /// returns a full response with `serializer_changed`.
+    pub serializer_version: String,
+    /// Canonical tree projection expected by the caller. A mismatch returns a
+    /// full response with `projection_changed`.
+    pub projection_version: String,
     /// Revision the caller wants to diff against. The caller — never the
     /// driver — decides which revision was actually delivered downstream.
     /// Missing, expired, foreign, or incompatible bases yield a full response.
@@ -673,6 +718,86 @@ impl ToolInput for ClickInput {
     const TOOL_NAME: &'static str = "click";
 }
 
+/// Exact-window click input for the generated SDK. The existing [`ClickInput`]
+/// remains the portable desktop-coordinate form.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct WindowClickInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "click_button_schema")]
+    pub button: Option<ClickButton>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "click_count_schema")]
+    pub count: Option<u32>,
+}
+
+impl ToolInput for WindowClickInput {
+    const TOOL_NAME: &'static str = "click";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct DoubleClickInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub y: Option<f64>,
+}
+
+impl ToolInput for DoubleClickInput {
+    const TOOL_NAME: &'static str = "double_click";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct RightClickInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_list_schema")]
+    pub modifier: Option<Vec<String>>,
+}
+
+impl ToolInput for RightClickInput {
+    const TOOL_NAME: &'static str = "right_click";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct DragInput {
@@ -713,6 +838,44 @@ impl ToolInput for DragInput {
     const TOOL_NAME: &'static str = "drag";
 }
 
+/// Exact-window drag input for the generated SDK. The existing [`DragInput`]
+/// keeps its established UniFFI record layout.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct WindowDragInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    #[schemars(schema_with = "number_schema")]
+    pub from_x: f64,
+    #[schemars(schema_with = "number_schema")]
+    pub from_y: f64,
+    #[schemars(schema_with = "number_schema")]
+    pub to_x: f64,
+    #[schemars(schema_with = "number_schema")]
+    pub to_y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "drag_duration_schema")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "drag_steps_schema")]
+    pub steps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "click_button_schema")]
+    pub button: Option<ClickButton>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_list_schema")]
+    pub modifier: Option<Vec<String>>,
+}
+
+impl ToolInput for WindowDragInput {
+    const TOOL_NAME: &'static str = "drag";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollInput {
@@ -746,6 +909,36 @@ impl ToolInput for ScrollInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
+pub struct WindowScrollInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "number_schema")]
+    pub y: Option<f64>,
+    pub direction: ScrollDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "scroll_by_schema")]
+    pub by: Option<ScrollBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "scroll_amount_schema")]
+    pub amount: Option<u64>,
+}
+
+impl ToolInput for WindowScrollInput {
+    const TOOL_NAME: &'static str = "scroll";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
 pub struct TypeTextInput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -763,6 +956,43 @@ pub struct TypeTextInput {
 
 impl ToolInput for TypeTextInput {
     const TOOL_NAME: &'static str = "type_text";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct WindowTypeTextInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+}
+
+impl ToolInput for WindowTypeTextInput {
+    const TOOL_NAME: &'static str = "type_text";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct SetValueInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: String,
+    pub value: String,
+}
+
+impl ToolInput for SetValueInput {
+    const TOOL_NAME: &'static str = "set_value";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
@@ -835,6 +1065,27 @@ impl ToolInput for PressKeyInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
+pub struct WindowPressKeyInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_list_schema")]
+    pub modifiers: Option<Vec<String>>,
+}
+
+impl ToolInput for WindowPressKeyInput {
+    const TOOL_NAME: &'static str = "press_key";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
 pub struct HotkeyInput {
     #[schemars(length(min = 2))]
     pub keys: Vec<String>,
@@ -853,6 +1104,42 @@ pub struct HotkeyInput {
 
 impl ToolInput for HotkeyInput {
     const TOOL_NAME: &'static str = "hotkey";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct WindowHotkeyInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: Option<String>,
+    #[schemars(length(min = 2))]
+    pub keys: Vec<String>,
+}
+
+impl ToolInput for WindowHotkeyInput {
+    const TOOL_NAME: &'static str = "hotkey";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct PerformSecondaryActionInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: Option<u64>,
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: String,
+    pub action: String,
+}
+
+impl ToolInput for PerformSecondaryActionInput {
+    const TOOL_NAME: &'static str = "perform_secondary_action";
 }
 
 #[cfg(test)]
@@ -876,6 +1163,15 @@ mod tests {
         assert_eq!(
             schema["properties"]["count"],
             json!({ "type": "integer", "minimum": 1, "maximum": 3 })
+        );
+    }
+
+    #[test]
+    fn generated_drag_schema_exposes_the_runtime_delivery_ladder() {
+        let schema = WindowDragInput::input_schema();
+        assert_eq!(
+            schema["properties"]["delivery_mode"],
+            json!({ "type": "string", "enum": ["background", "foreground"] })
         );
     }
 

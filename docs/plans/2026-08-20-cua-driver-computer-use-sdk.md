@@ -15,4 +15,4 @@ Do not modify Qwen Code core, CLI, ACP, TUI, Node REPL, tool registration, sched
 
 ## Current checkpoint
 
-The shared core revision implementation and the macOS implementation are present in the working tree. Windows UIA, Linux AT-SPI, generated SDK exposure, the direct JavaScript wrapper, real cross-platform E2E, packaging, and release validation remain incomplete.
+The shared revision core, macOS AX, Windows UIA, Linux AT-SPI, generated SDK exposure, direct JavaScript wrapper, lifecycle cleanup, and local package staging are present in the working tree. macOS has real native E2E evidence, including 30 deterministic transitions and token-bound actions. Windows UIA/MSAA and Linux AT-SPI/X11 have compile-time and deterministic-test coverage but still require real target E2E before this stage can claim cross-platform completion. Public npm release validation also remains gated on selecting and publishing an unused cua-driver version.

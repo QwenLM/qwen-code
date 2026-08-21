@@ -2992,6 +2992,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
@@ -3058,6 +3059,7 @@ dependencies = [
  "tiny-skia",
  "tokio",
  "tracing",
+ "uuid",
  "windows 0.58.0",
 ]
 

@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url"
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const typescriptRoot = join(driverRoot, "typescript")
+const computerUseRoot = join(typescriptRoot, "computer-use")
 
 function valueAfter(flag) {
   const index = process.argv.indexOf(flag)
@@ -131,5 +132,31 @@ writeJson(join(rootStage, "package.json"), {
 })
 pack(rootStage)
 
+const computerUseManifest = JSON.parse(
+  readFileSync(join(computerUseRoot, "package.json"), "utf8"),
+)
+if (computerUseManifest.dependencies?.["@trycua/cua-driver"] !== "file:..") {
+  throw new Error(
+    "Computer Use source must use the sibling @trycua/cua-driver package",
+  )
+}
+const computerUseStage = join(stagingRoot, "computer-use")
+mkdirSync(computerUseStage, { recursive: true })
+for (const file of computerUseManifest.files) {
+  cpSync(join(computerUseRoot, file), join(computerUseStage, file), { recursive: true })
+}
+writeJson(join(computerUseStage, "package.json"), {
+  ...computerUseManifest,
+  private: undefined,
+  scripts: undefined,
+  dependencies: {
+    ...computerUseManifest.dependencies,
+    "@trycua/cua-driver": version,
+  },
+})
+pack(computerUseStage)
+
 rmSync(stagingRoot, { recursive: true })
-console.log(`Packed @trycua/cua-driver ${version} with ${nativeCount} native package(s).`)
+console.log(
+  `Packed @trycua/cua-driver ${version}, @qwen-code/computer-use ${computerUseManifest.version}, and ${nativeCount} native package(s).`,
+)
