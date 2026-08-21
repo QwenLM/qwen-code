@@ -179,8 +179,11 @@ describe('AdvisorTool', () => {
     });
     expect(result.error).toBeUndefined();
     expect(String(result.llmContent)).toContain('<advisor_feedback>');
-    expect(result.returnDisplay).toContain('## Verdict');
-    expect(result.returnDisplay).toContain('Check the edge case.');
+    expect(result.llmContent).toContain('## Verdict');
+    expect(result.returnDisplay).toEqual({
+      type: 'advisor_review',
+      ...ADVISOR_REVIEW,
+    });
   });
 
   it('propagates user cancellation instead of returning a tool error', async () => {
