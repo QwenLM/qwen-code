@@ -249,6 +249,18 @@ describe('StreamingStatus loading phrases', () => {
     expect(labelText(container)).toBe(getLoadingPhrases('en')[0]);
     expect(warn).toHaveBeenCalled();
   });
+
+  it('stays visible when hasActivePrompt is true even if streamingState is idle (#9487)', () => {
+    mocks.streamingState = 'idle';
+    try {
+      const container = render({}, { hasActivePrompt: true });
+      // When streamingState is idle the component normally returns null.
+      // With hasActivePrompt, it should render the status element.
+      expect(container.firstElementChild).not.toBeNull();
+    } finally {
+      mocks.streamingState = 'responding';
+    }
+  });
 });
 
 describe('StreamingStatus daemon keep-alive (#9487)', () => {
