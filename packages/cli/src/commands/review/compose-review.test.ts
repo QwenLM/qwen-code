@@ -10016,6 +10016,137 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.fresh).toBe(1);
   });
 
+  it('does not accuse the posture over a finding the posture itself exempts', () => {
+    // SKILL Step 6 excludes a `[build]`/`[test]`/`[probe]` finding by source
+    // at any floor: it is pre-confirmed and stays inline whether or not the
+    // floor engaged. A fully compliant round that defers every deferrable
+    // Suggestion and posts one such finding is the posture working, not
+    // failing — and when the code-side reroute has failed open, the
+    // model-side posture is the layer carrying that same carve-out.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
+    const deterministic = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** [test] suite is red' },
+      ],
+    });
+    expect(deterministic.body).not.toContain('engaged in name');
+
+    // A Suggestion the floor WOULD have deferred still fires it.
+    const deferrable = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(deferrable.body).toContain('engaged in name');
+  });
+
+  it('leaves a terminal copy of the health note the ladder sheds first', () => {
+    // The note has its own rank BELOW the convergence paragraph, so it is
+    // the first thing shed — and the trim notice points the reader at a
+    // terminal report that must actually hold it.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.health?.en).toContain('Mechanism health:');
+    expect(r.health?.zh).toContain('机制健康：');
+  });
+
+  it('names the health note in the trim notice, not the convergence one', () => {
+    // With no diagnosis firing, rank -1 holds ONLY this note. Sharing rank 0
+    // made the notice name "the convergence observation" for a section that
+    // never existed in the body.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      bodyCriticals: ['B'.repeat(56_000)],
+      unreviewedDimensions: ['security'],
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).not.toContain('Mechanism health:');
+    expect(r.body).toContain('the mechanism-health note');
+    expect(r.body).not.toContain('the convergence observation');
+    // ...and the copy the notice points at exists.
+    expect(r.health?.en).toContain('Mechanism health:');
+  });
+
+  it('keeps quiet on a round whose scope closed cleanly', () => {
+    // The chain is TWO withholds. A round that anchors clears it, however
+    // unanchored its predecessor was.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 4, findings: [], posted: 0, fresh: 0 }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    expect(r.body).not.toContain('re-reads the whole diff');
+  });
+
+  it('carries the codes on a REQUEST_CHANGES result too', () => {
+    // Three separately-maintained result constructions; only one was pinned.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 5,
+        posted: 9,
+        fresh: 9,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+      }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Critical]** a new one' },
+        { path: 'src/b.ts', line: 2, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'root-cause-triage',
+    );
+    // ...and this branch's own copy of the health note. It is round 6 under
+    // the default configuration, so the posture gap is real and manifested.
+    expect(r.body).toContain('engaged in name and not in effect');
+    expect(r.health?.en).toContain('Mechanism health:');
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body

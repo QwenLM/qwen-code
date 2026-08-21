@@ -491,6 +491,31 @@ describe('saveReviewArtifact', () => {
     expect(() =>
       saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
     ).toThrow(/recommendations/);
+
+    // ...and the code is checked against the closed set, not cast into it: a
+    // set a caller wires actions to is a contract, and a cast writes
+    // whatever string it was handed under a type that says otherwise.
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [{ code: 'make-coffee', basis: 'x' }],
+    });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendation codes/);
+  });
+
+  it('carries the mechanism-health note into the artifact', () => {
+    // The first clause the overflow ladder sheds, so the artifact may be its
+    // only durable copy on the rounds it fires.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      health: { en: 'Mechanism health: …', zh: '机制健康：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.health.en).toBe('Mechanism health: …');
+    expect(saved.verdict.health.zh).toBe('机制健康：…');
   });
 
   it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {

@@ -213,6 +213,31 @@ function event(value: unknown, label: string): ReviewEvent {
   return value;
 }
 
+const RECOMMENDATION_CODES: ReadonlySet<string> = new Set([
+  'root-cause-triage',
+  'land-and-defer',
+  'batch-fixes',
+  'stem-surface',
+]);
+
+/**
+ * A recommendation code, checked against the closed set rather than cast
+ * into it. The set is a contract a caller wires actions to, and a cast
+ * writes whatever string it was handed into the durable record under a type
+ * that says otherwise — the shape every sibling closed vocabulary in this
+ * validator refuses.
+ */
+function recommendationCode(
+  value: unknown,
+  label: string,
+): Recommendation['code'] {
+  const code = string(value, label);
+  if (!RECOMMENDATION_CODES.has(code)) {
+    throw new Error(`${label} must be one of the known recommendation codes.`);
+  }
+  return code as Recommendation['code'];
+}
+
 function validateVerdict(value: unknown): PersistedVerdict {
   const verdict = object(value, 'Composed verdict');
   const downgradedFrom = verdict['downgradedFrom'];
@@ -319,10 +344,10 @@ function validateVerdict(value: unknown): PersistedVerdict {
     recommendations = rawRecs.map((entry, i) => {
       const r = object(entry, `Composed verdict.recommendations[${i}]`);
       return {
-        code: string(
+        code: recommendationCode(
           r['code'],
           `Composed verdict.recommendations[${i}].code`,
-        ) as Recommendation['code'],
+        ),
         basis: string(
           r['basis'],
           `Composed verdict.recommendations[${i}].basis`,
@@ -331,6 +356,17 @@ function validateVerdict(value: unknown): PersistedVerdict {
     });
   }
   // The fresh count reads by the same rules as the total it is part of.
+  // Same reasoning as the paragraph above, and more so: this block is the
+  // FIRST thing the ladder sheds.
+  const rawHealth = verdict['health'];
+  let health: { en: string; zh: string } | undefined;
+  if (rawHealth !== undefined && rawHealth !== null) {
+    const h = object(rawHealth, 'Composed verdict.health');
+    health = {
+      en: string(h['en'], 'Composed verdict.health.en'),
+      zh: string(h['zh'], 'Composed verdict.health.zh'),
+    };
+  }
   const rawFresh = verdict['postedFresh'];
   const freshAbsent = rawFresh === undefined || rawFresh === null;
   const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);
@@ -392,6 +428,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ...(postedFresh === undefined ? {} : { postedFresh }),
     ...(convergence === undefined ? {} : { convergence }),
     ...(recommendations === undefined ? {} : { recommendations }),
+    ...(health === undefined ? {} : { health }),
     lowSignal:
       lowSignal === null
         ? null

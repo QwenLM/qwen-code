@@ -212,6 +212,13 @@ export type CriticalFloorKind = 'explicit' | 'auto-resolved';
  *   were a non-converged reverse audit and skipped integration tests, which
  *   one raised-budget round does not clear — so the chain is DISCLOSED below
  *   as mechanism health and prescribes nothing.
+ * - `human-triage` is matched to "any shape" in the design, which makes it
+ *   advice no measurement selected. Emitting it on every diagnosis would
+ *   spend the code set's only real property — that a code means a fact was
+ *   observed — on a constant.
+ *
+ * That is the whole menu: eleven codes in the design, four emitted here,
+ * seven named above.
  */
 export type RecommendationCode =
   | 'root-cause-triage'
@@ -241,11 +248,20 @@ export interface MechanismHealth {
    */
   postureNotEngaging: boolean;
   /**
-   * This round withholds the incremental anchor and the round it recovered
-   * had none either. Two consecutive withholds mean the next round re-reads
-   * the whole diff, and the round after that, until something clears it —
-   * the closed loop measured at 119 minutes and 34M tokens on a PR whose
-   * code had not changed a line.
+   * This round's SCOPE did not close cleanly — which withholds the
+   * incremental anchor — and the round it recovered carried none either. Two
+   * consecutive withholds mean the next round re-reads the whole diff, and
+   * the round after that, until something clears it: the closed loop
+   * measured at 119 minutes and 34M tokens on a PR whose code had not
+   * changed a line.
+   *
+   * A stated limit: the scope is the only withholding leg visible from here.
+   * The marker also withholds when the plan carries no fetched sha, when it
+   * cannot be read, and when the round's model identity drifted — those are
+   * decided where the marker is built, with the plan in hand, and a round
+   * withheld only by one of them is a chain this check does not see. It
+   * under-reports rather than over-reports, and the wording claims only what
+   * it measured.
    */
   anchorChainBroken: boolean;
 }
@@ -614,10 +630,10 @@ export function renderMechanismHealth(
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round withholds the incremental anchor and the round it recovered had none either, so the next review re-reads the whole diff — and will keep doing so until a round closes cleanly`,
+      `this round's scope did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round closes cleanly`,
     );
     zh.push(
-      `本轮扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮干净收尾`,
+      `本轮的作用域未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮干净收尾`,
     );
   }
   if (en.length === 0) return null;

@@ -721,6 +721,14 @@ describe('recommendationsFor — measurement to advice, no constants', () => {
     expect(prose.en).toContain('--severity-floor critical');
     expect(prose.en).toContain('No Critical finding is open on this round');
     expect(prose.zh).toContain('本轮没有未决的 Critical');
+    // ...and the negative side: an open blocker means the ending is not
+    // available, so the sentence must not render.
+    const withBlocker = renderConvergenceDiagnosis({
+      ...base,
+      openCriticals: 2,
+    });
+    expect(withBlocker.en).not.toContain('No Critical finding is open');
+    expect(withBlocker.zh).not.toContain('本轮没有未决的 Critical');
     // ...and the narrowed floor case drops exactly the rung it dropped.
     const atFloor = renderConvergenceDiagnosis({
       ...base,

@@ -848,6 +848,18 @@ export interface ComposeReviewResult {
    */
   recommendations?: Recommendation[];
   /**
+   * The mechanism-health disclosure, when one fired — the SAME text the body
+   * carries, returned so a terminal copy exists.
+   *
+   * The overflow ladder sheds this paragraph before every other, and its
+   * notice tells the author the trimmed sections "still hold — read them in
+   * the terminal report". That was a false record while this text lived only
+   * inside the body composer, exactly as it was for the convergence
+   * paragraph: a disclosure derived from the round's own caps has no other
+   * copy anywhere unless the result carries one.
+   */
+  health?: { en: string; zh: string };
+  /**
    * The previous round's `postedInline`, recovered from the side file when
    * it recorded one. Absent on round 1, on a recovery miss, and on any
    * predecessor that predates the field — none of which is "posted
@@ -1771,10 +1783,12 @@ function ledgerMarkerFor(
       // critical floor and the volume under an open one are not two points
       // on one trend. Decides nothing, sheds with the volume it qualifies.
       // The RESOLVED posture, folded the way every consumer folds it: an
-      // ABSENT floor reads as `auto` throughout this module (a present but
+      // ABSENT floor reads as `auto` in the REPORTING reading (a present but
       // unrecognisable one reads as nothing at all — see
       // `criticalFloorKind`), and `auto` resolves determinately from the
-      // round number and the context state. Recording it only when the state NAMED a floor
+      // round number and the context state. The ENFORCEMENT reading folds
+      // nothing and fails open on both; the gap between the two is what the
+      // mechanism-health check discloses. Recording it only when the state NAMED a floor
       // left the guard blind under the DEFAULT configuration — where the
       // posture genuinely transitions at round 6 and again on a transient
       // context failure — so a real posture change read as loop divergence,
@@ -2916,6 +2930,7 @@ function composeReviewBody(
 
   /** What a rank drops, in the author's words — the note names it. */
   const RANK_NAMES: Record<number, { en: string; zh: string }> = {
+    [-1]: { en: 'the mechanism-health note', zh: '机制健康说明' },
     0: { en: 'the convergence observation', zh: '收敛情况观察' },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
     2: {
@@ -3747,15 +3762,20 @@ function composeReviewBody(
         // a consequence is not a malfunction anyone can act on; the gap
         // WITH one is.
         //
-        // Gating on the posted count is safe here precisely because the
-        // enforcement reading is false: `floorEnforcedReroute` never ran, so
-        // no inline Suggestion can be its deliberate deterministic
-        // carve-out. When enforcement DOES engage, the second conjunct is
-        // false and the carve-out can never trip this.
+        // The count EXCLUDES deterministic findings, through the same
+        // projection `floorEnforcedReroute` reads. Arguing that the code-side
+        // reroute never ran (so nothing inline can be ITS carve-out) is true
+        // and beside the point: when the enforcement reading is false the
+        // model-side posture is the layer in charge, and SKILL Step 6 carries
+        // the same carve-out — a `[build]`/`[test]`/`[probe]` finding is
+        // pre-confirmed and stays inline at any floor. A fully compliant
+        // round that defers every deferrable Suggestion and posts one
+        // `[test]` finding would otherwise be accused of a failure that is
+        // the posture working as specified.
         postureNotEngaging:
           convergence.criticalFloorKind !== undefined &&
           convergence.floorEnforcementEngaged === false &&
-          suggestionsInline > 0,
+          deferrableSuggestionsInline(input.draftedComments) > 0,
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
@@ -3764,7 +3784,13 @@ function composeReviewBody(
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),
       })
     : null;
-  const healthBlock: Bi[] = healthNote ? [{ ...healthNote, trim: 0 }] : [];
+  // Its OWN rank, shed before the convergence paragraph. Sharing rank 0 made
+  // the notice name "the convergence observation" for a body whose rank-0
+  // content was only this note — a section that never existed. It goes first
+  // because its primary reader is the operator, who has the `HEALTH:`
+  // terminal line, while the convergence paragraph's recommendations are
+  // addressed to the author reading the PR.
+  const healthBlock: Bi[] = healthNote ? [{ ...healthNote, trim: -1 }] : [];
   const convergenceBlock: Bi[] = convergenceNote
     ? [{ ...convergenceNote, trim: 0 }]
     : [];
@@ -3823,6 +3849,9 @@ function composeReviewBody(
         ? {}
         : { convergence: convergenceNote }),
       ...(recommendations === undefined ? {} : { recommendations }),
+      ...(healthNote === null || healthNote === undefined
+        ? {}
+        : { health: healthNote }),
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -3907,6 +3936,9 @@ function composeReviewBody(
         ? {}
         : { convergence: convergenceNote }),
       ...(recommendations === undefined ? {} : { recommendations }),
+      ...(healthNote === null || healthNote === undefined
+        ? {}
+        : { health: healthNote }),
       bodyTrim,
       lowSignal,
       scopeUnproven,
@@ -4140,6 +4172,9 @@ function composeReviewBody(
     postedFresh,
     ...(convergenceNote === undefined ? {} : { convergence: convergenceNote }),
     ...(recommendations === undefined ? {} : { recommendations }),
+    ...(healthNote === null || healthNote === undefined
+      ? {}
+      : { health: healthNote }),
     bodyTrim,
     lowSignal,
     scopeUnproven,
@@ -4854,6 +4889,11 @@ export const composeReviewCommand: CommandModule = {
     if (result.convergence) {
       writeStderrLine(`CONVERGENCE: ${result.convergence.en}`);
     }
+    // The same promise for the same reason: this block is the FIRST thing the
+    // overflow ladder sheds, and the notice points the reader here.
+    if (result.health) {
+      writeStderrLine(`HEALTH: ${result.health.en}`);
+    }
     writeStderrLine(verdictLine(result));
   },
 };
@@ -4897,6 +4937,29 @@ function ledgerClaimLine(body: unknown): string {
         LEADING_INVISIBLE_RE,
         '',
       );
+}
+
+/**
+ * Inline Suggestions the posting floor WOULD have deferred — every
+ * Suggestion-severity draft whose claim line carries no deterministic tag.
+ *
+ * The posture excludes a `[build]`/`[test]`/`[probe]` finding by source at
+ * any floor: it is pre-confirmed, and it stays inline whether or not the
+ * floor engaged. Counting it as evidence that the floor failed to act reads
+ * the posture working as specified as the posture failing — and the tag is
+ * read off the CLAIM LINE only, the same window `floorEnforcedReroute` uses,
+ * because the body's tail is writable surface a footer can forge.
+ */
+function deferrableSuggestionsInline(drafted: unknown): number {
+  if (!Array.isArray(drafted)) return 0;
+  let n = 0;
+  for (const c of drafted as Array<{ body?: unknown }>) {
+    if (severityOf(c) !== 'suggestion') continue;
+    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) continue;
+    n++;
+  }
+  return n;
 }
 
 /**
