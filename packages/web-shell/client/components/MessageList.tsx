@@ -27,6 +27,7 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
+  backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
@@ -74,6 +75,7 @@ const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 interface MessageListProps {
   messages: Message[];
+  terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
@@ -622,6 +624,7 @@ export interface ApplyTurnCollapseOptions {
    * so a lost notification cannot pin the turn expanded forever.
    */
   waitForUnmatchedAgentCompletions?: boolean;
+  terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   automaticallyExpandedAgentKeys?: ReadonlySet<string>;
   /**
    * Tool-call id of a pending approval, if any. The turn containing it is
@@ -1496,6 +1499,36 @@ function turnHasMcpApp(
   );
 }
 
+function completedBackgroundShellTaskIds(
+  items: readonly DisplayItem[],
+  terminalTaskIds?: ReadonlySet<string>,
+) {
+  const taskIds = new Set(terminalTaskIds);
+  for (const item of items) {
+    if (item.type !== 'message' || item.message.role !== 'system') continue;
+    if (item.message.source !== 'background_notification') continue;
+    const data = item.message.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    if (!('kind' in data) || data.kind !== 'shell') continue;
+    // Shell background notifications are terminal-only.
+    const taskId = 'taskId' in data ? data.taskId : undefined;
+    if (typeof taskId === 'string') taskIds.add(taskId);
+  }
+  return taskIds;
+}
+
+function turnHasPendingBackgroundShell(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  completedTaskIds: ReadonlySet<string>,
+): boolean {
+  return someTurnToolCall(items, start, end, (tool) => {
+    const taskId = backgroundShellTaskId(tool);
+    return taskId !== undefined && !completedTaskIds.has(taskId);
+  });
+}
+
 function turnHasActiveBackgroundAgent(
   items: readonly DisplayItem[],
   start: number,
@@ -1723,6 +1756,7 @@ export function applyTurnCollapse(
     activeTurnStartedAt,
     backgroundSummaryGraceActive = true,
     waitForUnmatchedAgentCompletions = true,
+    terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
     includeSubagentToolUsageInMetrics = true,
@@ -1740,6 +1774,11 @@ export function applyTurnCollapse(
   }
   if (userIdxs.length === 0) return items;
 
+  const completedShellTaskIds = completedBackgroundShellTaskIds(
+    items,
+    terminalBackgroundShellTaskIds,
+  );
+
   const result: DisplayItem[] = [];
   // Anything before the first prompt (e.g. a session-restore banner) is not
   // part of any turn and passes through verbatim.
@@ -1755,6 +1794,12 @@ export function applyTurnCollapse(
     const isActiveTurn = isLastTurn && isResponding;
     const hasActiveAgent = turnHasActiveAgent(items, start, end);
     const hasMcpApp = turnHasMcpApp(items, start, end);
+    const hasPendingBackgroundShell = turnHasPendingBackgroundShell(
+      items,
+      start,
+      end,
+      completedShellTaskIds,
+    );
     const hasAutomaticallyExpandedAgent = turnHasAutomaticallyExpandedAgent(
       items,
       start,
@@ -1865,8 +1910,8 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, while a subagent is still active, or when the latest turn is
-    // incomplete; otherwise it collapses once a newer turn starts. A
+    // streaming, while background work is still active, or when the latest
+    // turn is incomplete; otherwise it collapses once a newer turn starts. A
     // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
     // expanded and shows a chevron-less metrics line. An explicit user toggle
     // always wins.
@@ -1874,6 +1919,7 @@ export function applyTurnCollapse(
       isActiveTurn ||
       hasActiveAgent ||
       hasMcpApp ||
+      hasPendingBackgroundShell ||
       hasAutomaticallyExpandedAgent ||
       awaitsBackgroundSummary ||
       ((hasTurnError || answerIdx < 0) && isLastTurn);
@@ -2642,6 +2688,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
       onImagePreview,
@@ -3260,6 +3307,7 @@ export const MessageList = memo(
         collapseOverrides,
         isResponding,
         activeTurnStartedAt,
+        terminalBackgroundShellTaskIds,
         backgroundSummaryGraceActive,
         latestTurnHasActiveBackgroundAgent,
         unmatchedCompletionGraceExpired,
@@ -3315,6 +3363,7 @@ export const MessageList = memo(
         overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
+        terminalBackgroundShellTaskIds,
         backgroundSummaryGraceActive,
         waitForUnmatchedAgentCompletions:
           latestTurnHasActiveBackgroundAgent ||
@@ -3385,6 +3434,7 @@ export const MessageList = memo(
       collapseOverrides,
       isResponding,
       activeTurnStartedAt,
+      terminalBackgroundShellTaskIds,
       backgroundSummaryGraceActive,
       latestTurnHasActiveBackgroundAgent,
       unmatchedCompletionGraceExpired,
