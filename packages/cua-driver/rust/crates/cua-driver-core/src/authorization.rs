@@ -272,6 +272,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "perform_secondary_action",
     "bring_to_front",
     "set_window_frame",
 ];
@@ -858,6 +859,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "perform_secondary_action"
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
@@ -1149,6 +1151,7 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "perform_secondary_action"
             | "kill_app"
             | "bring_to_front"
             | "get_accessibility_tree"

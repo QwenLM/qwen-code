@@ -330,6 +330,8 @@ pub struct ObservationRevisionOutput {
     pub version: u64,
     #[schemars(schema_with = "string_schema_required")]
     pub serializer_version: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub projection_version: String,
     #[schemars(schema_with = "observation_revision_mode_schema")]
     pub mode: String,
     #[schemars(schema_with = "string_schema_required")]
@@ -363,6 +365,12 @@ impl ObservationRevisionOutput {
         }
         if self.version != 1 {
             return Err("observation_revision.version must be 1".into());
+        }
+        if self.serializer_version.is_empty() || self.projection_version.is_empty() {
+            return Err(
+                "observation_revision serializer_version and projection_version must be non-empty"
+                    .into(),
+            );
         }
         if !matches!(self.mode.as_str(), "full" | "diff" | "no_change") {
             return Err("observation_revision.mode must be full, diff, or no_change".into());

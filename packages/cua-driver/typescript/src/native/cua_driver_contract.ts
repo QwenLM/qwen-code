@@ -1359,6 +1359,61 @@ const FfiConverterTypeCursorVisualOutput = (() => {
     return new FFIConverter();
 })();
 
+export type DoubleClickInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    x?: number,
+    y?: number
+}
+
+/**
+ * Generated factory for {@link DoubleClickInput} record objects.
+ */
+export const DoubleClickInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<DoubleClickInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<DoubleClickInput>,
+    });
+})();
+
+const FfiConverterTypeDoubleClickInput = (() => {
+    type TypeName = DoubleClickInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                x: FfiConverterOptionalFloat64.read(from),
+                y: FfiConverterOptionalFloat64.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalFloat64.write(value.x, into);
+            FfiConverterOptionalFloat64.write(value.y, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalFloat64.allocationSize(value.x) +
+             FfiConverterOptionalFloat64.allocationSize(value.y);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type DragInput = {
     fromX: number,
     fromY: number,
@@ -2059,6 +2114,16 @@ export type ObservationRevisionInput = {
      */
     version: number,
     /**
+     * Canonical accessibility serializer expected by the caller. A mismatch
+     * returns a full response with `serializer_changed`.
+     */
+    serializerVersion: string,
+    /**
+     * Canonical tree projection expected by the caller. A mismatch returns a
+     * full response with `projection_changed`.
+     */
+    projectionVersion: string,
+    /**
      * Revision the caller wants to diff against. The caller — never the
      * driver — decides which revision was actually delivered downstream.
      * Missing, expired, foreign, or incompatible bases yield a full response.
@@ -2092,17 +2157,23 @@ const FfiConverterTypeObservationRevisionInput = (() => {
         read(from: RustBuffer): TypeName {
             return {
                 version: FfiConverterUInt32.read(from),
+                serializerVersion: FfiConverterString.read(from),
+                projectionVersion: FfiConverterString.read(from),
                 baseRevisionId: FfiConverterOptionalString.read(from),
                 forceFull: FfiConverterOptionalBoolean.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt32.write(value.version, into);
+            FfiConverterString.write(value.serializerVersion, into);
+            FfiConverterString.write(value.projectionVersion, into);
             FfiConverterOptionalString.write(value.baseRevisionId, into);
             FfiConverterOptionalBoolean.write(value.forceFull, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.version) +
+             FfiConverterString.allocationSize(value.serializerVersion) +
+             FfiConverterString.allocationSize(value.projectionVersion) +
              FfiConverterOptionalString.allocationSize(value.baseRevisionId) +
              FfiConverterOptionalBoolean.allocationSize(value.forceFull);
 
@@ -2324,6 +2395,41 @@ const FfiConverterTypeInvokeMenuInput = (() => {
              FfiConverterSequenceString.allocationSize(value.path) +
              FfiConverterOptionalString.allocationSize(value.session);
 
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type ListAppsInput = {
+}
+
+/**
+ * Generated factory for {@link ListAppsInput} record objects.
+ */
+export const ListAppsInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<ListAppsInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<ListAppsInput>,
+    });
+})();
+
+const FfiConverterTypeListAppsInput = (() => {
+    type TypeName = ListAppsInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+        }
+        allocationSize(value: TypeName): number {
+            return 0;
         }
     };
     return new FFIConverter();
@@ -2601,6 +2707,49 @@ const FfiConverterTypeListSessionsOutput = (() => {
     return new FFIConverter();
 })();
 
+export type ListWindowsInput = {
+    pid?: number,
+    onScreenOnly?: boolean
+}
+
+/**
+ * Generated factory for {@link ListWindowsInput} record objects.
+ */
+export const ListWindowsInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<ListWindowsInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<ListWindowsInput>,
+    });
+})();
+
+const FfiConverterTypeListWindowsInput = (() => {
+    type TypeName = ListWindowsInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterOptionalUInt32.read(from),
+                onScreenOnly: FfiConverterOptionalBoolean.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalUInt32.write(value.pid, into);
+            FfiConverterOptionalBoolean.write(value.onScreenOnly, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterOptionalUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalBoolean.allocationSize(value.onScreenOnly);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type MoveCursorInput = {
     x: number,
     y: number,
@@ -2660,6 +2809,57 @@ const FfiConverterTypeMoveCursorInput = (() => {
              FfiConverterOptionalTypeActionTarget.allocationSize(value.target) +
              FfiConverterOptionalTypeDesktopScope.allocationSize(value.scope) +
              FfiConverterOptionalString.allocationSize(value.session);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type PerformSecondaryActionInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken: string,
+    action: string
+}
+
+/**
+ * Generated factory for {@link PerformSecondaryActionInput} record objects.
+ */
+export const PerformSecondaryActionInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<PerformSecondaryActionInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<PerformSecondaryActionInput>,
+    });
+})();
+
+const FfiConverterTypePerformSecondaryActionInput = (() => {
+    type TypeName = PerformSecondaryActionInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterString.read(from),
+                action: FfiConverterString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterString.write(value.elementToken, into);
+            FfiConverterString.write(value.action, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterString.allocationSize(value.elementToken) +
+             FfiConverterString.allocationSize(value.action);
 
         }
     };
@@ -2852,6 +3052,65 @@ const FfiConverterTypePressKeyInput = (() => {
              FfiConverterOptionalTypeDesktopScope.allocationSize(value.scope) +
              FfiConverterOptionalString.allocationSize(value.session) +
              FfiConverterOptionalSequenceString.allocationSize(value.modifiers);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type RightClickInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    x?: number,
+    y?: number,
+    modifier?: Array<string>
+}
+
+/**
+ * Generated factory for {@link RightClickInput} record objects.
+ */
+export const RightClickInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<RightClickInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<RightClickInput>,
+    });
+})();
+
+const FfiConverterTypeRightClickInput = (() => {
+    type TypeName = RightClickInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                x: FfiConverterOptionalFloat64.read(from),
+                y: FfiConverterOptionalFloat64.read(from),
+                modifier: FfiConverterOptionalSequenceString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalFloat64.write(value.x, into);
+            FfiConverterOptionalFloat64.write(value.y, into);
+            FfiConverterOptionalSequenceString.write(value.modifier, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalFloat64.allocationSize(value.x) +
+             FfiConverterOptionalFloat64.allocationSize(value.y) +
+             FfiConverterOptionalSequenceString.allocationSize(value.modifier);
 
         }
     };
@@ -3413,6 +3672,57 @@ const FfiConverterTypeSetAgentCursorThemeOutput = (() => {
     return new FFIConverter();
 })();
 
+export type SetValueInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken: string,
+    value: string
+}
+
+/**
+ * Generated factory for {@link SetValueInput} record objects.
+ */
+export const SetValueInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<SetValueInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<SetValueInput>,
+    });
+})();
+
+const FfiConverterTypeSetValueInput = (() => {
+    type TypeName = SetValueInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterString.read(from),
+                value: FfiConverterString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterString.write(value.elementToken, into);
+            FfiConverterString.write(value.value, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterString.allocationSize(value.elementToken) +
+             FfiConverterString.allocationSize(value.value);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type SetWindowFrameInput = {
     pid: number,
     windowId: bigint,
@@ -3876,6 +4186,413 @@ const FfiConverterTypeVerifyStateOutput = (() => {
     return new FFIConverter();
 })();
 
+/**
+ * Exact-window click input for the generated SDK. The existing [`ClickInput`]
+ * remains the portable desktop-coordinate form.
+ */
+export type WindowClickInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    x?: number,
+    y?: number,
+    button?: ClickButton,
+    count?: number
+}
+
+/**
+ * Generated factory for {@link WindowClickInput} record objects.
+ */
+export const WindowClickInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowClickInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowClickInput>,
+    });
+})();
+
+const FfiConverterTypeWindowClickInput = (() => {
+    type TypeName = WindowClickInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                x: FfiConverterOptionalFloat64.read(from),
+                y: FfiConverterOptionalFloat64.read(from),
+                button: FfiConverterOptionalTypeClickButton.read(from),
+                count: FfiConverterOptionalUInt32.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalFloat64.write(value.x, into);
+            FfiConverterOptionalFloat64.write(value.y, into);
+            FfiConverterOptionalTypeClickButton.write(value.button, into);
+            FfiConverterOptionalUInt32.write(value.count, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalFloat64.allocationSize(value.x) +
+             FfiConverterOptionalFloat64.allocationSize(value.y) +
+             FfiConverterOptionalTypeClickButton.allocationSize(value.button) +
+             FfiConverterOptionalUInt32.allocationSize(value.count);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export enum DeliveryMode {
+    Background,
+    Foreground
+}
+
+const FfiConverterTypeDeliveryMode = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = DeliveryMode;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return DeliveryMode.Background;
+                case 2: return DeliveryMode.Foreground;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case DeliveryMode.Background: return ordinalConverter.write(1, into);
+                case DeliveryMode.Foreground: return ordinalConverter.write(2, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Exact-window drag input for the generated SDK. The existing [`DragInput`]
+ * keeps its established UniFFI record layout.
+ */
+export type WindowDragInput = {
+    pid: number,
+    windowId: bigint,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    durationMs?: bigint,
+    steps?: bigint,
+    deliveryMode?: DeliveryMode,
+    button?: ClickButton,
+    modifier?: Array<string>
+}
+
+/**
+ * Generated factory for {@link WindowDragInput} record objects.
+ */
+export const WindowDragInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowDragInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowDragInput>,
+    });
+})();
+
+const FfiConverterTypeWindowDragInput = (() => {
+    type TypeName = WindowDragInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from),
+                fromX: FfiConverterFloat64.read(from),
+                fromY: FfiConverterFloat64.read(from),
+                toX: FfiConverterFloat64.read(from),
+                toY: FfiConverterFloat64.read(from),
+                durationMs: FfiConverterOptionalUInt64.read(from),
+                steps: FfiConverterOptionalUInt64.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
+                button: FfiConverterOptionalTypeClickButton.read(from),
+                modifier: FfiConverterOptionalSequenceString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterFloat64.write(value.fromX, into);
+            FfiConverterFloat64.write(value.fromY, into);
+            FfiConverterFloat64.write(value.toX, into);
+            FfiConverterFloat64.write(value.toY, into);
+            FfiConverterOptionalUInt64.write(value.durationMs, into);
+            FfiConverterOptionalUInt64.write(value.steps, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
+            FfiConverterOptionalTypeClickButton.write(value.button, into);
+            FfiConverterOptionalSequenceString.write(value.modifier, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterFloat64.allocationSize(value.fromX) +
+             FfiConverterFloat64.allocationSize(value.fromY) +
+             FfiConverterFloat64.allocationSize(value.toX) +
+             FfiConverterFloat64.allocationSize(value.toY) +
+             FfiConverterOptionalUInt64.allocationSize(value.durationMs) +
+             FfiConverterOptionalUInt64.allocationSize(value.steps) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
+             FfiConverterOptionalTypeClickButton.allocationSize(value.button) +
+             FfiConverterOptionalSequenceString.allocationSize(value.modifier);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type WindowHotkeyInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    keys: Array<string>
+}
+
+/**
+ * Generated factory for {@link WindowHotkeyInput} record objects.
+ */
+export const WindowHotkeyInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowHotkeyInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowHotkeyInput>,
+    });
+})();
+
+const FfiConverterTypeWindowHotkeyInput = (() => {
+    type TypeName = WindowHotkeyInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                keys: FfiConverterSequenceString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterSequenceString.write(value.keys, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterSequenceString.allocationSize(value.keys);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type WindowPressKeyInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    key: string,
+    modifiers?: Array<string>
+}
+
+/**
+ * Generated factory for {@link WindowPressKeyInput} record objects.
+ */
+export const WindowPressKeyInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowPressKeyInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowPressKeyInput>,
+    });
+})();
+
+const FfiConverterTypeWindowPressKeyInput = (() => {
+    type TypeName = WindowPressKeyInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                key: FfiConverterString.read(from),
+                modifiers: FfiConverterOptionalSequenceString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterString.write(value.key, into);
+            FfiConverterOptionalSequenceString.write(value.modifiers, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterString.allocationSize(value.key) +
+             FfiConverterOptionalSequenceString.allocationSize(value.modifiers);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type WindowScrollInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    x?: number,
+    y?: number,
+    direction: ScrollDirection,
+    by?: ScrollBy,
+    amount?: bigint
+}
+
+/**
+ * Generated factory for {@link WindowScrollInput} record objects.
+ */
+export const WindowScrollInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowScrollInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowScrollInput>,
+    });
+})();
+
+const FfiConverterTypeWindowScrollInput = (() => {
+    type TypeName = WindowScrollInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                x: FfiConverterOptionalFloat64.read(from),
+                y: FfiConverterOptionalFloat64.read(from),
+                direction: FfiConverterTypeScrollDirection.read(from),
+                by: FfiConverterOptionalTypeScrollBy.read(from),
+                amount: FfiConverterOptionalUInt64.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalFloat64.write(value.x, into);
+            FfiConverterOptionalFloat64.write(value.y, into);
+            FfiConverterTypeScrollDirection.write(value.direction, into);
+            FfiConverterOptionalTypeScrollBy.write(value.by, into);
+            FfiConverterOptionalUInt64.write(value.amount, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalFloat64.allocationSize(value.x) +
+             FfiConverterOptionalFloat64.allocationSize(value.y) +
+             FfiConverterTypeScrollDirection.allocationSize(value.direction) +
+             FfiConverterOptionalTypeScrollBy.allocationSize(value.by) +
+             FfiConverterOptionalUInt64.allocationSize(value.amount);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export type WindowTypeTextInput = {
+    pid: number,
+    windowId?: bigint,
+    elementToken?: string,
+    text: string,
+    delayMs?: bigint
+}
+
+/**
+ * Generated factory for {@link WindowTypeTextInput} record objects.
+ */
+export const WindowTypeTextInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<WindowTypeTextInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<WindowTypeTextInput>,
+    });
+})();
+
+const FfiConverterTypeWindowTypeTextInput = (() => {
+    type TypeName = WindowTypeTextInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterOptionalUInt64.read(from),
+                elementToken: FfiConverterOptionalString.read(from),
+                text: FfiConverterString.read(from),
+                delayMs: FfiConverterOptionalUInt64.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterString.write(value.text, into);
+            FfiConverterOptionalUInt64.write(value.delayMs, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterString.allocationSize(value.text) +
+             FfiConverterOptionalUInt64.allocationSize(value.delayMs);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export enum Platform {
     Macos,
     Windows,
@@ -3989,6 +4706,9 @@ const FfiConverterSequenceTypeStatePredicate = new FfiConverterArray(FfiConverte
 // FfiConverter for Array<PredicateOutcome>
 const FfiConverterSequenceTypePredicateOutcome = new FfiConverterArray(FfiConverterTypePredicateOutcome);
 
+// FfiConverter for DeliveryMode | undefined
+const FfiConverterOptionalTypeDeliveryMode = new FfiConverterOptional(FfiConverterTypeDeliveryMode);
+
 
 /**
  * This should be called before anything else.
@@ -4040,7 +4760,9 @@ export default Object.freeze({
     FfiConverterTypeCursorThemeOutput,
     FfiConverterTypeCursorThemeSelection,
     FfiConverterTypeCursorVisualOutput,
+    FfiConverterTypeDeliveryMode,
     FfiConverterTypeDesktopScope,
+    FfiConverterTypeDoubleClickInput,
     FfiConverterTypeDragInput,
     FfiConverterTypeEffectiveScope,
     FfiConverterTypeElementPredicate,
@@ -4059,13 +4781,17 @@ export default Object.freeze({
     FfiConverterTypeGetWindowStateInput,
     FfiConverterTypeHotkeyInput,
     FfiConverterTypeInvokeMenuInput,
+    FfiConverterTypeListAppsInput,
     FfiConverterTypeListSessionsInput,
     FfiConverterTypeListSessionsOutput,
+    FfiConverterTypeListWindowsInput,
     FfiConverterTypeMoveCursorInput,
     FfiConverterTypeObservationRevisionInput,
+    FfiConverterTypePerformSecondaryActionInput,
     FfiConverterTypePlatform,
     FfiConverterTypePredicateOutcome,
     FfiConverterTypePressKeyInput,
+    FfiConverterTypeRightClickInput,
     FfiConverterTypeScrollBy,
     FfiConverterTypeScrollDirection,
     FfiConverterTypeScrollInput,
@@ -4080,6 +4806,7 @@ export default Object.freeze({
     FfiConverterTypeSetAgentCursorMotionOutput,
     FfiConverterTypeSetAgentCursorThemeInput,
     FfiConverterTypeSetAgentCursorThemeOutput,
+    FfiConverterTypeSetValueInput,
     FfiConverterTypeSetWindowFrameInput,
     FfiConverterTypeStartSessionInput,
     FfiConverterTypeStartSessionOutput,
@@ -4089,6 +4816,12 @@ export default Object.freeze({
     FfiConverterTypeVerificationStatus,
     FfiConverterTypeVerifyStateInput,
     FfiConverterTypeVerifyStateOutput,
+    FfiConverterTypeWindowClickInput,
+    FfiConverterTypeWindowDragInput,
+    FfiConverterTypeWindowHotkeyInput,
     FfiConverterTypeWindowPredicate,
+    FfiConverterTypeWindowPressKeyInput,
+    FfiConverterTypeWindowScrollInput,
+    FfiConverterTypeWindowTypeTextInput,
   }
 });

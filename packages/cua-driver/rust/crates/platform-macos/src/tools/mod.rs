@@ -33,6 +33,7 @@ pub(crate) mod get_screen_size;
 mod health_report;
 mod move_cursor;
 mod page;
+mod perform_secondary_action;
 pub(crate) mod px_frame;
 mod set_config;
 mod type_text_chars;
@@ -729,6 +730,8 @@ pub struct ToolState {
     pub zoom_registry: Arc<ZoomRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
     pub observation_revisions: Arc<MacObservationRevisions>,
+    watched_targets: std::sync::Mutex<std::collections::HashSet<(i32, u32)>>,
+    watcher_started: std::sync::atomic::AtomicBool,
     /// Global, disk-persisted config — the base layer and the only one the
     /// anonymous session / CLI writes.
     pub config: Arc<std::sync::RwLock<DriverConfig>>,
@@ -769,6 +772,8 @@ impl ToolState {
             zoom_registry: Arc::new(ZoomRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
             observation_revisions: Arc::new(MacObservationRevisions::new()),
+            watched_targets: std::sync::Mutex::new(Default::default()),
+            watcher_started: std::sync::atomic::AtomicBool::new(false),
             // Load persisted config from ~/.cua-driver/config.json so that
             // `qwen-cua-driver config set` changes carry over into MCP sessions.
             config: Arc::new(std::sync::RwLock::new(load_driver_config())),
@@ -777,6 +782,63 @@ impl ToolState {
             cursor_overlay_available,
             host_owns_permission_ux,
             host_bundle_id,
+        }
+    }
+
+    pub(crate) fn watch_target(self: &Arc<Self>, pid: i32, window_id: u32) {
+        self.watched_targets
+            .lock()
+            .unwrap()
+            .insert((pid, window_id));
+        if self
+            .watcher_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if std::thread::Builder::new()
+            .name("cua-ax-target-sweeper".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                let targets = state
+                    .watched_targets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let windows = crate::windows::all_windows();
+                for (pid, window_id) in targets {
+                    let process_alive = unsafe { libc::kill(pid, 0) } == 0
+                        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                    let window_alive = windows
+                        .iter()
+                        .any(|window| window.pid == pid && window.window_id == window_id);
+                    if process_alive && window_alive {
+                        continue;
+                    }
+                    state.element_cache.clear_target(pid, window_id);
+                    state.observation_revisions.clear_target(pid, window_id);
+                    if process_alive {
+                        cua_driver_core::element_token::global().clear_target(pid, window_id);
+                    } else {
+                        cua_driver_core::element_token::global().clear_pid(pid);
+                    }
+                    state
+                        .watched_targets
+                        .lock()
+                        .unwrap()
+                        .remove(&(pid, window_id));
+                }
+            })
+            .is_err()
+        {
+            self.watcher_started
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -953,6 +1015,10 @@ pub fn register_all(
     ));
     registry.register(pid_window_guarded(
         scroll::ScrollTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        perform_secondary_action::PerformSecondaryActionTool::new(state.clone()),
         &pid_window_candidates,
     ));
     cua_driver_core::clipboard::register_clipboard_tools(

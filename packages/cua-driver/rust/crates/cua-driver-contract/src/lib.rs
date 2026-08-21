@@ -28,13 +28,16 @@ pub use cursor::{
 };
 pub use inputs::{
     action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClipboardReadInput,
-    ClipboardWriteInput, DesktopScope, DragInput, EndSessionInput, EscalateSessionInput,
-    EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput,
-    GetScreenSizeInput, GetSessionInput, GetSessionStateInput, GetWindowStateInput, HotkeyInput,
-    InvokeMenuInput, ListSessionsInput, MoveCursorInput, ObservationRevisionInput, PressKeyInput,
-    ScrollBy, ScrollDirection, ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
-    SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
-    MULTI_CALL_SESSION_DESCRIPTION,
+    ClipboardWriteInput, DeliveryMode, DesktopScope, DoubleClickInput, DragInput, EndSessionInput,
+    EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
+    GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput, ListSessionsInput,
+    ListWindowsInput, MoveCursorInput, ObservationRevisionInput, PerformSecondaryActionInput,
+    PressKeyInput, RightClickInput, ScrollBy, ScrollDirection, ScrollInput,
+    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetValueInput,
+    SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput, WindowClickInput,
+    WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
+    WindowTypeTextInput, MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
     advertised_output_schema, refusal_envelope_schema, ActionDelivery, ActionDeliveryMode,
@@ -86,6 +89,7 @@ pub const ACTION_RESULT_TOOLS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "perform_secondary_action",
     "set_window_frame",
     "invoke_menu",
     "browser_click",
@@ -314,6 +318,8 @@ mod tests {
             max_depth: None,
             observation_revision: Some(ObservationRevisionInput {
                 version: 1,
+                serializer_version: "accessibility-render-v1".into(),
+                projection_version: "full-tree-v1".into(),
                 base_revision_id: Some("r_1".into()),
                 force_full: None,
             }),
@@ -326,7 +332,12 @@ mod tests {
                 "window_id": 7,
                 "session": "s1",
                 "include_screenshot": false,
-                "observation_revision": { "version": 1, "base_revision_id": "r_1" }
+                "observation_revision": {
+                    "version": 1,
+                    "serializer_version": "accessibility-render-v1",
+                    "projection_version": "full-tree-v1",
+                    "base_revision_id": "r_1"
+                }
             })
         );
     }

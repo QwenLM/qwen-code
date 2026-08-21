@@ -152,10 +152,13 @@ impl ZoomRegistry {
 
 pub struct ToolState {
     pub element_cache: Arc<ElementCache>,
+    pub observation_revisions: Arc<crate::atspi::revision::LinuxObservationRevisions>,
     pub cursor_registry: Arc<CursorRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
     pub zoom_registry: Arc<ZoomRegistry>,
     pub mouse_hold: std::sync::Mutex<std::collections::HashMap<String, MouseHoldState>>,
+    watched_targets: std::sync::Mutex<std::collections::HashSet<(u32, u64)>>,
+    watcher_started: std::sync::atomic::AtomicBool,
     pub config: Arc<RwLock<DriverConfig>>,
 }
 
@@ -172,12 +175,57 @@ impl ToolState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             element_cache: Arc::new(ElementCache::new()),
+            observation_revisions: Arc::new(
+                crate::atspi::revision::LinuxObservationRevisions::new(),
+            ),
             cursor_registry: Arc::new(CursorRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
             zoom_registry: Arc::new(ZoomRegistry::new()),
             mouse_hold: std::sync::Mutex::new(Default::default()),
+            watched_targets: std::sync::Mutex::new(Default::default()),
+            watcher_started: std::sync::atomic::AtomicBool::new(false),
             config: Arc::new(RwLock::new(load_driver_config())),
         })
+    }
+
+    fn watch_target(self: &Arc<Self>, pid: u32, xid: u64) {
+        self.watched_targets.lock().unwrap().insert((pid, xid));
+        if self
+            .watcher_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if std::thread::Builder::new()
+            .name("cua-atspi-target-sweeper".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                let targets = state
+                    .watched_targets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                for (pid, xid) in targets {
+                    if crate::proc_fs::is_process_live(pid) {
+                        continue;
+                    }
+                    state.element_cache.clear_target(pid, xid);
+                    state.observation_revisions.clear_target(pid, xid);
+                    cua_driver_core::element_token::global().clear_pid(pid as i32);
+                    state.watched_targets.lock().unwrap().remove(&(pid, xid));
+                }
+            })
+            .is_err()
+        {
+            self.watcher_started
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -614,10 +662,12 @@ impl Tool for GetWindowStateTool {
                 "max_depth":{"type":"integer","minimum":1,"description":"Cap on the AT-SPI tree walk depth. Omit for the default (uncapped). Lower for deeply nested apps."},
                 "observation_revision": {
                     "type": "object",
-                    "description": "Opt in to accessibility.observation_revision.v1. Linux currently answers with an explicit non-retained full response (no approved stable AT-SPI identity lineage yet). Omit to preserve the legacy full-snapshot contract.",
-                    "required": ["version"],
+                    "description": "Opt in to accessibility.observation_revision.v1. Native complete AT-SPI captures retain identity by unique bus owner plus object path; X11 fallback and incomplete captures remain explicit full-only responses.",
+                    "required": ["version", "serializer_version", "projection_version"],
                     "properties": {
                         "version": { "type": "integer", "const": 1 },
+                        "serializer_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "projection_version": { "type": "string", "minLength": 1, "maxLength": 128 },
                         "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                         "force_full": { "type": "boolean", "default": false }
                     },
@@ -650,11 +700,6 @@ impl Tool for GetWindowStateTool {
         // We don't even read the arg; it stays in the schema only so old callers
         // don't trip additionalProperties:false.
         let query = args.opt_str("query");
-        // `accessibility.observation_revision.v1` — Linux has no approved
-        // stable AT-SPI identity lineage yet (unique D-Bus owner + object path
-        // is a planned upgrade), so the versioned protocol is accepted but
-        // every response is an explicit non-retained full. Parsing stays in
-        // core so the closed error surface matches macOS byte for byte.
         let observation_revision_request =
             match cua_driver_core::observation_revision::parse_observation_revision_request(
                 args.get("observation_revision"),
@@ -726,7 +771,32 @@ impl Tool for GetWindowStateTool {
             .get("_observation_only")
             .and_then(|value| value.as_bool())
             == Some(true);
+        if observation_only && observation_revision_request.is_some() {
+            return ToolResult::error(
+                "observation_revision is unavailable for an internal observation-only call",
+            )
+            .with_structured(json!({
+                "code": "observation_revision_unavailable",
+            }));
+        }
+        let observation_session = if observation_revision_request.is_some() {
+            match cua_driver_core::observation_revision::current_observation_session_identity() {
+                Some(session) => Some(session),
+                None => {
+                    return ToolResult::error(
+                        "observation_revision requires a bound trusted driver session",
+                    )
+                    .with_structured(json!({
+                        "code": "observation_revision_unavailable",
+                    }))
+                }
+            }
+        } else {
+            None
+        };
         let state = self.state.clone();
+        let observation_revisions = state.observation_revisions.clone();
+        let revision_request_for_capture = observation_revision_request.clone();
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -744,6 +814,26 @@ impl Tool for GetWindowStateTool {
                 .as_ref()
                 .map(|tree| tree.bounds.clone())
                 .unwrap_or_default();
+            let observation_revision = match (
+                revision_request_for_capture.as_ref(),
+                observation_session,
+                tree_result.as_ref(),
+            ) {
+                (Some(request), Some(session), Some(tree)) => Some(
+                    observation_revisions
+                        .observe(
+                            session,
+                            pid,
+                            xid,
+                            max_elements.unwrap_or(5000),
+                            max_depth.unwrap_or(usize::MAX),
+                            tree,
+                            request,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                ),
+                _ => None,
+            };
             // Capture and DELIVER the screenshot alongside the tree by default — the
             // grounding frame the agent cross-checks the tree against. With
             // screenshot_out_file set, write to disk and surface the path instead
@@ -776,12 +866,12 @@ impl Tool for GetWindowStateTool {
             } else {
                 None
             };
-            Ok((tree_result, screenshot, bounds))
+            Ok((tree_result, screenshot, bounds, observation_revision))
         })
         .await;
 
         match result {
-            Ok(Ok((tree_opt, shot_opt, bounds))) => {
+            Ok(Ok((tree_opt, shot_opt, bounds, observation_revision))) => {
                 let mut content = Vec::new();
                 let mut structured = json!({ "window_id": xid, "pid": pid });
 
@@ -793,18 +883,20 @@ impl Tool for GetWindowStateTool {
                         .iter()
                         .filter(|n| n.element_index.is_some())
                         .count();
+                    let selected_tree_markdown = observation_revision
+                        .as_ref()
+                        .map(|revision| revision.text.as_str())
+                        .unwrap_or(&tr.tree_markdown);
                     let header = format!("window_id={xid} pid={pid} elements={count}\n\n");
                     content.push(cua_driver_core::protocol::Content::text(
-                        header + &tr.tree_markdown,
+                        header + selected_tree_markdown,
                     ));
                     if !observation_only {
                         state.element_cache.update(pid, xid, &tr.nodes);
                     }
                     structured["element_count"] = json!(count);
-                    // AT-SPI's current bounded walker does not surface an
-                    // exhaustive-walk proof. Keep negative existence unknown.
-                    structured["elements_complete"] = json!(false);
-                    structured["tree_markdown"] = json!(tr.tree_markdown);
+                    structured["elements_complete"] = json!(tr.complete);
+                    structured["tree_markdown"] = json!(selected_tree_markdown);
 
                     // Surface 6: register a snapshot in the global token
                     // registry so each actionable element can be addressed
@@ -815,6 +907,46 @@ impl Tool for GetWindowStateTool {
                         cua_driver_core::element_token::global()
                             .register_snapshot(pid as i32, xid as u32, count)
                     });
+                    if observation_revision.is_some() && !observation_only {
+                        state.watch_target(pid, xid);
+                    }
+                    let revision_capture_complete = observation_revision
+                        .as_ref()
+                        .is_some_and(|revision| revision.stable_element_ids)
+                        && tr.complete
+                        && tr.backend == crate::atspi::AtspiBackend::Atspi;
+                    if let (Some(revision), Some(snapshot_id)) = (
+                        observation_revision
+                            .as_ref()
+                            .filter(|_| revision_capture_complete),
+                        snapshot_id,
+                    ) {
+                        if let Err(error) = cua_driver_core::observation_revision::revision_tokens()
+                            .register_current(
+                                &revision.lineage_id,
+                                pid as i32,
+                                xid as u32,
+                                snapshot_id,
+                                &revision.nodes,
+                            )
+                        {
+                            return ToolResult::error(error.to_string())
+                                .with_structured(json!({ "code": error.code() }));
+                        }
+                    }
+                    let stable_ids = observation_revision
+                        .as_ref()
+                        .filter(|_| revision_capture_complete)
+                        .map(|revision| {
+                            revision
+                                .nodes
+                                .iter()
+                                .filter_map(|node| {
+                                    node.actionable_index.map(|index| (index, node.element_id))
+                                })
+                                .collect::<std::collections::HashMap<_, _>>()
+                        })
+                        .unwrap_or_default();
 
                     // Structured `elements` array: one entry per actionable node.
                     // Shape: `{element_index, element_token, role, label,
@@ -846,7 +978,19 @@ impl Tool for GetWindowStateTool {
                                 "role": n.role,
                                 "depth": n.depth,
                             });
-                            if let Some(snapshot_id) = snapshot_id {
+                            if let Some(element_id) = stable_ids.get(&idx) {
+                                entry["element_id"] = json!(element_id);
+                                entry["element_token"] = json!(
+                                    cua_driver_core::observation_revision::revision_token_for(
+                                        observation_revision
+                                            .as_ref()
+                                            .expect("stable ids require revision")
+                                            .lineage_id
+                                            .as_str(),
+                                        *element_id,
+                                    )
+                                );
+                            } else if let Some(snapshot_id) = snapshot_id {
                                 entry["element_token"] = json!(
                                     cua_driver_core::element_token::token_for(snapshot_id, idx)
                                 );
@@ -869,6 +1013,9 @@ impl Tool for GetWindowStateTool {
                             if let Some(enabled) = n.enabled {
                                 entry["enabled"] = json!(enabled);
                             }
+                            if !n.actions.is_empty() {
+                                entry["actions"] = json!(n.actions);
+                            }
                             if let Some(selected) = n.selected {
                                 entry["selected"] = json!(selected);
                             }
@@ -889,6 +1036,11 @@ impl Tool for GetWindowStateTool {
                     structured["total_element_count"] = json!(count);
                     structured["returned_element_count"] = json!(elements.len());
                     structured["elements"] = json!(elements);
+                    structured["capture_complete"] = json!(tr.complete);
+                    structured["capture_truncated"] = json!(tr.truncated);
+                    if !tr.incomplete_notes.is_empty() {
+                        structured["capture_incomplete_details"] = json!(tr.incomplete_notes);
+                    }
                     // Surface 6: snapshot id mirror for debug correlation.
                     if let Some(snapshot_id) = snapshot_id {
                         structured["snapshot_id"] =
@@ -965,30 +1117,36 @@ impl Tool for GetWindowStateTool {
                     }
                 }
 
-                if observation_revision_request.is_some() {
-                    // Explicit full-only: AT-SPI identity is not approved for
-                    // revision lineage yet, so the caller's base (if any) is
-                    // never usable and nothing is retained for future diffs.
-                    let (lineage_id, revision_id) =
-                        cua_driver_core::observation_revision::unretained_full_ids();
+                if let Some(revision) = observation_revision.as_ref() {
                     structured["observation_revision"] = json!({
                         "capability": "accessibility.observation_revision.v1",
                         "version":
                             cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
-                        "serializer_version": "linux-atspi-markdown-v1",
-                        "mode": "full",
-                        "lineage_id": lineage_id,
-                        "revision_id": revision_id,
-                        "base_revision_id": serde_json::Value::Null,
+                        "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
+                        "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                        "mode": revision.mode.as_str(),
+                        "lineage_id": revision.lineage_id,
+                        "revision_id": revision.revision_id,
+                        "base_revision_id": revision.base_revision_id,
                         "target": { "pid": pid, "window_id": xid },
-                        "identity": "linux_atspi_snapshot",
+                        "identity": if revision.stable_element_ids {
+                            "linux_atspi_unique_owner_object_path"
+                        } else {
+                            "linux_unretained"
+                        },
                         "elements_scope": "current_full",
-                        "stable_element_ids": false,
-                        "retained": false,
-                        "resync_reason":
-                            cua_driver_core::observation_revision::FullResyncReason::UnsupportedBackend
-                                .as_str(),
+                        "stable_element_ids": revision.stable_element_ids,
+                        "retained": revision.stable_element_ids,
+                        "selected_bytes": revision.text.len(),
+                        "full_bytes": revision.full_text.len(),
+                        "estimated_tokens": revision.text.len().div_ceil(4),
+                        "serializer_duration_us": revision.serializer_duration_us,
+                        "cache_estimate_bytes": revision.cache_estimate_bytes,
                     });
+                    if let Some(reason) = revision.full_resync_reason {
+                        structured["observation_revision"]["resync_reason"] =
+                            json!(reason.as_str());
+                    }
                 }
 
                 ToolResult {
@@ -1456,7 +1614,30 @@ fn resolve_element_local_coords(
     let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
     let screen_cx = bx as f64 + bw as f64 / 2.0;
     let screen_cy = by as f64 + bh as f64 / 2.0;
+    screen_point_to_window_local(pid, xid_hint, screen_cx, screen_cy)
+}
 
+fn resolve_element_local_coords_exact(
+    pid: u32,
+    idx: usize,
+    xid_hint: Option<u64>,
+    identity: Option<crate::atspi::AtspiIdentity>,
+) -> anyhow::Result<(u64, f64, f64)> {
+    let (bx, by, bw, bh) = match identity {
+        Some(identity) => crate::atspi::get_element_bounds_exact(pid, idx, identity)?,
+        None => crate::atspi::get_element_bounds(pid, idx)?,
+    };
+    let screen_cx = bx as f64 + bw as f64 / 2.0;
+    let screen_cy = by as f64 + bh as f64 / 2.0;
+    screen_point_to_window_local(pid, xid_hint, screen_cx, screen_cy)
+}
+
+fn screen_point_to_window_local(
+    pid: u32,
+    xid_hint: Option<u64>,
+    screen_cx: f64,
+    screen_cy: f64,
+) -> anyhow::Result<(u64, f64, f64)> {
     let xid = if let Some(x) = xid_hint {
         x
     } else if crate::wayland::wayland_input_enabled() {
@@ -1500,9 +1681,62 @@ fn resolve_element_local_coords(
     Ok((xid, local_x, local_y))
 }
 
-fn element_screen_center(pid: u32, idx: usize) -> anyhow::Result<(f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
+fn element_screen_center_exact(
+    pid: u32,
+    idx: usize,
+    identity: Option<crate::atspi::AtspiIdentity>,
+) -> anyhow::Result<(f64, f64)> {
+    let (bx, by, bw, bh) = match identity {
+        Some(identity) => crate::atspi::get_element_bounds_exact(pid, idx, identity)?,
+        None => crate::atspi::get_element_bounds(pid, idx)?,
+    };
     Ok((bx as f64 + bw as f64 / 2.0, by as f64 + bh as f64 / 2.0))
+}
+
+fn cached_atspi_identity(
+    state: &ToolState,
+    pid: u32,
+    xid: u64,
+    idx: usize,
+    required: bool,
+) -> Result<Option<crate::atspi::AtspiIdentity>, ToolResult> {
+    let identity = state.element_cache.get_element_identity(pid, xid, idx);
+    if required && identity.is_none() {
+        return Err(ToolResult::error(
+            "element_token no longer has a live AT-SPI unique-owner/object-path identity",
+        )
+        .with_structured(json!({
+            "status": "refused",
+            "refusal": {
+                "code": "stale_element_token",
+                "message": "element_token no longer has a live AT-SPI unique-owner/object-path identity",
+            }
+        })));
+    }
+    Ok(identity)
+}
+
+fn focus_atspi_target(
+    pid: u32,
+    idx: usize,
+    identity: Option<crate::atspi::AtspiIdentity>,
+) -> anyhow::Result<bool> {
+    match identity {
+        Some(identity) => crate::atspi::focus_element_exact(pid, idx, identity),
+        None => crate::atspi::focus_element(pid, idx),
+    }
+}
+
+fn type_into_atspi_target(
+    pid: u32,
+    idx: usize,
+    identity: Option<crate::atspi::AtspiIdentity>,
+    text: &str,
+) -> anyhow::Result<()> {
+    match identity {
+        Some(identity) => crate::atspi::type_into_editable_exact(pid, idx, identity, text),
+        None => crate::atspi::type_into_editable_at(pid, idx, text),
+    }
 }
 
 fn window_local_to_screen(xid: u64, x: f64, y: f64) -> anyhow::Result<(f64, f64)> {
@@ -2400,6 +2634,9 @@ impl Tool for ClickTool {
         // We resolve before the legacy `opt_u64("element_index")` branch
         // so a token-only call (no integer arg) still takes the element path.
         let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let window_id_arg = args.opt_u64("window_id");
         let element_index_arg = args.opt_u64("element_index").map(|v| v as usize);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
@@ -2428,13 +2665,35 @@ impl Tool for ClickTool {
 
         if let Some(idx) = elem_idx_resolved {
             let xid_hint = window_id_resolved;
+            let exact_identity = match xid_hint {
+                Some(xid) => match cached_atspi_identity(
+                    &self.state,
+                    pid,
+                    xid,
+                    idx,
+                    revision_identity_required,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                },
+                None if revision_identity_required => {
+                    return ToolResult::error("revision element_token did not resolve a window")
+                        .with_structured(json!({
+                            "status": "refused",
+                            "refusal": { "code": "stale_element_token" }
+                        }))
+                }
+                None => None,
+            };
+            let identity_for_center = exact_identity.clone();
             // Resolve the element's screen center + its window FIRST, so the
             // agent cursor glides to the target *before* the click fires —
             // matching the coordinate path below and the macOS/Windows backends.
             // Previously perform_action ran inside this spawn_blocking, so the
             // app updated before the cursor visibly arrived.
             let (xid, sx, sy) = tokio::task::spawn_blocking(move || -> (u64, f64, f64) {
-                let (cx, cy) = element_screen_center(pid, idx).unwrap_or((0.0, 0.0));
+                let (cx, cy) = element_screen_center_exact(pid, idx, identity_for_center)
+                    .unwrap_or((0.0, 0.0));
                 let xid = xid_hint
                     .or_else(|| {
                         crate::x11::list_windows(Some(pid))
@@ -2462,9 +2721,11 @@ impl Tool for ClickTool {
             // Chromium can execute a genuine AT-SPI action without focus. Try
             // that route before applying its background synthetic-input gate.
             if modifiers.is_empty() {
-                let ax_result =
-                    tokio::task::spawn_blocking(move || crate::atspi::perform_action(pid, idx))
-                        .await;
+                let ax_result = tokio::task::spawn_blocking(move || match exact_identity {
+                    Some(identity) => crate::atspi::perform_action_exact(pid, idx, identity),
+                    None => crate::atspi::perform_action(pid, idx),
+                })
+                .await;
                 if let Ok(Ok((_action, suspected_noop))) = ax_result {
                     let mut structured = json!({
                         "path": "ax",
@@ -2789,11 +3050,15 @@ async fn focus_nested_inject_target(
     pid: u32,
     window_id: u64,
     element_index: Option<usize>,
+    identity: Option<crate::atspi::AtspiIdentity>,
     pixel: Option<(f64, f64)>,
 ) -> Result<(), ToolResult> {
     if let Some(index) = element_index {
-        return match tokio::task::spawn_blocking(move || crate::atspi::focus_element(pid, index))
-            .await
+        return match tokio::task::spawn_blocking(move || match identity {
+            Some(identity) => crate::atspi::focus_element_exact(pid, index, identity),
+            None => crate::atspi::focus_element(pid, index),
+        })
+        .await
         {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(ToolResult::error(format!(
@@ -2890,10 +3155,14 @@ impl Tool for TypeTextTool {
         // Surface 6: resolve element_token / element_index for the
         // optional pre-typing focus glide below. The token also carries
         // the window_id when supplied so the caller can omit window_id.
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             args.opt_u64("element_index").map(|v| v as usize),
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             args.opt_u64("window_id").map(|v| v as u32),
             "type_text",
@@ -2929,6 +3198,16 @@ impl Tool for TypeTextTool {
                 }
             }
         };
+        let exact_identity = match resolved_elem_idx {
+            Some(idx) => {
+                match cached_atspi_identity(&self.state, pid, xid, idx, revision_identity_required)
+                {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                }
+            }
+            None => None,
+        };
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
@@ -2956,8 +3235,11 @@ impl Tool for TypeTextTool {
                 cursor_id.clone(),
                 cursor_overlay::OverlayCommand::PinAbove(xid),
             );
-            if let Ok(Ok((screen_x, screen_y))) =
-                tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+            let identity_for_center = exact_identity.clone();
+            if let Ok(Ok((screen_x, screen_y))) = tokio::task::spawn_blocking(move || {
+                element_screen_center_exact(pid, idx, identity_for_center)
+            })
+            .await
             {
                 overlay_glide_to_for(&cursor_id, screen_x, screen_y).await;
                 self.state
@@ -2978,8 +3260,9 @@ impl Tool for TypeTextTool {
         {
             let idx = resolved_elem_idx.expect("checked above");
             let text_at = text.clone();
+            let identity_for_type = exact_identity.clone();
             let targeted = tokio::task::spawn_blocking(move || {
-                crate::atspi::type_into_editable_at(pid, idx, &text_at)
+                type_into_atspi_target(pid, idx, identity_for_type, &text_at)
             })
             .await;
             if let Ok(Ok(())) = targeted {
@@ -2990,8 +3273,14 @@ impl Tool for TypeTextTool {
         // directly. Establish widget-local focus first, without changing the
         // compositor's focused toplevel, so keys reach the addressed control.
         if crate::wayland::is_inject_mode() {
-            if let Err(error) =
-                focus_nested_inject_target(pid, xid, resolved_elem_idx, px.zip(py)).await
+            if let Err(error) = focus_nested_inject_target(
+                pid,
+                xid,
+                resolved_elem_idx,
+                exact_identity.clone(),
+                px.zip(py),
+            )
+            .await
             {
                 return error;
             }
@@ -3059,9 +3348,10 @@ impl Tool for TypeTextTool {
         {
             if let Some(idx) = resolved_elem_idx {
                 let text_w = text.clone();
+                let identity_for_focus = exact_identity.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     crate::wayland::with_target_foreground(pid, xid, || {
-                        if !crate::atspi::focus_element(pid, idx)? {
+                        if !focus_atspi_target(pid, idx, identity_for_focus)? {
                             anyhow::bail!(
                                 "AT-SPI Component.GrabFocus returned false for element {idx}"
                             );
@@ -3090,8 +3380,9 @@ impl Tool for TypeTextTool {
         // compositor's globally focused surface.
         if let Some(idx) = resolved_elem_idx {
             let text_at = text.clone();
+            let identity_for_type = exact_identity.clone();
             let targeted = tokio::task::spawn_blocking(move || {
-                crate::atspi::type_into_editable_at(pid, idx, &text_at)
+                type_into_atspi_target(pid, idx, identity_for_type, &text_at)
             })
             .await;
             match targeted {
@@ -3120,10 +3411,11 @@ impl Tool for TypeTextTool {
             }
             let text_w = text.clone();
             let idx = resolved_elem_idx;
+            let identity_for_focus = exact_identity.clone();
             let result = tokio::task::spawn_blocking(move || {
                 crate::wayland::with_target_foreground(pid, xid, || {
                     if let Some(idx) = idx {
-                        if !crate::atspi::focus_element(pid, idx)? {
+                        if !focus_atspi_target(pid, idx, identity_for_focus)? {
                             anyhow::bail!(
                                 "AT-SPI Component.GrabFocus returned false for element {idx}"
                             );
@@ -3202,10 +3494,11 @@ impl Tool for TypeTextTool {
         if delivery.is_foreground() && (is_chromium_embedder(pid) || is_webkitgtk_embedder(pid)) {
             let text_f = text.clone();
             let idx = resolved_elem_idx;
+            let identity_for_focus = exact_identity.clone();
             let result = tokio::task::spawn_blocking(move || {
                 crate::input::with_x11_foreground(xid, 80, || {
                     if let Some(idx) = idx {
-                        if !crate::atspi::focus_element(pid, idx)? {
+                        if !focus_atspi_target(pid, idx, identity_for_focus)? {
                             anyhow::bail!(
                                 "AT-SPI Component.GrabFocus returned false for element {idx}"
                             );
@@ -3512,6 +3805,9 @@ impl Tool for PressKeyTool {
         // inside the verified top-level activation transaction; background
         // XSendEvent retains the historical direct-window path.
         let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let window_id_arg = args.opt_u64("window_id");
         let element_index_arg = args.opt_u64("element_index").map(|v| v as usize);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
@@ -3554,6 +3850,16 @@ impl Tool for PressKeyTool {
                 }
             }
         };
+        let exact_identity = match resolved_element_idx {
+            Some(idx) => {
+                match cached_atspi_identity(&self.state, pid, xid, idx, revision_identity_required)
+                {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                }
+            }
+            None => None,
+        };
 
         // ── px form: pixel-click to focus, then the key goes to the focused element ──
         // Reuses click's translation + delivery_mode; after it, deliver via the plain
@@ -3588,8 +3894,14 @@ impl Tool for PressKeyTool {
         // Nested cua-compositor addresses the owning Wayland client directly.
         // Preserve legacy modifiers by promoting the request to a chord.
         if crate::wayland::is_inject_mode() {
-            if let Err(error) =
-                focus_nested_inject_target(pid, xid, resolved_element_idx, px.zip(py)).await
+            if let Err(error) = focus_nested_inject_target(
+                pid,
+                xid,
+                resolved_element_idx,
+                exact_identity.clone(),
+                px.zip(py),
+            )
+            .await
             {
                 return error;
             }
@@ -3648,10 +3960,11 @@ impl Tool for PressKeyTool {
             let key_w = key.clone();
             let chord = press_key_chord(&mods, &key);
             let idx = resolved_element_idx;
+            let identity_for_focus = exact_identity.clone();
             let result = tokio::task::spawn_blocking(move || {
                 crate::wayland::with_target_foreground(pid, xid, || {
                     if let Some(idx) = idx {
-                        if !crate::atspi::focus_element(pid, idx)? {
+                        if !focus_atspi_target(pid, idx, identity_for_focus)? {
                             anyhow::bail!(
                                 "AT-SPI Component.GrabFocus returned false for element {idx}"
                             );
@@ -3678,6 +3991,7 @@ impl Tool for PressKeyTool {
         // A preceding PX click establishes internal widget focus, but that
         // click restores the prior top-level before returning.
         let deliver_fg = delivery.is_foreground();
+        let identity_for_focus = exact_identity.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if resolved_element_idx.is_none()
                 && mods.is_empty()
@@ -3696,7 +4010,7 @@ impl Tool for PressKeyTool {
             if deliver_fg {
                 return crate::input::with_x11_foreground(xid, 80, || {
                     if let Some(element_index) = resolved_element_idx {
-                        if !crate::atspi::focus_element(pid, element_index)? {
+                        if !focus_atspi_target(pid, element_index, identity_for_focus)? {
                             anyhow::bail!(
                                 "AT-SPI Component.GrabFocus returned false for element {element_index}"
                             );
@@ -3829,10 +4143,14 @@ impl Tool for HotkeyTool {
         let pid = args.u64_or("pid", 0) as u32;
         let window_id_arg = args.opt_u64("window_id");
         let element_index_arg = args.opt_u64("element_index").map(|value| value as usize);
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             element_index_arg,
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             window_id_arg.map(|value| value as u32),
             "hotkey",
@@ -3870,6 +4188,16 @@ impl Tool for HotkeyTool {
                     }
                 }
             }
+        };
+        let exact_identity = match resolved_element_index {
+            Some(idx) => {
+                match cached_atspi_identity(&self.state, pid, xid, idx, revision_identity_required)
+                {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                }
+            }
+            None => None,
         };
 
         // Parse keys array (preferred) or fall back to legacy key+modifiers.
@@ -3923,8 +4251,14 @@ impl Tool for HotkeyTool {
         }
 
         if crate::wayland::is_inject_mode() {
-            if let Err(error) =
-                focus_nested_inject_target(pid, xid, resolved_element_index, px.zip(py)).await
+            if let Err(error) = focus_nested_inject_target(
+                pid,
+                xid,
+                resolved_element_index,
+                exact_identity.clone(),
+                px.zip(py),
+            )
+            .await
             {
                 return error;
             }
@@ -3951,8 +4285,14 @@ impl Tool for HotkeyTool {
             && is_chromium_embedder(pid)
         {
             if let Some(element_index) = resolved_element_index {
+                let identity_for_bounds = exact_identity.clone();
                 let coordinates = tokio::task::spawn_blocking(move || {
-                    resolve_element_local_coords(pid, element_index, Some(xid))
+                    resolve_element_local_coords_exact(
+                        pid,
+                        element_index,
+                        Some(xid),
+                        identity_for_bounds,
+                    )
                 })
                 .await;
                 let (_, x, y) = match coordinates {
@@ -3978,8 +4318,9 @@ impl Tool for HotkeyTool {
         }
 
         if let Some(element_index) = resolved_element_index {
+            let identity_for_focus = exact_identity.clone();
             let focused = tokio::task::spawn_blocking(move || {
-                crate::atspi::focus_element(pid, element_index)
+                focus_atspi_target(pid, element_index, identity_for_focus)
             })
             .await;
             match focused {
@@ -4066,7 +4407,9 @@ impl Tool for HotkeyTool {
 
 // ── set_value ─────────────────────────────────────────────────────────────────
 
-pub struct SetValueTool;
+pub struct SetValueTool {
+    state: Arc<ToolState>,
+}
 static SV_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
 #[async_trait]
@@ -4101,10 +4444,14 @@ impl Tool for SetValueTool {
             Err(e) => return e,
         };
         // Surface 6: element_token / element_index precedence resolution.
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             args.opt_u64("element_index").map(|v| v as usize),
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             args.opt_u64("window_id").map(|v| v as u32),
             "set_value",
@@ -4112,24 +4459,35 @@ impl Tool for SetValueTool {
             Ok(r) => r,
             Err(e) => return e,
         };
-        let idx = match resolved {
-            cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
-                element_index
-            }
+        let (idx, xid) = match resolved {
+            cua_driver_core::element_token::ResolvedElement::Element {
+                element_index,
+                window_id: Some(window_id),
+                ..
+            } => (element_index, u64::from(window_id)),
             cua_driver_core::element_token::ResolvedElement::None => return ToolResult::error(
                 "set_value requires element_index or element_token to address the target element.",
             ),
+            _ => return ToolResult::error("set_value element target did not resolve a window"),
         };
+        let exact_identity =
+            match cached_atspi_identity(&self.state, pid, xid, idx, revision_identity_required) {
+                Ok(identity) => identity,
+                Err(error) => return error,
+            };
         let cursor_id = resolve_cursor_key(&args);
         let value_for_task = value.clone();
         // Pulse the agent cursor onto the target element before writing, so a
         // value write gets the same visual feedback as a click — the viewer can
         // see *where* the agent is acting. No-op when the element bounds can't
         // be resolved or the overlay is disabled.
-        if let Ok(Ok((sx, sy))) =
-            tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+        let identity_for_center = exact_identity.clone();
+        if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+            element_screen_center_exact(pid, idx, identity_for_center)
+        })
+        .await
         {
-            let window_id = args.u64_or("window_id", 0);
+            let window_id = xid;
             if window_id != 0 {
                 crate::overlay::send_command_for(
                     cursor_id.clone(),
@@ -4138,9 +4496,11 @@ impl Tool for SetValueTool {
             }
             overlay_glide_to_for(&cursor_id, sx, sy).await;
         }
-        let result =
-            tokio::task::spawn_blocking(move || crate::atspi::set_value(pid, idx, &value_for_task))
-                .await;
+        let result = tokio::task::spawn_blocking(move || match exact_identity {
+            Some(identity) => crate::atspi::set_value_exact(pid, idx, identity, &value_for_task),
+            None => crate::atspi::set_value(pid, idx, &value_for_task),
+        })
+        .await;
         match result {
             Ok(Ok(())) => ToolResult::text(format!("Set value of element [{idx}] to '{value}'.")),
             Ok(Err(e)) => ToolResult::error(e.to_string()),
@@ -4149,9 +4509,135 @@ impl Tool for SetValueTool {
     }
 }
 
+pub struct PerformSecondaryActionTool {
+    state: Arc<ToolState>,
+}
+
+static SECONDARY_ACTION_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+#[async_trait]
+impl Tool for PerformSecondaryActionTool {
+    fn def(&self) -> &ToolDef {
+        SECONDARY_ACTION_DEF.get_or_init(|| ToolDef {
+            name: "perform_secondary_action".into(),
+            description: "Perform one explicitly named action advertised by an exact AT-SPI element. Missing, ambiguous, stale, or changed actions fail closed without pixel or primary-action fallback.".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["pid", "element_token", "action"],
+                "properties": {
+                    "pid": { "type": "integer", "minimum": 1 },
+                    "window_id": { "type": "integer", "minimum": 1 },
+                    "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                    "action": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+            }),
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: true,
+        })
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let pid = match args.require_u32("pid") {
+            Ok(pid) => pid,
+            Err(error) => return error,
+        };
+        let requested = match args.require_str("action") {
+            Ok(action) if !action.is_empty() => action,
+            Ok(_) => return ToolResult::error("action must not be empty"),
+            Err(error) => return error,
+        };
+        let token = args.opt_str("element_token");
+        let resolved = match cua_driver_core::element_token::resolve_element_args(
+            pid as i32,
+            None,
+            token.as_deref(),
+            None,
+            args.opt_u64("window_id").map(|value| value as u32),
+            "perform_secondary_action",
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let cua_driver_core::element_token::ResolvedElement::Element {
+            window_id: Some(window_id),
+            element_index,
+            ..
+        } = resolved
+        else {
+            return ToolResult::error("perform_secondary_action requires a current element_token")
+                .with_structured(json!({ "code": "invalid_element_target" }));
+        };
+        let identity = match self.state.element_cache.get_element_identity(
+            pid,
+            u64::from(window_id),
+            element_index,
+        ) {
+            Some(identity) => identity,
+            None => {
+                return ToolResult::error(
+                    "element_token no longer resolves to a native AT-SPI identity",
+                )
+                .with_structured(json!({ "code": "stale_element_token" }))
+            }
+        };
+        let advertised = self
+            .state
+            .element_cache
+            .get_element_actions(pid, u64::from(window_id), element_index)
+            .unwrap_or_default();
+        if advertised
+            .iter()
+            .filter(|action| action.as_str() == requested)
+            .count()
+            != 1
+        {
+            return ToolResult::error(format!(
+                "secondary action '{requested}' was not uniquely advertised; advertised actions: {}",
+                advertised.join(", ")
+            ))
+            .with_structured(json!({ "code": "secondary_action_unavailable" }));
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            crate::atspi::perform_secondary_action(pid, element_index, identity, &requested)
+        })
+        .await;
+        match result {
+            Ok(Ok(action)) => ToolResult::text(format!("Performed AT-SPI action {action}."))
+                .with_structured(json!({
+                    "effect": "unverifiable",
+                    "route": "accessibility"
+                }))
+                .with_action_record(
+                    cua_driver_core::action_record::ActionExecutionRecord::builder(
+                        cua_driver_core::action_record::ActionEffect::Unverifiable,
+                        cua_driver_core::action_record::ActionTransport::LinuxAtSpiAction,
+                        cua_driver_core::action_record::RequestedDelivery::Background,
+                    )
+                    .actual_delivery(cua_driver_core::action_record::ActualDelivery::Background)
+                    .evidence(cua_driver_core::action_record::ActionEvidence {
+                        kind: cua_driver_core::action_record::EvidenceKind::NativeApiResult,
+                        detail: format!(
+                            "AT-SPI reported success for the exact advertised action {action}"
+                        ),
+                    })
+                    .build()
+                    .expect("secondary AT-SPI action record is valid"),
+                ),
+            Ok(Err(error)) => ToolResult::error(error.to_string())
+                .with_structured(json!({ "code": "secondary_action_unavailable" })),
+            Err(error) => ToolResult::error(format!("secondary action task failed: {error}")),
+        }
+    }
+}
+
 // ── scroll ────────────────────────────────────────────────────────────────────
 
-pub struct ScrollTool;
+pub struct ScrollTool {
+    state: Arc<ToolState>,
+}
 static SCROLL_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
 #[async_trait]
@@ -4234,10 +4720,14 @@ impl Tool for ScrollTool {
         // element (X11 scroll buttons go to the window root), but the
         // token still needs to be accepted + validated so a stale
         // token surfaces an error instead of silently no-op'ing.
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             args.opt_u64("element_index").map(|v| v as usize),
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             args.opt_u64("window_id").map(|v| v as u32),
             "scroll",
@@ -4270,6 +4760,22 @@ impl Tool for ScrollTool {
                 }
             }
         };
+        let resolved_element_index = match &resolved {
+            cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
+                Some(*element_index)
+            }
+            cua_driver_core::element_token::ResolvedElement::None => None,
+        };
+        let exact_identity = match resolved_element_index {
+            Some(idx) => {
+                match cached_atspi_identity(&self.state, pid, xid, idx, revision_identity_required)
+                {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                }
+            }
+            None => None,
+        };
 
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
@@ -4285,8 +4791,16 @@ impl Tool for ScrollTool {
             // success. Chromium's AT-SPI scroll path remains effective.
             if !(crate::wayland::wayland_input_enabled() && is_webkitgtk_embedder(pid)) {
                 let direction_for_ax = direction.clone();
-                let ax_result = tokio::task::spawn_blocking(move || {
-                    crate::atspi::scroll_element(pid, idx, &direction_for_ax, amount)
+                let identity_for_scroll = exact_identity.clone();
+                let ax_result = tokio::task::spawn_blocking(move || match identity_for_scroll {
+                    Some(identity) => crate::atspi::scroll_element_exact(
+                        pid,
+                        idx,
+                        identity,
+                        &direction_for_ax,
+                        amount,
+                    ),
+                    None => crate::atspi::scroll_element(pid, idx, &direction_for_ax, amount),
                 })
                 .await;
                 if matches!(ax_result, Ok(Ok(()))) {
@@ -4365,8 +4879,9 @@ impl Tool for ScrollTool {
                     },
                 ) => {
                     let idx = *element_index;
+                    let identity_for_bounds = exact_identity.clone();
                     match tokio::task::spawn_blocking(move || {
-                        resolve_element_local_coords(pid, idx, Some(xid))
+                        resolve_element_local_coords_exact(pid, idx, Some(xid), identity_for_bounds)
                     })
                     .await
                     {
@@ -4416,8 +4931,9 @@ impl Tool for ScrollTool {
         let element_point = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 let idx = *element_index;
+                let identity_for_bounds = exact_identity.clone();
                 match tokio::task::spawn_blocking(move || {
-                    resolve_element_local_coords(pid, idx, Some(xid))
+                    resolve_element_local_coords_exact(pid, idx, Some(xid), identity_for_bounds)
                 })
                 .await
                 {
@@ -4596,10 +5112,14 @@ impl Tool for DoubleClickTool {
             return refusal;
         }
         // Surface 6: element_token / element_index precedence.
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             args.opt_u64("element_index").map(|v| v as usize),
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             args.opt_u64("window_id").map(|v| v as u32),
             "double_click",
@@ -4621,14 +5141,30 @@ impl Tool for DoubleClickTool {
         };
         if let Some(idx) = elem_idx_resolved {
             let xid_hint = window_id_resolved;
+            let exact_identity = match xid_hint {
+                Some(xid) => match cached_atspi_identity(
+                    &self.state,
+                    pid,
+                    xid,
+                    idx,
+                    revision_identity_required,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                },
+                None => None,
+            };
+            let identity_for_bounds = exact_identity.clone();
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(u64, f64, f64)> {
-                resolve_element_local_coords(pid, idx, xid_hint)
+                resolve_element_local_coords_exact(pid, idx, xid_hint, identity_for_bounds)
             })
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center_exact(pid, idx, exact_identity)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),
@@ -4830,10 +5366,14 @@ impl Tool for RightClickTool {
             return refusal;
         }
         // Surface 6: element_token / element_index precedence.
+        let element_token_arg = args.opt_str("element_token");
+        let revision_identity_required = element_token_arg
+            .as_deref()
+            .is_some_and(cua_driver_core::observation_revision::is_revision_token);
         let resolved = match cua_driver_core::element_token::resolve_element_args(
             pid as i32,
             args.opt_u64("element_index").map(|v| v as usize),
-            args.opt_str("element_token").as_deref(),
+            element_token_arg.as_deref(),
             args.opt_str("snapshot_id").as_deref(),
             args.opt_u64("window_id").map(|v| v as u32),
             "right_click",
@@ -4855,14 +5395,30 @@ impl Tool for RightClickTool {
         };
         if let Some(idx) = elem_idx_resolved {
             let xid_hint = window_id_resolved;
+            let exact_identity = match xid_hint {
+                Some(xid) => match cached_atspi_identity(
+                    &self.state,
+                    pid,
+                    xid,
+                    idx,
+                    revision_identity_required,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => return error,
+                },
+                None => None,
+            };
+            let identity_for_bounds = exact_identity.clone();
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(u64, f64, f64)> {
-                resolve_element_local_coords(pid, idx, xid_hint)
+                resolve_element_local_coords_exact(pid, idx, xid_hint, identity_for_bounds)
             })
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center_exact(pid, idx, exact_identity)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),
@@ -7898,6 +8454,10 @@ pub fn build_registry_with_provider(
                 .unwrap()
                 .remove(session_id);
             crate::input::forget_master_pointer(session_id);
+            state_for_session_end
+                .observation_revisions
+                .clear_session(session_id);
+            cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);
         })
     };
     let session_revive_hook =
@@ -7911,6 +8471,7 @@ pub fn build_registry_with_provider(
     if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
         let prefix = format!("__cua_runtime_{runtime_scope}:");
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         r.retain_runtime_cleanup(move || {
             for cursor in cursor_registry
                 .all_states()
@@ -7920,6 +8481,8 @@ pub fn build_registry_with_provider(
                 cursor_registry.remove(&cursor.config.cursor_id);
                 crate::overlay::remove_cursor(cursor.config.cursor_id);
             }
+            observation_revisions.clear_runtime(&runtime_scope);
+            cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
     r.register(Box::new(ListAppsTool));
@@ -8006,8 +8569,24 @@ pub fn build_registry_with_provider(
         },
         &pid_window_candidates,
     ));
-    r.register(pid_window_guarded(SetValueTool, &pid_window_candidates));
-    r.register(pid_window_guarded(ScrollTool, &pid_window_candidates));
+    r.register(pid_window_guarded(
+        SetValueTool {
+            state: state.clone(),
+        },
+        &pid_window_candidates,
+    ));
+    r.register(pid_window_guarded(
+        PerformSecondaryActionTool {
+            state: state.clone(),
+        },
+        &pid_window_candidates,
+    ));
+    r.register(pid_window_guarded(
+        ScrollTool {
+            state: state.clone(),
+        },
+        &pid_window_candidates,
+    ));
     cua_driver_core::clipboard::register_clipboard_tools(
         &mut r,
         Arc::new(crate::clipboard::LinuxClipboard::new()),

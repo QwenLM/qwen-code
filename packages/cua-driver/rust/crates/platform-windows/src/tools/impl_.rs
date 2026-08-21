@@ -608,9 +608,12 @@ impl ZoomRegistry {
 
 pub struct ToolState {
     pub element_cache: Arc<ElementCache>,
+    pub observation_revisions: Arc<crate::uia::revision::WindowsObservationRevisions>,
     pub cursor_registry: Arc<CursorRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
     pub zoom_registry: Arc<ZoomRegistry>,
+    watched_targets: std::sync::Mutex<std::collections::HashSet<(u32, u64)>>,
+    watcher_started: std::sync::atomic::AtomicBool,
     pub config: Arc<RwLock<DriverConfig>>,
 }
 
@@ -618,11 +621,63 @@ impl ToolState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             element_cache: Arc::new(ElementCache::new()),
+            observation_revisions: Arc::new(
+                crate::uia::revision::WindowsObservationRevisions::new(),
+            ),
             cursor_registry: Arc::new(CursorRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
             zoom_registry: Arc::new(ZoomRegistry::new()),
+            watched_targets: std::sync::Mutex::new(Default::default()),
+            watcher_started: std::sync::atomic::AtomicBool::new(false),
             config: Arc::new(RwLock::new(load_driver_config())),
         })
+    }
+
+    fn watch_target(self: &Arc<Self>, pid: u32, hwnd: u64) {
+        self.watched_targets.lock().unwrap().insert((pid, hwnd));
+        if self
+            .watcher_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if std::thread::Builder::new()
+            .name("cua-uia-target-sweeper".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+                let targets = state
+                    .watched_targets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                for (pid, hwnd) in targets {
+                    let target = HWND(hwnd as *mut _);
+                    let mut owner_pid = 0;
+                    let window_live = unsafe { IsWindow(target) }.as_bool()
+                        && unsafe { GetWindowThreadProcessId(target, Some(&mut owner_pid)) } != 0
+                        && owner_pid == pid;
+                    if window_live {
+                        continue;
+                    }
+                    state.element_cache.clear_target(pid, hwnd);
+                    state.observation_revisions.clear_target(pid, hwnd);
+                    cua_driver_core::element_token::global().clear_target(pid as i32, hwnd as u32);
+                    state.watched_targets.lock().unwrap().remove(&(pid, hwnd));
+                }
+            })
+            .is_err()
+        {
+            self.watcher_started
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -1137,10 +1192,12 @@ impl Tool for GetWindowStateTool {
                 "max_depth":{"type":"integer","minimum":1,"description":"Cap on the UIA-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower for deep menu / Electron trees."},
                 "observation_revision": {
                     "type": "object",
-                    "description": "Opt in to accessibility.observation_revision.v1. Windows currently answers with an explicit non-retained full response (no approved stable UIA identity yet). Omit to preserve the legacy full-snapshot contract.",
-                    "required": ["version"],
+                    "description": "Opt in to accessibility.observation_revision.v1. Complete UIA captures use RuntimeId candidates confirmed with CompareElements; MSAA fallback and incomplete captures remain explicit full-only responses. Omit to preserve the legacy full-snapshot contract.",
+                    "required": ["version", "serializer_version", "projection_version"],
                     "properties": {
                         "version": { "type": "integer", "const": 1 },
+                        "serializer_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "projection_version": { "type": "string", "minLength": 1, "maxLength": 128 },
                         "base_revision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                         "force_full": { "type": "boolean", "default": false }
                     },
@@ -1202,11 +1259,11 @@ impl Tool for GetWindowStateTool {
         // trip additionalProperties:false.
         let query = args.opt_str("query");
         let screenshot_out_file = args.opt_str("screenshot_out_file");
-        // `accessibility.observation_revision.v1` — Windows has no approved
-        // stable native identity yet (UIA RuntimeId + CompareElements is a
-        // planned upgrade), so the versioned protocol is accepted but every
-        // response is an explicit non-retained full. Parsing stays in core so
-        // the closed error surface matches macOS byte for byte.
+        // `accessibility.observation_revision.v1` uses UIA RuntimeId only as a
+        // candidate and confirms continuity with CompareElements. MSAA and
+        // incomplete/provider-invalidated captures stay explicit non-retained
+        // full responses. Parsing stays in core so the closed error surface
+        // matches the other platforms byte for byte.
         let observation_revision_request =
             match cua_driver_core::observation_revision::parse_observation_revision_request(
                 args.get("observation_revision"),
@@ -1254,10 +1311,35 @@ impl Tool for GetWindowStateTool {
             .get("_observation_only")
             .and_then(|value| value.as_bool())
             == Some(true);
+        if observation_only && observation_revision_request.is_some() {
+            return ToolResult::error(
+                "observation_revision is unavailable for an internal observation-only call",
+            )
+            .with_structured(json!({
+                "code": "observation_revision_unavailable",
+            }));
+        }
+        let observation_session = if observation_revision_request.is_some() {
+            match cua_driver_core::observation_revision::current_observation_session_identity() {
+                Some(session) => Some(session),
+                None => {
+                    return ToolResult::error(
+                        "observation_revision requires a bound trusted driver session",
+                    )
+                    .with_structured(json!({
+                        "code": "observation_revision_unavailable",
+                    }))
+                }
+            }
+        } else {
+            None
+        };
         let do_tree = true;
         let do_shot = include_screenshot != Some(false) || screenshot_out_file.is_some();
 
         let state = self.state.clone();
+        let observation_revisions = state.observation_revisions.clone();
+        let revision_request_for_capture = observation_revision_request.clone();
         let q = query.clone();
         let out_file = screenshot_out_file.clone();
         let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -1270,6 +1352,18 @@ impl Tool for GetWindowStateTool {
                 ))
             } else {
                 None
+            };
+            let observation_revision = match (
+                revision_request_for_capture.as_ref(),
+                observation_session,
+                tree_result.as_ref(),
+            ) {
+                (Some(request), Some(session), Some(tree)) => Some(
+                    observation_revisions
+                        .observe(session, pid, hwnd, max_elements, max_depth, tree, request)
+                        .map_err(anyhow::Error::msg)?,
+                ),
+                _ => None,
             };
             // Capture screenshot AND any error message so the response can
             // surface *why* there's no image (the iconic-window guard from
@@ -1303,7 +1397,12 @@ impl Tool for GetWindowStateTool {
             } else {
                 (None, None)
             };
-            Ok((tree_result, screenshot, screenshot_err))
+            Ok((
+                tree_result,
+                screenshot,
+                screenshot_err,
+                observation_revision,
+            ))
         });
         // Timeout: Chrome's UIA provider can block indefinitely on property reads.
         let result: Result<anyhow::Result<_>, _> =
@@ -1332,20 +1431,24 @@ impl Tool for GetWindowStateTool {
         let result = result.and_then(|r| r);
 
         match result {
-            Ok((tree_opt, screenshot_opt, screenshot_err)) => {
+            Ok((tree_opt, screenshot_opt, screenshot_err, observation_revision)) => {
                 let mut content = Vec::new();
                 let mut structured = json!({ "window_id": hwnd, "pid": pid });
 
                 if let Some(tr) = tree_opt {
-                    let is_msaa = tr.nodes.iter().any(|n| n.msaa_role.is_some());
+                    let is_msaa = tr.backend == crate::uia::UiaBackend::Msaa;
                     let count = tr
                         .nodes
                         .iter()
                         .filter(|n| n.element_index.is_some())
                         .count();
+                    let selected_tree_markdown = observation_revision
+                        .as_ref()
+                        .map(|revision| revision.text.as_str())
+                        .unwrap_or(&tr.tree_markdown);
                     let header = format!("window_id={hwnd} pid={pid} elements={count}\n\n");
                     content.push(cua_driver_core::protocol::Content::text(
-                        header + &tr.tree_markdown,
+                        header + selected_tree_markdown,
                     ));
                     // Route the cache to the matching dispatch path: any
                     // node whose msaa_role is Some came from the MSAA
@@ -1359,11 +1462,8 @@ impl Tool for GetWindowStateTool {
                         }
                     }
                     structured["element_count"] = json!(count);
-                    // UIA currently does not expose whether a bounded walk
-                    // exhausted every subtree. Keep negative existence
-                    // conservative until that proof is available.
-                    structured["elements_complete"] = json!(false);
-                    structured["tree_markdown"] = json!(tr.tree_markdown);
+                    structured["elements_complete"] = json!(tr.complete);
+                    structured["tree_markdown"] = json!(selected_tree_markdown);
 
                     // Surface 6: register a snapshot in the global token
                     // registry. Windows uses u64 HWND but the registry
@@ -1377,6 +1477,46 @@ impl Tool for GetWindowStateTool {
                             count,
                         )
                     });
+                    if observation_revision.is_some() && !observation_only {
+                        state.watch_target(pid, hwnd);
+                    }
+                    let revision_capture_complete = observation_revision
+                        .as_ref()
+                        .is_some_and(|revision| revision.stable_element_ids)
+                        && tr.complete
+                        && !is_msaa;
+                    if let (Some(revision), Some(snapshot_id)) = (
+                        observation_revision
+                            .as_ref()
+                            .filter(|_| revision_capture_complete),
+                        snapshot_id,
+                    ) {
+                        if let Err(error) = cua_driver_core::observation_revision::revision_tokens()
+                            .register_current(
+                                &revision.lineage_id,
+                                pid as i32,
+                                hwnd as u32,
+                                snapshot_id,
+                                &revision.nodes,
+                            )
+                        {
+                            return ToolResult::error(error.to_string())
+                                .with_structured(json!({ "code": error.code() }));
+                        }
+                    }
+                    let stable_ids = observation_revision
+                        .as_ref()
+                        .filter(|_| revision_capture_complete)
+                        .map(|revision| {
+                            revision
+                                .nodes
+                                .iter()
+                                .filter_map(|node| {
+                                    node.actionable_index.map(|index| (index, node.element_id))
+                                })
+                                .collect::<std::collections::HashMap<_, _>>()
+                        })
+                        .unwrap_or_default();
 
                     // Structured `elements` array — preferred consumption
                     // path. Shape matches the cross-platform spec:
@@ -1400,7 +1540,19 @@ impl Tool for GetWindowStateTool {
                                 "role": n.control_type,
                                 "depth": n.depth,
                             });
-                            if let Some(snapshot_id) = snapshot_id {
+                            if let Some(element_id) = stable_ids.get(&idx) {
+                                entry["element_id"] = json!(element_id);
+                                entry["element_token"] = json!(
+                                    cua_driver_core::observation_revision::revision_token_for(
+                                        observation_revision
+                                            .as_ref()
+                                            .expect("stable ids require revision")
+                                            .lineage_id
+                                            .as_str(),
+                                        *element_id,
+                                    )
+                                );
+                            } else if let Some(snapshot_id) = snapshot_id {
                                 entry["element_token"] = json!(
                                     cua_driver_core::element_token::token_for(snapshot_id, idx)
                                 );
@@ -1422,6 +1574,9 @@ impl Tool for GetWindowStateTool {
                             }
                             if let Some(enabled) = n.enabled {
                                 entry["enabled"] = json!(enabled);
+                            }
+                            if !n.actions.is_empty() {
+                                entry["actions"] = json!(n.actions);
                             }
                             if let Some(selected) = n.selected {
                                 entry["selected"] = json!(selected);
@@ -1448,6 +1603,11 @@ impl Tool for GetWindowStateTool {
                     structured["total_element_count"] = json!(count);
                     structured["returned_element_count"] = json!(elements.len());
                     structured["elements"] = json!(elements);
+                    structured["capture_complete"] = json!(tr.complete);
+                    structured["capture_truncated"] = json!(tr.truncated);
+                    if !tr.incomplete_notes.is_empty() {
+                        structured["capture_incomplete_details"] = json!(tr.incomplete_notes);
+                    }
                     // Surface 6: snapshot id mirror for debug correlation.
                     if let Some(snapshot_id) = snapshot_id {
                         structured["snapshot_id"] =
@@ -1541,30 +1701,36 @@ impl Tool for GetWindowStateTool {
                     ),
                 );
 
-                if observation_revision_request.is_some() {
-                    // Explicit full-only: UIA identity is not approved for
-                    // revision lineage yet, so the caller's base (if any) is
-                    // never usable and nothing is retained for future diffs.
-                    let (lineage_id, revision_id) =
-                        cua_driver_core::observation_revision::unretained_full_ids();
+                if let Some(revision) = observation_revision.as_ref() {
                     structured["observation_revision"] = json!({
                         "capability": "accessibility.observation_revision.v1",
                         "version":
                             cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
-                        "serializer_version": "windows-uia-markdown-v1",
-                        "mode": "full",
-                        "lineage_id": lineage_id,
-                        "revision_id": revision_id,
-                        "base_revision_id": serde_json::Value::Null,
+                        "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
+                        "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                        "mode": revision.mode.as_str(),
+                        "lineage_id": revision.lineage_id,
+                        "revision_id": revision.revision_id,
+                        "base_revision_id": revision.base_revision_id,
                         "target": { "pid": pid, "window_id": hwnd },
-                        "identity": "windows_uia_snapshot",
+                        "identity": if revision.stable_element_ids {
+                            "windows_uia_runtime_id_compare"
+                        } else {
+                            "windows_unretained"
+                        },
                         "elements_scope": "current_full",
-                        "stable_element_ids": false,
-                        "retained": false,
-                        "resync_reason":
-                            cua_driver_core::observation_revision::FullResyncReason::UnsupportedBackend
-                                .as_str(),
+                        "stable_element_ids": revision.stable_element_ids,
+                        "retained": revision.stable_element_ids,
+                        "selected_bytes": revision.text.len(),
+                        "full_bytes": revision.full_text.len(),
+                        "estimated_tokens": revision.text.len().div_ceil(4),
+                        "serializer_duration_us": revision.serializer_duration_us,
+                        "cache_estimate_bytes": revision.cache_estimate_bytes,
                     });
+                    if let Some(reason) = revision.full_resync_reason {
+                        structured["observation_revision"]["resync_reason"] =
+                            json!(reason.as_str());
+                    }
                 }
 
                 ToolResult {
@@ -5547,6 +5713,219 @@ impl Tool for HotkeyTool {
             )),
             Ok(Err(e)) => ToolResult::error(e.to_string()),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
+        }
+    }
+}
+
+// ── perform_secondary_action ─────────────────────────────────────────────────
+
+pub struct PerformSecondaryActionTool {
+    state: Arc<ToolState>,
+}
+
+static PERFORM_SECONDARY_ACTION_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+#[async_trait]
+impl Tool for PerformSecondaryActionTool {
+    fn def(&self) -> &ToolDef {
+        PERFORM_SECONDARY_ACTION_DEF.get_or_init(|| {
+            ToolDef::from_contract(
+                &cua_driver_contract::tool_contract("perform_secondary_action")
+                    .expect("perform_secondary_action contract"),
+            )
+        })
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        use cua_driver_core::tool_args::ArgsExt;
+        let pid = match args.require_u32("pid") {
+            Ok(pid) => pid,
+            Err(error) => return error,
+        };
+        let requested = match args.require_str("action") {
+            Ok(action) if !action.is_empty() => action,
+            Ok(_) => return ToolResult::error("action must not be empty"),
+            Err(error) => return error,
+        };
+        let resolved = match cua_driver_core::element_token::resolve_element_args(
+            pid as i32,
+            None,
+            args.opt_str("element_token").as_deref(),
+            None,
+            args.opt_u64("window_id").map(|value| value as u32),
+            "perform_secondary_action",
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let cua_driver_core::element_token::ResolvedElement::Element {
+            window_id: Some(window_id),
+            element_index,
+            ..
+        } = resolved
+        else {
+            return ToolResult::error("perform_secondary_action requires a current element_token")
+                .with_structured(json!({ "code": "invalid_element_target" }));
+        };
+        let hwnd = window_id as u64;
+        let advertised =
+            match self
+                .state
+                .element_cache
+                .get_element_actions(pid, hwnd, element_index)
+            {
+                Some(actions) => actions,
+                None => {
+                    return ToolResult::error(
+                        "element_token no longer resolves in the current UIA snapshot",
+                    )
+                    .with_structured(json!({ "code": "stale_element_token" }))
+                }
+            };
+        let mut matches = advertised
+            .iter()
+            .filter(|action| action.as_str() == requested);
+        let Some(action) = matches.next().cloned() else {
+            return ToolResult::error(format!(
+                "secondary action '{requested}' is not advertised; available actions: {}",
+                advertised.join(", ")
+            ))
+            .with_structured(json!({ "code": "secondary_action_unavailable" }));
+        };
+        if matches.next().is_some() {
+            return ToolResult::error(format!(
+                "secondary action '{requested}' is ambiguous in the live snapshot"
+            ))
+            .with_structured(json!({ "code": "secondary_action_unavailable" }));
+        }
+        if !matches!(action.as_str(), "invoke" | "toggle" | "select" | "expand") {
+            return ToolResult::error(format!(
+                "secondary action '{action}' must use its dedicated typed tool"
+            ))
+            .with_structured(json!({ "code": "secondary_action_unavailable" }));
+        }
+
+        let _no_activate =
+            crate::input::NoActivateGuard::arm(windows::Win32::Foundation::HWND(hwnd as *mut _));
+        let state = self.state.clone();
+        let dispatch = tokio::task::spawn_blocking(move || -> anyhow::Result<(
+            String,
+            cua_driver_core::action_record::ActionTransport,
+        )> {
+            use crate::uia::cache::SnapshotKind;
+            use windows::core::{Interface, VARIANT};
+            use windows::Win32::UI::Accessibility::{
+                IAccessible, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
+                IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern,
+                IUIAutomationTogglePattern, UIA_ExpandCollapsePatternId, UIA_InvokePatternId,
+                UIA_SelectionItemPatternId, UIA_TogglePatternId,
+            };
+
+            let retained = state
+                .element_cache
+                .get_element_retained(pid, hwnd, element_index)
+                .ok_or_else(|| anyhow::anyhow!("element is stale"))?;
+            let (kind, _) = state
+                .element_cache
+                .get_element_kind_and_role(pid, hwnd, element_index)
+                .ok_or_else(|| anyhow::anyhow!("element is stale"))?;
+            match kind {
+                SnapshotKind::Msaa => {
+                    if action != "invoke" {
+                        anyhow::bail!(
+                            "MSAA supports only its native default invoke action; '{action}' has no stable semantic dispatch"
+                        );
+                    }
+                    let accessible = unsafe {
+                        IAccessible::from_raw(retained.as_ptr() as *mut _)
+                    };
+                    let result = unsafe { accessible.accDoDefaultAction(&VARIANT::from(0i32)) };
+                    std::mem::forget(accessible);
+                    result.map_err(|error| anyhow::anyhow!("MSAA default action failed: {error}"))?;
+                    Ok((
+                        "msaa_default_action".into(),
+                        cua_driver_core::action_record::ActionTransport::WindowsMsaaAction,
+                    ))
+                }
+                SnapshotKind::Uia => {
+                    let element = unsafe {
+                        IUIAutomationElement::from_raw(retained.as_ptr() as *mut _)
+                    };
+                    if unsafe { element.CurrentIsEnabled() }
+                        .map(|value| !value.as_bool())
+                        .unwrap_or(true)
+                    {
+                        std::mem::forget(element);
+                        anyhow::bail!("UIA element is disabled or no longer available");
+                    }
+                    let transport = match action.as_str() {
+                        "invoke" => cua_driver_core::action_record::ActionTransport::WindowsUiaInvoke,
+                        "toggle" => cua_driver_core::action_record::ActionTransport::WindowsUiaToggle,
+                        "select" => cua_driver_core::action_record::ActionTransport::WindowsUiaSelection,
+                        "expand" => cua_driver_core::action_record::ActionTransport::WindowsUiaExpandCollapse,
+                        _ => unreachable!(),
+                    };
+                    let result = crate::uia::fg_bypass::run_with_uwp_bypass(
+                        hwnd as isize,
+                        || unsafe {
+                            match action.as_str() {
+                                "invoke" => element
+                                    .GetCurrentPattern(UIA_InvokePatternId)?
+                                    .cast::<IUIAutomationInvokePattern>()?
+                                    .Invoke(),
+                                "toggle" => element
+                                    .GetCurrentPattern(UIA_TogglePatternId)?
+                                    .cast::<IUIAutomationTogglePattern>()?
+                                    .Toggle(),
+                                "select" => element
+                                    .GetCurrentPattern(UIA_SelectionItemPatternId)?
+                                    .cast::<IUIAutomationSelectionItemPattern>()?
+                                    .Select(),
+                                "expand" => element
+                                    .GetCurrentPattern(UIA_ExpandCollapsePatternId)?
+                                    .cast::<IUIAutomationExpandCollapsePattern>()?
+                                    .Expand(),
+                                _ => unreachable!(),
+                            }
+                        },
+                    );
+                    std::mem::forget(element);
+                    result.map_err(|error| {
+                        anyhow::anyhow!("UIA action '{action}' failed: {error}")
+                    })?;
+                    Ok((format!("uia_{action}"), transport))
+                }
+            }
+        })
+        .await;
+
+        match dispatch {
+            Ok(Ok((path, transport))) => ToolResult::text(format!(
+                "Performed secondary action '{requested}' via {path}."
+            ))
+            .with_structured(json!({
+                "effect": "unverifiable",
+                "route": "accessibility"
+            }))
+            .with_action_record(
+                cua_driver_core::action_record::ActionExecutionRecord::builder(
+                    cua_driver_core::action_record::ActionEffect::Unverifiable,
+                    transport,
+                    cua_driver_core::action_record::RequestedDelivery::Background,
+                )
+                .actual_delivery(cua_driver_core::action_record::ActualDelivery::Background)
+                .evidence(cua_driver_core::action_record::ActionEvidence {
+                    kind: cua_driver_core::action_record::EvidenceKind::NativeApiResult,
+                    detail: format!(
+                        "Windows accessibility reported success for the exact advertised action {requested}"
+                    ),
+                })
+                .build()
+                .expect("secondary Windows accessibility action record is valid"),
+            ),
+            Ok(Err(error)) => ToolResult::error(error.to_string())
+                .with_structured(json!({ "code": "secondary_action_unavailable" })),
+            Err(error) => ToolResult::error(format!("secondary action task failed: {error}")),
         }
     }
 }
@@ -9573,10 +9952,13 @@ pub fn build_registry_with_provider(
     // deregisters when that runtime's registry is dropped. Mirrors the macOS
     // `register_all` session_end hook (platform-macos/src/tools/mod.rs).
     let cursor_registry = state.cursor_registry.clone();
+    let observation_revisions = state.observation_revisions.clone();
     let session_end_hook =
         cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
             cursor_registry.remove(session_id);
             crate::overlay::remove_cursor(session_id.to_owned());
+            observation_revisions.clear_session(session_id);
+            cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);
         });
     let session_revive_hook =
         cua_driver_core::session::register_scoped_session_revive_hook(move |session_id| {
@@ -9590,6 +9972,7 @@ pub fn build_registry_with_provider(
     if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
         let prefix = format!("__cua_runtime_{runtime_scope}:");
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         r.retain_runtime_cleanup(move || {
             for cursor in cursor_registry
                 .all_states()
@@ -9599,6 +9982,8 @@ pub fn build_registry_with_provider(
                 cursor_registry.remove(&cursor.config.cursor_id);
                 crate::overlay::remove_cursor(cursor.config.cursor_id);
             }
+            observation_revisions.clear_runtime(&runtime_scope);
+            cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
     r.register(Box::new(ListAppsTool));
@@ -9667,6 +10052,12 @@ pub fn build_registry_with_provider(
     ));
     r.register(pid_window_guarded(
         SetValueTool {
+            state: state.clone(),
+        },
+        &pid_window_candidates,
+    ));
+    r.register(pid_window_guarded(
+        PerformSecondaryActionTool {
             state: state.clone(),
         },
         &pid_window_candidates,

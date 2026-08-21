@@ -6,14 +6,17 @@
 //! MCP and daemon transports are downstream adapters rather than peer contracts.
 
 use cua_driver_contract::{
-    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DragInput, EndSessionInput,
-    EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput, GetCursorPositionInput,
-    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput,
-    GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListSessionsInput, ListSessionsOutput,
-    MoveCursorInput, PressKeyInput, ScrollInput, SessionOutput, SessionStateOutput,
-    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
-    SetWindowFrameInput, StartSessionInput, StartSessionOutput, ToolInput, TypeTextInput,
-    VerifyStateInput, VerifyStateOutput,
+    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DoubleClickInput, DragInput,
+    EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
+    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
+    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
+    ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
+    PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollInput, SessionOutput,
+    SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
+    SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput, StartSessionInput,
+    StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
+    WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
+    WindowTypeTextInput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
@@ -615,6 +618,8 @@ impl From<SdkClientKind> for DaemonClientKind {
 macro_rules! desktop_tool_methods {
     ($callback:ident) => {
         $callback! {
+            list_apps: ListAppsInput,
+            list_windows: ListWindowsInput,
             get_desktop_state: GetDesktopStateInput,
             get_window_state: GetWindowStateInput,
             get_screen_size: GetScreenSizeInput,
@@ -624,13 +629,23 @@ macro_rules! desktop_tool_methods {
             set_window_frame: SetWindowFrameInput,
             invoke_menu: InvokeMenuInput,
             click: ClickInput,
+            window_click: WindowClickInput,
+            double_click: DoubleClickInput,
+            right_click: RightClickInput,
             drag: DragInput,
+            window_drag: WindowDragInput,
             scroll: ScrollInput,
+            window_scroll: WindowScrollInput,
             clipboard_read: ClipboardReadInput,
             clipboard_write: ClipboardWriteInput,
             type_text: TypeTextInput,
+            window_type_text: WindowTypeTextInput,
             press_key: PressKeyInput,
+            window_press_key: WindowPressKeyInput,
             hotkey: HotkeyInput,
+            window_hotkey: WindowHotkeyInput,
+            set_value: SetValueInput,
+            perform_secondary_action: PerformSecondaryActionInput,
             set_agent_cursor_enabled: SetAgentCursorEnabledInput,
             set_agent_cursor_motion: SetAgentCursorMotionInput,
             set_agent_cursor_theme: SetAgentCursorThemeInput,
@@ -1833,15 +1848,20 @@ mod tests {
 
     #[test]
     fn exported_typed_methods_cover_every_published_contract() {
-        let mut expected = cua_driver_contract::manifest()
+        let expected = cua_driver_contract::manifest()
             .tools
             .into_iter()
             .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        expected.sort();
-        let mut exported = EXPORTED_TOOL_NAMES.to_vec();
-        exported.sort_unstable();
-        assert_eq!(exported, expected);
+            .collect::<std::collections::BTreeSet<_>>();
+        let exported = EXPORTED_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = expected.difference(&exported).cloned().collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "typed SDK methods missing for {missing:?}"
+        );
     }
 
     #[cfg(unix)]

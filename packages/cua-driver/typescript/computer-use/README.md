@@ -26,7 +26,7 @@ behavior; observations then report `revisionSupported: false`.
 ```js
 import { ComputerUse } from "@qwen-code/computer-use";
 
-const computer = await ComputerUse.connect(); // installed qwen-cua-driver daemon
+const computer = await ComputerUse.create(); // configured in-process runtime + trusted session
 try {
   const apps = await computer.listApps();
   const windows = await computer.listWindows({ pid: apps[0].pid });
@@ -44,17 +44,30 @@ try {
     baseRevisionId: first.revisionId, // caller-owned base
   });
   console.log(second.mode); // "diff" | "no_change" | "full"
+
+  await computer.drag({
+    pid: apps[0].pid,
+    windowId: windows[0].window_id,
+    fromX: 100,
+    fromY: 100,
+    toX: 300,
+    toY: 100,
+    deliveryMode: "foreground", // explicit last resort when background drag is unavailable
+  });
 } finally {
   await computer.close();
 }
 ```
 
-`ComputerUse.create()` runs the driver in-process instead (the observing
-process then needs the platform accessibility permissions itself).
+`ComputerUse.connect({ socketPath })` instead binds the same trusted-session
+surface to a caller-selected daemon. In-process use inherits the host process's
+platform accessibility permissions; daemon use inherits the selected daemon's
+identity and permissions.
 
 ## Tests
 
 - `npm test` — hermetic unit tests against a fake driver handle.
-- `npm run test:integration` — standalone end-to-end run against a live
-  daemon; set `COMPUTER_USE_SOCKET`, `COMPUTER_USE_PID`, and
-  `COMPUTER_USE_WINDOW` first (unset variables skip the suite).
+- `npm run test:e2e` — standalone high-level wrapper run against a real target;
+  set `COMPUTER_USE_PID` and `COMPUTER_USE_WINDOW`. It uses an isolated
+  configured runtime by default; set `COMPUTER_USE_SOCKET` only when testing a
+  specific compatible daemon. Unset target variables skip the suite.

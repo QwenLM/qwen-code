@@ -1473,13 +1473,25 @@
                 "default": false,
                 "type": "boolean"
               },
+              "projection_version": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "serializer_version": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
               "version": {
                 "const": 1,
                 "type": "integer"
               }
             },
             "required": [
-              "version"
+              "version",
+              "serializer_version",
+              "projection_version"
             ],
             "type": "object"
           },
@@ -1536,6 +1548,10 @@
                 ],
                 "type": "string"
               },
+              "projection_version": {
+                "minLength": 1,
+                "type": "string"
+              },
               "resync_reason": {
                 "type": "string"
               },
@@ -1561,6 +1577,7 @@
               "capability",
               "version",
               "serializer_version",
+              "projection_version",
               "mode",
               "lineage_id",
               "revision_id"
@@ -1583,7 +1600,8 @@
         "linux"
       ],
       "capabilities": [
-        "input.keyboard.hotkey"
+        "input.keyboard.hotkey",
+        "accessibility.element_tokens"
       ],
       "annotations": {
         "read_only": false,
@@ -2193,6 +2211,170 @@
         "required": [
           "x",
           "y"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "additionalProperties": false,
+            "properties": {
+              "delivered_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "background",
+                  "foreground",
+                  "not_applicable",
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "confirmed",
+              "partial",
+              "unverifiable",
+              "suspected_noop",
+              "refused"
+            ],
+            "type": "string"
+          },
+          "escalation": {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "enum": [
+                  "route_unavailable",
+                  "delivery_failed",
+                  "effect_unconfirmed",
+                  "suspected_noop",
+                  "permission_required"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "enum": [
+                  "pixel",
+                  "foreground",
+                  "page",
+                  "session"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "reason"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "value_readback",
+                    "window_change"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "route": {
+            "enum": [
+              "accessibility",
+              "synthetic_events",
+              "global_input",
+              "system_api",
+              "dom",
+              "trusted_input"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect",
+          "route"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "perform_secondary_action",
+      "description": "Perform one explicitly named action advertised by the exact current accessibility element. Missing, ambiguous, disabled, or stale actions fail closed without a pixel fallback.",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "capabilities": [
+        "accessibility.action.secondary",
+        "accessibility.element_tokens"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": false,
+        "open_world": true
+      },
+      "schema_mode": "portable_subset",
+      "cursor_semantics": {
+        "action": "app"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "element_token": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "pid": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "element_token",
+          "action"
         ],
         "type": "object"
       },
@@ -3069,6 +3251,170 @@
         "required": [
           "session",
           "theme"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "set_value",
+      "description": "Set the value of the exact current accessibility element named by an opaque element token.",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "capabilities": [
+        "accessibility.value.set",
+        "accessibility.element_tokens"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": true,
+        "open_world": true
+      },
+      "schema_mode": "portable_subset",
+      "cursor_semantics": {
+        "action": "text"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "element_token": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "pid": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "value": {
+            "type": "string"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "element_token",
+          "value"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "additionalProperties": false,
+            "properties": {
+              "delivered_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "background",
+                  "foreground",
+                  "not_applicable",
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "confirmed",
+              "partial",
+              "unverifiable",
+              "suspected_noop",
+              "refused"
+            ],
+            "type": "string"
+          },
+          "escalation": {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "enum": [
+                  "route_unavailable",
+                  "delivery_failed",
+                  "effect_unconfirmed",
+                  "suspected_noop",
+                  "permission_required"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "enum": [
+                  "pixel",
+                  "foreground",
+                  "page",
+                  "session"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "reason"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "value_readback",
+                    "window_change"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "route": {
+            "enum": [
+              "accessibility",
+              "synthetic_events",
+              "global_input",
+              "system_api",
+              "dom",
+              "trusted_input"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect",
+          "route"
         ],
         "type": "object"
       }

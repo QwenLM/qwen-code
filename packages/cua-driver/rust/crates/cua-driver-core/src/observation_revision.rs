@@ -9,11 +9,14 @@ use serde_json::Value;
 const REVISION_TOKEN_PREFIX: &str = "rv1:";
 pub const OBSERVATION_REVISION_VERSION: u32 = 1;
 pub const ACCESSIBILITY_SERIALIZER_VERSION: &str = "accessibility-render-v1";
+pub const ACCESSIBILITY_PROJECTION_VERSION: &str = "full-tree-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationRevisionRequest {
     pub version: u32,
+    pub serializer_version: String,
+    pub projection_version: String,
     #[serde(default)]
     pub base_revision_id: Option<String>,
     #[serde(default)]
@@ -41,7 +44,29 @@ pub fn parse_observation_revision_request(
     {
         return Err("observation_revision.base_revision_id must contain 1-256 bytes".to_owned());
     }
+    for (field, value) in [
+        ("serializer_version", request.serializer_version.as_str()),
+        ("projection_version", request.projection_version.as_str()),
+    ] {
+        if value.is_empty() || value.len() > 128 {
+            return Err(format!(
+                "observation_revision.{field} must contain 1-128 bytes"
+            ));
+        }
+    }
     Ok(Some(request))
+}
+
+pub fn requested_format_resync_reason(
+    request: &ObservationRevisionRequest,
+) -> Option<FullResyncReason> {
+    if request.serializer_version != ACCESSIBILITY_SERIALIZER_VERSION {
+        Some(FullResyncReason::SerializerChanged)
+    } else if request.projection_version != ACCESSIBILITY_PROJECTION_VERSION {
+        Some(FullResyncReason::ProjectionChanged)
+    } else {
+        None
+    }
 }
 
 /// Fresh lineage/revision identifier pair for a non-retained full response.
@@ -156,6 +181,8 @@ pub struct ObservationRevisionResult {
     pub text: String,
     pub full_text: String,
     pub nodes: Vec<RevisionNode>,
+    pub serializer_duration_us: u64,
+    pub cache_estimate_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,6 +502,7 @@ where
         stable_element_ids: bool,
         retain: bool,
     ) -> Result<ObservationRevisionResult, ObservationRevisionError> {
+        let serializer_started = std::time::Instant::now();
         if stable_element_ids || retain {
             ensure_unique_identities(&captured)?;
         }
@@ -607,6 +635,14 @@ where
             }
         }
 
+        let cache_estimate_bytes = if retain {
+            self.retained_cache_estimate_bytes()
+        } else {
+            0
+        };
+        let serializer_duration_us =
+            u64::try_from(serializer_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+
         Ok(ObservationRevisionResult {
             lineage_id: self.lineage_id.clone(),
             revision_id,
@@ -617,7 +653,28 @@ where
             text,
             full_text,
             nodes,
+            serializer_duration_us,
+            cache_estimate_bytes,
         })
+    }
+
+    fn retained_cache_estimate_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.lineage_id.capacity()
+            + self
+                .revisions
+                .iter()
+                .map(|revision| {
+                    std::mem::size_of::<StoredRevision<I>>()
+                        + revision.revision_id.capacity()
+                        + revision.nodes.capacity() * std::mem::size_of::<StoredNode<I>>()
+                        + revision
+                            .nodes
+                            .iter()
+                            .map(|node| node.rendered.body.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
     }
 
     pub fn retained_revision_count(&self) -> usize {
@@ -1031,12 +1088,16 @@ mod tests {
     fn revision_request_is_versioned_and_closed() {
         let request = parse_observation_revision_request(Some(&serde_json::json!({
             "version": 1,
+            "serializer_version": ACCESSIBILITY_SERIALIZER_VERSION,
+            "projection_version": ACCESSIBILITY_PROJECTION_VERSION,
             "base_revision_id": "lineage:r1",
             "force_full": true
         })))
         .unwrap()
         .unwrap();
         assert_eq!(request.version, 1);
+        assert_eq!(request.serializer_version, ACCESSIBILITY_SERIALIZER_VERSION);
+        assert_eq!(request.projection_version, ACCESSIBILITY_PROJECTION_VERSION);
         assert_eq!(request.base_revision_id.as_deref(), Some("lineage:r1"));
         assert!(request.force_full);
 
@@ -1046,9 +1107,35 @@ mod tests {
         .is_err());
         assert!(parse_observation_revision_request(Some(&serde_json::json!({
             "version": 1,
+            "serializer_version": ACCESSIBILITY_SERIALIZER_VERSION,
+            "projection_version": ACCESSIBILITY_PROJECTION_VERSION,
             "unexpected": true
         })))
         .is_err());
+
+        let serializer_changed = parse_observation_revision_request(Some(&serde_json::json!({
+            "version": 1,
+            "serializer_version": "accessibility-render-v0",
+            "projection_version": ACCESSIBILITY_PROJECTION_VERSION
+        })))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            requested_format_resync_reason(&serializer_changed),
+            Some(FullResyncReason::SerializerChanged)
+        );
+
+        let projection_changed = parse_observation_revision_request(Some(&serde_json::json!({
+            "version": 1,
+            "serializer_version": ACCESSIBILITY_SERIALIZER_VERSION,
+            "projection_version": "full-tree-v0"
+        })))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            requested_format_resync_reason(&projection_changed),
+            Some(FullResyncReason::ProjectionChanged)
+        );
     }
 
     fn padded(mut changing: Vec<CapturedNode<&'static str>>) -> Vec<CapturedNode<&'static str>> {
@@ -1092,6 +1179,7 @@ mod tests {
         assert_eq!(result.nodes[1].element_id, 1);
         assert_eq!(result.nodes[1].parent_id, Some(0));
         assert!(result.stable_element_ids);
+        assert!(result.cache_estimate_bytes > 0);
         assert!(
             result.text.contains("element_token=rv1:lineage:1"),
             "actionable rows must expose their stable revision token"
@@ -1463,6 +1551,7 @@ mod tests {
 
         assert_eq!(result.mode, ObservationMode::Full);
         assert!(!result.stable_element_ids);
+        assert_eq!(result.cache_estimate_bytes, 0);
         assert!(!result.text.contains("element_token="));
         assert_eq!(lineage.retained_revision_count(), 0);
     }

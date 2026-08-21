@@ -131,6 +131,10 @@ impl ElementCache {
             .with_snapshot(&CacheKey { pid, window_id }, |s| s.elements.len())
             .unwrap_or(0)
     }
+
+    pub fn clear_target(&self, pid: i32, window_id: u32) {
+        self.core.remove(&CacheKey { pid, window_id });
+    }
 }
 
 impl Default for ElementCache {

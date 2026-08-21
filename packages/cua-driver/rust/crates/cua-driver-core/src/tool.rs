@@ -4718,6 +4718,7 @@ mod capability_tests {
         "press_key",
         "hotkey",
         "set_value",
+        "perform_secondary_action",
         // screen
         "zoom",
         "get_screen_size",
@@ -4806,6 +4807,8 @@ mod capability_tests {
         // Surface 6 — claimed by tools that accept the opaque
         // `element_token` arg + get_window_state which emits them.
         "accessibility.element_tokens",
+        "accessibility.value.set",
+        "accessibility.action.secondary",
         // Versioned opt-in revision/diff protocol on get_window_state.
         // Advertising the token promises the versioned protocol is accepted;
         // platforms without approved native identity still answer with
@@ -5014,7 +5017,9 @@ mod capability_tests {
             "type_text",
             "type_text_chars",
             "press_key",
+            "hotkey",
             "set_value",
+            "perform_secondary_action",
             // get_window_state emits the tokens — same capability
             // claim, from the other side of the contract.
             "get_window_state",

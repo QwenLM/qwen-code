@@ -724,7 +724,14 @@ unsafe fn copy_element_array_attr(element: AXUIElementRef, attr_name: &str) -> C
         return CopiedAXElements {
             elements: Vec::new(),
             complete: {
-                note_incomplete(attr_name, if err != kAXErrorSuccess { "ax_error on element array" } else { "null or non-array value" });
+                note_incomplete(
+                    attr_name,
+                    if err != kAXErrorSuccess {
+                        "ax_error on element array"
+                    } else {
+                        "null or non-array value"
+                    },
+                );
                 false
             },
         };
@@ -735,7 +742,14 @@ unsafe fn copy_element_array_attr(element: AXUIElementRef, attr_name: &str) -> C
         return CopiedAXElements {
             elements: Vec::new(),
             complete: {
-                note_incomplete(attr_name, if err != kAXErrorSuccess { "ax_error on element array" } else { "null or non-array value" });
+                note_incomplete(
+                    attr_name,
+                    if err != kAXErrorSuccess {
+                        "ax_error on element array"
+                    } else {
+                        "null or non-array value"
+                    },
+                );
                 false
             },
         };
@@ -985,7 +999,10 @@ mod tests {
 
     #[test]
     fn stable_app_side_refusals_are_complete_transient_errors_are_not() {
-        assert!(attribute_error_is_complete("AXDescription", kAXErrorNoValue));
+        assert!(attribute_error_is_complete(
+            "AXDescription",
+            kAXErrorNoValue
+        ));
         assert!(attribute_error_is_complete(
             "AXDescription",
             kAXErrorAttributeUnsupported
