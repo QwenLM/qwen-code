@@ -628,7 +628,7 @@ describe('package scripts', () => {
     }
 
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
   });
 });
