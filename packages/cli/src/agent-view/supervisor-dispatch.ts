@@ -66,6 +66,7 @@ export async function dispatchAgentViewSession(
     activeCwd: resolvedCwd,
     createdAt: now,
     updatedAt: now,
+    ...(options.promptInArgv === false ? {} : { initialPromptPending: true }),
     worktree: { mode: 'none' as const },
   };
   try {

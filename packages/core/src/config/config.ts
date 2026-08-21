@@ -1123,6 +1123,7 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  agentViewEnabled?: boolean;
   sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
@@ -2017,6 +2018,7 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly agentViewEnabled: boolean = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
@@ -2299,6 +2301,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.agentViewEnabled = params.agentViewEnabled ?? false;
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
@@ -6769,6 +6772,10 @@ export class Config {
   isCronEnabled(): boolean {
     if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
+  }
+
+  isAgentViewEnabled(): boolean {
+    return this.agentViewEnabled;
   }
 
   isAgentTeamEnabled(): boolean {

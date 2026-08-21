@@ -74,6 +74,8 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
+import { agentsCommand } from '../commands/agents.js';
+import { setInvocationScopedEnv } from './invocation-env.js';
 import { isValidSessionId } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -81,7 +83,10 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  drainStdioBeforeExit,
+  writeStderrLine,
+} from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
   validateMaxToolCalls,
@@ -229,6 +234,7 @@ export interface CliArgs {
   jsonFile?: string | undefined;
   jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+  background?: boolean | undefined;
 }
 
 /**
@@ -544,20 +550,9 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-export async function parseArguments(): Promise<CliArgs> {
-  let rawArgv = hideBin(process.argv);
-
-  // hack: if the first argument is the CLI entry point, remove it
-  if (
-    rawArgv.length > 0 &&
-    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli/cli.js'))
-  ) {
-    rawArgv = rawArgv.slice(1);
-  }
-
-  const yargsInstance = yargs(rawArgv)
+function buildCliParser(rawArgv: string[]): Argv {
+  const parser = yargs(rawArgv)
+    .parserConfiguration({ 'populate--': true })
     .locale('en')
     .scriptName('qwen')
     .usage(
@@ -653,6 +648,19 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'boolean',
       description:
         'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
+    })
+    .option('background', {
+      alias: 'bg',
+      type: 'boolean',
+      nargs: 0,
+      description: 'Start a new Agent View background session',
+    })
+    .option('continue', {
+      alias: 'c',
+      type: 'boolean',
+      nargs: 0,
+      description: 'Resume the most recent session for the current project.',
+      default: false,
     })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
@@ -863,13 +871,6 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for receiving remote input commands (bidirectional sync). ' +
             'An external process writes JSONL commands; the TUI watches and processes them.',
         })
-        .option('continue', {
-          alias: 'c',
-          type: 'boolean',
-          description:
-            'Resume the most recent session for the current project.',
-          default: false,
-        })
         .option('resume', {
           alias: 'r',
           type: 'string',
@@ -981,8 +982,22 @@ export async function parseArguments(): Promise<CliArgs> {
           const hasPositionalQuery = Array.isArray(query)
             ? query.length > 0
             : !!query;
+          const separatorTail = Array.isArray(argv['--']) ? argv['--'] : [];
+          const hasQuery = hasPositionalQuery || separatorTail.length > 0;
 
-          if (argv['prompt'] && hasPositionalQuery) {
+          if (argv['background']) {
+            if (!hasQuery) {
+              return 'Cannot use --bg/--background without a positional prompt';
+            }
+            const backgroundError = validateBackgroundInvocation(rawArgv);
+            if (backgroundError) return backgroundError;
+          }
+          if (argv['background'] && !process.stdin.isTTY) {
+            // The positional-prompt gate above already ran, so the prompt
+            // is positional here; the only actionable fix is a TTY.
+            return 'Cannot use --bg/--background when stdin is not an interactive terminal; run it from a TTY';
+          }
+          if (argv['prompt'] && hasQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
           if (argv['prompt'] && argv['promptInteractive']) {
@@ -1059,10 +1074,6 @@ export async function parseArguments(): Promise<CliArgs> {
               return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
             }
             const hasPrompt = !!argv['prompt'];
-            const query = argv['query'] as string | string[] | undefined;
-            const hasPositionalQuery = Array.isArray(query)
-              ? query.length > 0
-              : !!query;
             // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
             // when stdin is not a TTY, the prompt is supplied via the pipe
             // and headless mode runs normally. Only reject true interactive
@@ -1071,13 +1082,14 @@ export async function parseArguments(): Promise<CliArgs> {
             // termination handler in the TUI loop, so silently launching
             // the TUI would strand the run.
             const stdinIsPiped = !process.stdin.isTTY;
-            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+            if (!hasPrompt && !hasQuery && !stdinIsPiped) {
               return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
             }
           }
           return true;
         }),
-    )
+    );
+  parser
     // Register MCP subcommands
     .command(mcpCommand)
     // Register Extension subcommands
@@ -1095,6 +1107,60 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     // Register update command
     .command(updateCommand);
+  return parser;
+}
+
+function validateBackgroundInvocation(rawArgv: string[]): string | undefined {
+  try {
+    yargs(rawArgv)
+      .exitProcess(false)
+      .help(false)
+      .version(false)
+      .parserConfiguration({ 'populate--': true })
+      .option('background', {
+        alias: 'bg',
+        type: 'boolean',
+        nargs: 0,
+      })
+      .command('$0 [query..]', false, (parser: Argv) =>
+        parser.positional('query', { type: 'string' }),
+      )
+      .strictOptions()
+      .fail((message, error) => {
+        throw error ?? new Error(message);
+      })
+      .parseSync();
+    return undefined;
+  } catch {
+    return 'Cannot use --bg/--background with other CLI options; pass only a positional prompt or place option-looking prompt text after `--`';
+  }
+}
+
+export async function parseArguments(): Promise<CliArgs> {
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
+  const yargsInstance = buildCliParser(rawArgv);
+  yargsInstance.command(agentsCommand);
+  yargsInstance.middleware((argv) => {
+    if (
+      argv._.length > 0 &&
+      (argv['background'] === true || argv['continue'] === true)
+    ) {
+      throw new Error(
+        '`--bg/--background` and `--continue/-c` cannot be combined with a CLI subcommand. Place `--` before prompt text that matches a command name.',
+      );
+    }
+  });
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1120,6 +1186,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'agents' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1129,17 +1196,28 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
+    // Drain first: on POSIX pipes stdout flushes asynchronously, so a bare
+    // process.exit would discard buffered output beyond the pipe buffer
+    // (e.g. `qwen agents logs <id> | tee` for a large scrollback).
+    await drainStdioBeforeExit();
     process.exit(process.exitCode ?? 0);
   }
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file
   const queryArg = (result as { query?: string | string[] | undefined }).query;
-  const q: string | undefined = Array.isArray(queryArg)
-    ? queryArg.join(' ')
-    : queryArg;
+  const queryParts = Array.isArray(queryArg)
+    ? queryArg.map(String)
+    : queryArg
+      ? [queryArg]
+      : [];
+  const separatorTail = (result as { '--'?: unknown })['--'];
+  if (Array.isArray(separatorTail)) {
+    queryParts.push(...separatorTail.map(String));
+  }
+  const q = queryParts.length > 0 ? queryParts.join(' ') : undefined;
 
   // Route positional args: explicit -i flag -> interactive; else -> one-shot (even for @commands)
-  if (q && !result['prompt']) {
+  if (q && !result['prompt'] && !result['background']) {
     const hasExplicitInteractive =
       result['promptInteractive'] === '' || !!result['promptInteractive'];
     if (hasExplicitInteractive) {
@@ -1568,7 +1646,7 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
-    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    setInvocationScopedEnv('QWEN_DEBUG_LOG_FILE', '1');
   }
   const bareMode = isBareMode(argv.bare);
   const safeMode =
@@ -1579,7 +1657,7 @@ export async function loadCliConfig(
   // every content generator and the preconnect path. Resolution there ORs this
   // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
   if (argv.insecure) {
-    process.env['QWEN_TLS_INSECURE'] = '1';
+    setInvocationScopedEnv('QWEN_TLS_INSECURE', '1');
   }
   // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
   // process-wide. The custom undici dispatcher handles the Node path, but this
@@ -1591,7 +1669,7 @@ export async function loadCliConfig(
     isTlsVerificationDisabled() &&
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
   ) {
-    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    setInvocationScopedEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
     // The setting is process-wide, so the blast radius is every outbound HTTPS
     // connection (model API, OAuth, MCP servers, and child processes that
     // inherit the env), not just model calls. Log to the debug file too, so the
@@ -2268,6 +2346,7 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    agentViewEnabled: settings.experimental?.agentView === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,

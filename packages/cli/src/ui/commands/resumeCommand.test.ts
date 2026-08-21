@@ -17,11 +17,28 @@ vi.mock('../../config/config.js', () => ({
   ),
 }));
 
+const mockIsAgentViewWorkerResumeCommandBlocked = vi.hoisted(() =>
+  vi.fn(() => false),
+);
+const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() =>
+  vi.fn(async () => false),
+);
+
+vi.mock('../../startup/agent-view-resume-guard.js', () => ({
+  AGENT_VIEW_WORKER_RESUME_MESSAGE:
+    'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
+  isAgentViewWorkerResumeCommandBlocked:
+    mockIsAgentViewWorkerResumeCommandBlocked,
+  isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
+}));
+
 describe('resumeCommand', () => {
   let mockContext: CommandContext;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(false);
     mockContext = createMockCommandContext();
   });
 
@@ -40,6 +57,19 @@ describe('resumeCommand', () => {
     expect(result).toEqual({
       type: 'dialog',
       dialog: 'resume',
+    });
+  });
+
+  it('blocks resume inside an attached background agent', async () => {
+    mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(true);
+
+    const result = await resumeCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
     });
   });
 
@@ -75,6 +105,28 @@ describe('resumeCommand', () => {
       dialog: 'resume',
       sessionId,
     });
+  });
+
+  it('blocks direct resume for a managed Agent View session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValueOnce(true);
+    const sessionExists = vi.fn().mockResolvedValue(true);
+    const mockConfig = {
+      getSessionService: vi.fn().mockReturnValue({ sessionExists }),
+      getTargetDir: vi.fn().mockReturnValue('/test'),
+    };
+    mockContext = createMockCommandContext({
+      services: { config: mockConfig as never },
+    });
+
+    const result = await resumeCommand.action!(mockContext, sessionId);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'managed session message',
+    });
+    expect(sessionExists).toHaveBeenCalledWith(sessionId);
   });
 
   it('should return error when valid UUID is provided but session does not exist', async () => {

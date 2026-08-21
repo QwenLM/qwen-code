@@ -13,6 +13,15 @@ export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   PTY_HOST_AUTH_TOKEN_ENV,
   PTY_HOST_ID_ENV,
+  // The supervisor startup-gate marker (INTERNAL_AGENT_VIEW_SUPERVISOR_ENV):
+  // workers must not carry it, or an agent-run `qwen` whose argv mentions
+  // the internal flag could re-enter supervisor mode from inside a session.
+  'QWEN_AGENT_VIEW_SUPERVISOR',
+  // The --bare invocation marker must never leak from the daemon env into
+  // workers: a bare-mode `qwen agents` invocation that spawned the daemon
+  // would otherwise silently run every later background session bare
+  // (minimal settings: no user model/MCP servers/approval mode).
+  'QWEN_CODE_SIMPLE',
   'TMUX',
   'TMUX_PANE',
   'STY',

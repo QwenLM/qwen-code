@@ -189,6 +189,7 @@ export interface WorktreeSetupConfig {
 export interface CreateWorktreeResult {
   success: boolean;
   worktree?: WorktreeInfo;
+  createdSymlinkPaths?: string[];
   error?: string;
 }
 
@@ -1598,14 +1599,16 @@ export class GitWorktreeService {
       // run tests / builds without a fresh install. Same fail-open
       // policy as hooksPath — failures log and continue.
       const symlinkPaths = options?.symlinkDirectories ?? [];
+      let createdSymlinkPaths: string[] = [];
       if (symlinkPaths.length > 0) {
-        await this.symlinkConfiguredDirectories(
+        createdSymlinkPaths = await this.symlinkConfiguredDirectories(
           worktreePath,
           symlinkPaths,
         ).catch((error) => {
           debugLogger.warn(
             `createUserWorktree: symlinkConfiguredDirectories failed for ${slug}: ${error}`,
           );
+          return [];
         });
       }
 
@@ -1617,7 +1620,7 @@ export class GitWorktreeService {
         isActive: true,
         createdAt: Date.now(),
       };
-      return { success: true, worktree };
+      return { success: true, worktree, createdSymlinkPaths };
     } catch (error) {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
@@ -1739,7 +1742,7 @@ export class GitWorktreeService {
   private async symlinkConfiguredDirectories(
     worktreePath: string,
     configured: readonly string[],
-  ): Promise<void> {
+  ): Promise<string[]> {
     // Loop-invariant canonical paths, hoisted out of the per-entry loop.
     //
     // We must `fs.realpath` the repo root (rather than `path.resolve`,
@@ -1764,7 +1767,7 @@ export class GitWorktreeService {
       debugLogger.warn(
         `symlinkConfiguredDirectories: cannot realpath sourceRepoPath "${this.sourceRepoPath}", skipping all entries`,
       );
-      return;
+      return [];
     }
     const gitDirAbs = path.join(repoRootAbs, '.git');
     const qwenDirAbs = path.join(repoRootAbs, '.qwen');
@@ -1776,6 +1779,7 @@ export class GitWorktreeService {
       .realpath(worktreePath)
       .catch(() => worktreePath);
 
+    const createdPaths: string[] = [];
     for (const raw of configured) {
       if (typeof raw !== 'string' || raw.length === 0) {
         debugLogger.warn(
@@ -1966,6 +1970,7 @@ export class GitWorktreeService {
         // `sourceAbs` so the new link is one-hop and doesn't preserve
         // the chain we just validated.
         await fs.symlink(realSource, destAbs, symlinkType);
+        createdPaths.push(raw);
         debugLogger.debug(
           `symlinkConfiguredDirectories: linked ${destAbs} → ${realSource} (${symlinkType})`,
         );
@@ -1981,6 +1986,7 @@ export class GitWorktreeService {
         }
       }
     }
+    return createdPaths;
   }
 
   /**
@@ -2178,11 +2184,26 @@ export class GitWorktreeService {
    * Fail-closed: returns `true` on any git error so the caller assumes the
    * worktree is dirty rather than risking data loss.
    */
-  async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
+  async hasWorktreeChanges(
+    worktreePath: string,
+    ignoredPaths: readonly string[] = [],
+  ): Promise<boolean> {
     try {
       const { simpleGit } = await loadSimpleGit();
       const wtGit = simpleGit(worktreePath);
-      const status = await wtGit.status();
+      const status = await wtGit.status(
+        ignoredPaths.length > 0
+          ? [
+              '--untracked-files=all',
+              '--',
+              '.',
+              ...ignoredPaths.map(
+                (entry) =>
+                  `:(exclude,literal)${entry.replaceAll(path.sep, '/')}`,
+              ),
+            ]
+          : undefined,
+      );
       // Defensive: `status.isClean()` reads several status arrays, but
       // we OR with `conflicted.length` explicitly so future simple-git
       // versions that change the bookkeeping cannot silently let a

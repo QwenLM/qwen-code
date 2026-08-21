@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { AgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
+
 const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
   vi.hoisted(() => ({
     writeTerminalTitleSpy: vi.fn(),
@@ -12,6 +14,43 @@ const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
       vi.fn(() => deps),
     ),
   }));
+
+const agentViewHandoffMocks = vi.hoisted(() => ({
+  detachCurrentSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+  readWorkerSideband: vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(
+    () => undefined,
+  ),
+  sendWorkerEvent: vi.fn(async () => undefined),
+  reportWorkerState: vi.fn(async () => undefined),
+}));
+
+const agentViewStateMock = vi.hoisted(() =>
+  vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+    agentShellFocused: false as boolean,
+  })),
+);
+
+vi.mock('../agent-view/managed-detach.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/managed-detach.js')>();
+  return {
+    ...actual,
+    detachCurrentSessionToAgentView: agentViewHandoffMocks.detachCurrentSession,
+  };
+});
+
+vi.mock('../agent-view/worker-sideband.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/worker-sideband.js')>();
+  return {
+    ...actual,
+    readAgentViewWorkerSidebandEnv: agentViewHandoffMocks.readWorkerSideband,
+    sendAgentViewWorkerEvent: agentViewHandoffMocks.sendWorkerEvent,
+    reportAgentViewWorkerState: agentViewHandoffMocks.reportWorkerState,
+  };
+});
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -160,10 +199,7 @@ vi.mock('./hooks/useProviderUpdates.js', () => ({
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
-  useAgentViewState: vi.fn(() => ({
-    activeView: 'main',
-    agents: new Map(),
-  })),
+  useAgentViewState: agentViewStateMock,
   useAgentViewActions: vi.fn(() => ({
     switchToAgent: vi.fn(),
     switchToNext: vi.fn(),
@@ -211,6 +247,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
+import { runExitCleanup } from '../utils/cleanup.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -263,6 +300,17 @@ describe('AppContainer State Management', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    agentViewHandoffMocks.detachCurrentSession.mockResolvedValue({
+      sessionId: 'session-1',
+    });
+    agentViewHandoffMocks.readWorkerSideband.mockReturnValue(undefined);
+    agentViewHandoffMocks.sendWorkerEvent.mockResolvedValue(undefined);
+    agentViewHandoffMocks.reportWorkerState.mockResolvedValue(undefined);
+    agentViewStateMock.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+      agentShellFocused: false,
+    });
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -359,6 +407,7 @@ describe('AppContainer State Management', () => {
       confirmationRequest: null,
     });
     mockedUseGeminiStream.mockReturnValue({
+      pendingToolCalls: [],
       streamingState: 'idle',
       submitQuery: vi.fn(),
       initError: null,
@@ -699,6 +748,43 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Basic Rendering', () => {
+    it('reports working after an Agent View worker starts responding', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/test/workspace',
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: mockClearPendingState,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(agentViewHandoffMocks.reportWorkerState).toHaveBeenCalledWith({
+          sessionState: 'working',
+        });
+      });
+    });
+
     it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
       const cancelOngoingRequest = vi.fn(() => {
@@ -706,6 +792,7 @@ describe('AppContainer State Management', () => {
       });
       const requestShutdown = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: StreamingState.Responding,
         submitQuery: vi.fn(),
         initError: null,
@@ -741,6 +828,95 @@ describe('AppContainer State Management', () => {
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(requestShutdown).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(timerCount + 1);
+    });
+
+    it('exits the foreground runtime after handing it to Agent View', async () => {
+      const requestShutdown = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        flush,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
+      const exit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => undefined) as never);
+
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as { detachAgentViewSession: () => Promise<void> } | undefined;
+
+        await actions?.detachAgentViewSession();
+
+        expect(agentViewHandoffMocks.detachCurrentSession).toHaveBeenCalledWith(
+          mockConfig,
+        );
+        expect(requestShutdown).toHaveBeenCalledOnce();
+        expect(runExitCleanup).toHaveBeenCalledOnce();
+        expect(exit).toHaveBeenCalledWith(0);
+        expect(flush).toHaveBeenCalledOnce();
+        expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        );
+        expect(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(requestShutdown.mock.invocationCallOrder[0]);
+        expect(requestShutdown.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        );
+        expect(
+          vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
+        ).toBeLessThan(exit.mock.invocationCallOrder[0]);
+      } finally {
+        exit.mockRestore();
+      }
+    });
+
+    it('detaches an attached worker through sideband without adopting it', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+      const requestShutdown = vi.fn();
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        requestShutdown,
+      } as unknown as GeminiClient);
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
+        | { detachAgentViewSession: () => Promise<void> }
+        | undefined;
+
+      await actions?.detachAgentViewSession();
+
+      expect(agentViewHandoffMocks.sendWorkerEvent).toHaveBeenCalledWith({
+        type: 'detach',
+      });
+      expect(agentViewHandoffMocks.detachCurrentSession).not.toHaveBeenCalled();
+      expect(requestShutdown).not.toHaveBeenCalled();
+      expect(runExitCleanup).not.toHaveBeenCalled();
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
@@ -874,6 +1050,7 @@ describe('AppContainer State Management', () => {
         confirmationRequest: null,
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery,
         initError: null,
@@ -1476,6 +1653,7 @@ describe('AppContainer State Management', () => {
         drainQueue: vi.fn().mockReturnValue([]),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery,
         initError: null,
@@ -1781,6 +1959,7 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1829,6 +2008,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1880,6 +2060,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1990,6 +2171,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -2039,6 +2221,7 @@ describe('AppContainer State Management', () => {
         .mockReturnValueOnce('Use list_agents to inspect restored agents.')
         .mockReturnValue(null);
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -2658,6 +2841,7 @@ describe('AppContainer State Management', () => {
           confirmationRequest: null,
         });
         mockedUseGeminiStream.mockReturnValue({
+          pendingToolCalls: [],
           streamingState: StreamingState.Responding,
           submitQuery: vi.fn(),
           initError: null,
@@ -2753,6 +2937,7 @@ describe('AppContainer State Management', () => {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
         return {
+          pendingToolCalls: [],
           ...streamReturnValue,
           streamingResponseLengthRef: { current: 0 },
           isReceivingContent: false,
@@ -4421,6 +4606,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Processing request';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4469,6 +4655,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4516,6 +4703,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: StreamingState.WaitingForConfirmation,
         submitQuery: vi.fn(),
         initError: null,
@@ -4565,6 +4753,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought with a short subject
       const shortTitle = 'Short';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4619,6 +4808,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const title = 'Test Title';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4670,6 +4860,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4738,6 +4929,7 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4838,6 +5030,7 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4966,6 +5159,7 @@ describe('AppContainer State Management', () => {
       mockedMeasureElement.mockReturnValue({ width: 80, height: 10 }); // Footer is taller than the screen
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -5297,6 +5491,7 @@ describe('AppContainer State Management', () => {
     it('should cancel ongoing request on first Ctrl+C', () => {
       const mockCancelOngoingRequest = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -6127,6 +6322,7 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -6171,6 +6367,7 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -6272,6 +6469,71 @@ describe('AppContainer State Management', () => {
           pending: { taskId: 'skill-task-1', skills: [] },
         }),
       ).toBe(false);
+    });
+  });
+
+  describe('Agent View idle gate state', () => {
+    it('passes a populated idle-gate ref to the slash command processor', () => {
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [
+          {
+            status: 'awaiting_approval',
+            confirmationDetails: { type: 'ask_user_question' },
+          },
+        ],
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const calls = mockedUseSlashCommandProcessor.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const gateRef = calls[calls.length - 1]?.at(-1) as {
+        current: Record<string, boolean | undefined>;
+      };
+      expect(gateRef?.current).toMatchObject({
+        hasPendingUserQuestion: true,
+        hasPendingToolConfirmation: true,
+      });
+    });
+
+    it('treats a focused agent shell as a foreground shell', () => {
+      agentViewStateMock.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: true,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const calls = mockedUseSlashCommandProcessor.mock.calls;
+      const gateRef = calls[calls.length - 1]?.at(-1) as {
+        current: Record<string, boolean | undefined>;
+      };
+      expect(gateRef.current['hasForegroundShell']).toBe(true);
     });
   });
 });

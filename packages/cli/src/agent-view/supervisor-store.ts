@@ -781,6 +781,9 @@ function normalizeSessionState(
     activeCwd: path.resolve(activeCwd),
     createdAt,
     updatedAt,
+    ...(typeof raw['initialPromptPending'] === 'boolean'
+      ? { initialPromptPending: raw['initialPromptPending'] }
+      : {}),
     worktree: isRecord(raw['worktree'])
       ? {
           ...raw['worktree'],

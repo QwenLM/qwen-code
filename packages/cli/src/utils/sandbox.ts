@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
@@ -81,6 +82,10 @@ export function getSandboxPassthroughEnvArgs(
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    // Agent View worker identity: startup routing, the resume/continue
+    // guards and the sideband ready/heartbeat all run after the container
+    // hop and read these keys, so a managed worker mis-starts without them.
+    ...AGENT_VIEW_WORKER_ENV_KEYS,
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );

@@ -12,6 +12,7 @@ import {
   type SlashCommandProcessorActions,
 } from './slashCommandProcessor.js';
 import type {
+  AgentViewIdleGateState,
   CommandContext,
   ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
@@ -234,6 +235,8 @@ describe('useSlashCommandProcessor', () => {
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
     isIdleRef = { current: true },
+    actions: SlashCommandProcessorActions = createMockActions(),
+    agentViewIdleGateStateRef?: { current: AgentViewIdleGateState },
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -253,13 +256,14 @@ describe('useSlashCommandProcessor', () => {
         setIsProcessing,
         isIdleRef,
         vi.fn(), // setGeminiMdFileCount
-        createMockActions(),
+        actions,
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
         mockUpdateItem,
         undefined, // setSessionName
         extensionRefreshState,
+        agentViewIdleGateStateRef,
       ),
     );
 
@@ -275,6 +279,31 @@ describe('useSlashCommandProcessor', () => {
       expect(BuiltinCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(FileCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(McpPromptLoader).toHaveBeenCalledWith(mockConfig);
+    });
+
+    it('plumbs Agent View idle gate state into the command context', async () => {
+      const agentViewIdleGateStateRef = {
+        current: { hasQueuedPrompt: true },
+      };
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: true },
+        createMockActions(),
+        agentViewIdleGateStateRef,
+      );
+
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      expect(result.current.commandContext.ui.agentViewIdleGateStateRef).toBe(
+        agentViewIdleGateStateRef,
+      );
     });
 
     it('rebuilds commands when an MCP server connects (surfaces MCP prompts in /)', async () => {
@@ -740,6 +769,32 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Action Result Handling', () => {
+    it('should handle "agent_view_detach" action', async () => {
+      const command = createTestCommand({
+        name: 'background',
+        action: vi.fn().mockResolvedValue({ type: 'agent_view_detach' }),
+      });
+      const actions = createMockActions();
+      actions.detachAgentViewSession = vi.fn();
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: true },
+        actions,
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/background');
+      });
+
+      expect(actions.detachAgentViewSession).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       ['/auth status', 'auth', ['connect', 'login'], 'auth'],
       ['/connect', 'auth', ['connect', 'login'], 'auth'],

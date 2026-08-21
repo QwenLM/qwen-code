@@ -21,6 +21,7 @@
  * those need a constructed `Config` and live in {@link persistStartupWorktreeSidecar}.
  */
 
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   createDebugLogger,
@@ -77,6 +78,7 @@ export interface StartupWorktreeContext {
    * session's new commits.
    */
   wasReattached: boolean;
+  createdSymlinkPaths: string[];
 }
 
 export type SetupStartupWorktreeResult =
@@ -252,6 +254,7 @@ export async function setupStartupWorktree(
         originalHeadCommit: registered.headCommit,
         isPullRequest,
         wasReattached: true,
+        createdSymlinkPaths: [],
       },
     };
   }
@@ -330,8 +333,74 @@ export async function setupStartupWorktree(
         : originalHeadCommit,
       isPullRequest,
       wasReattached: false,
+      createdSymlinkPaths: result.createdSymlinkPaths ?? [],
     },
   };
+}
+
+export interface DiscardStartupWorktreeResult {
+  preserved?: string;
+  error?: string;
+}
+
+export async function discardCreatedStartupWorktree(
+  context: StartupWorktreeContext | null,
+): Promise<DiscardStartupWorktreeResult> {
+  if (context === null || context.wasReattached) return {};
+  try {
+    process.chdir(context.repoRoot);
+    const service = new GitWorktreeService(context.repoRoot);
+    const owner = await readWorktreeSessionMarker(context.worktreePath);
+    if (owner !== null) {
+      return {
+        preserved: `worktree ${context.worktreePath} is owned by session ${owner}`,
+      };
+    }
+    const intactCreatedSymlinkPaths: string[] = [];
+    for (const entry of context.createdSymlinkPaths) {
+      try {
+        const sourcePath = path.join(context.repoRoot, entry);
+        const worktreePath = path.join(context.worktreePath, entry);
+        const [stat, sourceTarget, worktreeTarget] = await Promise.all([
+          fs.lstat(worktreePath),
+          fs.realpath(sourcePath),
+          fs.realpath(worktreePath),
+        ]);
+        if (stat.isSymbolicLink() && sourceTarget === worktreeTarget) {
+          intactCreatedSymlinkPaths.push(entry);
+        }
+      } catch {
+        // A missing or changed link is user-visible work and must stay dirty.
+      }
+    }
+    if (
+      await service.hasWorktreeChanges(
+        context.worktreePath,
+        intactCreatedSymlinkPaths,
+      )
+    ) {
+      return {
+        preserved: `worktree ${context.worktreePath} has uncommitted changes`,
+      };
+    }
+    const branchHead = await service.resolveRef(`refs/heads/${context.branch}`);
+    if (branchHead !== context.originalHeadCommit) {
+      return {
+        preserved: `worktree branch ${context.branch} changed after startup`,
+      };
+    }
+    const result = await service.removeUserWorktree(context.slug, {
+      deleteBranch: true,
+      forceDeleteBranch: true,
+    });
+    return result.success
+      ? {}
+      : {
+          error: result.error ?? `failed to remove ${context.worktreePath}`,
+        };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /**

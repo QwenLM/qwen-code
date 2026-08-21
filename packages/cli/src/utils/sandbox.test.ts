@@ -210,6 +210,29 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_DESKTOP=1',
     ]);
   });
+
+  it('forwards Agent View worker identity into container sandboxes', () => {
+    expect(
+      getSandboxPassthroughEnvArgs({
+        QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
+        QWEN_AGENT_VIEW_SIDEBAND: '/tmp/sideband.sock',
+        QWEN_AGENT_VIEW_TOKEN: 'token',
+        QWEN_AGENT_VIEW_ACTIVE_CWD: '/project',
+      }),
+    ).toEqual([
+      '--env',
+      'QWEN_AGENT_VIEW_WORKER=1',
+      '--env',
+      'QWEN_AGENT_VIEW_SESSION_ID=session-1',
+      '--env',
+      'QWEN_AGENT_VIEW_SIDEBAND=/tmp/sideband.sock',
+      '--env',
+      'QWEN_AGENT_VIEW_TOKEN=token',
+      '--env',
+      'QWEN_AGENT_VIEW_ACTIVE_CWD=/project',
+    ]);
+  });
 });
 
 describe('isContainerPathWithinWorkdir', () => {

@@ -276,6 +276,7 @@ class AgentViewSupervisorProcessHandler
 
   status() {
     return {
+      running: true,
       protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
       pid: process.pid,
       socketPath: this.socketPath,
@@ -426,7 +427,7 @@ class AgentViewSupervisorProcessHandler
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
-      promptInArgv: !shouldWaitForWorkerReady(this.options),
+      promptInArgv: true,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
@@ -487,9 +488,6 @@ class AgentViewSupervisorProcessHandler
         readyCompleted = true;
         await ensureSessionStillLaunchable(result.sessionId, store);
       });
-      if (shouldWaitForWorkerReady(this.options)) {
-        await this.queuePromptForSession(result.sessionId, prompt);
-      }
       const state = await readAgentViewSessionState(result.sessionId, store);
       const publishedAt = new Date().toISOString();
       try {
@@ -612,6 +610,7 @@ class AgentViewSupervisorProcessHandler
             resumeSessionId: adoption.resumeSessionId,
             argv: buildResumeWorkerArgv(
               adoption.resumeSessionId,
+              undefined,
               adoption.approvalMode,
             ),
             env: createAgentViewWorkerSidebandEnv({
@@ -1260,6 +1259,60 @@ class AgentViewSupervisorProcessHandler
     this.notifyChanged();
     return { sessionId, removed: true };
   }
+  async release(params?: Record<string, unknown>) {
+    const sessionId = requireSessionId(params);
+    return this.withAttachSetupLock(sessionId, () =>
+      this.withPromptQueueLock(sessionId, () =>
+        this.workers.withHostSetupLock(sessionId, async () => {
+          let state = await readAgentViewSessionState(sessionId, this.store);
+          if (!state) {
+            throw new Error(`No Agent View session found for ${sessionId}.`);
+          }
+          state = await this.detachIfAttachIsStale(state);
+          if (state.ownership === 'unmanaged') {
+            return { sessionId, released: true, alreadyReleased: true };
+          }
+          if (state.ownership === 'removing') {
+            await this.finishRemovingSessionLocked(sessionId);
+            this.notifyChanged();
+            return { sessionId, released: true, resumedRelease: true };
+          }
+          if (
+            state.ownership !== 'managed' ||
+            (state.processState !== 'exited' &&
+              state.processState !== 'hibernated') ||
+            state.attachState !== 'detached'
+          ) {
+            throw new Error(
+              `Agent View session ${sessionId} cannot be released while it is active.`,
+            );
+          }
+          const accepted = await patchAgentViewSessionStateIf(
+            sessionId,
+            (current) =>
+              current.ownership === 'managed' &&
+              (current.processState === 'exited' ||
+                current.processState === 'hibernated') &&
+              current.attachState === 'detached'
+                ? {
+                    ownership: 'removing',
+                    updatedAt: new Date().toISOString(),
+                  }
+                : undefined,
+            this.store,
+          );
+          if (!accepted) {
+            throw new Error(
+              `Agent View session ${sessionId} changed while it was being released.`,
+            );
+          }
+          await this.finishRemovingSessionLocked(sessionId);
+          this.notifyChanged();
+          return { sessionId, released: true };
+        }),
+      ),
+    );
+  }
   private async finishRemovingSessionLocked(sessionId: string): Promise<void> {
     const state = await readAgentViewSessionState(sessionId, this.store);
     if (state?.ownership !== 'removing') {
@@ -1383,9 +1436,21 @@ class AgentViewSupervisorProcessHandler
       socket.destroy();
     }
     this.attachSockets.clear();
-    const workerCount = await this.workers.shutdownAll();
+    const workers = await this.workers.shutdownAll();
+    if (workers.failed.length > 0) {
+      this.shuttingDown = false;
+      return {
+        shuttingDown: false,
+        workersStopped: workers.stopped.length,
+        workersFailed: workers.failed,
+      };
+    }
     await this.options.onShutdown?.();
-    return { shuttingDown: true, workersStopped: workerCount };
+    return {
+      shuttingDown: true,
+      workersStopped: workers.stopped.length,
+      workersFailed: workers.failed,
+    };
   }
   async hibernateIdleSessions() {
     const result = await this.hibernateIdleSessionsWithPolicy(
@@ -2143,19 +2208,39 @@ class WorkerRegistry {
     await this.retireSessionHost(sessionId, host);
   }
 
-  async shutdownAll(): Promise<number> {
+  async shutdownAll(): Promise<{
+    stopped: string[];
+    failed: Array<{ sessionId: string; error: string }>;
+  }> {
     const sessionIds = Array.from(this.ptyHosts.keys());
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       sessionIds.map((sessionId) =>
         this.withHostSetupLock(sessionId, async () => {
           const host = this.ptyHosts.get(sessionId);
-          if (!host) return;
+          if (!host) return undefined;
           await this.shutdownHost(sessionId, host);
           await markStoppedSession(sessionId, this.store, 'exited');
+          return sessionId;
         }),
       ),
     );
-    return sessionIds.length;
+    const stopped: string[] = [];
+    const failed: Array<{ sessionId: string; error: string }> = [];
+    for (const [index, result] of results.entries()) {
+      const sessionId = sessionIds[index]!;
+      if (result.status === 'fulfilled') {
+        if (result.value !== undefined) stopped.push(result.value);
+      } else {
+        failed.push({
+          sessionId,
+          error:
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason),
+        });
+      }
+    }
+    return { stopped, failed };
   }
 
   async launchPtyHostForSupervisor(
@@ -2409,6 +2494,7 @@ class WorkerRegistry {
     const resumeLaunch = await writeResumeWorkerLaunch(
       launch,
       token,
+      refreshedState.initialPromptPending === true,
       this.store,
     );
     // The replacement worker must not inherit stop/redraw controls queued
@@ -3789,6 +3875,9 @@ async function applyWorkerEvent(
           : {}),
         activeCwd,
         updatedAt: now,
+        ...(event.type === 'state' && event.sessionState === 'working'
+          ? { initialPromptPending: undefined }
+          : {}),
         ...(event.type === 'ready' ? { lastError: undefined } : {}),
       };
     },
@@ -4298,12 +4387,14 @@ function stringArrayParam(
 
 function buildResumeWorkerArgv(
   sessionId: string,
+  initialPrompt?: string,
   approvalMode?: string,
 ): string[] {
   // Attached form: the id stays one token even if it starts with '-', so
   // the argument parser can never drop or reinterpret it as a flag.
   return buildCurrentQwenCliArgv([
     `--resume=${sessionId}`,
+    ...(initialPrompt ? [`--prompt-interactive=${initialPrompt}`] : []),
     ...(approvalMode ? [`--approval-mode=${approvalMode}`] : []),
   ]);
 }
@@ -4311,6 +4402,11 @@ function buildResumeWorkerArgv(
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token?: string,
+  // Entrypoint migration runs after a respawn launch is built; preserve a
+  // still-pending initial prompt already encoded in that argv.
+  replayInitialPrompt = launch.argv.includes(
+    `--prompt-interactive=${launch.initialPrompt ?? ''}`,
+  ),
 ): AgentViewLaunchFile {
   return {
     ...launch,
@@ -4319,6 +4415,7 @@ function refreshResumeWorkerLaunch(
     // is case-sensitive and the canonical id may rewrite it.
     argv: buildResumeWorkerArgv(
       launch.resumeSessionId ?? launch.sessionId,
+      replayInitialPrompt ? launch.initialPrompt : undefined,
       launch.approvalMode,
     ),
     env: {
@@ -4357,9 +4454,14 @@ function getResumeWorkerSandboxEnv(
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token: string,
+  replayInitialPrompt: boolean,
   store: { globalDir?: string },
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch, token);
+  const resumeLaunch = refreshResumeWorkerLaunch(
+    launch,
+    token,
+    replayInitialPrompt,
+  );
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }
