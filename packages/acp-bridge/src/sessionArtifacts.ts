@@ -9,10 +9,16 @@ import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
   isPrototypeMetadataKey,
+  isRecordableDerivedChild,
   isReservedWorkspaceMetadataKey,
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
+  MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
@@ -37,6 +43,7 @@ export type DaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactStorage =
@@ -328,13 +335,32 @@ export class SessionArtifactStore {
       const warningDetails: SessionArtifactWarningDetail[] = [];
       for (const input of inputs) {
         try {
-          normalizedResults.push(
-            await this.normalizeInput(
-              input,
-              ++this.receivedSeq,
-              options.trustedPublisher === true,
-            ),
-          );
+          const expanded = await this.expandWorkspaceDirectoryInput(input);
+          for (const item of expanded.inputs) {
+            try {
+              normalizedResults.push(
+                await this.normalizeInput(
+                  item,
+                  ++this.receivedSeq,
+                  options.trustedPublisher === true,
+                ),
+              );
+            } catch (error) {
+              if (validationStrict) {
+                throw error;
+              }
+              const message =
+                error instanceof Error ? error.message : String(error);
+              writeStderrLine(
+                `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
+                  message,
+                )}`,
+              );
+            }
+          }
+          if (expanded.warning) {
+            warnings.push(expanded.warning);
+          }
         } catch (error) {
           if (validationStrict) {
             throw error;
@@ -428,9 +454,17 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
-        changes.push(
-          ...(await this.evictOverflow(createdIds, changes, persistenceStrict)),
+        const overflowRemoved = await this.evictOverflow(
+          createdIds,
+          changes,
+          persistenceStrict,
         );
+        changes.push(...overflowRemoved.removed);
+        if (overflowRemoved.droppedCreated > 0) {
+          warnings.push(
+            `dropped ${overflowRemoved.droppedCreated} newly created artifacts because the store is full`,
+          );
+        }
 
         const hasStrictDurableTransition = changes.some(
           shouldCommitBeforeDurablePersistence,
@@ -789,9 +823,9 @@ export class SessionArtifactStore {
         });
       }
       const evicted = await this.evictOverflow(new Set(), []);
-      if (evicted.length > 0) {
+      if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
-        warnings.push(...(await this.persistChanges(evicted, false)));
+        warnings.push(...(await this.persistChanges(evicted.removed, false)));
       }
       this.setLastRestoreWarnings(warnings);
       return warnings;
@@ -1251,6 +1285,197 @@ export class SessionArtifactStore {
     );
   }
 
+  private async expandWorkspaceDirectoryInput(
+    input: SessionArtifactInput,
+  ): Promise<{ inputs: SessionArtifactInput[]; warning?: string }> {
+    const workspacePath =
+      typeof input.workspacePath === 'string'
+        ? input.workspacePath.trim()
+        : undefined;
+    if (!workspacePath) {
+      return { inputs: [input] };
+    }
+    const realWorkspace = await this.getRealWorkspaceCwdForValidation();
+    const normalizedPath = normalizeWorkspacePath(workspacePath, realWorkspace);
+    const absolutePath = path.resolve(realWorkspace, normalizedPath);
+    let stat: Stats;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return { inputs: [input] };
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SessionArtifactValidationError(
+        `workspacePath could not be inspected: ${reason}`,
+        'workspacePath',
+      );
+    }
+    let walkDir = absolutePath;
+    let walkRelative = normalizedPath;
+    if (stat.isSymbolicLink()) {
+      let realPath: string;
+      try {
+        realPath = await fs.realpath(absolutePath);
+      } catch {
+        return { inputs: [input] };
+      }
+      let realStat: Stats;
+      try {
+        realStat = await fs.lstat(realPath);
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          return { inputs: [input] };
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new SessionArtifactValidationError(
+          `workspacePath could not be inspected: ${reason}`,
+          'workspacePath',
+        );
+      }
+      if (!realStat.isDirectory()) {
+        return { inputs: [input] };
+      }
+      walkDir = realPath;
+      // Keep the caller-facing symlink path so expansion and direct records
+      // share one identity; realPath is only used to read the directory.
+      walkRelative = normalizedPath;
+    } else if (!stat.isDirectory()) {
+      return { inputs: [input] };
+    } else {
+      // Intermediate symlink components are followed by path lookup, so the
+      // final lstat may look like a plain directory while the real target
+      // sits under a skipped tree. Canonicalize before the skip gate.
+      try {
+        walkDir = await fs.realpath(absolutePath);
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          return { inputs: [input] };
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new SessionArtifactValidationError(
+          `workspacePath could not be inspected: ${reason}`,
+          'workspacePath',
+        );
+      }
+    }
+
+    const resolvedRelative = path.relative(realWorkspace, walkDir);
+    if (!resolvedRelative || isOutsidePath(resolvedRelative)) {
+      throw new SessionArtifactValidationError(
+        'workspacePath must stay inside the workspace',
+        'workspacePath',
+      );
+    }
+    if (
+      pathHasSkippedDirectoryComponent(
+        resolvedRelative.split(path.sep).join('/'),
+      ) ||
+      (walkRelative && pathHasSkippedDirectoryComponent(walkRelative))
+    ) {
+      throw new SessionArtifactValidationError(
+        'workspacePath is a skipped directory and cannot be recorded',
+        'workspacePath',
+      );
+    }
+
+    if (
+      input.metadata !== undefined &&
+      !isPlainMetadataObject(input.metadata)
+    ) {
+      throw new SessionArtifactValidationError(
+        'metadata must be an object',
+        'metadata',
+      );
+    }
+    const childMetadata = {
+      ...(isPlainMetadataObject(input.metadata) ? input.metadata : {}),
+      expandedFromDirectory: true as const,
+    };
+    if (Buffer.byteLength(JSON.stringify(childMetadata), 'utf8') > 4096) {
+      throw new SessionArtifactValidationError(
+        'metadata is too large to expand a directory',
+        'metadata',
+      );
+    }
+    const parentTitle = normalizeString(input.title, 'title', 200, true);
+    const parentDescription = normalizeString(
+      input.description,
+      'description',
+      1000,
+      false,
+    );
+
+    let collected: Awaited<ReturnType<typeof collectRecordableWorkspaceFiles>>;
+    try {
+      collected = await collectRecordableWorkspaceFiles(
+        walkDir,
+        walkRelative,
+        realWorkspace,
+        (filePath) =>
+          isRecordableDerivedChild(path.posix.basename(filePath), filePath),
+      );
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return { inputs: [input] };
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SessionArtifactValidationError(
+        `workspacePath could not be inspected: ${reason}`,
+        'workspacePath',
+      );
+    }
+    if (collected.files.length === 0) {
+      throw new SessionArtifactValidationError(
+        collected.depthLimited
+          ? `workspacePath is a directory whose recordable files are deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} levels`
+          : 'workspacePath is a directory with no recordable files',
+        'workspacePath',
+      );
+    }
+
+    const warnings: string[] = [];
+    if (collected.truncated) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" contained more than ${MAX_DIRECTORY_ARTIFACT_FILES} files; recorded the first ${collected.files.length}`,
+      );
+    }
+    if (collected.depthLimited) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" exceeded ${MAX_DIRECTORY_ARTIFACT_DEPTH} directory levels; some files were not recorded`,
+      );
+    }
+    if (collected.unreadable) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" contained subdirectories that could not be read`,
+      );
+    }
+    if (collected.skippedUnrecordable > 0) {
+      warnings.push(
+        `workspacePath "${normalizedPath}" skipped ${collected.skippedUnrecordable} files whose names cannot be recorded as artifact titles`,
+      );
+    }
+    return {
+      inputs: collected.files.map((filePath) => {
+        const title = path.posix.basename(filePath).trim();
+        const description =
+          parentDescription ||
+          (parentTitle && parentTitle !== title ? parentTitle : undefined);
+        return {
+          ...input,
+          title,
+          workspacePath: filePath,
+          kind: undefined,
+          mimeType: undefined,
+          sizeBytes: undefined,
+          metadata: childMetadata,
+          ...(description ? { description } : { description: undefined }),
+        };
+      }),
+      ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
+    };
+  }
+
   private async normalizeInput(
     input: RestoreSessionArtifactInput,
     receivedSeq: number,
@@ -1541,10 +1766,10 @@ export class SessionArtifactStore {
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
     strict = false,
-  ): Promise<SessionArtifactChange[]> {
+  ): Promise<{ removed: SessionArtifactChange[]; droppedCreated: number }> {
     const removed: SessionArtifactChange[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
-      return removed;
+      return { removed, droppedCreated: 0 };
     }
 
     const createdInThisBatch = new Set(createdIds);
@@ -1592,18 +1817,20 @@ export class SessionArtifactStore {
         'artifactId',
       );
     }
+    let droppedCreated = 0;
     for (const artifact of overflowCreated) {
       if (this.artifacts.size <= this.maxArtifacts) {
         break;
       }
       this.artifacts.delete(artifact.id);
+      droppedCreated++;
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
       removePriorChange(changes, artifact.id);
     }
 
-    return removed;
+    return { removed, droppedCreated };
   }
 }
 
@@ -1663,11 +1890,26 @@ function mergeBatchArtifact(
     delete merged.workspacePath;
     return merged;
   }
+  const refreshDisplay =
+    existing.storage === 'workspace' &&
+    next.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(next, existing);
+  const metadata = mergeMetadata(existing, next);
   return {
     ...existing,
+    title: refreshDisplay ? next.title : existing.title,
+    description: refreshDisplay
+      ? (next.description ?? existing.description)
+      : existing.description,
+    toolName: refreshDisplay ? next.toolName : existing.toolName,
+    source: refreshDisplay ? next.source : existing.source,
+    hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
+    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
-    metadata: mergeMetadata(existing, next),
+    metadata: refreshDisplay
+      ? stripExpandedFromDirectoryMarker(metadata)
+      : metadata,
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
@@ -1753,6 +1995,21 @@ function mergeArtifact(
     next.description = incoming.description;
     delete next.workspacePath;
     delete next.hideWorkspacePath;
+  } else if (
+    existing.storage === 'workspace' &&
+    incoming.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(incoming, existing)
+  ) {
+    // Workspace re-records keep the same locator identity. Explicit
+    // record_artifact (or the same producer) may refresh the display
+    // name; write_file/hook auto-records must not clobber it.
+    next.title = incoming.title;
+    next.description = incoming.description ?? existing.description;
+    next.toolCallId = incoming.toolCallId;
+    next.toolName = incoming.toolName;
+    next.source = incoming.source;
+    next.hookEventName = incoming.hookEventName;
+    next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
   }
 
   const changed = !publicArtifactsEqual(
@@ -1775,6 +2032,39 @@ function shouldRecordEphemeralUnpin(
     (existing.retention !== 'ephemeral' ||
       existing.persistedAt !== undefined ||
       existing.durableTombstoneRequired === true)
+  );
+}
+
+function stripExpandedFromDirectoryMarker(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (metadata?.['expandedFromDirectory'] !== true) {
+    return metadata;
+  }
+  const { expandedFromDirectory: _dropped, ...rest } = metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+function shouldRefreshWorkspaceDisplay(
+  incoming: Pick<
+    NormalizedArtifact,
+    'toolName' | 'source' | 'hookEventName' | 'metadata'
+  >,
+  existing: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
+): boolean {
+  if (incoming.metadata?.['expandedFromDirectory'] === true) {
+    return false;
+  }
+  if (incoming.toolName === 'record_artifact' && incoming.source !== 'hook') {
+    return true;
+  }
+  if (!incoming.toolName) {
+    return true;
+  }
+  return (
+    incoming.toolName === existing.toolName &&
+    incoming.source === existing.source &&
+    incoming.hookEventName === existing.hookEventName
   );
 }
 
@@ -2313,6 +2603,7 @@ function normalizeKind(kind: unknown): DaemonSessionArtifactKind {
     kind === 'audio' ||
     kind === 'pdf' ||
     kind === 'notebook' ||
+    kind === 'document' ||
     kind === 'other'
   ) {
     return kind;
@@ -2792,6 +3083,7 @@ function inferKind(input: {
   if (['.mp3', '.wav', '.m4a', '.ogg'].includes(ext)) return 'audio';
   if (ext === '.pdf') return 'pdf';
   if (ext === '.ipynb') return 'notebook';
+  if (isOfficeDocumentExtension(ext)) return 'document';
   return input.workspacePath ? 'file' : 'other';
 }
 
@@ -2825,60 +3117,58 @@ async function getWorkspaceStatus(
       if (!isSameFile(preOpenStat, stat)) {
         return { status: 'missing', escaped: true };
       }
-      if (stat.isFile()) {
-        const expectedMtimeMs =
-          typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
-        const expectedSha256 =
-          typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
-        const unchanged =
-          expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
-        const sizeChanged =
-          expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
-        if (sizeChanged) {
-          return {
-            status: 'changed',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (unchanged) {
-          return {
-            status: 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
-          return {
-            status: expectedSha256 ? 'changed' : 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        if (!options.hashContent) {
-          return {
-            status: expectedSha256 ? 'changed' : 'available',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
-        const sha256 = await hashFile(handle);
-        if (expectedSha256 && sha256 !== expectedSha256) {
-          return {
-            status: 'changed',
-            sizeBytes: stat.size,
-            mtimeMs: stat.mtimeMs,
-          };
-        }
+      if (!stat.isFile()) {
+        throw new Error('path is not a regular file');
+      }
+      const expectedMtimeMs =
+        typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
+      const expectedSha256 =
+        typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
+      const unchanged =
+        expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
+      const sizeChanged =
+        expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
+      if (sizeChanged) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      if (unchanged) {
         return {
           status: 'available',
           sizeBytes: stat.size,
           mtimeMs: stat.mtimeMs,
-          sha256,
+        };
+      }
+      if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
+        return {
+          status: expectedSha256 ? 'changed' : 'available',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      if (!options.hashContent) {
+        return {
+          status: expectedSha256 ? 'changed' : 'available',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      const sha256 = await hashFile(handle);
+      if (expectedSha256 && sha256 !== expectedSha256) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
         };
       }
       return {
         status: 'available',
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        sha256,
       };
     } finally {
       await handle.close();
@@ -2996,6 +3286,12 @@ function isNotFoundError(error: unknown): boolean {
   }
   const code = (error as { code?: unknown }).code;
   return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function isPlainMetadataObject(
+  value: unknown,
+): value is Record<string, string | number | boolean | null> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isNoFollowSymlinkError(error: unknown): boolean {

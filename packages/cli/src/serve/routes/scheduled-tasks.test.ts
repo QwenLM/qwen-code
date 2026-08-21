@@ -27,6 +27,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -48,6 +49,7 @@ interface StubBridge {
     sessionId: string,
     metadata: { displayName?: string },
   ): unknown;
+  markSessionCatalogChanged: ReturnType<typeof vi.fn>;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
@@ -64,6 +66,7 @@ function makeStubBridge(): StubBridge {
     spawnSources: [],
     closed: [],
     named: [],
+    markSessionCatalogChanged: vi.fn(),
     failNext: false,
     async spawnOrAttach(req) {
       if (bridge.failNext) {
@@ -651,6 +654,29 @@ describe('scheduled-tasks routes', () => {
       expect(h.bridge.spawned).toHaveLength(1); // spawn happened
       expect(h.bridge.closed).toEqual([h.bridge.spawned[0]]); // closed
       expect(removeSpy).toHaveBeenCalledWith(h.bridge.spawned[0]); // and removed
+      // The persisted removal changes the catalog, so the catalog clock must
+      // advance with it.
+      expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
+  it('does not mark the catalog when the rollback removal is a no-op', async () => {
+    // Same failure shape as the rollback test above, but the persisted session
+    // is already gone — a no-op removal carries no catalog change and must not
+    // advance the version.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'CORRUPT {{{', 'utf8');
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(false);
+    try {
+      const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+      expect(res.status).toBe(500);
+      expect(h.bridge.closed).toEqual([h.bridge.spawned[0]]);
+      expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
     } finally {
       removeSpy.mockRestore();
     }
@@ -1031,6 +1057,40 @@ describe('scheduled-tasks routes', () => {
     // The one-shot is gone from the store — its single fire already happened.
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toEqual([]);
+  });
+
+  it('revokes channel delivery when a manual run consumes a one-shot task', async () => {
+    const delivery = {
+      kind: 'channel',
+      target: {
+        channelName: 'dingtalk',
+        type: 'user' as const,
+        id: 'user-1',
+      },
+    };
+    const created = await create({
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      delivery,
+    });
+
+    const res = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(res.status).toBe(200);
+    const firedAt = res.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: created.body.sessionId,
+        deliveryId: `${created.body.id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: created.body.id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(false);
   });
 
   it('keeps a RECURRING task on manual run (only stamps lastFiredAt)', async () => {
@@ -1805,6 +1865,7 @@ interface QualifiedHarness {
   primary: QualifiedRuntime;
   secondary: QualifiedRuntime;
   untrusted: QualifiedRuntime;
+  activity: ConversationRuntimeActivityGate;
 }
 
 /** A registry stub exposing only what the qualified route resolver touches:
@@ -1816,6 +1877,9 @@ function makeStubRegistry(runtimes: QualifiedRuntime[]): WorkspaceRegistry {
     workspaceCwd: runtime.workspaceCwd,
     primary: index === 0,
     removable: index !== 0,
+    get internal() {
+      return runtime.provenance === 'live-conversation';
+    },
     registrationIds: [],
     lastGenerationId: 1,
     state: 'active' as const,
@@ -1833,18 +1897,43 @@ function makeStubRegistry(runtimes: QualifiedRuntime[]): WorkspaceRegistry {
     appliedRevision: 'test',
   }));
   return {
-    list: () => runtimes.map(asRuntime),
-    listEntries: () => entries,
+    list: () =>
+      runtimes
+        .filter((runtime) => runtime.provenance !== 'live-conversation')
+        .map(asRuntime),
+    listEntries: () => entries.filter((entry) => !entry.internal),
+    listAll: () => runtimes.map(asRuntime),
+    listAllEntries: () => entries,
     getEntryByWorkspaceId: (id: string) =>
       entries.find((entry) => entry.workspaceId === id),
     getEntryByWorkspaceCwd: (cwd: string) =>
       entries.find((entry) => entry.workspaceCwd === cwd),
+    getManagedEntryByWorkspaceId: (id: string) =>
+      entries.find((entry) => entry.workspaceId === id),
+    getManagedEntryByWorkspaceCwd: (cwd: string) =>
+      entries.find((entry) => entry.workspaceCwd === cwd),
     getByWorkspaceId: (id: string) => {
       const found = runtimes.find((r) => r.workspaceId === id);
-      return found ? asRuntime(found) : undefined;
+      return found?.provenance === 'live-conversation'
+        ? undefined
+        : found
+          ? asRuntime(found)
+          : undefined;
     },
     getByWorkspaceCwd: (cwd: string) => {
       const found = runtimes.find((r) => r.workspaceCwd === cwd);
+      return found?.provenance === 'live-conversation'
+        ? undefined
+        : found
+          ? asRuntime(found)
+          : undefined;
+    },
+    getManagedByWorkspaceId: (id: string) => {
+      const found = runtimes.find((runtime) => runtime.workspaceId === id);
+      return found ? asRuntime(found) : undefined;
+    },
+    getManagedByWorkspaceCwd: (cwd: string) => {
+      const found = runtimes.find((runtime) => runtime.workspaceCwd === cwd);
       return found ? asRuntime(found) : undefined;
     },
   } as unknown as WorkspaceRegistry;
@@ -1873,6 +1962,7 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
   const secondary = await mkRuntime('secondary', true);
   const untrusted = await mkRuntime('untrusted', false);
   const runtimes = [primary, secondary, untrusted];
+  const activity = new ConversationRuntimeActivityGate();
 
   const app = express();
   app.use(express.json());
@@ -1891,8 +1981,9 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     manageScheduledTaskSessions: true,
+    conversationRuntimeActivity: activity,
   });
-  return { app, scratch, primary, secondary, untrusted };
+  return { app, scratch, primary, secondary, untrusted, activity };
 }
 
 describe('workspace-qualified scheduled-tasks routes', () => {
@@ -2010,5 +2101,67 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     await expect(
       fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
     ).rejects.toThrow();
+  });
+
+  it('fails closed before internal task reads when the activity gate is absent', async () => {
+    h.secondary.provenance = 'live-conversation';
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedScheduledTasksRoutes(app, {
+      workspaceRegistry: makeStubRegistry([
+        h.primary,
+        h.secondary,
+        h.untrusted,
+      ]),
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      manageScheduledTaskSessions: true,
+    });
+
+    const response = await request(app).get(qualified(h.secondary.workspaceId));
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('conversation_runtime_unavailable');
+  });
+
+  it('holds the Conversations activity lease for the whole delete handler', async () => {
+    const created = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    const taskId = created.body.id as string;
+    h.secondary.provenance = 'live-conversation';
+    let finishClose: (() => void) | undefined;
+    const closePending = new Promise<void>((resolve) => {
+      finishClose = resolve;
+    });
+    const originalClose = h.secondary.bridge.closeSession.bind(
+      h.secondary.bridge,
+    );
+    vi.spyOn(h.secondary.bridge, 'closeSession').mockImplementation(
+      async (sessionId) => {
+        await originalClose(sessionId);
+        await closePending;
+      },
+    );
+
+    const deletion = request(h.app)
+      .delete(`${qualified(h.secondary.workspaceId)}/${taskId}`)
+      .then((response) => response);
+    await vi.waitFor(() => expect(h.secondary.bridge.closed).toHaveLength(1));
+    let drained = false;
+    const drain = h.activity.sealAndWait().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    finishClose?.();
+    expect((await deletion).status).toBe(200);
+    await drain;
+    expect(drained).toBe(true);
+
+    const late = await request(h.app).get(qualified(h.secondary.workspaceId));
+    expect(late.status).toBe(503);
+    expect(late.body.code).toBe('daemon_draining');
   });
 });

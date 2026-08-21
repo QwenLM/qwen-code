@@ -33,7 +33,24 @@ function validTarget(target: string): boolean {
   return /^pr-\d+$/.test(target);
 }
 
-interface ReviewWorktreeLease {
+/**
+ * Whether a filename under `REVIEW_TMP_DIR` is a review-worktree lease.
+ * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
+ * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
+ * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
+ */
+export function isReviewLeaseFile(fileName: string): boolean {
+  if (!fileName.startsWith(LEASE_PREFIX) || !fileName.endsWith('.json')) {
+    return false;
+  }
+  const target = fileName.slice(
+    LEASE_PREFIX.length,
+    fileName.length - '.json'.length,
+  );
+  return validTarget(target);
+}
+
+export interface ReviewWorktreeLease {
   sessionId: string;
   promptId: string;
   target: string;
@@ -50,12 +67,43 @@ function leasePath(repositoryRoot: string, target: string): string {
   return join(leaseDirectory(repositoryRoot), `${LEASE_PREFIX}${target}.json`);
 }
 
+/** Absolute path of the lease file recording who holds a review target. */
+export function reviewLeasePath(
+  repositoryRoot: string,
+  target: string,
+): string {
+  return leasePath(resolve(repositoryRoot), target);
+}
+
 export function clearReviewWorktreeLease(
   repositoryRoot: string,
   target: string,
 ): void {
   if (!validTarget(target)) return;
   rmSync(leasePath(resolve(repositoryRoot), target), { force: true });
+}
+
+/**
+ * Remove the lease only when the caller wrote it. fetch-pr's failure-path
+ * rollback must never erase a lease another session acquired DURING the run —
+ * the documented manual-recovery shape: an operator deletes a stuck run's
+ * lease, a new session acquires, then the stuck run un-sticks, fails, and
+ * would blind-delete the new holder's lock.
+ */
+export function clearReviewWorktreeLeaseIfOwned(
+  repositoryRoot: string,
+  target: string,
+  owner: { sessionId: string; promptId: string },
+): void {
+  const lease = readReviewWorktreeLease(repositoryRoot, target);
+  if (
+    !lease ||
+    lease.sessionId !== owner.sessionId ||
+    lease.promptId !== owner.promptId
+  ) {
+    return;
+  }
+  clearReviewWorktreeLease(repositoryRoot, target);
 }
 
 export function createReviewWorktreeLease(params: {
@@ -79,12 +127,31 @@ export function createReviewWorktreeLease(params: {
     worktreePath: resolve(repositoryRoot, params.worktreePath),
     branch: params.branch,
   };
+  const data = `${JSON.stringify(lease, null, 2)}\n`;
+  const path = leasePath(repositoryRoot, params.target);
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
-  writeFileSync(
-    leasePath(repositoryRoot, params.target),
-    `${JSON.stringify(lease, null, 2)}\n`,
-    'utf8',
-  );
+  try {
+    // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
+    // fetch-prs can both pass the gate's read, and a plain write would let
+    // the second clobber the winner's lease — after which the loser's
+    // rollback deletes a lock it never owned. Same atomic-create shape as
+    // `ensureWorktreesGitignored` in core's gitWorktreeService.
+    writeFileSync(path, data, { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const existing = readLease(path);
+    if (existing && existing.sessionId !== params.sessionId) {
+      throw new Error(
+        `review worktree lease for ${params.target} is held by another ` +
+          `session (session ${existing.sessionId}); it was acquired ` +
+          `between the gate read and the lease write — retry`,
+      );
+    }
+    // Same-session re-fetch refreshes the lease (ownership is per session,
+    // not per prompt). An unreadable file is already read as no lease by
+    // every reader, so rewriting it heals a torn write instead of wedging.
+    writeFileSync(path, data, 'utf8');
+  }
 }
 
 function readLease(path: string): ReviewWorktreeLease | null {
@@ -105,6 +172,36 @@ function readLease(path: string): ReviewWorktreeLease | null {
     debugLogger.debug(`Failed to read review lease ${path}:`, error);
     return null;
   }
+}
+
+/** The lease currently registered for a review target, or null. */
+export function readReviewWorktreeLease(
+  repositoryRoot: string,
+  target: string,
+): ReviewWorktreeLease | null {
+  if (!validTarget(target)) return null;
+  return readLease(reviewLeasePath(repositoryRoot, target));
+}
+
+/**
+ * Whether a lease blocks THIS process from taking the target over.
+ *
+ * The review worktree path is fixed per PR number, so two reviews of the same
+ * PR run on top of each other: whichever runs `fetch-pr`'s stale-clean or
+ * `cleanup` next removes the other's worktree, branch, and side files mid-run
+ * (#9205). The lease doubles as the lock against that — holders compare by
+ * SESSION, not prompt: one session reviews a PR across several prompts
+ * (rounds, drift restarts), and a later prompt of the same session must be
+ * able to re-take what its own earlier prompt leased. A process with no
+ * session id cannot prove ownership of anything, so any existing lease blocks
+ * it — a bare-terminal `cleanup` must not delete a live session's state.
+ */
+export function reviewLeaseHeldByAnotherSession(
+  lease: ReviewWorktreeLease | null,
+): lease is ReviewWorktreeLease {
+  if (!lease) return false;
+  const sessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  return !sessionId || lease.sessionId !== sessionId;
 }
 
 function removeLeaseWorktree(
@@ -213,7 +310,7 @@ export function cleanupReviewWorktreeLeases(params: {
     if (!existsSync(directory)) return;
 
     for (const entry of readdirSync(directory)) {
-      if (!entry.startsWith(LEASE_PREFIX) || !entry.endsWith('.json')) continue;
+      if (!isReviewLeaseFile(entry)) continue;
       const path = join(directory, basename(entry));
       const lease = readLease(path);
       if (

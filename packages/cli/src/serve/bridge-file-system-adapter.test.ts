@@ -700,17 +700,20 @@ describe('createBridgeFileSystemAdapter', () => {
 
     it('rejects a Unix socket as an external text target', async () => {
       if (process.platform === 'win32') return;
-      const socketPath = path.join(outsideDir, 'target.sock');
-      const server = createServer();
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(socketPath, resolve);
-      });
-      const adapter = createBridgeFileSystemAdapter(
-        buildFactory({ trusted: true }),
-        { allowSameHostToolWritesOutsideWorkspace: true },
+      const socketDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'bridge-fs-socket-'),
       );
+      const socketPath = path.join(socketDir, 'target.sock');
+      const server = createServer();
       try {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(socketPath, resolve);
+        });
+        const adapter = createBridgeFileSystemAdapter(
+          buildFactory({ trusted: true }),
+          { allowSameHostToolWritesOutsideWorkspace: true },
+        );
         await expect(
           adapter.writeText({
             path: socketPath,
@@ -722,6 +725,7 @@ describe('createBridgeFileSystemAdapter', () => {
         expect(auditEmits).toHaveLength(1);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        await fsp.rm(socketDir, { recursive: true, force: true });
       }
     });
 
@@ -980,6 +984,7 @@ describe('createBridgeFileSystemAdapter', () => {
             edit: vi.fn(),
             editAtomic: vi.fn(),
             writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };
@@ -1032,6 +1037,7 @@ describe('createBridgeFileSystemAdapter', () => {
             edit: vi.fn(),
             editAtomic: vi.fn(),
             writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };

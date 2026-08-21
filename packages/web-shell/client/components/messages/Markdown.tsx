@@ -11,6 +11,10 @@ import {
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components, Options } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
@@ -24,6 +28,7 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -49,6 +54,10 @@ interface MarkdownProps {
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
 }
+
+// Keep the cost of repeatedly parsing a growing stream bounded. Short streams
+// retain live Markdown; large ones settle into full Markdown once at the end.
+const STREAMING_MARKDOWN_PARSE_LIMIT = 32_000;
 
 const SUPPORTED_LANGUAGES = new Set([
   'javascript',
@@ -309,13 +318,12 @@ function MermaidBlock({ code }: { code: string }) {
   }, [code, mermaidTheme]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
+    void writeClipboardText(code)
+      .then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
   if (error) {
@@ -490,13 +498,12 @@ function CodeBlock({
   }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
+    void writeClipboardText(code)
+      .then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
   if (lang === 'mermaid' && !isStreaming) {
@@ -708,6 +715,7 @@ function MarkdownLink({
   children?: ReactNode;
 }) {
   const renderMode = useTranscriptRenderMode();
+  const openExternalLink = useExternalLinkOpener();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode === 'readonly') {
       return <span className={styles.link}>{children}</span>;
@@ -737,6 +745,7 @@ function MarkdownLink({
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
+      onClick={(event) => openExternalLink(event, safeHref)}
     >
       {children}
     </a>
@@ -891,12 +900,15 @@ export const Markdown = memo(function Markdown({
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderStreamingPlainText =
+    isStreaming === true &&
+    throttledContent.length > STREAMING_MARKDOWN_PARSE_LIMIT;
   const renderedContent = useMemo(
     () =>
       throttledContent && source && sourceMarkdown?.transformMarkdown
         ? sourceMarkdown.transformMarkdown(throttledContent, { source })
         : throttledContent,
-    [throttledContent, source, sourceMarkdown],
+    [source, sourceMarkdown, throttledContent],
   );
 
   const effectiveTableMode = isStreaming
@@ -962,6 +974,18 @@ export const Markdown = memo(function Markdown({
   }, [sourceMarkdown?.rehypePlugins]);
 
   if (!content) return null;
+
+  if (renderStreamingPlainText) {
+    return (
+      <div
+        className={source !== 'thinking' ? styles.content : undefined}
+        data-markdown-source={source}
+        data-markdown-streaming-plain-text="true"
+      >
+        <pre className={styles.streamingPlainText}>{renderedContent}</pre>
+      </div>
+    );
+  }
 
   const renderedMarkdown = (
     <MemoizedMarkdownRenderer

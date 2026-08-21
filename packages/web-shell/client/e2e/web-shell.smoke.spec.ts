@@ -73,6 +73,105 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   }
 });
 
+test('branches from an earlier completed Assistant response and resumes the fork @smoke', async ({
+  page,
+}, testInfo) => {
+  const branchRecordId = '11111111-1111-4111-8111-111111111111';
+  const branchSessionId = 'web-shell-e2e-branch';
+  const firstTurn = [
+    userTextEvent('First question', { id: 1 }),
+    assistantTextEvent('First completed answer', {
+      id: 2,
+      branchRecordId,
+    }),
+    turnCompleteEvent('prompt-1', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      ...firstTurn,
+      userTextEvent('Second question', { id: 4 }),
+      assistantTextEvent('Second completed answer', {
+        id: 5,
+        branchRecordId: '22222222-2222-4222-8222-222222222222',
+      }),
+      turnCompleteEvent('prompt-2', { id: 6 }),
+      userTextEvent('Third question', { id: 7 }),
+      assistantTextEvent('Third completed answer', {
+        id: 8,
+        branchRecordId: '33333333-3333-4333-8333-333333333333',
+      }),
+      turnCompleteEvent('prompt-3', { id: 9 }),
+    ],
+    branch: {
+      sessionId: branchSessionId,
+      clientId: 'web-shell-e2e-branch-client',
+      displayName: 'First answer branch',
+      events: firstTurn,
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const firstAnswerRow = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await firstAnswerRow.hover();
+  await firstAnswerRow
+    .getByRole('button', { name: 'Branch', exact: true })
+    .click();
+
+  await expect.poll(() => daemon.branchRequests().length).toBe(1);
+  const branchRequest = firstRequest(daemon.branchRequests());
+  expect(branchRequest.path).toBe(
+    `/session/${encodeURIComponent(scenario.sessionId)}/branch`,
+  );
+  expect(requestBodyRecord(branchRequest)).toEqual({
+    atRecordId: branchRecordId,
+  });
+  await expect(page).toHaveURL(
+    new RegExp(`/session/${encodeURIComponent(branchSessionId)}$`),
+  );
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const messages = page.locator('[data-web-shell-message-list]');
+  await expect(messages).toContainText('First completed answer');
+  await expect(messages).not.toContainText('Second completed answer');
+  await expect(messages).not.toContainText('Third completed answer');
+  expect(scenario.events).toHaveLength(9);
+
+  await fillComposer(page, 'Continue from the fork');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect
+    .poll(
+      () =>
+        daemon
+          .promptRequests()
+          .filter(
+            (request) => request.path === `/session/${branchSessionId}/prompt`,
+          ).length,
+    )
+    .toBe(1);
+
+  await page.reload();
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const restoredFirstAnswer = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await restoredFirstAnswer.hover();
+  await expect(
+    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+  ).toBeVisible();
+});
+
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
   page,
 }, testInfo) => {
@@ -174,6 +273,59 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect(
     page.locator('[data-web-shell-model-submenu] input[type="search"]'),
   ).toBeVisible();
+});
+
+test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.7-plus',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Thinking on' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { toggleOnly: true },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  await expect(controls).toBeVisible();
+  await expect(thinking).toBeChecked();
+  await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(0);
+  await expect(modelButton).toContainText('Thinking');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'none' });
+  await expect(thinking).not.toBeChecked();
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Thinking');
 });
 
 test('uploads an Extension archive from the manager @smoke', async ({
@@ -752,7 +904,7 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
   await expect
     .poll(() => emptyMobileComposerLayout(page))
     .toMatchObject({
-      chatViewPosition: 'relative',
+      chatViewPosition: 'static',
       footerPosition: 'relative',
     });
   const wideLayout = await emptyMobileComposerLayout(page);
@@ -943,7 +1095,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 }
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
-  test(`bounds shared attachments and long text at ${viewportHeight}px @smoke`, async ({
+  test(`bounds attachments and long text at ${viewportHeight}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: viewportHeight });
@@ -959,7 +1111,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
 
     await pasteComposerImages(page, 8);
     const images = page.locator(
-      '[data-web-shell-composer-attachments] img[src^="data:image/png;base64,"]',
+      '[data-web-shell-composer-images] img[src^="data:image/png;base64,"]',
     );
     await expect(images).toHaveCount(8);
     await expectImagesDecoded(images);
@@ -1017,15 +1169,15 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     });
     await expect
       .poll(async () => {
-        const [attachmentsBox, imageBox] = await Promise.all([
+        const [attachmentsBox, tagBox] = await Promise.all([
           attachments.boundingBox(),
-          images.last().boundingBox(),
+          tags.last().boundingBox(),
         ]);
-        if (!attachmentsBox || !imageBox) return false;
+        if (!attachmentsBox || !tagBox) return false;
         const tolerance = 1;
         return (
-          imageBox.y >= attachmentsBox.y - tolerance &&
-          imageBox.y + imageBox.height <=
+          tagBox.y >= attachmentsBox.y - tolerance &&
+          tagBox.y + tagBox.height <=
             attachmentsBox.y + attachmentsBox.height + tolerance
         );
       })
@@ -1078,7 +1230,7 @@ test('drops ordered PNG and BMP images and submits them without text @smoke', as
   await expect(surface).not.toHaveAttribute('data-image-drag-active');
   await expect(surface).not.toHaveAttribute('aria-busy');
   const images = surface.locator(
-    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+    '[data-web-shell-composer-images] img[src^="data:image/"]',
   );
   await expect(images).toHaveCount(2);
   await expectImagesDecoded(images);

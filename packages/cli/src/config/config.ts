@@ -23,6 +23,7 @@ import {
   SessionService,
   ideContextStore,
   type ResumedSessionData,
+  type SessionRestoreProjection,
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
@@ -42,6 +43,7 @@ import {
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
+  addDaemonRequestAttribute,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -72,7 +74,7 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { isValidSessionId } from './session-id.js';
+import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -1557,6 +1559,11 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    sessionRestore?: {
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    };
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
@@ -1975,6 +1982,10 @@ export async function loadCliConfig(
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
+  let sessionRestoreProjection: SessionRestoreProjection | undefined;
+  const sessionRestoreProjectionSource =
+    hostPolicy?.sessionRestore?.projectionSource;
+  let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
@@ -1995,8 +2006,24 @@ export async function loadCliConfig(
       // session UUID by gemini.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
-      sessionData = await sessionService.loadSession(argv.resume);
-      if (!sessionData) {
+      deferProjectionUntilWriterLease =
+        sessionRestoreProjectionSource !== undefined &&
+        (argv.chatRecording ?? settings.general?.chatRecording ?? true) &&
+        isAcpMode === true &&
+        settings.experimental?.sessionWriterLease === true;
+      if (sessionRestoreProjectionSource) {
+        if (!deferProjectionUntilWriterLease && !argv.forkSession) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(sessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(argv.resume);
+      }
+      if (!sessionRestoreProjectionSource && !sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         writeStderrLine(message);
         process.exit(1);
@@ -2015,10 +2042,22 @@ export async function loadCliConfig(
         process.exit(1);
       }
       sessionId = forkedSessionId;
-      sessionData = await sessionService.loadSession(forkedSessionId);
-      if (!sessionData) {
-        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
-        process.exit(1);
+      if (sessionRestoreProjectionSource) {
+        sessionData = undefined;
+        if (!deferProjectionUntilWriterLease) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(forkedSessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(forkedSessionId);
+        if (!sessionData) {
+          writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+          process.exit(1);
+        }
       }
     }
   } else if (argv.sandboxSessionId) {
@@ -2029,12 +2068,26 @@ export async function loadCliConfig(
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
-    // Check if session ID is already in use
+    // Check if session ID is already in use — case-insensitively: a legacy
+    // mixed-case transcript still occupies the id, and creating a
+    // case-only twin would make both spellings permanently unrestorable.
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExistsInAnyState(
-      argv['sessionId'],
-    );
-    if (exists) {
+    let occupied: boolean;
+    try {
+      occupied =
+        (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
+        undefined;
+    } catch (error) {
+      // Any read failure leaves the id unproven, and the resolver propagates
+      // non-ENOENT errors. Assume occupied, as the previous existence check
+      // did: startup must reach the guarded conflict message and honour
+      // `throwOnSessionIdConflict` rather than die on a raw errno.
+      debugLogger.debug(
+        `Session id occupancy check failed for ${argv['sessionId']}: ${error}`,
+      );
+      occupied = true;
+    }
+    if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       if (throwOnSessionIdConflict) {
         throw new SessionIdConflictError(argv['sessionId'], message);
@@ -2042,11 +2095,16 @@ export async function loadCliConfig(
       writeStderrLine(message);
       process.exit(1);
     }
-    sessionId = argv['sessionId'];
+    sessionId = normalizeSessionIdForLookup(argv['sessionId']);
   }
 
   const modelProvidersConfig = settings.modelProviders;
   const providerProtocolConfig = settings.providerProtocol;
+  const restoreSessionId = sessionId;
+  const boundSessionRestoreProjectionSource =
+    sessionRestoreProjectionSource && restoreSessionId
+      ? () => sessionRestoreProjectionSource(restoreSessionId)
+      : undefined;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -2083,6 +2141,8 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
+    sessionRestoreProjection,
+    sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2226,6 +2286,7 @@ export async function loadCliConfig(
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,

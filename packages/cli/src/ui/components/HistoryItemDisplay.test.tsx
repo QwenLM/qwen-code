@@ -154,6 +154,21 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
+  it('renders AdvisorMessage for "advisor" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.ADVISOR,
+      text: 'review body',
+      model: 'qwen3-max',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('/advisor · qwen3-max');
+    expect(output).toContain('review body');
+  });
+
   it('renders v2 goal_state history items through the lifecycle card', () => {
     const item: HistoryItem = {
       id: 1,

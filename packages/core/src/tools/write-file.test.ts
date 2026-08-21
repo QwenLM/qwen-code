@@ -530,6 +530,10 @@ describe('WriteFileTool', () => {
       ['photo.jpg', 'image'],
       ['diagram.svg', 'image'],
       ['photo.webp', 'image'],
+      ['table.csv', 'file'],
+      ['table.xlsx', 'document'],
+      ['brief.docx', 'document'],
+      ['deck.pptx', 'document'],
     ])('infers artifact kind for %s as %s', async (fileName, expectedKind) => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'reports', fileName);
@@ -1718,6 +1722,71 @@ describe('workspace artifact metadata guard', () => {
     const deepDir = 'a'.repeat(510);
     const filePath = path.resolve(rootDir, deepDir, 'x.html');
     expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+  });
+
+  it('derives auto-record identity from the realpath target', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'report.csv');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('infers kind from the realpath target, not the link name', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'preview.png');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('skips auto-record when the realpath target is not a whitelisted kind', () => {
+    const target = path.join(rootDir, 'dropped.bin');
+    const link = path.join(rootDir, 'report.csv');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(target, 'bin');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toBeNull();
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(target, { force: true });
+    }
+  });
+
+  it('does not auto-record a file whose realpath is outside the workspace', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'write-file-out-'));
+    const linkDir = path.join(rootDir, 'output');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.symlinkSync(outside, linkDir);
+    const filePath = path.join(linkDir, 'report.csv');
+    fs.writeFileSync(filePath, 'a,b\n');
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+    } finally {
+      fs.rmSync(linkDir, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('skips artifacts whose workspace path contains a control character', () => {

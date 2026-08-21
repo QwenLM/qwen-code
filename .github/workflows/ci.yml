@@ -50,7 +50,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
 
 jobs:
   classify_pr:
@@ -289,6 +289,15 @@ jobs:
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
+
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
         run: 'echo "Docs-only change; full CI skipped."'
@@ -507,7 +516,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
       # Release guard for the Chrome extension: build, package, and scan real
       # artifacts for forbidden adapter signatures instead of leaving
@@ -557,6 +590,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
+          npx tsc -p integration-tests/tsconfig.json --pretty false
           npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
@@ -805,7 +839,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
@@ -911,7 +969,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
   post_coverage_comment:
     name: 'Post Coverage Comment'

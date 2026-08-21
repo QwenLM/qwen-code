@@ -120,6 +120,7 @@ import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppress
 describe('loggers', () => {
   const mockLogger = {
     emit: vi.fn(),
+    enabled: vi.fn().mockReturnValue(true),
   };
   const mockUiEvent = {
     addEvent: vi.fn(),
@@ -743,6 +744,25 @@ describe('loggers', () => {
       ).toHaveBeenCalledWith(mockConfig, event);
     });
 
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+      );
+
+      logApiResponse(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',
@@ -843,6 +863,29 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'test error',
+      });
+
+      logApiError(
+        makeFakeConfig({ sessionId: 'current-session-id' }),
+        event,
+        'request-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
 
     it('suppresses chatRecordingService writes inside hidden runs', () => {
@@ -990,6 +1033,20 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-6',
         },
       });
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiRequestEvent('test-model', 'prompt-id');
+
+      logApiRequest(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
   });
 
