@@ -87,7 +87,7 @@ describe('projectCommandItem', () => {
     }
   });
 
-  it('projects compression items with real token counts (G-12)', () => {
+  it('projects compression items as structured compaction events (G-12)', () => {
     const item = {
       type: 'compression',
       compression: {
@@ -98,12 +98,15 @@ describe('projectCommandItem', () => {
       },
     } as unknown as HistoryItemWithoutId;
     const event = projectCommandItem(item);
-    if (event?.type === 'text') {
-      expect(event.delta).toBe(
-        'Chat history compressed from 1000 to 200 tokens.',
-      );
+    if (event?.type === 'compaction') {
+      expect(event.compression).toEqual({
+        isPending: false,
+        originalTokenCount: 1000,
+        newTokenCount: 200,
+        compressionStatus: 1,
+      });
     } else {
-      throw new Error('expected a text event');
+      throw new Error('expected a compaction event');
     }
   });
 
@@ -125,6 +128,47 @@ describe('projectCommandItem', () => {
       expect(progress.delta).toBe('✓ Analyzing');
     } else {
       throw new Error('expected a text event');
+    }
+  });
+
+  it('projects goal_state items onto structured goal events', () => {
+    const snapshot = {
+      goal: { objective: 'ship it', status: 'active', turnCount: 1 },
+      activity: 'running',
+    };
+    const event = projectCommandItem({
+      type: 'goal_state',
+      snapshot,
+      cause: 'create',
+    } as unknown as HistoryItemWithoutId);
+    if (event?.type === 'goal') {
+      expect(event.snapshot).toEqual(snapshot);
+      expect(event.cause).toBe('create');
+    } else {
+      throw new Error('expected a goal event');
+    }
+  });
+
+  it('projects goal_status items onto legacy goal events', () => {
+    const event = projectCommandItem({
+      type: 'goal_status',
+      kind: 'achieved',
+      condition: 'tests green',
+      iterations: 2,
+      durationMs: 5000,
+      lastReason: 'all passed',
+    } as unknown as HistoryItemWithoutId);
+    if (event?.type === 'goal-legacy') {
+      expect(event).toEqual({
+        type: 'goal-legacy',
+        kind: 'achieved',
+        condition: 'tests green',
+        iterations: 2,
+        durationMs: 5000,
+        lastReason: 'all passed',
+      });
+    } else {
+      throw new Error('expected a goal-legacy event');
     }
   });
 
@@ -501,12 +545,13 @@ describe('createBackendCommandHost', () => {
     } as never;
     host.setPendingItem(pending);
     expect(host.pendingItem).toBe(pending);
-    // The pending work is visible immediately.
+    // The pending work is visible immediately as a structured compaction
+    // event (spinner row, ink CompressionMessage parity).
     const event = captured.events.at(-1);
-    if (event?.type === 'text') {
-      expect(event.delta).toBe('Compressing chat history');
+    if (event?.type === 'compaction') {
+      expect(event.compression.isPending).toBe(true);
     } else {
-      throw new Error('expected a text event');
+      throw new Error('expected a compaction event');
     }
     host.setPendingItem(null);
     expect(host.pendingItem).toBeNull();

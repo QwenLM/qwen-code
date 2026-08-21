@@ -15,7 +15,6 @@ import {
   extractPromptText,
   projectContextUsage,
   projectDoctor,
-  projectGoalItem,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
@@ -143,49 +142,6 @@ describe('projectSummary', () => {
         filePath: '/tmp/QWEN.md',
       }),
     ).toContain('Saved to: /tmp/QWEN.md');
-  });
-});
-
-describe('projectGoalItem', () => {
-  it('renders goal_state snapshots with lifecycle titles', () => {
-    const text = projectGoalItem({
-      snapshot: {
-        v: 2,
-        goal: {
-          objective: 'ship it',
-          status: 'active',
-          turnCount: 3,
-          activeTimeMs: 65000,
-        },
-        activity: 'running',
-      },
-    });
-    expect(text).toContain('Goal running · 3 turns · 1m 5s');
-    expect(text).toContain('Goal: ship it');
-  });
-
-  it('renders the cleared state only for cause=clear', () => {
-    expect(
-      projectGoalItem({ snapshot: { v: 2, goal: null, activity: 'idle' } }),
-    ).toBe('');
-    expect(
-      projectGoalItem({
-        snapshot: { v: 2, goal: null, activity: 'idle' },
-        cause: 'clear',
-      }),
-    ).toContain('Goal cleared');
-  });
-
-  it('renders legacy goal_status kinds', () => {
-    const text = projectGoalItem({
-      kind: 'achieved',
-      condition: 'tests green',
-      iterations: 1,
-      lastReason: 'all passed',
-    });
-    expect(text).toContain('Goal achieved · 1 turn');
-    expect(text).toContain('Goal: tests green');
-    expect(text).toContain('Last check: all passed');
   });
 });
 

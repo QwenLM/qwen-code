@@ -209,18 +209,18 @@ export async function* livePromptEvents(
   const client = config.getGeminiClient();
   const promptId = `${config.getSessionId()}########${promptCount++}`;
   const map = createEventMapper({
-    // ink handleErrorEvent parity: auth-aware formatting + retry hint.
+    // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
+    // hint travels on the error event's `hint` field (ErrorMessage renders
+    // it inline in secondary color).
     formatError: (error) => {
-      let text: string;
       try {
-        text = parseAndFormatApiError(
+        return parseAndFormatApiError(
           error,
           config.getContentGeneratorConfig()?.authType,
         );
       } catch {
-        text = error instanceof Error ? error.message : String(error);
+        return error instanceof Error ? error.message : String(error);
       }
-      return `${text}\nPress Ctrl+Y to retry`;
     },
     getModelName: () => options?.modelOverride ?? config.getModel(),
     getMaxSessionTurns: () => config.getMaxSessionTurns(),

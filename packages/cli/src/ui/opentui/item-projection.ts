@@ -19,7 +19,6 @@
  */
 
 import {
-  CompressionStatus,
   findProviderByCredentials,
   getExtensionDisplayName,
   getMCPServerStatus,
@@ -374,32 +373,6 @@ export function projectSkillStats(metrics: SessionMetrics): string {
   return lines.join('\n');
 }
 
-/** Parity of messages/CompressionMessage. */
-export function projectCompression(compression: {
-  isPending?: boolean;
-  originalTokenCount?: number | null;
-  newTokenCount?: number | null;
-  compressionStatus?: CompressionStatus | null;
-}): string {
-  if (compression.isPending) return 'Compressing chat history';
-  const original = compression.originalTokenCount ?? 0;
-  const renewed = compression.newTokenCount ?? 0;
-  switch (compression.compressionStatus) {
-    case CompressionStatus.COMPRESSED:
-      return `Chat history compressed from ${original} to ${renewed} tokens.`;
-    case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:
-      return original < 50000
-        ? 'Compression was not beneficial for this history size.'
-        : 'Chat history compressed did not reduce size. This may indicate issues with the compression prompt.';
-    case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
-      return 'Could not compress chat history due to a token counting error.';
-    case CompressionStatus.NOOP:
-      return 'Nothing to compress.';
-    default:
-      return '';
-  }
-}
-
 /** Parity of messages/SummaryMessage. */
 export function projectSummary(summary: {
   isPending?: boolean;
@@ -436,106 +409,6 @@ export function projectInsightProgress(progress: {
   const filled = Math.round((progress.progress / 100) * 30);
   const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 30 - filled));
   return `${bar} ${progress.stage}${progress.detail ? ` (${progress.detail})` : ''}`;
-}
-
-/** Parity of messages/GoalStatusMessage (goal_status + goal_state). */
-export function projectGoalItem(item: Record<string, unknown>): string {
-  if (item['snapshot'] !== undefined) {
-    const snapshot = item['snapshot'] as {
-      goal: {
-        objective: string;
-        status: string;
-        turnCount?: number;
-        activeTimeMs?: number;
-        lastReason?: string;
-      } | null;
-      activity: string;
-    };
-    const cause = item['cause'] as string | undefined;
-    const goal = snapshot.goal;
-    if (!goal) {
-      return cause === 'clear' ? '○ Goal cleared' : '';
-    }
-    let title = 'Goal active';
-    let icon = '◎';
-    if (goal.status === 'active' && snapshot.activity === 'verifying') {
-      title = 'Goal checking';
-      icon = '○';
-    } else if (goal.status === 'active' && snapshot.activity === 'running') {
-      title = 'Goal running';
-    } else if (goal.status === 'paused') {
-      title = 'Goal paused';
-      icon = '!';
-    } else if (goal.status === 'blocked') {
-      title = 'Goal blocked';
-      icon = '✖';
-    } else if (goal.status === 'usage_limited') {
-      title = 'Goal usage limited';
-      icon = '!';
-    } else if (goal.status === 'complete') {
-      title = 'Goal complete';
-      icon = '✓';
-    }
-    const subtitleParts: string[] = [];
-    if ((goal.turnCount ?? 0) > 0) {
-      subtitleParts.push(
-        `${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`,
-      );
-    }
-    if ((goal.activeTimeMs ?? 0) > 0) {
-      subtitleParts.push(
-        formatDuration(goal.activeTimeMs ?? 0, { hideTrailingZeros: true }),
-      );
-    }
-    const subtitle = subtitleParts.join(' · ');
-    const lines = [`${icon} ${title}${subtitle ? ` · ${subtitle}` : ''}`];
-    lines.push(`Goal: ${goal.objective}`);
-    const reason = goal.lastReason?.trim();
-    if (
-      reason &&
-      (goal.status !== 'active' || snapshot.activity === 'verifying')
-    ) {
-      lines.push(`Reason: ${reason}`);
-    }
-    return lines.join('\n');
-  }
-  // legacy goal_status shape
-  const kind = item['kind'] as string;
-  const condition = String(item['condition'] ?? '');
-  const iterations = item['iterations'] as number | undefined;
-  const durationMs = item['durationMs'] as number | undefined;
-  const lastReason = (item['lastReason'] as string | undefined)?.trim();
-  if (kind === 'checking') {
-    const lines = [
-      `○ Goal check${iterations && iterations > 0 ? ` · turn ${iterations}` : ''} · not yet met`,
-      `Goal: ${condition}`,
-    ];
-    if (lastReason) lines.push(`Judge: ${lastReason}`);
-    return lines.join('\n');
-  }
-  const titleByKind: Record<string, [string, string]> = {
-    set: ['Goal set', '◎'],
-    achieved: ['Goal achieved', '✓'],
-    cleared: ['Goal cleared', '○'],
-    failed: ['Goal could not be achieved', '✖'],
-    aborted: ['Goal aborted', '!'],
-    paused: ['Goal paused', '!'],
-  };
-  const [title, icon] = titleByKind[kind] ?? ['Goal', '◎'];
-  const subtitleParts: string[] = [];
-  if (iterations && iterations > 0) {
-    subtitleParts.push(`${iterations} ${iterations === 1 ? 'turn' : 'turns'}`);
-  }
-  if (typeof durationMs === 'number') {
-    subtitleParts.push(formatDuration(durationMs, { hideTrailingZeros: true }));
-  }
-  const subtitle = subtitleParts.join(' · ');
-  const lines = [`${icon} ${title}${subtitle ? ` · ${subtitle}` : ''}`];
-  lines.push(`Goal: ${condition}`);
-  const terminal =
-    kind === 'achieved' || kind === 'aborted' || kind === 'failed';
-  if (terminal && lastReason) lines.push(`Last check: ${lastReason}`);
-  return lines.join('\n');
 }
 
 /** Parity of views/ContextUsage. */
@@ -931,12 +804,6 @@ export function projectSpecialItemText(
       return projectSkillStats(
         ctx.stats?.metrics ?? uiTelemetryService.getMetrics(),
       );
-    case 'compression':
-      return projectCompression(
-        (record['compression'] ?? {}) as Parameters<
-          typeof projectCompression
-        >[0],
-      );
     case 'summary':
       return projectSummary(
         (record['summary'] ?? {}) as Parameters<typeof projectSummary>[0],
@@ -947,9 +814,6 @@ export function projectSpecialItemText(
           typeof projectInsightProgress
         >[0],
       );
-    case 'goal_state':
-    case 'goal_status':
-      return projectGoalItem(record) || null;
     case 'context_usage':
       return projectContextUsage(record);
     case 'doctor':

@@ -1,4 +1,4 @@
-/* eslint-disable react/no-unknown-property, default-case */
+/* eslint-disable react/no-unknown-property */
 /**
  * @license
  * Copyright 2026 Qwen
@@ -7,9 +7,10 @@
 /** @jsxImportSource @opentui/react */
 
 /**
- * Message list aligned with the original MainContent rendering semantics
- * (packages/cli/src/ui/components/HistoryItemDisplay.tsx → UserMessage /
- * AssistantMessage / ThinkMessage / ToolMessage). The ink components render:
+ * Shared message-rendering helpers for the OpenTUI backend, aligned with the
+ * original ink rendering semantics (packages/cli/src/ui/components/
+ * HistoryItemDisplay.tsx → UserMessage / AssistantMessage / ThinkMessage /
+ * ToolMessage). The ink components render:
  *
  *  - user turns as `> text` in theme.text.accent;
  *  - assistant turns behind a `◆` (ICON.DIAMOND) accent prefix with a
@@ -20,17 +21,18 @@
  *    status, a bold tool name and a dim description, result below.
  *
  * The pure `*-Meta` helpers below compute the exact glyph/color/label the ink
- * components produce so they can be unit-tested; the MessageList component is
- * a thin OpenTUI rendering of them plus the existing click-to-expand cards.
+ * components produce so they can be unit-tested; TodoRows and AnsiRows are
+ * the shared sub-renderers the backend's tool cards embed.
  */
 
-import { MouseButton } from '@opentui/core';
-import { useRenderer, useTerminalDimensions } from '@opentui/react';
-import { useMemo, useState } from 'react';
-import { C, SYNTAX } from './theme.js';
-import { renderDiffBody } from './diff-render.js';
+import { C } from './theme.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
-import type { LiveHistoryItem, LiveToolItem } from './live-session-model.js';
+import { ICON } from '../constants.js';
+import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
+import { formatMemoryUsage } from '../utils/formatters.js';
+import type { AnsiToken } from '@qwen-code/qwen-code-core';
+import type { LiveToolItem } from './live-session-model.js';
+import type { TodoItem } from '../components/TodoDisplay.js';
 
 /** The original TOOL_STATUS glyphs (ui/constants.ts). */
 export const TOOL_STATUS = {
@@ -65,6 +67,13 @@ export const selectionProps = () => ({
 
 /** TextAttributes bitmask (1 << 7) for the canceled strikethrough. */
 const STRIKETHROUGH_ATTR = 128;
+
+/** ink TodoDisplay STATUS_ICONS (components/TodoDisplay.tsx). */
+const TODO_STATUS_ICONS = {
+  pending: ICON.CIRCLE_EMPTY,
+  in_progress: ICON.CIRCLE_LEFT_HALF,
+  completed: ICON.CIRCLE_FILLED,
+} as const;
 
 /** ink ToolMessage MAXIMUM_RESULT_DISPLAY_CHARACTERS. */
 export const MAX_RESULT_DISPLAY_CHARACTERS = 1000000;
@@ -285,339 +294,164 @@ export function toolStatusMeta(item: LiveToolItem): ToolStatusMeta {
   return { glyph: TOOL_STATUS.ERROR, color: C.red, strikethrough: false };
 }
 
-interface ThinkingBlockProps {
-  item: Extract<LiveHistoryItem, { kind: 'thinking' }>;
-  expanded: boolean;
-  onToggle: (id: string) => void;
-}
-
-function ThinkingBlock({ item, expanded, onToggle }: ThinkingBlockProps) {
-  const [hover, setHover] = useState(false);
-  const renderer = useRenderer();
-  const meta = thinkingMeta(item.done, expanded, true);
+/**
+ * ink TodoDisplay parity: status-icon column (width 3) + content column.
+ * Completed rows render Foreground struck through, in_progress AccentGreen,
+ * pending Foreground — the same color for icon and text.
+ */
+export function TodoRows({ todos }: { todos: readonly TodoItem[] }) {
+  if (todos.length === 0) {
+    return null;
+  }
   return (
-    <box flexDirection="column" marginTop={0}>
-      <box
-        onMouseOver={() => setHover(true)}
-        onMouseOut={() => setHover(false)}
-        onMouseUp={(e) => {
-          if (e.button === MouseButton.LEFT) {
-            const sel = renderer.getSelection();
-            if (!sel?.getSelectedText()) onToggle(item.id);
-          }
-        }}
-        backgroundColor={hover ? C.hover : undefined}
-      >
-        <text fg={meta.color} attributes={6} {...selectionProps()}>
-          {meta.icon} {meta.label}
-          {meta.hint ? ` ${meta.hint}` : ''}
-        </text>
-      </box>
-      {!meta.collapsed && item.text.length > 0 && (
-        <box paddingLeft={2} marginTop={0}>
-          <text fg={C.dim} {...selectionProps()}>
-            {item.text}
-          </text>
-        </box>
-      )}
+    <box flexDirection="column">
+      {todos.map((todo) => (
+        <TodoItemRow key={todo.id} todo={todo} />
+      ))}
     </box>
   );
 }
 
-interface ToolCardProps {
-  item: LiveToolItem;
-  expanded: boolean;
-  onToggle: (id: string) => void;
+function TodoItemRow({ todo }: { todo: TodoItem }) {
+  const statusIcon = TODO_STATUS_ICONS[todo.status];
+  const isCompleted = todo.status === 'completed';
+  const isInProgress = todo.status === 'in_progress';
+  const itemColor = isCompleted ? C.text : isInProgress ? C.green : C.text;
+  return (
+    <box flexDirection="row" minHeight={1}>
+      <box width={3}>
+        <text fg={itemColor} {...selectionProps()}>
+          {statusIcon}
+        </text>
+      </box>
+      <box flexGrow={1}>
+        <text
+          fg={itemColor}
+          attributes={isCompleted ? STRIKETHROUGH_ATTR : 0}
+          {...selectionProps()}
+        >
+          {todo.content}
+        </text>
+      </box>
+    </box>
+  );
 }
 
-function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
-  const [hover, setHover] = useState(false);
-  const renderer = useRenderer();
-  const { height: terminalHeight } = useTerminalDimensions();
-  const meta = toolStatusMeta(item);
-  const suffix = toolCardSummarySuffix(item.done, item.summary);
-  const confirmLabel =
-    item.confirm === 'pending'
-      ? ' · awaiting approval…'
-      : item.confirm === 'rejected'
-        ? ' · rejected'
-        : '';
-  const description = `${toolCardDescription(item.tool, item.args)}${suffix}${confirmLabel}`;
-  // FileDiff results render as colored gutter+diff lines (ink
-  // DiffResultRenderer parity), always visible like the original — not
-  // gated behind the click-to-expand output block.
-  const diffLines = useMemo(
-    () => (item.diff ? renderDiffBody(item.diff.fileDiff) : null),
-    [item.diff],
-  );
-  // ink static history caps one item at staticAreaMaxItemHeight rows, tail
-  // first (MaxSizedBox); an uncapped mega-diff would dominate the scrollbox.
-  const diffWindow = useMemo(
-    () =>
-      diffLines
-        ? tailWindow(diffLines, maxHistoryItemRows(terminalHeight))
-        : null,
-    [diffLines, terminalHeight],
-  );
-  const outputWindow = useMemo(() => {
-    if (!expanded || item.output.length === 0) return null;
-    const lines = truncateResultDisplayChars(item.output).split('\n');
-    return tailWindow(lines, maxHistoryItemRows(terminalHeight));
-  }, [expanded, item.output, terminalHeight]);
+/** ink AnsiOutput DEFAULT_HEIGHT (components/AnsiOutput.tsx). */
+const ANSI_DEFAULT_HEIGHT = 24;
 
+/**
+ * Line-level truncate (ink Text wrap="truncate" parity — a hard cut, no
+ * ellipsis): walks tokens left-to-right keeping whole code points until the
+ * visual width budget is spent.
+ */
+export function truncateTokenLine(
+  line: readonly AnsiToken[],
+  maxWidth: number,
+): AnsiToken[] {
+  if (maxWidth <= 0) return [];
+  let width = 0;
+  const kept: AnsiToken[] = [];
+  for (const token of line) {
+    const tokenWidth = getCachedStringWidth(token.text);
+    if (width + tokenWidth <= maxWidth) {
+      if (tokenWidth > 0 || kept.length === 0) kept.push(token);
+      width += tokenWidth;
+      continue;
+    }
+    let partial = '';
+    for (const cp of toCodePoints(token.text)) {
+      const cpWidth = getCachedStringWidth(cp);
+      if (width + cpWidth > maxWidth) break;
+      partial += cp;
+      width += cpWidth;
+    }
+    if (partial) kept.push({ ...token, text: partial });
+    break;
+  }
+  return kept;
+}
+
+/** ink AnsiToken → opentui text props (BOLD=1 | DIM=2 | ITALIC=4 | UNDERLINE=8). */
+function ansiTokenProps(token: AnsiToken): {
+  fg: string | undefined;
+  bg: string | undefined;
+  attributes: number;
+} {
+  const fg = token.inverse ? token.bg : token.fg;
+  const bg = token.inverse ? token.fg : token.bg;
+  return {
+    fg: fg || undefined,
+    bg: bg || undefined,
+    attributes:
+      (token.bold ? 1 : 0) |
+      (token.dim ? 2 : 0) |
+      (token.italic ? 4 : 0) |
+      (token.underline ? 8 : 0),
+  };
+}
+
+/**
+ * ink AnsiOutputText + ShellStatsBar parity: keeps the trailing 24 lines of
+ * the token grid, truncates each line to `maxWidth`, and appends the
+ * "+N lines / KB" stats bar when the shell output exceeded the window.
+ */
+export function AnsiRows({
+  grid,
+  maxWidth,
+  totalLines,
+  totalBytes,
+}: {
+  grid: ReadonlyArray<readonly AnsiToken[]>;
+  maxWidth: number;
+  totalLines?: number;
+  totalBytes?: number;
+}) {
+  const windowed = tailWindow(grid, ANSI_DEFAULT_HEIGHT);
+  const stats: string[] = [];
+  if (totalLines && totalLines > ANSI_DEFAULT_HEIGHT) {
+    stats.push(`+${totalLines - ANSI_DEFAULT_HEIGHT} lines`);
+  }
+  if (totalBytes && totalBytes > 0) {
+    stats.push(formatMemoryUsage(totalBytes));
+  }
   return (
     <box flexDirection="column">
-      <box
-        onMouseOver={() => setHover(true)}
-        onMouseOut={() => setHover(false)}
-        onMouseUp={(e) => {
-          if (e.button === MouseButton.LEFT) {
-            const sel = renderer.getSelection();
-            if (!sel?.getSelectedText()) onToggle(item.id);
-          }
-        }}
-        backgroundColor={hover ? C.hover : undefined}
-      >
-        <box width={STATUS_INDICATOR_WIDTH} flexShrink={0}>
-          <text fg={meta.color} attributes={1} {...selectionProps()}>
-            {meta.glyph}
-          </text>
+      {windowed.hiddenCount > 0 && (
+        <text fg={C.dim} {...selectionProps()}>
+          {hiddenLinesLabel(windowed.hiddenCount)}
+        </text>
+      )}
+      {windowed.visible.map((line, i) => (
+        <box key={`${i}`} flexDirection="row">
+          {truncateTokenLine(line, maxWidth).map((token, j) => {
+            const style = ansiTokenProps(token);
+            return (
+              <text
+                key={`${j}`}
+                fg={style.fg ?? C.text}
+                bg={style.bg}
+                attributes={style.attributes}
+                {...selectionProps()}
+              >
+                {token.text}
+              </text>
+            );
+          })}
         </box>
-        <box flexGrow={1}>
-          <text
-            fg={C.text}
-            attributes={1 | (meta.strikethrough ? STRIKETHROUGH_ATTR : 0)}
-            {...selectionProps()}
-          >
-            {toolCardName(item.tool)}
-          </text>
-          <text fg={C.dim} {...selectionProps()}>
-            {' '}
-            {description}
-          </text>
-        </box>
-      </box>
-      {diffWindow && (
-        <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
-          {diffWindow.hiddenCount > 0 && (
-            <text fg={C.dim} {...selectionProps()}>
-              {hiddenLinesLabel(diffWindow.hiddenCount)}
-            </text>
-          )}
-          {diffWindow.visible.map((spans, i) => (
+      ))}
+      {stats.length > 0 && (
+        <box flexDirection="row">
+          {stats.map((part, i) => (
             <box key={`${i}`} flexDirection="row">
-              {spans.map((span, j) => (
-                <text key={`${j}`} fg={span.color} {...selectionProps()}>
-                  {span.text}
-                </text>
-              ))}
+              {i > 0 && <text> </text>}
+              <text fg={C.dim} {...selectionProps()}>
+                {part}
+              </text>
             </box>
           ))}
         </box>
       )}
-      {item.args && expanded && (
-        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
-          <text fg={C.dim} {...selectionProps()}>
-            {argsPreview(item.args)}
-          </text>
-        </box>
-      )}
-      {outputWindow && (
-        <box
-          paddingLeft={STATUS_INDICATOR_WIDTH}
-          marginTop={0}
-          flexDirection="column"
-        >
-          {outputWindow.hiddenCount > 0 && (
-            <text fg={C.dim} {...selectionProps()}>
-              {hiddenLinesLabel(outputWindow.hiddenCount)}
-            </text>
-          )}
-          <code
-            content={outputWindow.visible.join('\n')}
-            filetype="txt"
-            syntaxStyle={SYNTAX}
-            fg={C.dim}
-            {...selectionProps()}
-          />
-        </box>
-      )}
     </box>
-  );
-}
-
-/** One-line truncated preview of the tool-call args JSON. */
-const argsPreview = (args: string) => {
-  const line = args.split('\n')[0] ?? '';
-  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
-};
-
-interface TaskCardProps {
-  item: Extract<LiveHistoryItem, { kind: 'task' }>;
-  expanded: boolean;
-  onToggle: (id: string) => void;
-}
-
-function TaskCard({ item, expanded, onToggle }: TaskCardProps) {
-  const [hover, setHover] = useState(false);
-  const renderer = useRenderer();
-  const icon = !item.done ? TOOL_STATUS.EXECUTING : TOOL_STATUS.SUCCESS;
-  const iconColor = !item.done ? C.text : C.green;
-  const suffix = item.done && item.stats ? ` · ${item.stats}` : '';
-  const live =
-    !item.done && item.progress.length > 0
-      ? item.progress[item.progress.length - 1]
-      : undefined;
-
-  return (
-    <box flexDirection="column">
-      <box
-        onMouseOver={() => setHover(true)}
-        onMouseOut={() => setHover(false)}
-        onMouseUp={(e) => {
-          if (e.button === MouseButton.LEFT) {
-            const sel = renderer.getSelection();
-            if (!sel?.getSelectedText()) onToggle(item.id);
-          }
-        }}
-        backgroundColor={hover ? C.hover : undefined}
-      >
-        <box width={STATUS_INDICATOR_WIDTH} flexShrink={0}>
-          <text fg={iconColor} attributes={1} {...selectionProps()}>
-            {icon}
-          </text>
-        </box>
-        <box flexGrow={1}>
-          <text fg={C.text} {...selectionProps()}>
-            Task — {item.description}
-          </text>
-          <text fg={C.dim} {...selectionProps()}>
-            {suffix}
-          </text>
-        </box>
-      </box>
-      {!item.done && live && (
-        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
-          <text fg={C.dim} {...selectionProps()}>
-            {live}
-          </text>
-        </box>
-      )}
-      {expanded && item.progress.length > 0 && (
-        <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
-          {item.progress.map((p, i) => (
-            <text key={i} fg={C.dim} {...selectionProps()}>
-              {p}
-            </text>
-          ))}
-        </box>
-      )}
-    </box>
-  );
-}
-
-export interface MessageListProps {
-  items: readonly LiveHistoryItem[];
-  expanded: ReadonlySet<string>;
-  onToggle: (id: string) => void;
-}
-
-/**
- * Renders the live history the way MainContent renders the committed one:
- * user/assistant turns get their accent prefix columns, thinking and tool
- * turns render through the collapse/expand cards above.
- */
-export function MessageList({ items, expanded, onToggle }: MessageListProps) {
-  const user = userMessageMeta();
-  const assistant = assistantMessageMeta();
-  return (
-    <>
-      {items.map((item) => {
-        switch (item.kind) {
-          case 'user':
-            return (
-              <box
-                key={item.id}
-                flexDirection="row"
-                marginTop={1}
-                alignSelf="flex-start"
-              >
-                <box width={2} flexShrink={0}>
-                  <text fg={user.color} {...selectionProps()}>
-                    {user.glyph}
-                  </text>
-                </box>
-                <box flexGrow={1}>
-                  <text fg={user.color} {...selectionProps()}>
-                    {item.text}
-                  </text>
-                </box>
-              </box>
-            );
-          case 'assistant':
-            // TODO(opentui parity — mermaid/image rendering): the ink
-            // renderer turns ```mermaid blocks and inline model images into
-            // terminal pictures (mermaidImageRenderer: kitty/sixel/ANSI via
-            // the capability probe). OpenTUI has no such pipeline yet — the
-            // renderer already probes the kitty graphics protocol at
-            // startup, but nothing consumes it — so mermaid output falls
-            // back to a plain code block and inline image parts are dropped
-            // upstream in the event adapter. Not implemented here by design;
-            // tracked as residual gap P2-6 in the display/render audit.
-            return (
-              <box key={item.id} flexDirection="row" marginTop={1}>
-                <box width={2} flexShrink={0}>
-                  <text fg={assistant.color}>{assistant.glyph}</text>
-                </box>
-                <box flexGrow={1} flexDirection="column">
-                  {item.text.length > 0 && (
-                    <markdown
-                      content={item.text}
-                      streaming={item.streaming}
-                      syntaxStyle={SYNTAX}
-                      fg={C.text}
-                      bg={C.bg}
-                    />
-                  )}
-                </box>
-              </box>
-            );
-          case 'thinking':
-            return (
-              <ThinkingBlock
-                key={item.id}
-                item={item}
-                expanded={expanded.has(item.id)}
-                onToggle={onToggle}
-              />
-            );
-          case 'tool':
-            return (
-              <ToolCard
-                key={item.id}
-                item={item}
-                expanded={expanded.has(item.id)}
-                onToggle={onToggle}
-              />
-            );
-          case 'task':
-            return (
-              <TaskCard
-                key={item.id}
-                item={item}
-                expanded={expanded.has(item.id)}
-                onToggle={onToggle}
-              />
-            );
-          case 'image':
-            // Text-only surface: placeholder for inline model images.
-            return (
-              <box key={item.id} flexDirection="row" marginTop={1}>
-                <text fg={C.dim}>{`[image: ${item.mimeType}]`}</text>
-              </box>
-            );
-        }
-      })}
-    </>
   );
 }

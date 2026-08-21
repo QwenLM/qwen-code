@@ -22,7 +22,14 @@ import {
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
+  toolStatusMeta,
+  tailWindow,
+  maxHistoryItemRows,
+  hiddenLinesLabel,
+  TodoRows,
+  AnsiRows,
 } from './messages.js';
+import { CompressionNotice, compactionView } from './session-compaction.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import {
   useKeyboard,
@@ -30,19 +37,32 @@ import {
   useSelectionHandler,
   useTerminalDimensions,
 } from '@opentui/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
 import { copyText } from './clipboard.js';
 import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
+  describeGoalCard,
+  describeLegacyGoalCard,
   foldLiveEvent,
   settleOpenTools,
+  type GoalCardColor,
   type LiveHistoryItem,
   type LiveImageItem,
+  type LiveRetryItem,
   type LiveThinkingItem,
   type LiveToolItem,
 } from './live-session-model.js';
 import { formatDuration } from '../utils/displayUtils.js';
+
+/** Maps a goal card's semantic palette slot onto the theme colors. */
+const GOAL_CARD_COLORS: Record<GoalCardColor, string> = {
+  secondary: C.dim,
+  accent: C.accent,
+  warning: C.yellow,
+  error: C.red,
+  success: C.green,
+};
 import {
   Logger,
   MessageSenderType,
@@ -66,7 +86,30 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { fmtTokens } from '../components/stats-helpers.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
-import { getAsciiArtWidth } from '../utils/textUtils.js';
+import {
+  getAsciiArtWidth,
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../utils/textUtils.js';
+import { ICON } from '../constants.js';
+import {
+  getOrderedStickyTodos,
+  getStickyTodoMaxVisibleItemsForMode,
+  getStickyTodosRenderKey,
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
+} from '../utils/todoSnapshot.js';
+import {
+  pickAsciiArtTier,
+  resolveCustomBanner,
+} from '../utils/customBanner.js';
+import {
+  getTipHistory,
+  selectTip,
+  tipRegistry,
+  type TipContext,
+} from '../../services/tips/index.js';
+import { getStickyTodosFromLiveItems } from './sticky-todos.js';
+import type { TodoItem } from '../components/TodoDisplay.js';
 import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
@@ -200,22 +243,11 @@ function ToolCard(props: {
   const { item, expanded, onToggle } = props;
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
+  const { width, height } = useTerminalDimensions();
 
-  const pendingApproval = item.confirm === 'pending';
-  const icon = !item.done
-    ? pendingApproval
-      ? '⏸'
-      : nextSpinner()
-    : item.success
-      ? '✓'
-      : '✗';
-  const iconColor = !item.done
-    ? pendingApproval
-      ? C.yellow
-      : C.accent
-    : item.success
-      ? C.green
-      : C.red;
+  // ink ToolStatusIndicator parity: pending `o`, executing `⊷`, success `✓`,
+  // confirming `?`, canceled `-` (struck through), error `x`.
+  const meta = toolStatusMeta(item);
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   const confirmLabel =
     item.confirm === 'pending'
@@ -242,6 +274,20 @@ function ToolCard(props: {
     }
   }
   const description = `${argsDescription || fallbackDescription}${suffix}`;
+  // FileDiff results render as colored gutter+diff lines (ink
+  // DiffResultRenderer parity), always visible like the original — not
+  // gated behind the click-to-expand output block.
+  const diffLines = useMemo(
+    () => (item.diff ? renderDiffBody(item.diff.fileDiff) : null),
+    [item.diff],
+  );
+  // ink static history caps one item at staticAreaMaxItemHeight rows, tail
+  // first (MaxSizedBox); an uncapped mega-diff would dominate the viewport.
+  const diffWindow = useMemo(
+    () =>
+      diffLines ? tailWindow(diffLines, maxHistoryItemRows(height)) : null,
+    [diffLines, height],
+  );
   return (
     <box flexDirection="column">
       <box
@@ -257,8 +303,8 @@ function ToolCard(props: {
         backgroundColor={hover ? C.hover : undefined}
       >
         <box flexDirection="row">
-          <text fg={iconColor}>{icon} </text>
-          <text fg={C.text} attributes={1}>
+          <text fg={meta.color}>{meta.glyph} </text>
+          <text fg={C.text} attributes={1 | (meta.strikethrough ? 128 : 0)}>
             {displayName}
           </text>
           {(description || confirmLabel) && (
@@ -267,6 +313,22 @@ function ToolCard(props: {
           {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
         </box>
       </box>
+      {diffWindow && (
+        <box paddingLeft={3} flexDirection="column">
+          {diffWindow.hiddenCount > 0 && (
+            <text fg={C.dim}>{hiddenLinesLabel(diffWindow.hiddenCount)}</text>
+          )}
+          {diffWindow.visible.map((spans, i) => (
+            <box key={`${i}`} flexDirection="row">
+              {spans.map((span, j) => (
+                <text key={`${j}`} fg={span.color}>
+                  {span.text}
+                </text>
+              ))}
+            </box>
+          ))}
+        </box>
+      )}
       {expanded && item.args && item.title !== 'write_file' && (
         <box paddingLeft={3}>
           <text fg={C.dim}>{argsPreview(item.args)}</text>
@@ -291,6 +353,25 @@ function ToolCard(props: {
               fg={C.text}
             />
           </box>
+        </box>
+      )}
+      {/* TodoWrite result renders the status-icon list always (ink
+       * ToolMessage resultDisplay parity), not gated behind expand. */}
+      {item.todos && item.todos.length > 0 && (
+        <box paddingLeft={3}>
+          <TodoRows todos={item.todos} />
+        </box>
+      )}
+      {/* Live shell output renders the styled token grid always (ink
+       * AnsiOutputText parity). */}
+      {item.ansi && item.ansi.grid.length > 0 && (
+        <box paddingLeft={3}>
+          <AnsiRows
+            grid={item.ansi.grid}
+            maxWidth={width - 6}
+            totalLines={item.ansi.totalLines}
+            totalBytes={item.ansi.totalBytes}
+          />
         </box>
       )}
     </box>
@@ -360,16 +441,15 @@ function AssistantMessage(props: {
   item: Extract<LiveHistoryItem, { kind: 'assistant' }>;
 }) {
   const { item } = props;
-  const isError = item.text.startsWith('[error]');
   return (
     <box paddingLeft={1} marginTop={1} flexDirection="row">
-      <text fg={isError ? C.red : C.accent}>{isError ? '✗ ' : '◆ '}</text>
+      <text fg={C.accent}>◆ </text>
       <box flexGrow={1} flexDirection="column">
         <markdown
           content={item.text}
           streaming={item.streaming}
           syntaxStyle={SYNTAX}
-          fg={isError ? C.red : C.text}
+          fg={C.text}
           bg={C.bg}
         />
       </box>
@@ -458,8 +538,8 @@ function gradientAt(stops: string[], t: number): string {
   return lerpHex(stops[seg], stops[seg + 1], lt);
 }
 /** ASCII logo with the original horizontal gradient (themes GradientColors). */
-function GradientLogo() {
-  const lines = shortAsciiLogo.replace(/^\n/, '').split('\n');
+function GradientLogo({ logo }: { logo: string }) {
+  const lines = logo.replace(/^\n/, '').split('\n');
   const w = Math.max(...lines.map((l) => [...l].length), 1);
   return (
     <box flexDirection="column" flexShrink={0}>
@@ -494,8 +574,14 @@ function approvalModeLabel(mode: string): string {
 
 // Faithful port of the original ink Header (components/Header.tsx): a
 // single-border info panel with 4 lines — title(+version), blank spacer,
-// auth|model(+hint), directory. Same data sources as the original.
-function buildBanner(config: Config | undefined, width: number) {
+// auth|model(+hint), directory. Same data sources as the original, including
+// the AppHeader custom-banner resolution (hideBanner / customAsciiArt /
+// customBannerTitle / customBannerSubtitle).
+function buildBanner(
+  config: Config | undefined,
+  settings: LoadedSettings,
+  width: number,
+) {
   let versionLabel = '';
   try {
     const cliPkg = nodePath.join(
@@ -535,27 +621,55 @@ function buildBanner(config: Config | undefined, width: number) {
   }
   const authModelText = authLabel ? `${authLabel} | ${model}` : model;
   const hint = ' (/model to change)';
-  const authLine = authModelText + hint;
 
   // Responsive layout mirroring Header.tsx: two-column (ASCII logo + info
   // panel) when wide, single-column info panel when narrow. The outer
   // marginX=2 puts the border in the original's third column.
+  const custom = resolveCustomBanner(settings);
   const containerMarginX = 2;
   const logoGap = 2;
   const infoPanelChromeWidth = 2 + 1 * 2; // border(2) + paddingX(1*2)
   const minInfoPanelWidth = 40 + infoPanelChromeWidth;
   const available = Math.max(0, width - containerMarginX * 2);
-  const logoWidth = getAsciiArtWidth(shortAsciiLogo);
-  const showLogo = available >= logoWidth + logoGap + minInfoPanelWidth;
+  // ink Header parity: a fitting custom tier wins; custom art that fits
+  // nowhere hides the logo column (no silent fallback to the bundled logo —
+  // that would undo a white-label deployment on narrow terminals); no
+  // custom art falls through to the bundled shortAsciiLogo.
+  const hasCustomArt = Boolean(custom.asciiArt.small || custom.asciiArt.large);
+  const customTier = pickAsciiArtTier(
+    custom.asciiArt.small,
+    custom.asciiArt.large,
+    available,
+    logoGap,
+    minInfoPanelWidth,
+    getAsciiArtWidth,
+  );
+  const displayLogo = customTier ?? (hasCustomArt ? '' : shortAsciiLogo);
+  const logoWidth = getAsciiArtWidth(displayLogo);
+  const showLogo =
+    displayLogo !== '' && available >= logoWidth + logoGap + minInfoPanelWidth;
   const maxInfoPanelWidth = 60;
   const infoPanelWidth = showLogo
     ? Math.min(available - logoWidth - logoGap, maxInfoPanelWidth)
     : available;
   const maxPathLength = Math.max(0, infoPanelWidth - infoPanelChromeWidth);
-  const displayPath = shortenPath(
+  const infoPanelContentWidth = Math.max(
+    0,
+    infoPanelWidth - infoPanelChromeWidth,
+  );
+  const showModelHint =
+    infoPanelContentWidth > 0 &&
+    getCachedStringWidth(authModelText + hint) <= infoPanelContentWidth;
+  const shortenedPath = shortenPath(
     tildeifyPath(targetDir),
     Math.max(3, maxPathLength),
   );
+  const displayPath =
+    maxPathLength <= 0
+      ? ''
+      : shortenedPath.length > maxPathLength
+        ? shortenedPath.slice(0, maxPathLength)
+        : shortenedPath;
 
   const infoPanel = (
     <box
@@ -565,9 +679,23 @@ function buildBanner(config: Config | undefined, width: number) {
       width={infoPanelWidth}
       flexGrow={showLogo ? 0 : 1}
     >
-      <text fg={C.accent}>{`>_ Qwen Code (${versionLabel})`}</text>
-      <text> </text>
-      <text fg={C.dim}>{authLine}</text>
+      <box flexDirection="row">
+        <text fg={C.accent} attributes={1}>
+          {custom.title ?? '>_ Qwen Code'}
+        </text>
+        <text fg={C.dim}>{` (${versionLabel})`}</text>
+      </box>
+      {/* Subtitle (when set) replaces the blank spacer row so the auth
+       * line keeps its vertical position (ink Header parity). */}
+      {custom.subtitle ? (
+        <text fg={C.dim}>{custom.subtitle}</text>
+      ) : (
+        <text> </text>
+      )}
+      <box flexDirection="row">
+        <text fg={C.dim}>{authModelText}</text>
+        {showModelHint && <text fg={C.dim}>{hint}</text>}
+      </box>
       <text fg={C.dim}>{displayPath}</text>
     </box>
   );
@@ -591,7 +719,7 @@ function buildBanner(config: Config | undefined, width: number) {
       marginRight={containerMarginX}
       flexShrink={0}
     >
-      <GradientLogo />
+      <GradientLogo logo={displayLogo} />
       <box width={logoGap} />
       {infoPanel}
     </box>
@@ -601,6 +729,150 @@ function buildBanner(config: Config | undefined, width: number) {
 // Cap the confirmation body (diff/command/plan) so a long payload can't
 // push the option list off-screen.
 const CONFIRM_BODY_MAX_LINES = 12;
+
+/**
+ * Select a startup tip (ink Tips.pickStartupTip parity). Called once per
+ * session via useMemo([]) — recordShown writes to disk.
+ */
+function pickStartupTip(): string {
+  const history = getTipHistory();
+  const context: TipContext = {
+    lastPromptTokenCount: 0,
+    contextWindowSize: 0,
+    sessionPromptCount: 0,
+    sessionCount: history.sessionCount,
+    platform: process.platform,
+  };
+  const tip = selectTip('startup', context, tipRegistry, history);
+  if (tip) {
+    history.recordShown(tip.id, 0);
+    return tip.content;
+  }
+  return 'Type / to see all available commands.';
+}
+
+/** ink Tips parity: marginX 2, secondary-colored "Tips: {tip}" line. */
+function Tips() {
+  const selectedTip = useMemo(() => pickStartupTip(), []);
+  return (
+    <box marginLeft={2} marginRight={2}>
+      <text fg={C.dim}>{`Tips: ${selectedTip}`}</text>
+    </box>
+  );
+}
+
+/** ink StickyTodoList clampVisibleTodoCount parity. */
+function clampVisibleTodoCount(value: number): number {
+  if (!Number.isFinite(value)) {
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
+  }
+  return Math.max(
+    1,
+    Math.min(STICKY_TODO_MAX_VISIBLE_ITEMS, Math.floor(value)),
+  );
+}
+
+/** Ink StickyTodoList STATUS_ICONS (status column is width 2 here). */
+const STICKY_TODO_ICONS = {
+  pending: ICON.CIRCLE_EMPTY,
+  in_progress: ICON.CIRCLE_LEFT_HALF,
+  completed: ICON.CIRCLE_FILLED,
+} as const;
+
+/**
+ * ink StickyTodoList parity: numbered open-todo panel above the composer.
+ * C has no border token, so the round border takes the dim color (the ink
+ * theme's border.default is a low-contrast gray in both default themes).
+ */
+const StickyTodoListOpInternal = ({
+  todos,
+  width,
+  maxVisibleItems = STICKY_TODO_MAX_VISIBLE_ITEMS,
+}: {
+  todos: TodoItem[];
+  width: number;
+  maxVisibleItems?: number;
+}) => {
+  const orderedOpenTodos = getOrderedStickyTodos(todos).filter(
+    (todo) => todo.status !== 'completed',
+  );
+  const todoNumberById = new Map(
+    todos.map((todo, index) => [todo.id, `${index + 1}.`] as const),
+  );
+
+  if (orderedOpenTodos.length === 0) {
+    return null;
+  }
+
+  const visibleTodoCount = clampVisibleTodoCount(maxVisibleItems);
+  const visibleTodos = orderedOpenTodos.slice(0, visibleTodoCount);
+  const hiddenTodoCount = orderedOpenTodos.length - visibleTodos.length;
+  const numberColumnWidth =
+    Math.max(
+      ...visibleTodos.map(
+        (todo, index) =>
+          (todoNumberById.get(todo.id) ?? `${index + 1}.`).length,
+      ),
+    ) + 1;
+  // 6 = 2 (status icon column) + 2 (border columns) + 2 (paddingX columns).
+  const contentColumnWidth = Math.max(1, width - numberColumnWidth - 6);
+
+  return (
+    <box
+      marginLeft={2}
+      marginRight={2}
+      width={width}
+      flexDirection="column"
+      borderStyle="rounded"
+      borderColor={C.dim}
+      paddingX={1}
+    >
+      <text fg={C.dim} attributes={1}>
+        {'Current tasks'}
+      </text>
+      {visibleTodos.map((todo, index) => {
+        const todoNumber = todoNumberById.get(todo.id) ?? `${index + 1}.`;
+        const itemColor = todo.status === 'in_progress' ? C.green : C.text;
+        return (
+          <box key={todo.id} flexDirection="row" height={1}>
+            <box width={numberColumnWidth}>
+              <text fg={C.dim}>{todoNumber}</text>
+            </box>
+            <box width={2}>
+              <text fg={itemColor}>{STICKY_TODO_ICONS[todo.status]}</text>
+            </box>
+            <box width={contentColumnWidth}>
+              <text
+                fg={itemColor}
+                attributes={todo.status === 'completed' ? 128 : 0}
+              >
+                {truncateToWidth(todo.content, contentColumnWidth)}
+              </text>
+            </box>
+          </box>
+        );
+      })}
+      {hiddenTodoCount > 0 && (
+        <box flexDirection="row" height={1}>
+          <box width={numberColumnWidth} />
+          <box width={2} />
+          <box width={contentColumnWidth}>
+            <text fg={C.dim}>{`... and ${hiddenTodoCount} more`}</text>
+          </box>
+        </box>
+      )}
+    </box>
+  );
+};
+
+const StickyTodoListOp = memo(
+  StickyTodoListOpInternal,
+  (previousProps, nextProps) =>
+    previousProps.width === nextProps.width &&
+    previousProps.maxVisibleItems === nextProps.maxVisibleItems &&
+    getStickyTodosRenderKey(previousProps.todos) ===
+      getStickyTodosRenderKey(nextProps.todos),
+);
 
 // One rendered confirmation body line = a row of colored spans, so a dim
 // line-number gutter can sit next to normally colored content.
@@ -621,7 +893,7 @@ function App({
   remoteInputWatcher?: RemoteInputWatcher;
 }) {
   const renderer = useRenderer();
-  const { width } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   // The directory this session operates on. `config.getTargetDir()` (not
   // `process.cwd()`) so worktree/--cd sessions show the right path.
   const targetDir = useMemo(
@@ -635,6 +907,18 @@ function App({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
   const [loadingPhrase, setLoadingPhrase] = useState(WITTY_LOADING_PHRASES[0]);
+  // Live retry countdown: re-render every second while a retry item's delay
+  // is still elapsing (ink startRetryCountdown parity).
+  const activeRetryId = items.find(
+    (it): it is LiveRetryItem =>
+      it.kind === 'retry' && Date.now() - it.startedAt < it.delayMs,
+  )?.id;
+  const [, setRetryTick] = useState(0);
+  useEffect(() => {
+    if (!activeRetryId) return;
+    const timer = setInterval(() => setRetryTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [activeRetryId]);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!streaming) return;
@@ -1509,6 +1793,22 @@ function App({
       return;
     }
     if (key.name === 'y' && key.ctrl) {
+      // ink parity: during a rate-limit countdown, Ctrl+Y skips the delay so
+      // the in-flight generator retries immediately (retryLastPrompt's
+      // skipRetryDelay branch) — no abort/re-submit needed.
+      const activeRetry = [...items]
+        .reverse()
+        .find(
+          (it): it is LiveRetryItem =>
+            it.kind === 'retry' && Date.now() - it.startedAt < it.delayMs,
+        );
+      if (activeRetry) {
+        activeRetry.skipDelay?.();
+        setItems((prev) =>
+          foldLiveEvent(prev, { type: 'retry-countdown-clear' }),
+        );
+        return;
+      }
       // retry last user prompt (mirrors original Ctrl+Y)
       const lastUser = [...items].reverse().find((i) => i.kind === 'user');
       if (lastUser && lastUser.kind === 'user')
@@ -2307,7 +2607,33 @@ function App({
     }
   }, [remoteInputWatcher, streaming, commandProcessing]);
 
-  const banner = buildBanner(config, width);
+  // ink AppHeader parity: screen-reader mode and ui.hideBanner suppress the
+  // banner; ui.hideTips or screen-reader mode suppresses the tips line.
+  const screenReaderMode = config?.getScreenReader() ?? false;
+  const showBanner = !screenReaderMode && !settings.merged.ui?.hideBanner;
+  const showTips = !(settings.merged.ui?.hideTips || screenReaderMode);
+  // resolveCustomBanner may read art files, so the banner JSX is memoized on
+  // its inputs (ink AppHeader resolves once per settings identity).
+  const banner = useMemo(
+    () => (showBanner ? buildBanner(config, settings, width) : null),
+    [showBanner, config, settings, width],
+  );
+
+  // Sticky-todo panel state (ink AppContainer/DefaultAppLayout parity).
+  // `streaming` ≙ StreamingState.Responding; slash-command processing is not
+  // a model response and does not surface the panel. The snapshot array
+  // reference is stable across unrelated fold events, and the memo'd panel
+  // compares via getStickyTodosRenderKey, so unrelated items do not re-render it.
+  const stickyTodos = useMemo(
+    () => getStickyTodosFromLiveItems(items),
+    [items],
+  );
+  const shouldShowStickyTodos = stickyTodos !== null && !dialog && streaming;
+  const stickyTodoWidth = Math.min(Math.min(width - 4, 100), 64);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    height,
+    false,
+  );
 
   // footer (mirrors original Footer): project · git · model + approval mode
   const footerProject = nodePath.basename(targetDir);
@@ -2376,13 +2702,7 @@ function App({
         }}
       >
         {banner}
-        <box paddingLeft={1} paddingRight={1}>
-          <text fg={C.dim}>
-            {
-              'Tips: Try /insight to generate personalized insights from your chat history.'
-            }
-          </text>
-        </box>
+        {showTips && <Tips />}
         {items.map((item) => {
           switch (item.kind) {
             case 'user':
@@ -2470,6 +2790,250 @@ function App({
                   onToggle={toggle}
                 />
               );
+            case 'compaction':
+              return (
+                <box key={item.id} paddingLeft={1} marginTop={1}>
+                  <CompressionNotice view={compactionView(item.compression)} />
+                </box>
+              );
+            case 'info':
+              // ink InfoMessage parity: `●` prefix + primary-colored text
+              // (StatusMessage reserves a 2-cell prefix column; no top margin).
+              return (
+                <box key={item.id} flexDirection="row" paddingLeft={1}>
+                  <box width={2} flexShrink={0}>
+                    <text fg={C.text} {...selectionProps()}>
+                      {ICON.CIRCLE_FILLED}
+                    </text>
+                  </box>
+                  <box flexGrow={1} flexDirection="column">
+                    {item.text.split('\n').map((line, i) => (
+                      <text key={i} fg={C.text} {...selectionProps()}>
+                        {line}
+                      </text>
+                    ))}
+                  </box>
+                </box>
+              );
+            case 'error': {
+              // ink ErrorMessage parity: `✕` prefix + error-colored text with
+              // the retry hint inline (secondary color) on the last line.
+              const lines = item.text.split('\n');
+              return (
+                <box key={item.id} flexDirection="row" paddingLeft={1}>
+                  <box width={2} flexShrink={0}>
+                    <text fg={C.red} {...selectionProps()}>
+                      ✕
+                    </text>
+                  </box>
+                  <box flexGrow={1} flexDirection="column">
+                    {lines.map((line, i) => (
+                      <text key={i} fg={C.red} {...selectionProps()}>
+                        {line}
+                        {item.hint && i === lines.length - 1 ? (
+                          <span fg={C.dim}> ({item.hint})</span>
+                        ) : null}
+                      </text>
+                    ))}
+                  </box>
+                </box>
+              );
+            }
+            case 'warning':
+              // ink user_prompt_submit_blocked parity: no prefix, the whole
+              // block in the warning color.
+              return (
+                <box key={item.id} paddingLeft={1} flexDirection="column">
+                  {item.text.split('\n').map((line, i) => (
+                    <text key={i} fg={C.yellow} {...selectionProps()}>
+                      {line}
+                    </text>
+                  ))}
+                </box>
+              );
+            case 'retry': {
+              // ink startRetryCountdown drives two pending rows, both updated
+              // every second until the delay elapses: the retry error line
+              // (short-format countdown hint inline, ink pendingRetryErrorItem)
+              // and the `↻` countdown line (ink RetryCountdownMessage).
+              const remainingMs = Math.max(
+                0,
+                item.delayMs - (Date.now() - item.startedAt),
+              );
+              const remainingSec = Math.ceil(remainingMs / 1000);
+              return (
+                <box key={item.id} flexDirection="column" paddingLeft={1}>
+                  <box flexDirection="row">
+                    <box width={2} flexShrink={0}>
+                      <text fg={C.red} {...selectionProps()}>
+                        ✕
+                      </text>
+                    </box>
+                    <box flexGrow={1}>
+                      <text fg={C.red} {...selectionProps()}>
+                        {item.message ??
+                          'Rate limit exceeded. Please wait and try again.'}
+                        <span fg={C.dim}>
+                          {' '}
+                          (Retrying in {remainingSec}s… (attempt {item.attempt}/
+                          {item.maxRetries}))
+                        </span>
+                      </text>
+                    </box>
+                  </box>
+                  <box flexDirection="row">
+                    <box width={2} flexShrink={0}>
+                      <text fg={C.dim} {...selectionProps()}>
+                        ↻
+                      </text>
+                    </box>
+                    <box flexGrow={1}>
+                      <text fg={C.dim} {...selectionProps()}>
+                        Retrying in {remainingSec} seconds… (attempt{' '}
+                        {item.attempt}/{item.maxRetries})
+                      </text>
+                    </box>
+                  </box>
+                </box>
+              );
+            }
+            case 'stop-hook':
+              // ink stop_hook_system_message parity: `⎿ Stop says:` header +
+              // indented markdown body.
+              return (
+                <box key={item.id} paddingLeft={1} flexDirection="column">
+                  <text fg={C.text} {...selectionProps()}>
+                    {' ⎿ Stop says:'}
+                  </text>
+                  <box paddingLeft={4}>
+                    <markdown
+                      content={item.message}
+                      syntaxStyle={SYNTAX}
+                      fg={C.text}
+                      bg={C.bg}
+                    />
+                  </box>
+                </box>
+              );
+            case 'goal': {
+              // ink GoalStatusMessage parity: v2 snapshots render through
+              // GoalStateCard; /goal command items render the legacy kind
+              // form (checking / six-card lifecycle).
+              if (item.legacy) {
+                const legacy = describeLegacyGoalCard(item.legacy);
+                if (legacy.state === 'hidden') return null;
+                if (legacy.state === 'checking') {
+                  return (
+                    <box key={item.id} flexDirection="row" paddingLeft={1}>
+                      <box width={2} flexShrink={0}>
+                        <text fg={C.dim} {...selectionProps()}>
+                          {ICON.CIRCLE_EMPTY}
+                        </text>
+                      </box>
+                      <box flexGrow={1} flexDirection="column">
+                        <text fg={C.dim} {...selectionProps()}>
+                          {legacy.title}
+                        </text>
+                        <text fg={C.dim} {...selectionProps()}>
+                          Goal: {legacy.condition}
+                        </text>
+                        {legacy.judgeReason ? (
+                          <text fg={C.dim} {...selectionProps()}>
+                            Judge: {legacy.judgeReason}
+                          </text>
+                        ) : null}
+                      </box>
+                    </box>
+                  );
+                }
+                const legacyColor = GOAL_CARD_COLORS[legacy.color];
+                return (
+                  <box key={item.id} flexDirection="row" paddingLeft={1}>
+                    <box width={2} flexShrink={0}>
+                      <text fg={legacyColor} {...selectionProps()}>
+                        {legacy.icon}
+                      </text>
+                    </box>
+                    <box flexGrow={1} flexDirection="column">
+                      <text fg={legacyColor} {...selectionProps()}>
+                        {legacy.title}
+                        {legacy.subtitle ? (
+                          <span fg={C.dim}> · {legacy.subtitle}</span>
+                        ) : null}
+                      </text>
+                      <box flexDirection="row">
+                        <box flexShrink={0} marginRight={1}>
+                          <text fg={C.dim} {...selectionProps()}>
+                            Goal:
+                          </text>
+                        </box>
+                        <box flexGrow={1}>
+                          <text fg={C.text} {...selectionProps()}>
+                            {legacy.condition}
+                          </text>
+                        </box>
+                      </box>
+                      {legacy.lastCheck ? (
+                        <text fg={C.dim} {...selectionProps()}>
+                          Last check: {legacy.lastCheck}
+                        </text>
+                      ) : null}
+                    </box>
+                  </box>
+                );
+              }
+              const view = describeGoalCard(item.snapshot, item.cause);
+              if (view.state === 'hidden') return null;
+              if (view.state === 'cleared') {
+                return (
+                  <box key={item.id} flexDirection="row" paddingLeft={1}>
+                    <box width={2} flexShrink={0}>
+                      <text fg={C.dim} {...selectionProps()}>
+                        {ICON.CIRCLE_EMPTY}
+                      </text>
+                    </box>
+                    <text fg={C.dim} {...selectionProps()}>
+                      Goal cleared
+                    </text>
+                  </box>
+                );
+              }
+              const goalColor = GOAL_CARD_COLORS[view.color];
+              return (
+                <box key={item.id} flexDirection="row" paddingLeft={1}>
+                  <box width={2} flexShrink={0}>
+                    <text fg={goalColor} {...selectionProps()}>
+                      {view.icon}
+                    </text>
+                  </box>
+                  <box flexGrow={1} flexDirection="column">
+                    <text fg={goalColor} {...selectionProps()}>
+                      {view.title}
+                      {view.subtitle ? (
+                        <span fg={C.dim}> · {view.subtitle}</span>
+                      ) : null}
+                    </text>
+                    <box flexDirection="row">
+                      <box flexShrink={0} marginRight={1}>
+                        <text fg={C.dim} {...selectionProps()}>
+                          Goal:
+                        </text>
+                      </box>
+                      <box flexGrow={1}>
+                        <text fg={C.text} {...selectionProps()}>
+                          {view.objective}
+                        </text>
+                      </box>
+                    </box>
+                    {view.reason ? (
+                      <text fg={C.dim} {...selectionProps()}>
+                        Reason: {view.reason}
+                      </text>
+                    ) : null}
+                  </box>
+                </box>
+              );
+            }
             case 'image':
               return <ImageItem key={item.id} item={item} />;
           }
@@ -2628,6 +3192,13 @@ function App({
                 {'Ctrl+Q to queue · ↑ to edit queued messages'}
               </text>
             </box>
+          )}
+          {shouldShowStickyTodos && (
+            <StickyTodoListOp
+              todos={stickyTodos!}
+              width={stickyTodoWidth}
+              maxVisibleItems={stickyTodoMaxVisibleItems}
+            />
           )}
           <OpenTuiInputPrompt
             onSubmit={submitText}

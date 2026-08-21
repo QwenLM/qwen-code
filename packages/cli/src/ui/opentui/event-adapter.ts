@@ -21,11 +21,14 @@
  */
 
 import type {
+  AnsiToken,
   ChatCompressionInfo,
   RetryInfo,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
+import type { TodoItem } from '../components/TodoDisplay.js';
+import type { CompressionProps } from '../types.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
@@ -43,8 +46,67 @@ export type OpenTuiStreamEvent =
        * tool card instead of the flattened `display` text (ink
        * DiffResultRenderer parity). */
       diff?: { fileDiff: string; fileName: string };
+      /** Structured TodoWrite payload: rendered as a status-icon list in the
+       * tool card (ink TodoDisplay parity) instead of the flattened text. */
+      todos?: TodoItem[];
+      /** Structured AnsiOutputDisplay payload: rendered as a styled token
+       * grid in the tool card (ink AnsiOutputText parity) instead of the
+       * flattened, color-stripped text. */
+      ansi?: {
+        grid: AnsiToken[][];
+        totalLines?: number;
+        totalBytes?: number;
+      };
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
+  /** Structured compression item (/compress command): rendered as the ink
+   * CompressionMessage row (spinner/diamond + token counts) instead of the
+   * flattened text projection. */
+  | { type: 'compaction'; compression: CompressionProps }
+  /** Info notice row (ink `addItem({type: INFO})` → InfoMessage): `●` prefix
+   * + primary-colored text, e.g. the auto-compact `chat_compressed` notice. */
+  | { type: 'info'; text: string }
+  /** Error notice row (ink `type: 'error'` → ErrorMessage): `✕` prefix +
+   * error-colored text with an optional inline hint. */
+  | { type: 'error'; text: string; hint?: string }
+  /** Warning block (ink user_prompt_submit_blocked): no prefix, whole block
+   * in the warning color. */
+  | { type: 'warning'; text: string }
+  /** Retry countdown (ink startRetryCountdown): drives the two pending
+   * rows — the retry error line and the `↻` countdown — updated every
+   * second until the delay elapses. `message` mirrors RetryInfo.message;
+   * `skipDelay` resolves the core delay promise early (Ctrl+Y, ink
+   * skipRetryDelayRef); `isContinuation` keeps the failed attempt's
+   * streamed content instead of discarding it (ink continuation retries). */
+  | {
+      type: 'retry-countdown';
+      attempt: number;
+      maxRetries: number;
+      delayMs: number;
+      message?: string;
+      skipDelay?: () => void;
+      isContinuation?: boolean;
+    }
+  /** Retry without retryInfo: the attempt is starting now, so any prior
+   * retry UI is stale (ink clearRetryCountdown). */
+  | { type: 'retry-countdown-clear' }
+  /** Stop-hook system message (ink stop_hook_system_message):
+   * `⎿ Stop says:` header + indented markdown body. */
+  | { type: 'stop-hook-message'; message: string }
+  /** Goal lifecycle card (ink goal_state → GoalStatusMessage/GoalStateCard):
+   * carries the v2 snapshot + display cause. */
+  | { type: 'goal'; snapshot: GoalSnapshotLike; cause?: string }
+  /** Legacy goal card (ink goal_status → GoalStatusMessage kind form, the
+   * /goal command path): carried structurally instead of the text
+   * projection so the renderer can apply lifecycle colors. */
+  | {
+      type: 'goal-legacy';
+      kind: string;
+      condition: string;
+      iterations?: number;
+      durationMs?: number;
+      lastReason?: string;
+    }
   /**
    * Turn segmentation marker (core `finished` / one-shot notices): closes
    * the streaming assistant block WITHOUT settling tool cards or dropping
@@ -66,7 +128,8 @@ export interface EventMapperContext {
    * error message when absent.
    */
   formatError?: (error: unknown) => string;
-  /** Active model name for the chat-compression notice. */
+  /** Active model name for the chat-compression notice (ink parity:
+   * `modelOverrideRef.current ?? config.getModel()`). */
   getModelName?: () => string;
   /** Configured max session turns for the MaxSessionTurns notice. */
   getMaxSessionTurns?: () => number;
@@ -91,6 +154,45 @@ export function extractFileDiff(
     fileDiff: o['fileDiff'],
     fileName: typeof o['fileName'] === 'string' ? o['fileName'] : '',
   };
+}
+
+/** Extracts the structured TodoWrite payload (`type: 'todo_list'`). */
+export function extractTodos(display: unknown): TodoItem[] | null {
+  if (typeof display !== 'object' || display === null) return null;
+  const o = display as Record<string, unknown>;
+  if (o['type'] !== 'todo_list' || !Array.isArray(o['todos'])) return null;
+  return (o['todos'] as unknown[]).filter(
+    (t): t is TodoItem =>
+      typeof t === 'object' &&
+      t !== null &&
+      typeof (t as TodoItem).id === 'string' &&
+      typeof (t as TodoItem).content === 'string' &&
+      typeof (t as TodoItem).status === 'string',
+  );
+}
+
+/** Extracts the AnsiOutputDisplay token grid (live shell output). */
+export function extractAnsiOutput(
+  display: unknown,
+): { grid: AnsiToken[][]; totalLines?: number; totalBytes?: number } | null {
+  if (typeof display !== 'object' || display === null) return null;
+  const o = display as Record<string, unknown>;
+  if (!Array.isArray(o['ansiOutput'])) return null;
+  const grid = (o['ansiOutput'] as unknown[])
+    .filter((line): line is unknown[] => Array.isArray(line))
+    .map((line) =>
+      line.filter(
+        (t): t is AnsiToken =>
+          typeof t === 'object' &&
+          t !== null &&
+          typeof (t as AnsiToken).text === 'string',
+      ),
+    );
+  const totalLines =
+    typeof o['totalLines'] === 'number' ? o['totalLines'] : undefined;
+  const totalBytes =
+    typeof o['totalBytes'] === 'number' ? o['totalBytes'] : undefined;
+  return { grid, totalLines, totalBytes };
 }
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
@@ -144,8 +246,7 @@ const FINISH_REASON_NOTICES: Record<string, string | undefined> = {
 /**
  * Stateful mapper: one server event may yield 0..n neutral events. Tracks the
  * thinking→content transition so the model collapses the thought block before
- * the answer starts streaming, and the last rendered goal text so repeated
- * goal snapshots do not spam identical lines.
+ * the answer starts streaming.
  */
 export function createEventMapper(
   context?: EventMapperContext,
@@ -153,7 +254,6 @@ export function createEventMapper(
   let sawThought = false;
   let thoughtClosed = false;
   let toolSeq = 0;
-  let lastGoalText: string | null = null;
 
   return (ev: ServerGeminiStreamEvent): OpenTuiStreamEvent[] => {
     const out: OpenTuiStreamEvent[] = [];
@@ -162,17 +262,6 @@ export function createEventMapper(
         out.push({ type: 'thinking-end' });
         thoughtClosed = true;
       }
-    };
-    // One-shot notices get their own assistant block: close the streaming
-    // one first (fold `segment-end`), then emit the text.
-    const notice = (text: string) => {
-      out.push({ type: 'segment-end' });
-      out.push({ type: 'text', delta: text });
-    };
-    const goalNotice = (text: string | null) => {
-      if (!text || text === lastGoalText) return;
-      lastGoalText = text;
-      notice(text);
     };
 
     switch (ev.type) {
@@ -259,8 +348,24 @@ export function createEventMapper(
         if (diff) {
           out.push({ type: 'tool-result', id: v.callId, display: '', diff });
         } else {
-          const display = renderResultDisplay(v.resultDisplay);
-          if (display) out.push({ type: 'tool-result', id: v.callId, display });
+          const todos = extractTodos(v.resultDisplay);
+          if (todos) {
+            out.push({ type: 'tool-result', id: v.callId, display: '', todos });
+          } else {
+            const ansi = extractAnsiOutput(v.resultDisplay);
+            if (ansi) {
+              out.push({
+                type: 'tool-result',
+                id: v.callId,
+                display: '',
+                ansi,
+              });
+            } else {
+              const display = renderResultDisplay(v.resultDisplay);
+              if (display)
+                out.push({ type: 'tool-result', id: v.callId, display });
+            }
+          }
         }
         const cancelled = v.executionStatus === 'cancelled';
         const failed = v.error !== undefined || v.executionStatus === 'error';
@@ -274,22 +379,36 @@ export function createEventMapper(
       }
       case 'user_cancelled': {
         closeThought();
-        notice('User cancelled the request.');
+        // ink parity: handleUserCancelledEvent clears the retry countdown
+        // (stale after the cancel) before adding the info notice.
+        out.push({ type: 'retry-countdown-clear' });
+        out.push({ type: 'info', text: 'User cancelled the request.' });
         break;
       }
       case 'error': {
         closeThought();
+        // ink parity: handleErrorEvent sets a pending error item rendered by
+        // ErrorMessage (`✕` + error color) with the retry hint inline.
         const v = ev.value as { error?: unknown };
         const message = context?.formatError
           ? context.formatError(v.error)
           : String(
               (v.error as { message?: string } | undefined)?.message ?? '',
             );
-        notice(`[error] ${message}`);
+        if (message)
+          out.push({
+            type: 'error',
+            text: message,
+            hint: 'Press Ctrl+Y to retry',
+          });
         break;
       }
       case 'chat_compressed': {
+        // ink parity: useGeminiStream's handleChatCompressionEvent adds a
+        // `type: 'info'` history item (InfoMessage row) with this text; a
+        // pending retry countdown is stale once the context is swapped.
         closeThought();
+        out.push({ type: 'retry-countdown-clear' });
         const v = ev.value as ChatCompressionInfo | null;
         const model = context?.getModelName?.() ?? 'the model';
         const reasonClause =
@@ -297,144 +416,162 @@ export function createEventMapper(
             ? `accumulated enough tool screenshots to trigger compaction for ${model}`
             : `approached the input token limit for ${model}`;
         const warningSuffix = v?.warning ? `\n⚠️ ${v.warning}` : '';
-        notice(
-          `IMPORTANT: This conversation ${reasonClause}. ` +
+        out.push({
+          type: 'info',
+          text:
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${v?.originalTokenCount ?? 'unknown'} to ` +
             `${v?.newTokenCount ?? 'unknown'} tokens).` +
             warningSuffix,
-        );
+        });
         break;
       }
       case 'max_session_turns': {
         closeThought();
+        // ink parity: handleMaxSessionTurnsEvent adds `{type: 'info'}`.
         const turns = context?.getMaxSessionTurns?.();
-        notice(
-          `The session has reached the maximum number of turns: ` +
+        out.push({
+          type: 'info',
+          text:
+            `The session has reached the maximum number of turns: ` +
             `${turns ?? 'the configured limit'}. ` +
             `Please update this limit in your setting.json file.`,
-        );
+        });
         break;
       }
       case 'session_token_limit_exceeded': {
         closeThought();
+        // ink parity: handleSessionTokenLimitExceededEvent adds `{type:
+        // 'error'}` with a `✗` glyph in the text.
         const v = ev.value as { currentTokens: number; limit: number };
-        notice(
-          `[error] Session token limit exceeded: ` +
+        out.push({
+          type: 'error',
+          text:
+            `✗ Session token limit exceeded: ` +
             `${v.currentTokens.toLocaleString()} tokens > ` +
             `${v.limit.toLocaleString()} limit.\n\n` +
             `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
-        );
+        });
         break;
       }
       case 'loop_detected': {
         closeThought();
         // ink shows a disable/keep confirmation dialog; until that dialog
-        // exists here, surface the halt itself (the dialog's "keep" outcome).
-        notice(
-          'A potential loop was detected. This can happen due to repetitive ' +
+        // exists here, surface the halt itself (the dialog's "keep" outcome,
+        // which ink adds as `{type: 'info'}`).
+        out.push({
+          type: 'info',
+          text:
+            'A potential loop was detected. This can happen due to repetitive ' +
             'tool calls or other model behavior. The request has been halted.',
-        );
+        });
         break;
       }
       case 'citation': {
         closeThought();
-        // No dedicated citation surface yet — render the preformatted
-        // citation text (the core already builds the display string).
+        // ink parity: handleCitationEvent adds `{type: 'info'}` (the core
+        // already builds the display string).
         const text = ev.value as string;
-        if (text) notice(text);
+        if (text) out.push({ type: 'info', text });
         break;
       }
       case 'retry': {
         closeThought();
-        // No countdown UI: emit the retry info as plain text (ink
-        // startRetryCountdown wording). Without retryInfo ink shows
-        // nothing either.
+        // ink parity: retryInfo → startRetryCountdown (restarts the two
+        // pending rows every second); no retryInfo → clearRetryCountdown
+        // (the attempt is starting now, so any prior retry UI is stale).
         const info = (ev as { retryInfo?: RetryInfo }).retryInfo;
         if (info) {
-          const seconds = Math.max(1, Math.ceil(info.delayMs / 1000));
-          notice(
-            `Retrying in ${seconds}s… (attempt ${info.attempt}/${info.maxRetries})`,
-          );
+          out.push({
+            type: 'retry-countdown',
+            attempt: info.attempt,
+            maxRetries: info.maxRetries,
+            delayMs: info.delayMs,
+            message: info.message,
+            skipDelay: info.skipDelay,
+            isContinuation: (ev as { isContinuation?: boolean }).isContinuation,
+          });
+        } else {
+          out.push({ type: 'retry-countdown-clear' });
         }
         break;
       }
       case 'model_fallback': {
         closeThought();
+        // ink parity: the model_fallback branch clears the retry countdown
+        // (the retry chain died with the primary model) before the notice.
+        out.push({ type: 'retry-countdown-clear' });
         const v = ev as { fromModel?: string; toModel?: string };
-        notice(
-          `Model ${v.fromModel ?? '(unknown)'} unavailable, ` +
+        out.push({
+          type: 'info',
+          text:
+            `Model ${v.fromModel ?? '(unknown)'} unavailable, ` +
             `falling back to ${v.toModel ?? '(unknown)'}`,
-        );
+        });
         break;
       }
       case 'hook_system_message': {
         closeThought();
-        notice(`Stop says: ${ev.value as string}`);
+        // ink parity: stop_hook_system_message renders `⎿ Stop says:` +
+        // an indented markdown body.
+        out.push({ type: 'stop-hook-message', message: ev.value as string });
         break;
       }
       case 'user_prompt_submit_blocked': {
         closeThought();
         const v = ev.value as { reason: string; originalPrompt: string };
-        notice(
-          `✕ UserPromptSubmit operation blocked by hook:\n${v.reason}\n\n` +
+        out.push({
+          type: 'warning',
+          text:
+            `✕ UserPromptSubmit operation blocked by hook:\n${v.reason}\n\n` +
             `Original prompt: ${v.originalPrompt}`,
-        );
+        });
         break;
       }
       case 'stop_hook_loop': {
         closeThought();
+        // ink parity: the stop_hook_loop item renders via InfoMessage.
         const v = ev.value as {
           reasons: string[];
           stopHookCount: number;
         };
-        notice(
-          `Ran ${v.stopHookCount} stop hooks\n` +
+        out.push({
+          type: 'info',
+          text:
+            `Ran ${v.stopHookCount} stop hooks\n` +
             `  ⎿  Stop hook error: ${v.reasons[v.reasons.length - 1] ?? ''}`,
-        );
+        });
         break;
       }
-      case 'active_goal': {
-        closeThought();
-        // Legacy goal runtime shape ({condition, iterations}); ink ignores
-        // this event, but deduped text keeps the opentui user informed.
-        const g = ev.value as {
-          condition?: string;
-          iterations?: number;
-        } | null;
-        if (!g) break;
-        const turns = g.iterations ?? 0;
-        goalNotice(
-          `Goal active${turns > 0 ? ` · ${turns} ${turns === 1 ? 'turn' : 'turns'}` : ''}\n` +
-            `Goal: ${g.condition ?? ''}`,
-        );
+      case 'active_goal':
+        // ink parity: useGeminiStream ignores this legacy projection event.
         break;
-      }
       case 'goal_state': {
         closeThought();
         const v = ev as {
           value: GoalSnapshotLike;
           cause?: string;
         };
-        // ink gates on shouldDisplayGoalStateCause (turn_finished /
-        // checkpoint / verifier_accept stay silent).
-        if (
-          v.cause &&
-          ['turn_finished', 'checkpoint', 'verifier_accept'].includes(v.cause)
-        ) {
-          break;
-        }
-        goalNotice(goalText(v.value ?? null, v.cause));
+        // ink gates on `event.cause && shouldDisplayGoalStateCause(cause)`
+        // (turn_finished / checkpoint / verifier_accept stay silent).
+        const cause = v.cause;
+        if (!cause || SILENT_GOAL_CAUSES.includes(cause)) break;
+        // ink parity: addItem({type: 'goal_state', snapshot, cause}) renders
+        // via GoalStatusMessage (GoalStateCard).
+        out.push({ type: 'goal', snapshot: v.value, cause });
         break;
       }
       case 'finished': {
         closeThought();
+        // ink parity: handleFinishedEvent adds `{type: 'info'}` for
+        // non-STOP finish reasons.
         const reason = (ev.value as { reason?: string } | undefined)?.reason;
         const message = reason ? FINISH_REASON_NOTICES[reason] : undefined;
-        if (message) notice(`⚠  ${message}`);
+        if (message) out.push({ type: 'info', text: `⚠  ${message}` });
         // Segment marker only — the turn settles when the live generator
         // returns (backend emits `done`), NOT here: `finished` arrives
         // before tool execution, so mapping it to `done` flashed a fake
@@ -450,53 +587,19 @@ export function createEventMapper(
 }
 
 /** Loose GoalSnapshotV2 shape (goal-protocol.ts) for display purposes. */
-type GoalSnapshotLike = {
+export type GoalSnapshotLike = {
   goal?: {
     objective?: string;
     status?: string;
     turnCount?: number;
+    activeTimeMs?: number;
     lastReason?: string;
   } | null;
   activity?: string;
 };
 
-/**
- * Goal snapshot / active-goal → one status text line (ink GoalStatusMessage
- * parity, simplified to plain text). Returns null when there is nothing to
- * show (no goal and not an explicit clear).
- */
-function goalText(
-  snapshot: GoalSnapshotLike | null | undefined,
-  cause?: string,
-): string | null {
-  const goal = snapshot?.goal ?? null;
-  if (!goal) return cause === 'clear' ? 'Goal cleared' : null;
-  const status = goal.status ?? 'active';
-  const title =
-    status === 'active'
-      ? snapshot?.activity === 'verifying'
-        ? 'Goal checking'
-        : snapshot?.activity === 'running'
-          ? 'Goal running'
-          : 'Goal active'
-      : status === 'paused'
-        ? 'Goal paused'
-        : status === 'blocked'
-          ? 'Goal blocked'
-          : status === 'usage_limited'
-            ? 'Goal usage limited'
-            : status === 'complete'
-              ? 'Goal complete'
-              : 'Goal';
-  const turns = goal.turnCount ?? 0;
-  const subtitle =
-    turns > 0 ? ` · ${turns} ${turns === 1 ? 'turn' : 'turns'}` : '';
-  const reason =
-    status !== 'active' && goal.lastReason?.trim()
-      ? `\nReason: ${goal.lastReason.trim()}`
-      : '';
-  return `${title}${subtitle}\nGoal: ${goal.objective ?? ''}${reason}`;
-}
+/** Causes ink's shouldDisplayGoalStateCause keeps silent. */
+const SILENT_GOAL_CAUSES = ['turn_finished', 'checkpoint', 'verifier_accept'];
 
 /** Drains a real agent stream into a neutral-event sink. */
 export async function pumpServerStream(

@@ -33,9 +33,22 @@ import {
   toolCardSummarySuffix,
   toolStatusMeta,
   truncateResultDisplayChars,
+  truncateTokenLine,
   userMessageMeta,
 } from './messages.js';
+import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
+
+const ansiToken = (text: string, fg = ''): AnsiToken => ({
+  text,
+  bold: false,
+  italic: false,
+  underline: false,
+  dim: false,
+  inverse: false,
+  fg,
+  bg: '',
+});
 
 describe('toolCardName (ink ToolDisplayNames parity)', () => {
   it('maps internal tool names to their display names', () => {
@@ -190,5 +203,37 @@ describe('message meta (ink glyph/color parity)', () => {
       summary: 'canceled',
     } as unknown as LiveToolItem;
     expect(toolStatusMeta(item).strikethrough).toBe(true);
+  });
+});
+
+describe('truncateTokenLine (ink wrap="truncate" parity)', () => {
+  it('keeps tokens that fit the width budget unchanged', () => {
+    const line = [ansiToken('ab'), ansiToken('cd')];
+    expect(truncateTokenLine(line, 10)).toEqual(line);
+  });
+
+  it('hard-truncates mid-token with no ellipsis', () => {
+    const line = [ansiToken('abcdef', 'red'), ansiToken('gh')];
+    const out = truncateTokenLine(line, 4);
+    expect(out).toEqual([{ ...ansiToken('abcd', 'red') }]);
+  });
+
+  it('stops at the first token that exceeds the budget', () => {
+    const line = [ansiToken('ab'), ansiToken('cdef'), ansiToken('gh')];
+    expect(truncateTokenLine(line, 4)).toEqual([
+      ansiToken('ab'),
+      ansiToken('cd'),
+    ]);
+  });
+
+  it('returns an empty line for non-positive budgets', () => {
+    expect(truncateTokenLine([ansiToken('ab')], 0)).toEqual([]);
+    expect(truncateTokenLine([ansiToken('ab')], -1)).toEqual([]);
+  });
+
+  it('never splits a wide glyph in half', () => {
+    const line = [ansiToken('你你你')];
+    const out = truncateTokenLine(line, 4);
+    expect(out).toEqual([ansiToken('你你')]);
   });
 });

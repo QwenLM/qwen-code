@@ -45,7 +45,7 @@ import type {
 } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type {
   OpenTuiCommandHost,
   ShellConfirmationResolution,
@@ -153,6 +153,26 @@ export function projectCommandItem(
     case 'warning':
     case 'error':
       return { type: 'text', delta: item.text };
+    case 'compression':
+      return { type: 'compaction', compression: item.compression };
+    case 'goal_state':
+      // ink renders goal_state history items through GoalStateCard.
+      return {
+        type: 'goal',
+        snapshot: item.snapshot as GoalSnapshotLike,
+        cause: item.cause as string | undefined,
+      };
+    case 'goal_status':
+      // ink renders goal_status history items through GoalStatusMessage's
+      // kind form (the /goal command path).
+      return {
+        type: 'goal-legacy',
+        kind: item.kind,
+        condition: item.condition,
+        iterations: item.iterations,
+        durationMs: item.durationMs,
+        lastReason: item.lastReason,
+      };
     default: {
       const text = projectSpecialItemText(item, ctx ?? {});
       return text ? { type: 'text', delta: text } : null;

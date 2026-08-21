@@ -4,21 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect } from 'vitest';
-import {
-  createEventMapper,
-  renderResultDisplay,
-  type OpenTuiStreamEvent,
-} from './event-adapter.js';
+import { createEventMapper, renderResultDisplay } from './event-adapter.js';
 
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
-
-/** Extracts the text deltas of one mapped event batch. */
-const texts = (out: OpenTuiStreamEvent[]) =>
-  out
-    .filter((e): e is Extract<OpenTuiStreamEvent, { type: 'text' }> =>
-      e.type === 'text' ? true : false,
-    )
-    .map((e) => e.delta);
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
   it('maps content to text delta', () => {
@@ -94,6 +82,98 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ]);
   });
 
+  it('carries TodoWrite resultDisplay as a structured todos payload', () => {
+    const map = createEventMapper();
+    const out = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'c1',
+        resultDisplay: {
+          type: 'todo_list',
+          todos: [
+            { id: 'a', content: 'A', status: 'in_progress' },
+            { id: 'b', content: 'B', status: 'pending' },
+            { id: 'c', content: 'C', status: 'completed' },
+          ],
+        },
+      },
+    } as unknown as AnyEv);
+    expect(out[0]).toEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      todos: [
+        { id: 'a', content: 'A', status: 'in_progress' },
+        { id: 'b', content: 'B', status: 'pending' },
+        { id: 'c', content: 'C', status: 'completed' },
+      ],
+    });
+  });
+
+  it('drops malformed todo entries but keeps valid ones', () => {
+    const map = createEventMapper();
+    const out = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'c1',
+        resultDisplay: {
+          type: 'todo_list',
+          todos: [
+            { id: 'a', content: 'A', status: 'pending' },
+            { content: 'no id' },
+            'garbage',
+          ],
+        },
+      },
+    } as unknown as AnyEv);
+    expect(out[0]).toEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      todos: [{ id: 'a', content: 'A', status: 'pending' }],
+    });
+  });
+
+  it('carries AnsiOutputDisplay as a structured token grid', () => {
+    const map = createEventMapper();
+    const grid = [
+      [
+        {
+          text: 'ok',
+          bold: true,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+          fg: '#00FF00',
+          bg: '',
+        },
+      ],
+      [],
+    ];
+    const out = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'c1',
+        resultDisplay: {
+          ansiOutput: [...grid, ['nope' as unknown as object]],
+          totalLines: 30,
+          totalBytes: 4096,
+        },
+      },
+    } as unknown as AnyEv);
+    expect(out[0]).toEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      ansi: {
+        grid: [grid[0], grid[1], []],
+        totalLines: 30,
+        totalBytes: 4096,
+      },
+    });
+  });
+
   describe('finished (premature-done fix)', () => {
     it('maps finished(STOP) to a segment marker, not done', () => {
       const map = createEventMapper();
@@ -119,9 +199,10 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: { reason: 'MAX_TOKENS' },
       } as unknown as AnyEv);
       expect(out).toContainEqual({ type: 'segment-end' });
-      expect(texts(out)).toEqual([
-        '⚠  Response truncated due to token limits.',
-      ]);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response truncated due to token limits.',
+      });
     });
 
     it('warns on safety finish reasons', () => {
@@ -130,9 +211,10 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'finished',
         value: { reason: 'IMAGE_SAFETY' },
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        '⚠  Response stopped due to image safety violations.',
-      ]);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response stopped due to image safety violations.',
+      });
     });
   });
 
@@ -144,40 +226,50 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: { error: { message: 'boom' } },
       } as unknown as AnyEv);
       expect(out).toEqual([
-        { type: 'segment-end' },
-        { type: 'text', delta: '[error] boom' },
+        {
+          type: 'error',
+          text: 'boom',
+          hint: 'Press Ctrl+Y to retry',
+        },
       ]);
     });
 
     it('uses the context formatError (parseAndFormatApiError seam)', () => {
       const map = createEventMapper({
-        formatError: () => '[API Error: 429]\nPress Ctrl+Y to retry',
+        formatError: () => '[API Error: 429]',
       });
       const out = map({
         type: 'error',
         value: { error: { message: 'quota', status: 429 } },
       } as unknown as AnyEv);
       expect(out).toEqual([
-        { type: 'segment-end' },
         {
-          type: 'text',
-          delta: '[error] [API Error: 429]\nPress Ctrl+Y to retry',
+          type: 'error',
+          text: '[API Error: 429]',
+          hint: 'Press Ctrl+Y to retry',
         },
       ]);
     });
   });
 
   describe('previously dropped core events', () => {
-    it('maps chat_compressed with token counts and reason', () => {
+    // ink parity: useGeminiStream's handleChatCompressionEvent adds a
+    // `type: 'info'` history item (InfoMessage row) for auto-compact.
+    it('maps chat_compressed to an info notice with token counts', () => {
       const map = createEventMapper({ getModelName: () => 'qwen3-max' });
       const out = map({
         type: 'chat_compressed',
         value: { originalTokenCount: 1200, newTokenCount: 300 },
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'IMPORTANT: This conversation approached the input token limit for qwen3-max. ' +
-          'A compressed context will be sent for future messages (compressed from: ' +
-          '1200 to 300 tokens).',
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text:
+            'IMPORTANT: This conversation approached the input token limit for qwen3-max. ' +
+            'A compressed context will be sent for future messages (compressed from: ' +
+            '1200 to 300 tokens).',
+        },
       ]);
     });
 
@@ -189,36 +281,89 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           originalTokenCount: 10,
           newTokenCount: 5,
           triggerReason: 'image_overflow',
+          warning: 'screenshots dropped',
         },
       } as unknown as AnyEv);
-      expect(texts(out)[0]).toContain(
-        'accumulated enough tool screenshots to trigger compaction for m',
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'accumulated enough tool screenshots to trigger compaction for m',
+          ),
+        },
+      ]);
+      expect((out[1] as { text: string }).text).toContain(
+        '\n⚠️ screenshots dropped',
       );
     });
 
-    it('maps retry with countdown info to text', () => {
+    it('maps retry with retryInfo to a structured countdown event', () => {
+      const map = createEventMapper();
+      const skipDelay = () => {};
+      const out = map({
+        type: 'retry',
+        retryInfo: {
+          attempt: 2,
+          maxRetries: 3,
+          delayMs: 4200,
+          message: 'rate limited',
+          skipDelay,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'retry-countdown',
+          attempt: 2,
+          maxRetries: 3,
+          delayMs: 4200,
+          message: 'rate limited',
+          skipDelay,
+          isContinuation: undefined,
+        },
+      ]);
+    });
+
+    it('maps a continuation retry, passing isContinuation through', () => {
       const map = createEventMapper();
       const out = map({
         type: 'retry',
-        retryInfo: { attempt: 2, maxRetries: 3, delayMs: 4200 },
+        retryInfo: { attempt: 1, maxRetries: 3, delayMs: 5000 },
+        isContinuation: true,
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['Retrying in 5s… (attempt 2/3)']);
+      expect(out).toEqual([
+        {
+          type: 'retry-countdown',
+          attempt: 1,
+          maxRetries: 3,
+          delayMs: 5000,
+          message: undefined,
+          skipDelay: undefined,
+          isContinuation: true,
+        },
+      ]);
     });
 
-    it('maps retry without retryInfo to nothing (ink parity)', () => {
+    it('maps retry without retryInfo to a countdown clear (ink parity)', () => {
       const map = createEventMapper();
-      expect(map({ type: 'retry' } as unknown as AnyEv)).toEqual([]);
+      expect(map({ type: 'retry' } as unknown as AnyEv)).toEqual([
+        { type: 'retry-countdown-clear' },
+      ]);
     });
 
-    it('maps model_fallback to a notification text', () => {
+    it('maps model_fallback to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({
         type: 'model_fallback',
         fromModel: 'qwen3-coder',
         toModel: 'qwen3-max',
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'Model qwen3-coder unavailable, falling back to qwen3-max',
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text: 'Model qwen3-coder unavailable, falling back to qwen3-max',
+        },
       ]);
     });
 
@@ -228,35 +373,48 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'session_token_limit_exceeded',
         value: { currentTokens: 130000, limit: 128000, message: '' },
       } as unknown as AnyEv);
-      const text = texts(out).join('');
-      expect(text).toContain('[error] Session token limit exceeded:');
-      expect(text).toContain('Use /clear command');
-      expect(text).toContain('"sessionTokenLimit"');
-      expect(text).toContain('Use /compress command');
+      expect(out).toHaveLength(1);
+      const item = out[0] as { type: string; text: string };
+      expect(item.type).toBe('error');
+      expect(item.text).toContain('✗ Session token limit exceeded:');
+      expect(item.text).toContain('Use /clear command');
+      expect(item.text).toContain('"sessionTokenLimit"');
+      expect(item.text).toContain('Use /compress command');
     });
 
     it('maps max_session_turns with the configured limit', () => {
       const map = createEventMapper({ getMaxSessionTurns: () => 42 });
       const out = map({ type: 'max_session_turns' } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'The session has reached the maximum number of turns: 42. ' +
-          'Please update this limit in your setting.json file.',
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text:
+            'The session has reached the maximum number of turns: 42. ' +
+            'Please update this limit in your setting.json file.',
+        },
       ]);
     });
 
     it('maps loop_detected to the halt warning text', () => {
       const map = createEventMapper();
       const out = map({ type: 'loop_detected' } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'A potential loop was detected. This can happen due to repetitive ' +
-          'tool calls or other model behavior. The request has been halted.',
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text:
+            'A potential loop was detected. This can happen due to repetitive ' +
+            'tool calls or other model behavior. The request has been halted.',
+        },
       ]);
     });
 
-    it('maps user_cancelled to an info notice', () => {
+    it('maps user_cancelled to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({ type: 'user_cancelled' } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['User cancelled the request.']);
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        { type: 'info', text: 'User cancelled the request.' },
+      ]);
     });
 
     it('maps citation to an info text (no citation surface yet)', () => {
@@ -265,16 +423,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'citation',
         value: 'Sources: [1] https://example.com',
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['Sources: [1] https://example.com']);
+      expect(out).toEqual([
+        { type: 'info', text: 'Sources: [1] https://example.com' },
+      ]);
     });
 
-    it('maps hook_system_message with the Stop-says prefix', () => {
+    it('maps hook_system_message to a stop-hook markdown message', () => {
       const map = createEventMapper();
       const out = map({
         type: 'hook_system_message',
         value: 'run the tests',
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['Stop says: run the tests']);
+      expect(out).toEqual([
+        { type: 'stop-hook-message', message: 'run the tests' },
+      ]);
     });
 
     it('maps user_prompt_submit_blocked to reason + original prompt', () => {
@@ -283,9 +445,13 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'user_prompt_submit_blocked',
         value: { reason: 'blocked by policy', originalPrompt: 'do it' },
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        '✕ UserPromptSubmit operation blocked by hook:\nblocked by policy\n\n' +
-          'Original prompt: do it',
+      expect(out).toEqual([
+        {
+          type: 'warning',
+          text:
+            '✕ UserPromptSubmit operation blocked by hook:\nblocked by policy\n\n' +
+            'Original prompt: do it',
+        },
       ]);
     });
 
@@ -299,28 +465,35 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           stopHookCount: 2,
         },
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'Ran 2 stop hooks\n  ⎿  Stop hook error: last failure',
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: last failure',
+        },
       ]);
     });
   });
 
   describe('goal events', () => {
-    it('maps goal_state with a displayable cause to a status line', () => {
+    // ink parity: addItem({type: 'goal_state', snapshot, cause}) renders via
+    // GoalStatusMessage (GoalStateCard) — the adapter passes the snapshot
+    // through untouched.
+    it('maps goal_state with a displayable cause to a goal event', () => {
       const map = createEventMapper();
+      const snapshot = {
+        goal: {
+          objective: 'ship it',
+          status: 'active',
+          turnCount: 2,
+        },
+        activity: 'running',
+      };
       const out = map({
         type: 'goal_state',
-        value: {
-          goal: {
-            objective: 'ship it',
-            status: 'active',
-            turnCount: 2,
-          },
-          activity: 'running',
-        },
+        value: snapshot,
         cause: 'create',
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['Goal running · 2 turns\nGoal: ship it']);
+      expect(out).toEqual([{ type: 'goal', snapshot, cause: 'create' }]);
     });
 
     it('stays silent for non-displayable causes', () => {
@@ -337,27 +510,31 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toEqual([]);
     });
 
-    it('dedupes identical consecutive goal texts', () => {
+    it('stays silent when cause is missing (ink parity)', () => {
       const map = createEventMapper();
-      const ev = {
+      expect(
+        map({
+          type: 'goal_state',
+          value: { goal: { objective: 'ship it', status: 'active' } },
+        } as unknown as AnyEv),
+      ).toEqual([]);
+    });
+
+    it('does not dedupe consecutive displayable snapshots (ink parity)', () => {
+      const map = createEventMapper();
+      const value = { goal: { objective: 'ship it', status: 'active' } };
+      const first = map({
         type: 'goal_state',
-        value: { goal: { objective: 'ship it', status: 'active' } },
-        cause: 'checkpoint', // silent cause first
-      } as unknown as AnyEv;
-      map(ev);
-      const out = map({
-        type: 'goal_state',
-        value: { goal: { objective: 'ship it', status: 'active' } },
+        value,
         cause: 'create',
       } as unknown as AnyEv);
-      expect(texts(out)).toHaveLength(1);
-      // Same text again → suppressed.
       const again = map({
         type: 'goal_state',
-        value: { goal: { objective: 'ship it', status: 'active' } },
+        value,
         cause: 'resume',
       } as unknown as AnyEv);
-      expect(texts(again)).toHaveLength(0);
+      expect(first).toHaveLength(1);
+      expect(again).toHaveLength(1);
     });
 
     it('maps goal cleared (null goal + clear cause)', () => {
@@ -367,18 +544,19 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: { goal: null },
         cause: 'clear',
       } as unknown as AnyEv);
-      expect(texts(out)).toEqual(['Goal cleared']);
+      expect(out).toEqual([
+        { type: 'goal', snapshot: { goal: null }, cause: 'clear' },
+      ]);
     });
 
-    it('maps active_goal (legacy shape) to a status line', () => {
+    it('ignores the legacy active_goal projection (ink parity)', () => {
       const map = createEventMapper();
-      const out = map({
-        type: 'active_goal',
-        value: { condition: 'all tests green', iterations: 1 },
-      } as unknown as AnyEv);
-      expect(texts(out)).toEqual([
-        'Goal active · 1 turn\nGoal: all tests green',
-      ]);
+      expect(
+        map({
+          type: 'active_goal',
+          value: { condition: 'all tests green', iterations: 1 },
+        } as unknown as AnyEv),
+      ).toEqual([]);
     });
   });
 
