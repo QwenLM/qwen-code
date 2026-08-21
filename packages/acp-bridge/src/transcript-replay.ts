@@ -83,6 +83,7 @@ export interface TranscriptReplayMachineOptions {
   readonly gaps?: readonly TranscriptReplayGapInput[];
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
+  readonly skipFinalizeCallIds?: ReadonlySet<string>;
 }
 
 export interface TranscriptReplayMachine {
@@ -529,8 +530,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (skip?.has(pending.callId)) continue;
       this.pendingToolCalls.delete(pending.callId);
       this.report(
         'missing_tool_result',

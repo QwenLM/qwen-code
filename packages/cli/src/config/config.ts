@@ -174,6 +174,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -738,6 +739,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
+          default: false,
+        })
+        .option('restore-ask-user-question', {
+          type: 'boolean',
+          description:
+            'On daemon session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result',
           default: false,
         })
         .option('channel', {
@@ -2268,6 +2275,7 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    restoreAskUserQuestion: argv.restoreAskUserQuestion === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,

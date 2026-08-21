@@ -139,6 +139,7 @@ import {
   DAEMON_MEDIA_REFERENCES_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -763,6 +764,24 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     ...(typeof replayError === 'string' ? { replayError } : {}),
     ...(hasMore === true ? { hasMore: true } : {}),
   };
+}
+
+function takeRestoreAskUserQuestionHint(state: BridgeSessionState): {
+  hint: boolean;
+  state: BridgeSessionState;
+} {
+  const meta = isRecord(state._meta) ? state._meta : undefined;
+  const hint = meta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+  if (!hint || !meta) return { hint: false, state };
+  const nextMeta = { ...meta };
+  delete nextMeta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
+  const next: BridgeSessionState = { ...state };
+  if (Object.keys(nextMeta).length > 0) {
+    next._meta = nextMeta;
+  } else {
+    delete next._meta;
+  }
+  return { hint: true, state: next };
 }
 
 /**
@@ -6091,6 +6110,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   }
 
+  const sendTrackedPrompt: {
+    fn: AcpSessionBridge['sendPrompt'] | undefined;
+  } = { fn: undefined };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -6576,6 +6599,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       let replayError: string | undefined;
       let replayHasMore: true | undefined;
       let replayAnchorRecordId: string | undefined;
+      let restoreAskUserQuestionHint = false;
       try {
         const rawRestore = telemetry.withSpan(
           'session.restore',
@@ -6702,6 +6726,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayHasMore = extracted.hasMore === true ? true : undefined;
           replayAnchorRecordId = extracted.anchorRecordId;
         }
+        const restoreHint = takeRestoreAskUserQuestionHint(state);
+        restoreAskUserQuestionHint = restoreHint.hint;
+        state = restoreHint.state;
       } catch (err) {
         if (err instanceof SessionRestoreTimeoutError) throw err;
         restoreEvents.close();
@@ -6770,6 +6797,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             );
             throw error;
           }
+        }
+        if (
+          opts.restoreAskUserQuestion === true &&
+          restoreAskUserQuestionHint &&
+          !racedEntry.promptActive
+        ) {
+          const restorePrompt = sendTrackedPrompt.fn?.(
+            racedEntry.sessionId,
+            { sessionId: racedEntry.sessionId, prompt: [] } as Parameters<
+              AcpSessionBridge['sendPrompt']
+            >[1],
+            undefined,
+            {
+              ...(clientId !== undefined ? { clientId } : {}),
+              restoreAskUserQuestion: true,
+            },
+          );
+          restorePrompt?.catch((err) => {
+            teeServeDebugLine(
+              `restoreAskUserQuestion: restore prompt failed for ${racedEntry.sessionId}: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
         }
         return {
           sessionId: racedEntry.sessionId,
@@ -6868,6 +6918,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // directly.
       entry.attachCount = coalesceState.count;
       registeredEntry = entry;
+      if (
+        opts.restoreAskUserQuestion === true &&
+        restoreAskUserQuestionHint &&
+        !entry.promptActive
+      ) {
+        const restorePrompt = sendTrackedPrompt.fn?.(
+          entry.sessionId,
+          { sessionId: entry.sessionId, prompt: [] } as Parameters<
+            AcpSessionBridge['sendPrompt']
+          >[1],
+          undefined,
+          {
+            ...(clientId !== undefined ? { clientId } : {}),
+            restoreAskUserQuestion: true,
+          },
+        );
+        restorePrompt?.catch((err) => {
+          teeServeDebugLine(
+            `restoreAskUserQuestion: restore prompt failed for ${entry.sessionId}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -8097,6 +8170,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // through this tracked admission path instead of an untracked
                 // internal agent prompt.
                 const isContinue = context?.continue === true;
+                const isRestoreAskUserQuestion =
+                  context?.restoreAskUserQuestion === true;
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
@@ -8115,6 +8190,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
@@ -8129,6 +8205,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
+                  }
+                  if (isRestoreAskUserQuestion) {
+                    meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] = true;
                   }
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
@@ -8195,7 +8274,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // in the transcript from the first attempt.
                   // Continuations carry no user prompt to echo (empty `prompt`);
                   // the original user_message_chunk is already in the transcript.
-                  if (!isRetry && !isContinue) {
+                  if (!isRetry && !isContinue && !isRestoreAskUserQuestion) {
                     echoPromptToSessionBus(
                       entry,
                       {
@@ -11892,6 +11971,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
   };
+
+  sendTrackedPrompt.fn = bridgeApi.sendPrompt.bind(bridgeApi);
 
   return bridgeApi;
 }

@@ -12340,6 +12340,72 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips a client-spoofed restoreAskUserQuestion meta key', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof restore' }],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('does not auto-restore ask_user_question when the switch is off', async () => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('fires a tracked restore prompt when load hints and the switch is on', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([]);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(true);
+      await bridge.shutdown();
+    });
+
     it('strips channel display metadata from non-channel sessions', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });

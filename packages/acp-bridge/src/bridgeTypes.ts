@@ -765,6 +765,12 @@ export interface BridgeClientRequestContext {
    */
   continue?: boolean;
   /**
+   * Internal: set ONLY after load/resume when the child hinted that a trailing
+   * ask_user_question should be re-hung. HTTP routes never populate this from
+   * request input.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
    * Absolute wallclock budget (ms) for this prompt, measured from admission
    * (the 202 semantic point) and covering queue wait. When exceeded, the
    * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
@@ -775,6 +781,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_MEDIA_REFERENCES_META_KEY = 'qwen.daemon.mediaReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 

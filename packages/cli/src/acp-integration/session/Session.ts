@@ -64,6 +64,8 @@ import {
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
+  findRestorableAskUserQuestion,
+  restorableAskUserQuestionCallIds,
   markDuplicateProviderToolCallResponseSent,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
@@ -202,6 +204,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MEDIA_REFERENCES_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -2399,7 +2402,9 @@ export class Session implements SessionContext {
       (params as { retry?: boolean }).retry === true ||
       metadata?.[DAEMON_RETRY_META_KEY] === true;
     const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
-    if (isRetry || isContinue) {
+    const isRestoreAskUserQuestion =
+      metadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+    if (isRetry || isContinue || isRestoreAskUserQuestion) {
       this.#clearTodoStopGuardQueuedPromptWait();
       if (this.todoStopGuard.hasTrustedUnfinishedState) {
         this.todoStopGuard.resumeTrustedPrompt();
@@ -2991,6 +2996,15 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  shouldHintAskUserQuestionRestore(): boolean {
+    if (this.config.getRestoreAskUserQuestion?.() !== true) return false;
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) return false;
+    return (
+      findRestorableAskUserQuestion(this.#getCurrentChat().getHistory()) !==
+      undefined
+    );
+  }
+
   async assertCanStartTurn(): Promise<void> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -3318,8 +3332,15 @@ export class Session implements SessionContext {
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
+    const skipFinalizeCallIds =
+      this.config.getRestoreAskUserQuestion?.() === true
+        ? restorableAskUserQuestionCallIds(this.#getCurrentChat().getHistory())
+        : undefined;
     try {
-      await this.historyReplayer.replay(records, gaps, options);
+      await this.historyReplayer.replay(records, gaps, {
+        ...options,
+        ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+      });
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
       // belong to finished cycles; only live updates may bind the next
@@ -4161,7 +4182,8 @@ export class Session implements SessionContext {
         const continuesCurrentWorkChain =
           (params as { retry?: boolean }).retry === true ||
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
-          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
+          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
+          promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -4232,7 +4254,16 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
-            if (!isRetry && !isContinue && goalTurn?.origin !== 'runtime') {
+            const isRestoreAskUserQuestion =
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
+              ] === true;
+            if (
+              !isRetry &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              goalTurn?.origin !== 'runtime'
+            ) {
               const interactionSpan = getActiveInteractionSpan();
               if (interactionSpan) {
                 addAgentInputMessageAttributes(
@@ -4246,7 +4277,10 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
-            const isSlashInput = !isContinue && isSlashCommand(inputText);
+            const isSlashInput =
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
@@ -4301,7 +4335,7 @@ export class Session implements SessionContext {
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
-            } else if (isContinue) {
+            } else if (isContinue || isRestoreAskUserQuestion) {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
@@ -4330,7 +4364,12 @@ export class Session implements SessionContext {
               }
             }
 
-            if (!isSlashInput && !isContinue && !isRetry) {
+            if (
+              !isSlashInput &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRetry
+            ) {
               this.refreshContextFilesOnWrite = false;
             }
 
@@ -4347,7 +4386,9 @@ export class Session implements SessionContext {
               return true;
             };
 
-            if (isContinue) {
+            if (isRestoreAskUserQuestion) {
+              parts = [];
+            } else if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
               // interruption branches assign a concrete part list.
               parts = continuationParts!;
@@ -4467,6 +4508,7 @@ export class Session implements SessionContext {
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             if (
               !isContinue &&
+              !isRestoreAskUserQuestion &&
               !isRuntimeContinuation &&
               hooksEnabled &&
               messageBus &&
@@ -4553,7 +4595,7 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            if (systemReminders.length > 0) {
+            if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
               // the original send. Re-inserting would show the model duplicate
@@ -4584,7 +4626,10 @@ export class Session implements SessionContext {
             // are inserted first, the resulting order on such a continuation is
             // `[...functionResponses, worktreeNotice, ...systemReminders, ...]`;
             // Session.worktree.test.ts locks this ordering.
-            if (this.pendingWorktreeNotice) {
+            // Restore of ask_user_question never sends these `parts` (it
+            // replaces nextMessage with the functionResponse), so leave the
+            // notice pending until that post-answer message is built.
+            if (this.pendingWorktreeNotice && !isRestoreAskUserQuestion) {
               const noticePart = {
                 text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
               };
@@ -4595,6 +4640,7 @@ export class Session implements SessionContext {
             if (
               this.pendingRecoveredAgentsNotice &&
               !isContinue &&
+              !isRestoreAskUserQuestion &&
               !isSlashInput
             ) {
               const noticePart = {
@@ -4609,6 +4655,7 @@ export class Session implements SessionContext {
               true,
             );
             if (
+              !isRestoreAskUserQuestion &&
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
             ) {
@@ -4624,14 +4671,96 @@ export class Session implements SessionContext {
             );
 
             // conversation_finished must fire on every terminal path of the
-            // turn — the loop below has cancel/abort/no-stream early-returns
-            // and API-error throws — so the emission lives in a finally that
-            // wraps the whole turn, not just the stop-hook loop. Daemon turns
-            // run autonomously in all approval modes (approvals are mediated by
-            // the ACP client rather than by gating this loop), so unlike the
-            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
-            // is intentionally emitted for every mode.
+            // turn — restore of ask_user_question, the loop below's
+            // cancel/abort/no-stream early-returns, and API-error throws —
+            // so the emission lives in a finally that wraps the whole turn,
+            // not just the stop-hook loop. Daemon turns run autonomously in
+            // all approval modes (approvals are mediated by the ACP client
+            // rather than by gating this loop), so unlike the CLI reference
+            // (useGeminiStream.ts, which only emits in YOLO) this is
+            // intentionally emitted for every mode.
             try {
+              if (isRestoreAskUserQuestion) {
+                const restorable = findRestorableAskUserQuestion(
+                  this.#getCurrentChat().getHistory(),
+                );
+                if (!restorable) {
+                  return { stopReason: 'end_turn' };
+                }
+                const toolRun = await this.#runWithFullTurnModel(
+                  fullTurnModelOverride,
+                  () =>
+                    this.runToolCalls(
+                      pendingSend.signal,
+                      promptId,
+                      restorable.functionCalls,
+                      toolLoopState,
+                      onFullTurnModel,
+                    ),
+                );
+                if (
+                  toolRun.stopAfterPermissionCancel ||
+                  pendingSend.signal.aborted
+                ) {
+                  this.todoStopGuard.suspend();
+                  await this.#preserveStoppedToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
+                  return {
+                    stopReason: getAbortAwareEndTurnStopReason(
+                      pendingSend.signal,
+                    ),
+                  };
+                }
+                const nextAfterTools = await this.#buildNextMessageAfterToolRun(
+                  toolRun,
+                  pendingSend.signal,
+                  promptId,
+                  toolLoopState,
+                  onFullTurnModel,
+                  rejectOnLoopDetected,
+                );
+                nextMessage = nextAfterTools.message;
+                if (nextAfterTools.stoppedByRepeatedToolFailure) {
+                  return {
+                    stopReason: rejectOnLoopDetected
+                      ? cancelledOrThrowLoopDetected(
+                          pendingSend.signal,
+                          toolLoopState,
+                        )
+                      : getAbortAwareEndTurnStopReason(pendingSend.signal),
+                  };
+                }
+                if (toolRun.loopDetected) {
+                  this.todoStopGuard.suspend();
+                  await this.#preserveStoppedToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
+                  return {
+                    stopReason: rejectOnLoopDetected
+                      ? cancelledOrThrowLoopDetected(
+                          pendingSend.signal,
+                          toolLoopState,
+                        )
+                      : getAbortAwareEndTurnStopReason(pendingSend.signal),
+                  };
+                }
+                if (nextMessage?.parts && this.pendingWorktreeNotice) {
+                  const noticePart = {
+                    text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                  };
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(nextMessage.parts, [
+                      noticePart,
+                    ]),
+                  };
+                  this.pendingWorktreeNotice = null;
+                }
+              }
+
               while (nextMessage !== null) {
                 turnCount++;
                 if (pendingSend.signal.aborted) {

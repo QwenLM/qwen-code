@@ -2709,6 +2709,207 @@ describe('Session', () => {
     });
   });
 
+  describe('restoreAskUserQuestion prompt', () => {
+    const auqArgs = {
+      questions: [
+        {
+          question: 'Which approach?',
+          header: 'Approach',
+          options: [
+            { label: 'Polling', description: 'Poll the API' },
+            { label: 'Webhook', description: 'Use a webhook' },
+          ],
+        },
+      ],
+    };
+
+    function danglingAuqHistory(): Content[] {
+      return [
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: auqArgs,
+              },
+            },
+          ],
+        },
+      ];
+    }
+
+    it('requests permission and continues with the real function response', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'User answers:\nQuestion: Polling',
+        returnDisplay: 'answered',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('ask_user_question', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'got it' }] } }],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            toolCallId: 'call-auq',
+            _meta: expect.objectContaining({
+              qwenInteractionKind: 'user_question',
+            }),
+          }),
+        }),
+      );
+      expect(execute).toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent[0]?.functionResponse?.id).toBe('call-auq');
+      expect(sent[0]?.functionResponse?.name).toBe('ask_user_question');
+    });
+
+    it('writes a decline result when the restored question is cancelled', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      const execute = vi.fn();
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          execute,
+          'ask_user_question',
+          onConfirm,
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(execute).not.toHaveBeenCalled();
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        expect.anything(),
+      );
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-auq',
+                name: 'ask_user_question',
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it('carries a pending worktree notice on the post-answer model message', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn().mockResolvedValue({
+            llmContent: 'User answers:\nQuestion: Polling',
+            returnDisplay: 'answered',
+          }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'got it' }] } }],
+            },
+          },
+        ]),
+      );
+      const notice =
+        '[Resumed] Active worktree: "feat" at /repo/.qwen/worktrees/feat';
+      session.pendingWorktreeNotice = notice;
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      const sent = firstSentMessage();
+      expect(sent[0]?.functionResponse?.id).toBe('call-auq');
+      expect(
+        sent.some(
+          (part) =>
+            typeof part.text === 'string' &&
+            part.text.includes('<system-reminder>') &&
+            part.text.includes(notice),
+        ),
+      ).toBe(true);
+      expect(session.pendingWorktreeNotice).toBeNull();
+    });
+
+    it('keeps the worktree notice and emits conversation_finished on cancel', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn(),
+          'ask_user_question',
+          vi.fn().mockResolvedValue(undefined),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      const finishedSpy = vi
+        .spyOn(core, 'logConversationFinishedEvent')
+        .mockImplementation(() => {});
+      const notice = 'worktree restore notice';
+      session.pendingWorktreeNotice = notice;
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(session.pendingWorktreeNotice).toBe(notice);
+      expect(finishedSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Runs a full exit_plan_mode approval turn and returns the permission
   // request the client received, so tests can assert the observable
   // `_meta.qwenTodoApproval` binding instead of poking the private

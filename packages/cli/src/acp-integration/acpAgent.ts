@@ -352,6 +352,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -4525,6 +4526,23 @@ class QwenAgent implements Agent {
     return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
   }
 
+  private withAskUserQuestionRestoreHint<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(session: Session, response: T): T {
+    if (!session.shouldHintAskUserQuestionRestore()) {
+      return response;
+    }
+    return {
+      ...response,
+      _meta: {
+        ...(response._meta && typeof response._meta === 'object'
+          ? response._meta
+          : {}),
+        [DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+      },
+    };
+  }
+
   private async retryPendingConfigCleanup(
     runtimeBaseDir: string,
     requiredSessionId?: string,
@@ -5197,7 +5215,9 @@ class QwenAgent implements Agent {
                 }) as LoadSessionResponse,
             );
             const replayPage = projection?.replay;
-            if (!replayPage || replayPage.records.length === 0) return response;
+            if (!replayPage || replayPage.records.length === 0) {
+              return this.withAskUserQuestionRestoreHint(liveSession, response);
+            }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
             const replay = await profiler.time('history_replay', () =>
@@ -5241,7 +5261,7 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
-              return response;
+              return this.withAskUserQuestionRestoreHint(liveSession, response);
             }
 
             const envelope: BridgeLoadReplayEnvelope = {
@@ -5263,12 +5283,12 @@ class QwenAgent implements Agent {
               envelope,
               restoreOptions.replay.kind === 'recent',
             );
-            return {
+            return this.withAskUserQuestionRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
-            };
+            });
           },
         );
       });
@@ -5527,7 +5547,10 @@ class QwenAgent implements Agent {
           sessionId,
         );
       }
-      return response!;
+      return this.withAskUserQuestionRestoreHint(
+        this.sessions.get(sessionId)!,
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }
@@ -5575,17 +5598,20 @@ class QwenAgent implements Agent {
           liveSession,
           RESUME_RESTORE_OPTIONS,
           async (config, projection) =>
-            profiler.timeSync(
-              'response_build',
-              () =>
-                ({
-                  modes: this.buildModesData(config),
-                  models: this.buildAvailableModels(config),
-                  configOptions: this.buildConfigOptions(config),
-                  ...(projection?.artifactSnapshot
-                    ? { artifactSnapshot: projection.artifactSnapshot }
-                    : {}),
-                }) as ResumeSessionResponse,
+            this.withAskUserQuestionRestoreHint(
+              liveSession,
+              profiler.timeSync(
+                'response_build',
+                () =>
+                  ({
+                    modes: this.buildModesData(config),
+                    models: this.buildAvailableModels(config),
+                    configOptions: this.buildConfigOptions(config),
+                    ...(projection?.artifactSnapshot
+                      ? { artifactSnapshot: projection.artifactSnapshot }
+                      : {}),
+                  }) as ResumeSessionResponse,
+              ),
             ),
         );
       });
@@ -5683,7 +5709,10 @@ class QwenAgent implements Agent {
         );
       }
 
-      return response!;
+      return this.withAskUserQuestionRestoreHint(
+        this.sessions.get(sessionId)!,
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }

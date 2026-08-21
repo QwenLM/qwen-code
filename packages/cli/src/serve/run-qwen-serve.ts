@@ -81,6 +81,7 @@ import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -3969,8 +3970,8 @@ async function runQwenServeImpl(
             message,
           }),
       },
-      ...(opts.experimentalLsp === true
-        ? { extraArgs: ['--experimental-lsp'] }
+      ...(acpChildExtraArgs(opts)
+        ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
     });
     const statusProvider = runtime.createDaemonStatusProvider({
@@ -4302,6 +4303,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && primaryGenerationGuard.closed) {
@@ -4681,8 +4685,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
@@ -4711,6 +4715,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && secondaryGenerationGuard.closed) {
@@ -5228,8 +5235,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
@@ -5272,6 +5279,9 @@ async function runQwenServeImpl(
             channelDeliveryDiagnosticRedaction,
           ),
           maxSessions: opts.maxSessions,
+          ...(opts.restoreAskUserQuestion === true
+            ? { restoreAskUserQuestion: true }
+            : {}),
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: (event) => {
             if (event.type === 'registered' && generationGuard.closed) return;

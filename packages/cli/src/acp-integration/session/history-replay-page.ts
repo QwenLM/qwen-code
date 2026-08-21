@@ -7,6 +7,7 @@
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
+  restorableAskUserQuestionCallIds,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
@@ -265,12 +266,19 @@ export async function collectHistoryReplayUpdates({
   const updates: SessionUpdate[] = [];
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
+    const skipFinalizeCallIds =
+      config?.getRestoreAskUserQuestion?.() === true
+        ? restorableAskUserQuestionCallIds(
+            config.getGeminiClient?.()?.getChat?.()?.getHistory?.() ?? [],
+          )
+        : undefined;
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config, limits),
     ).replay(records, gaps, {
       ...(initial.goalState ? { initialGoalState: initial.goalState } : {}),
       ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
       ...(goalBootstrap ? { goalBootstrap } : {}),
+      ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;
@@ -345,12 +353,19 @@ export async function replayTranscriptRecordPage({
   let replayState: TranscriptReplayStateV1;
   let replayError: string | undefined;
   try {
+    const skipFinalizeCallIds =
+      config?.getRestoreAskUserQuestion?.() === true
+        ? restorableAskUserQuestionCallIds(
+            config.getGeminiClient?.()?.getChat?.()?.getHistory?.() ?? [],
+          )
+        : undefined;
     const replayPageState = await replayer.replayPage(page.records, {
       pendingToolCalls:
         page.direction === 'backward' ? [] : state.pendingToolCalls,
       finalizeDangling:
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
+      ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
       ...(state.goalState ? { goalState: state.goalState } : {}),
       ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });

@@ -1079,6 +1079,47 @@ describe('createTranscriptReplayMachine', () => {
     expect([...machine.finalize()]).toEqual([]);
   });
 
+  it('skips finalize for selected ask_user_question call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-bash',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const finalized = [...machine.finalize()].map((item) => item.update);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-bash',
+      status: 'failed',
+    });
+    expect(machine.snapshot().pendingToolCalls).toEqual([
+      expect.objectContaining({ callId: 'call-auq' }),
+    ]);
+  });
+
   it('correlates an id-less result only to one same-name pending call', () => {
     const machine = createTranscriptReplayMachine();
     updates(
