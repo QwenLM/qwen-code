@@ -294,6 +294,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -8750,6 +8751,18 @@ export class Session implements SessionContext {
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
+    const isRuntime =
+      resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|');
+    void recordDaemonSessionModel(this.config, {
+      modelId: isRuntime
+        ? (resolvedRoute?.modelId ?? parsed.modelId)
+        : effectiveModelId,
+      authType: effectiveAuthType,
+      ...(resolvedRoute && !isRuntime && resolvedRoute.baseUrl !== undefined
+        ? { baseUrl: resolvedRoute.baseUrl ?? '' }
+        : {}),
+      ...(isRuntime ? { isRuntime: true } : {}),
+    });
     const activeRuntimeSnapshot = this.config.getActiveRuntimeModelSnapshot?.();
     const currentAcpModelId = getCurrentAcpModelId(
       buildAcpModelOptions(this.config.getAllConfiguredModels()),

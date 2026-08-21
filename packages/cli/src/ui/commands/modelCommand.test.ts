@@ -215,6 +215,7 @@ describe('modelCommand', () => {
   it('should switch the main model directly in interactive mode when args are provided', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
     mockContext = createMockCommandContext({
       invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
       services: {
@@ -227,6 +228,9 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
           switchModel,
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel,
+          }),
         },
         settings: createMockSettings(setValue),
       },
@@ -256,6 +260,45 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'Model: qwen-max',
+    });
+    expect(recordSessionModel).not.toHaveBeenCalled();
+  });
+
+  it('records the session model in ACP mode after switching', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-max',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+          getModel: vi.fn().mockReturnValue('qwen-max'),
+          getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+          getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel,
+          }),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(switchModel).toHaveBeenCalled();
+    expect(recordSessionModel).toHaveBeenCalledWith({
+      modelId: 'qwen-max',
+      authType: AuthType.QWEN_OAUTH,
     });
   });
 

@@ -1110,6 +1110,24 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
+    it('skips session_model system records', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_model',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
     it('preserves slash-command provenance when replaying results', async () => {
       const systemRecord: ChatRecord = {
         uuid: 'system-uuid',

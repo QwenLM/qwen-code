@@ -22,6 +22,7 @@ import type {
   AttributionSnapshotPayload,
   ChatRecord,
   ParentSessionRecordPayload,
+  SessionModelRecordPayload,
   SessionSourceRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -209,6 +210,8 @@ export interface SessionRuntimeResumeState {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
+    sessionModel?: SessionModelRecordPayload;
+    lastAssistantModel?: string;
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
@@ -2147,6 +2150,10 @@ export class SessionTranscriptReader {
       index,
       (entry) => entry.type === 'system' && entry.subtype === 'session_source',
     );
+    const sessionModelUuid = lastUuidMatching(
+      index,
+      (entry) => entry.type === 'system' && entry.subtype === 'session_model',
+    );
     const uiTelemetrySet = new Set(
       index.runtimeUuids.filter((uuid) => {
         const entry = index.byUuid.get(uuid);
@@ -2176,7 +2183,7 @@ export class SessionTranscriptReader {
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
-      [parentSessionUuid, sessionSourceUuid].filter(
+      [parentSessionUuid, sessionSourceUuid, sessionModelUuid].filter(
         (uuid): uuid is string => uuid !== undefined,
       ),
     );
@@ -2200,6 +2207,8 @@ export class SessionTranscriptReader {
     let parentSessionId: string | undefined;
     let sourceType: string | undefined;
     let sourceId: string | undefined;
+    let sessionModel: SessionModelRecordPayload | undefined;
+    let lastAssistantModel: string | undefined;
     let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
     let goalCheckpointAccumulator:
@@ -2234,6 +2243,20 @@ export class SessionTranscriptReader {
           | undefined;
         sourceType = payload?.sourceType;
         sourceId = payload?.sourceId;
+      } else if (record.uuid === sessionModelUuid) {
+        const payload = record.systemPayload as
+          | SessionModelRecordPayload
+          | undefined;
+        if (payload?.modelId && payload.authType) {
+          sessionModel = payload;
+        }
+      }
+      if (
+        record.type === 'assistant' &&
+        typeof record.model === 'string' &&
+        record.model.trim()
+      ) {
+        lastAssistantModel = record.model;
       }
       if (fileHistorySet.has(record.uuid)) {
         try {
@@ -2482,6 +2505,8 @@ export class SessionTranscriptReader {
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(sourceId !== undefined ? { sourceId } : {}),
+        ...(sessionModel !== undefined ? { sessionModel } : {}),
+        ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
       },
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }

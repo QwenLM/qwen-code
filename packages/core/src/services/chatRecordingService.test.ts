@@ -1112,6 +1112,25 @@ describe('ChatRecordingService', () => {
       ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
+
+    it('restores session model bindings for duplicate suppression', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        },
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
   });
 
   describe('rewindRecording', () => {
@@ -2563,6 +2582,91 @@ describe('ChatRecordingService', () => {
       } finally {
         process.off('unhandledRejection', handler);
       }
+    });
+  });
+
+  describe('recordSessionModel', () => {
+    it('appends a session_model record and skips identical payloads', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: {
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        },
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('writes a new record when the model changes', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-flash',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('re-anchors the live session model onto the rewind branch', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_model',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-flash',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
   });
 
