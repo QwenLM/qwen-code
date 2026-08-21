@@ -462,17 +462,16 @@ function VirtualizedList<T>(
     if (
       shouldAutoScroll &&
       // The clamp-parked position is content-driven, not the user being at
-      // the bottom, so growth must not auto-follow from it either (#9305
-      // review R6-2) — except growth that crosses the fit boundary: while
-      // the content fit, the user could see everything, so follow must come
-      // back once it overflows instead of every new message rendering below
-      // the fold (#9305 review R11-6).
-      ((listGrew &&
-        (isStickingToBottom ||
-          (wasAtBottom &&
-            (!clampParked ||
-              (contentPreviouslyFit &&
-                totalHeight > scrollableContainerHeight))))) ||
+      // the bottom, so growth must not auto-follow from it (#9305 review
+      // R6-2) — except a parked state that previously fit crossing into
+      // overflow by any shape: length growth, in-place height growth, or a
+      // container shrink. While the content fit, the user could see
+      // everything, so follow must come back once it overflows instead of
+      // content rendering below the fold (#9305 reviews R11-6, R14-1).
+      ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
+        (clampParked &&
+          contentPreviouslyFit &&
+          totalHeight > scrollableContainerHeight) ||
         // A shrink landing in the same render must reach the drop/re-anchor
         // branch below, not be preempted here on the stale render-time
         // sticking flag (#9305 review R11-1).

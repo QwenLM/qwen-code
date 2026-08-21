@@ -1096,6 +1096,145 @@ describe('<VirtualizedList />', () => {
     );
   });
 
+  it('re-engages auto-follow when parked fitting content grows taller in place', async () => {
+    // Streaming reply shape: useGeminiStream updates one pending item per
+    // chunk and MainContent maps it at a constant array position, so the
+    // reply crosses the container height at constant data.length. The
+    // fit-boundary crossing must re-engage follow from the clamp-parked,
+    // previously-fitting state for any growth shape, not only data.length
+    // increases (#9305 review R14-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place until the content fits: clamp-parked at {0,0}.
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // In-place height growth that still fits must not yank the park.
+    items = [...makeItems(7), { id: 7, label: 'tok-0\ntok-1' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      ...Array.from({ length: 7 }, (_, i) => `item-${i}`),
+      'tok-0',
+      'tok-1',
+    ]);
+
+    // The streamed reply crosses the container height at constant
+    // data.length: follow must re-engage.
+    items = [...makeItems(7), { id: 7, label: 'tok-0\ntok-1\ntok-2\ntok-3' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      ...Array.from({ length: 6 }, (_, i) => `item-${i + 1}`),
+      'tok-0',
+      'tok-1',
+      'tok-2',
+      'tok-3',
+    ]);
+  });
+
+  it('re-engages auto-follow when a container shrink overflows parked fitting content', async () => {
+    // Second crossing shape: the resize-to-fit park at {0,0} carries the
+    // mark, then the terminal shrinks back below the content height. The
+    // previously-fitting state overflows without any data.length change;
+    // afterwards contentPreviouslyFit is false and the parked scrollTop is
+    // not near the grown max scroll, so no other gate can bring follow
+    // back — the crossing must re-engage it (#9305 review R14-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    const items = makeItems(20);
+    let height = 10;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Enlarge the terminal until the content fits: top-parked at {0,0}.
+    height = 25;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 20 }, (_, i) => `item-${i}`),
+    );
+
+    // Shrink the terminal back below the content height: follow must
+    // re-engage.
+    height = 10;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `item-${i + 10}`),
+    );
+  });
+
   it('reports zero-height shrink so collapsed items leave no blank gap', async () => {
     // Mirrors VP thought groups: the head renders a 1-line summary when
     // collapsed while continuations render nothing (zero height). The zero
