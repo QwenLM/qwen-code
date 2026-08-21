@@ -548,6 +548,22 @@ describe('createMemoryScopedAgentConfig', () => {
       reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
     });
     await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff'\ntouch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff'\r\ntouch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
       evaluate(ToolNames.SHELL, { command: `rm ${pinnedFile}` }),
     ).resolves.toEqual({
       allowed: false,
@@ -588,6 +604,21 @@ describe('createMemoryScopedAgentConfig', () => {
     execFileSync('git', ['config', '--unset', 'diff.external'], {
       cwd: projectRoot,
     });
+    execFileSync(
+      'git',
+      ['config', 'diff.untrusted.textconv', 'untrusted-textconv'],
+      { cwd: projectRoot },
+    );
+    for (const command of ['git diff', 'git log -p -1', 'git show HEAD']) {
+      await expect(evaluate(command)).resolves.toEqual({
+        allowed: false,
+        reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+      });
+    }
+
+    execFileSync('git', ['config', '--unset', 'diff.untrusted.textconv'], {
+      cwd: projectRoot,
+    });
     execFileSync('git', ['config', 'core.fsmonitor', 'untrusted-fsmonitor'], {
       cwd: projectRoot,
     });
@@ -604,6 +635,14 @@ describe('createMemoryScopedAgentConfig', () => {
       reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
     });
     await expect(evaluate('git ls-files')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git blame README.md')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git grep needle')).resolves.toEqual({
       allowed: false,
       reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
     });

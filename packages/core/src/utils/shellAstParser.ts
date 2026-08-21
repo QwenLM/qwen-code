@@ -965,7 +965,19 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     new Set(['command_substitution', 'process_substitution']),
     true,
   );
-  if (substitutions.length === 0) return 'read-only';
+  if (substitutions.length === 0) {
+    for (const expansion of collectDescendants(node, new Set(['expansion']))) {
+      for (let i = 0; i < expansion.childCount - 1; i++) {
+        if (
+          expansion.child(i)?.type === '@' &&
+          expansion.child(i + 1)?.type === 'P'
+        ) {
+          return 'unknown';
+        }
+      }
+    }
+    return 'read-only';
+  }
   return mergeSafety(
     'unknown',
     ...substitutions
@@ -1104,7 +1116,7 @@ function localGitConfigMakesCommandUnsafe(
   cwd: string,
 ): boolean {
   let changedDirectory = false;
-  let usesDiff = false;
+  let usesDiffOutput = false;
   let usesFsmonitor = false;
 
   for (const command of collectDescendants(root, new Set(['command']))) {
@@ -1117,15 +1129,35 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
-    if (!['diff', 'ls-files', 'status'].includes(subcommand)) continue;
+    const argumentTexts = getArgumentNodes(command)
+      .slice(1)
+      .map((argument) => stripOuterQuotes(argument.text).toLowerCase());
+    const logShowsPatch =
+      subcommand === 'log' &&
+      argumentTexts.some((argument) =>
+        ['-p', '-u', '--patch'].includes(argument),
+      );
+    const canUseDiffOutput =
+      subcommand === 'diff' || subcommand === 'show' || logShowsPatch;
+    const canUseFsmonitor = [
+      'blame',
+      'diff',
+      'grep',
+      'ls-files',
+      'status',
+    ].includes(subcommand);
+    if (!canUseDiffOutput && !canUseFsmonitor) continue;
     if (changedDirectory) return true;
-    usesDiff ||= subcommand === 'diff';
-    usesFsmonitor = true;
+    usesDiffOutput ||= canUseDiffOutput;
+    usesFsmonitor ||= canUseFsmonitor;
   }
 
-  if (!usesDiff && !usesFsmonitor) return false;
+  if (!usesDiffOutput && !usesFsmonitor) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesFsmonitor && risk.fsmonitor);
+  return (
+    (usesDiffOutput && (risk.diffExternal || risk.diffTextconv)) ||
+    (usesFsmonitor && risk.fsmonitor)
+  );
 }
 
 function fallbackGitConfigMakesCommandUnsafe(
@@ -1135,7 +1167,7 @@ function fallbackGitConfigMakesCommandUnsafe(
   if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
   if (!/\bgit\b/i.test(command)) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return risk.diffExternal || risk.fsmonitor;
+  return risk.diffExternal || risk.diffTextconv || risk.fsmonitor;
 }
 
 async function classifyInternal(
@@ -1149,6 +1181,13 @@ async function classifyInternal(
     const safety = mergeSafety(
       ...root.namedChildren.map(evaluateStatementSafety),
     );
+    if (safety === 'read-only' && command.includes('\\\n')) {
+      const normalizedSafety = await classifyInternal(
+        command.replaceAll('\\\n', ''),
+        cwd,
+      );
+      if (normalizedSafety !== 'read-only') return 'unknown';
+    }
     if (safety !== 'read-only' || !cwd) return safety;
     return localGitConfigMakesCommandUnsafe(root, cwd)
       ? 'unknown'

@@ -434,6 +434,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -507,6 +508,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -966,6 +968,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'usage_limited',
       lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+      limitKind: 'checkpoint_request',
     });
     // The oversized request cannot shrink on its own, so resume must stay
     // blocked instead of re-limiting on every resumed turn.
@@ -1078,9 +1081,10 @@ describe('goal runtime', () => {
       expect(host.started).toHaveLength(1);
       expect(checkpointVerifier).toHaveBeenCalledTimes(0);
       if (failurePoint === 'truncated') {
-        expect(runtime.getSnapshot().goal?.lastReason).toBe(
-          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-        );
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+          limitKind: 'evidence_catalog',
+        });
         await expect(
           runtime.dispatch({
             action: 'resume',
@@ -3813,6 +3817,11 @@ describe('goal runtime', () => {
     expect(host.preemptGoalTurn).toHaveBeenCalledOnce();
     expect(host.started).toHaveLength(2);
     expect(runtime.getSnapshot().goal).toBeNull();
+    expect(runtime.getSnapshot().clearedGoal).toEqual({
+      goalId: replaced.snapshot.goal!.goalId,
+      revision: 1,
+      updatedAt: replaced.snapshot.goal!.updatedAt,
+    });
   });
 
   it('defensively copies response, subscriber, and getter snapshots', async () => {

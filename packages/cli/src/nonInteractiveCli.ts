@@ -50,6 +50,9 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
   parsePositiveIntegerEnv,
@@ -765,6 +768,17 @@ export async function runNonInteractive(
       },
       abortController,
     );
+    const stampBudgetAbort = () => {
+      const exceeded = budgetEnforcer.getExceeded();
+      if (!exceeded) return;
+      endActiveInteraction('error', {
+        errorMessage: exceeded.message,
+        errorType: 'run_budget_exceeded',
+      });
+    };
+    abortController.signal.addEventListener('abort', stampBudgetAbort, {
+      once: true,
+    });
     budgetEnforcer.start();
 
     /**
@@ -1069,6 +1083,7 @@ export async function runNonInteractive(
       let inlineModelOverride: string | undefined;
       let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
       let fullTurnOnComplete: (() => Promise<void>) | undefined;
+      let fullTurnHadApiError = false;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1574,7 +1589,7 @@ export async function runNonInteractive(
       const runFullTurnOnComplete = async (): Promise<void> => {
         const onComplete = fullTurnOnComplete;
         fullTurnOnComplete = undefined;
-        if (!onComplete) return;
+        if (!onComplete || fullTurnHadApiError) return;
         try {
           await onComplete();
         } catch (error) {
@@ -1708,8 +1723,11 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledProviderToolCallIds =
-        geminiClient.getHistoryFunctionResponseIds();
+      // Fresh map per call today; copy so a future cached accessor cannot
+      // turn this run's cross-turn recording into shared-state mutation.
+      const handledToolCallFingerprints = new Map(
+        geminiClient.getHistoryToolCallFingerprints(),
+      );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
       // the current tool batch so we do not send partial tool responses.
@@ -1765,10 +1783,26 @@ export async function runNonInteractive(
           }
           return true;
         });
+        const isReplayOfHandledRequest = (
+          request: ToolCallRequestInfo,
+        ): boolean => {
+          const providerCallId = getProviderResponseId(request);
+          return providerCallId
+            ? isReplayOfHandledToolCall(
+                handledToolCallFingerprints,
+                providerCallId,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
+              )
+            : false;
+        };
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           [...uniqueBatchRequests, ...duplicateBatchRequests],
           getProviderResponseId,
-          handledProviderToolCallIds,
+          isReplayOfHandledRequest,
           duplicateProviderToolCallResponseIds,
         );
         if (repeatedDuplicateRequest) {
@@ -1794,8 +1828,16 @@ export async function runNonInteractive(
             continue;
           }
 
-          if (!handledProviderToolCallIds.has(providerCallId)) {
-            handledProviderToolCallIds.add(providerCallId);
+          if (!isReplayOfHandledRequest(requestInfo)) {
+            recordHandledToolCall(
+              handledToolCallFingerprints,
+              providerCallId,
+              getCachedToolCallFingerprint(
+                requestInfo,
+                requestInfo.name,
+                requestInfo.args,
+              ),
+            );
             executableBatchRequests.push(requestInfo);
             continue;
           }
@@ -2227,7 +2269,14 @@ export async function runNonInteractive(
             toolName: request.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           })),
+          new Map(
+            orderedResponses.map(({ request }) => [
+              request.callId,
+              request.prompt_id,
+            ]),
+          ),
         );
 
         const chatRecordingService = config.getChatRecordingService?.();
@@ -2242,6 +2291,8 @@ export async function runNonInteractive(
               statusByResponse.get(response) ??
               (response.error ? 'error' : 'success'),
             resultDisplay: response.resultDisplay,
+            persistedOutputFiles: finalized[index].persistedOutputFiles,
+            artifacts: finalized[index].artifacts,
             error: response.error,
             errorType: response.errorType,
             executionStatus: response.executionStatus,
@@ -2395,6 +2446,9 @@ export async function runNonInteractive(
             // loop fix below.
             adapter.finalizeAssistantMessage();
             await routeAbort();
+          }
+          if (event.type === GeminiEventType.Error) {
+            fullTurnHadApiError = true;
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
@@ -2737,6 +2791,9 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                if (event.type === GeminiEventType.Error) {
+                  fullTurnHadApiError = true;
+                }
                 adapter.processEvent(event);
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
@@ -3067,6 +3124,8 @@ export async function runNonInteractive(
       }
     } catch (error) {
       const budgetExceeded = budgetEnforcer.getExceeded();
+      const failureMessage =
+        error instanceof Error ? error.message : String(error);
       endActiveInteraction(
         budgetExceeded || !abortController.signal.aborted
           ? 'error'
@@ -3121,9 +3180,7 @@ export async function runNonInteractive(
         ? budgetExceeded.message
         : recoverableCancellation
           ? abortController.signal.reason.message
-          : error instanceof Error
-            ? error.message
-            : String(error);
+          : failureMessage;
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -3210,6 +3267,7 @@ export async function runNonInteractive(
       // run completes — important for callers (e.g. the `qwen serve`
       // daemon, SDK) that reuse a single process across many runs.
       budgetEnforcer.stop();
+      abortController.signal.removeEventListener('abort', stampBudgetAbort);
 
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);

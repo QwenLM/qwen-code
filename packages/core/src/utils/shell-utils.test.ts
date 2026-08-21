@@ -156,6 +156,29 @@ describe('isCommandAllowed', () => {
       expect(result.reason).toContain('Command substitution');
     });
 
+    it('should block the two substitution forms from issue #8582', async () => {
+      for (const command of [
+        'echo "$\\\n(touch /tmp/pwned)"',
+        'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+      ]) {
+        const result = await isCommandAllowed(command, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      }
+    });
+
+    it('should keep literal twins of issue #8582 allowed', async () => {
+      config.getCoreTools = () => ['ShellTool(echo)'];
+      for (const command of [
+        'echo "\\$\\\n(touch /tmp/pwned)"',
+        'echo "$$\\\n(touch /tmp/pwned)"',
+        "echo '$\\\n(touch /tmp/pwned)'",
+        "echo '${two@P}'",
+      ]) {
+        expect((await isCommandAllowed(command, config)).allowed).toBe(true);
+      }
+    });
+
     it('should block command substitution using `<(...)`', async () => {
       const result = await isCommandAllowed('diff <(ls) <(ls -a)', config);
       expect(result.allowed).toBe(false);
@@ -898,6 +921,25 @@ describe('normalizeMonitorCommand', () => {
       analysisCommand: 'echo ok',
       safetyCommand: 'echo ok $(cat secret.txt)',
       spawnCommand: `/bin/bash -c 'echo ok' $(cat secret.txt)`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('preserves a leading newline before shell-wrapper suffix commands', () => {
+    expect(
+      normalizeMonitorCommand("/bin/bash -c 'git diff'\ntouch /tmp/pwn8357"),
+    ).toEqual({
+      analysisCommand: 'git diff',
+      safetyCommand: 'git diff\ntouch /tmp/pwn8357',
+      spawnCommand: "/bin/bash -c 'git diff'\ntouch /tmp/pwn8357",
+      strippedTrailingAmp: false,
+    });
+    expect(
+      normalizeMonitorCommand("/bin/bash -c 'git diff'\r\ntouch /tmp/pwn8357"),
+    ).toEqual({
+      analysisCommand: 'git diff',
+      safetyCommand: 'git diff\ntouch /tmp/pwn8357',
+      spawnCommand: "/bin/bash -c 'git diff'\ntouch /tmp/pwn8357",
       strippedTrailingAmp: false,
     });
   });

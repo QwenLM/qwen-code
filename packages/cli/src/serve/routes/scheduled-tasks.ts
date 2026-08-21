@@ -62,9 +62,11 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
+  sendConversationRuntimeUnavailable,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -88,6 +90,11 @@ export interface ScheduledTasksSessionBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Advance the in-memory session-catalog revision after a successful
+   * persisted removal driven by task cleanup. Optional so existing
+   * structural test fakes stay source-compatible; the production bridge
+   * always provides it. */
+  markSessionCatalogChanged?(): void;
   /** Give the task's session a readable name so it's recognizable in the
    * session list (rather than a bare id). Best-effort. */
   updateSessionMetadata(
@@ -141,6 +148,7 @@ interface ScheduledTaskTarget {
   bridge?: ScheduledTasksSessionBridge;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   assertGenerationOpen?: () => void;
+  activity?: ConversationRuntimeActivityGate;
 }
 
 function requireOpenGeneration(
@@ -182,11 +190,12 @@ async function teardownBoundSession(
     await target.cleanupSession(sessionId).catch(() => {});
   } else if (target.bridge) {
     await target.bridge.closeSession(sessionId).catch(() => {});
-    await new SessionService(target.workspaceCwd, {
+    const removed = await new SessionService(target.workspaceCwd, {
       runtimeBaseDir: target.runtimeBaseDir,
     })
       .removeSession(sessionId)
-      .catch(() => {});
+      .catch(() => false);
+    if (removed) target.bridge.markSessionCatalogChanged?.();
   }
 }
 
@@ -246,16 +255,33 @@ interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
     runtime: WorkspaceRuntime,
     sessionId: string,
   ) => Promise<unknown>;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
-function runWithScheduledTaskTarget<T>(
+async function runWithScheduledTaskTarget<T>(
   target: ScheduledTaskTarget,
-  fn: () => T,
-): T {
-  if (target.runtimeBaseDir === undefined) {
-    return fn();
+  fn: () => T | Promise<T>,
+): Promise<Awaited<T>> {
+  const result =
+    target.runtimeBaseDir === undefined
+      ? fn()
+      : Storage.runWithResolvedRuntimeBaseDir(target.runtimeBaseDir, fn);
+  return (await result) as Awaited<T>;
+}
+
+function sendActivityGateError(res: Response, error: unknown): boolean {
+  if (
+    !error ||
+    typeof error !== 'object' ||
+    (error as { code?: unknown }).code !== 'daemon_draining'
+  ) {
+    return false;
   }
-  return Storage.runWithResolvedRuntimeBaseDir(target.runtimeBaseDir, fn);
+  res.status(503).json({
+    error: 'The daemon is draining and no longer accepts work.',
+    code: 'daemon_draining',
+  });
+  return true;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
@@ -373,320 +399,79 @@ function registerScheduledTaskCrudRoutes(
   } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
-  // ── List ──────────────────────────────────────────────────────────
-  app.get(base, async (req, res) => {
-    const target = resolveTarget(req, res);
-    if (!target) return;
-    if (!requireOpenGeneration(target, res)) return;
-    try {
-      const tasks = await runWithScheduledTaskTarget(target, () =>
-        readCronTasks(target.workspaceCwd),
-      );
-      if (!requireOpenGeneration(target, res)) return;
-      res.status(200).json({ v: 1, tasks: tasks.map(toView) });
-    } catch (err) {
-      // A malformed/corrupt file throws (fix-or-delete contract) rather than
-      // reading as empty — surface it instead of hiding the user's tasks
-      // behind a silent [].
-      writeStderrLine(
-        `qwen serve: GET ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to read scheduled tasks (the tasks file may be corrupt)',
-        code: 'scheduled_tasks_read_failed',
-      });
-    }
-  });
-
-  // ── Create ────────────────────────────────────────────────────────
-  app.post(base, mutate(), async (req, res) => {
-    const target = resolveTarget(req, res);
-    if (!target) return;
-    if (!requireOpenGeneration(target, res)) return;
-    const { workspaceCwd, bridge } = target;
-    const body = safeBody(req);
-
-    const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
-    if (cron.length === 0) {
-      res.status(400).json({
-        error: '`cron` is required and must be a non-empty string',
-        code: 'invalid_cron',
-      });
-      return;
-    }
-    if (cron.length > MAX_CRON_LENGTH) {
-      res.status(400).json({
-        error: `\`cron\` exceeds ${MAX_CRON_LENGTH}-character limit`,
-        code: 'invalid_cron',
-      });
-      return;
-    }
-    const cronError = validateCron(cron);
-    if (cronError) {
-      res.status(400).json({ error: cronError, code: 'invalid_cron' });
-      return;
-    }
-
-    const prompt =
-      typeof body['prompt'] === 'string' ? body['prompt'].trim() : '';
-    if (prompt.length === 0) {
-      res.status(400).json({
-        error: '`prompt` is required and must be a non-empty string',
-        code: 'invalid_prompt',
-      });
-      return;
-    }
-    if (prompt.length > MAX_PROMPT_LENGTH) {
-      res.status(400).json({
-        error: `\`prompt\` exceeds ${MAX_PROMPT_LENGTH}-character limit`,
-        code: 'invalid_prompt',
-      });
-      return;
-    }
-
-    const nameResult = parseNameField(body['name']);
-    if (nameResult.error) {
-      res.status(400).json({ error: nameResult.error, code: 'invalid_name' });
-      return;
-    }
-
-    if (
-      body['recurring'] !== undefined &&
-      typeof body['recurring'] !== 'boolean'
-    ) {
-      res.status(400).json({
-        error: '`recurring` must be a boolean',
-        code: 'invalid_recurring',
-      });
-      return;
-    }
-    if (body['enabled'] !== undefined && typeof body['enabled'] !== 'boolean') {
-      res.status(400).json({
-        error: '`enabled` must be a boolean',
-        code: 'invalid_enabled',
-      });
-      return;
-    }
-    let delivery: PublicChannelDelivery | undefined;
-    if (body['delivery'] !== undefined) {
+  const withTarget =
+    (
+      handler: (
+        req: Request,
+        res: Response,
+        target: ScheduledTaskTarget,
+      ) => Promise<void>,
+    ): RequestHandler =>
+    async (req, res) => {
+      const target = resolveTarget(req, res);
+      if (!target) return;
+      const operation = async () => {
+        if (!requireOpenGeneration(target, res)) return;
+        await handler(req, res, target);
+      };
       try {
-        delivery = parseChannelDelivery(body['delivery']);
-      } catch (err) {
-        if (!isChannelDeliveryError(err)) throw err;
-        res.status(400).json({ error: err.message, code: err.code });
-        return;
-      }
-    }
-    const removedField = findRemovedTaskField(body);
-    if (removedField) {
-      res.status(400).json(removedFieldError(removedField));
-      return;
-    }
-    const recurring = body['recurring'] !== false;
-    const enabled = body['enabled'] !== false;
-    const taskId = generateCronTaskId();
-
-    // Mint the task's dedicated session up front. The task is BOUND to it and
-    // fires only inside it — its transcript becomes the task's run history, and
-    // archiving/deleting the session stops the task. Done before the write so a
-    // task never lands on disk without its session; if the bridge is absent
-    // (minimal embedding) the task is created unbound (shared-owner firing).
-    //
-    // `sessionScope: 'thread'` is REQUIRED: the daemon's default scope is
-    // 'single', which would attach to (and reuse) the shared workspace session
-    // instead of minting a fresh one. Two tasks — or a task and an open chat —
-    // would then bind to the same session: the task renames it, scheduled runs
-    // land in the wrong transcript, and deleting one task closes the shared
-    // session. Forcing 'thread' guarantees each task gets an isolated session.
-    let boundSessionId: string | undefined;
-    if (bridge) {
-      // Pre-check the cap BEFORE spawning: an over-cap create must not spawn a
-      // session it will immediately tear down, because closeSession removes the
-      // live bridge entry but can leave the just-spawned+named session listed as
-      // an orphan with no owning task. Best-effort — the write-lock cap check
-      // below stays authoritative for the concurrent-create race.
-      try {
-        if (
-          (
-            await runWithScheduledTaskTarget(target, () =>
-              readCronTasks(workspaceCwd),
-            )
-          ).length >= MAX_SCHEDULED_TASKS
-        ) {
-          res.status(409).json({
-            error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
-            code: 'max_tasks_reached',
-          });
-          return;
+        if (target.activity) {
+          await target.activity.run(operation);
+        } else {
+          await operation();
         }
-      } catch {
-        // Read failure → skip the pre-check; the write below is authoritative.
-      }
-      if (!requireOpenGeneration(target, res)) return;
-      try {
-        const session = await bridge.spawnOrAttach({
-          workspaceCwd,
-          sessionScope: 'thread',
-          sourceType: 'scheduled_task',
-          sourceId: taskId,
-        });
-        boundSessionId = session.sessionId;
-        if (!requireOpenGeneration(target, res)) {
-          await teardownBoundSession(target, boundSessionId);
-          return;
-        }
-        // Name the session after the task so it's recognizable in the session
-        // list. Best-effort — a nameless session still fires correctly.
-        try {
-          bridge.updateSessionMetadata(boundSessionId, {
-            displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
-          });
-        } catch {
-          // metadata update is non-critical
-        }
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        writeStderrLine(
-          `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        res.status(500).json({
-          error: "Failed to create the task's session",
-          code: 'scheduled_tasks_session_failed',
-        });
-        return;
-      }
-    }
-
-    const now = Date.now();
-    const task: DurableCronTask = {
-      id: taskId,
-      cron,
-      prompt,
-      recurring,
-      createdAt: now,
-      // Pin to the creation minute so the scheduler can't fire during the
-      // minute the task was created — same guard cronScheduler.create uses.
-      lastFiredAt: now - (now % 60_000),
-      enabled,
-      ...(delivery !== undefined ? { delivery } : {}),
-      ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
-      ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
-    };
-
-    // Best-effort teardown of the just-minted session when the create can't be
-    // committed. closeSession only tears down the live child; removeSession also
-    // deletes the persisted transcript/title record — both are needed, or a
-    // rejected create (the loser of a concurrent create at the cap boundary,
-    // which passes the pre-check but loses the authoritative write) would leave
-    // a named "⏰ …" session in the list with no owning task.
-    const rollbackSession = async () => {
-      if (boundSessionId !== undefined) {
-        await teardownBoundSession(target, boundSessionId);
-      }
-    };
-
-    let overCap = false;
-    let rollbackBefore: DurableCronTask[] | undefined;
-    let rollbackAfter: DurableCronTask[] | undefined;
-    try {
-      await runWithScheduledTaskTarget(target, () =>
-        updateCronTasks(
-          workspaceCwd,
-          (tasks) => {
-            // Cap check under the write lock so two concurrent creates can't both
-            // slip past a stale count. Returning the input unchanged is a no-op
-            // (no write), which the flag below turns into a 409.
-            if (tasks.length >= MAX_SCHEDULED_TASKS) {
-              overCap = true;
-              return tasks;
-            }
-            rollbackBefore = tasks;
-            rollbackAfter = [...tasks, task];
-            return rollbackAfter;
-          },
-          { assertCanCommit: target.assertGenerationOpen },
-        ),
-      );
-    } catch (err) {
-      await rollbackSession();
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: POST ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to create scheduled task',
-        code: 'scheduled_tasks_write_failed',
-      });
-      return;
-    }
-    if (rollbackBefore && rollbackAfter) {
-      try {
-        target.assertGenerationOpen?.();
       } catch (error) {
-        await rollbackCronMutation(
-          target,
-          rollbackBefore,
-          rollbackAfter,
-          `POST ${base}`,
-        );
-        await rollbackSession();
-        if (sendGenerationClosedError(res, error)) return;
+        if (sendActivityGateError(res, error)) return;
         throw error;
       }
-    }
-    if (overCap) {
-      await rollbackSession();
-      res.status(409).json({
-        error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
-        code: 'max_tasks_reached',
-      });
-      return;
-    }
-    if (task.delivery && task.sessionId) {
-      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
-        sessionId: task.sessionId,
-        taskId: task.id,
-        target: task.delivery.target,
-        recurring: task.recurring,
-        lastFiredAt: task.lastFiredAt ?? undefined,
-      });
-    }
-    res.status(201).json(toView(task));
-  });
+    };
 
-  // ── Update (name / enabled / cron / prompt / recurring / delivery) ──
-  app.patch(`${base}/:id`, mutate(), async (req, res) => {
-    const target = resolveTarget(req, res);
-    if (!target) return;
-    if (!requireOpenGeneration(target, res)) return;
-    const { workspaceCwd, bridge } = target;
-    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
-    if (id.length === 0) {
-      res
-        .status(400)
-        .json({ error: 'Task id is required', code: 'invalid_id' });
-      return;
-    }
-    const body = safeBody(req);
+  // ── List ──────────────────────────────────────────────────────────
+  app.get(
+    base,
+    withTarget(async (_req, res, target) => {
+      try {
+        const tasks = await runWithScheduledTaskTarget(target, () =>
+          readCronTasks(target.workspaceCwd),
+        );
+        if (!requireOpenGeneration(target, res)) return;
+        res.status(200).json({ v: 1, tasks: tasks.map(toView) });
+      } catch (err) {
+        if (sendActivityGateError(res, err)) return;
+        // A malformed/corrupt file throws (fix-or-delete contract) rather than
+        // reading as empty — surface it instead of hiding the user's tasks
+        // behind a silent [].
+        writeStderrLine(
+          `qwen serve: GET ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error:
+            'Failed to read scheduled tasks (the tasks file may be corrupt)',
+          code: 'scheduled_tasks_read_failed',
+        });
+      }
+    }),
+  );
 
-    // Pre-validate every provided field OUTSIDE the write lock — cron parsing
-    // and type checks don't need it, and validating inside the mutate callback
-    // would mean holding the lock to reject a bad request.
-    const patch: Partial<DurableCronTask> = {};
-    let clearName = false;
-    let clearDelivery = false;
+  // ── Create ────────────────────────────────────────────────────────
+  app.post(
+    base,
+    mutate(),
+    withTarget(async (req, res, target) => {
+      const { workspaceCwd, bridge } = target;
+      const body = safeBody(req);
 
-    const removedPatchField = findRemovedTaskField(body);
-    if (removedPatchField) {
-      res.status(400).json(removedFieldError(removedPatchField));
-      return;
-    }
-
-    if ('cron' in body) {
       const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
-      if (cron.length === 0 || cron.length > MAX_CRON_LENGTH) {
+      if (cron.length === 0) {
         res.status(400).json({
-          error: '`cron` must be a non-empty string within the length limit',
+          error: '`cron` is required and must be a non-empty string',
+          code: 'invalid_cron',
+        });
+        return;
+      }
+      if (cron.length > MAX_CRON_LENGTH) {
+        res.status(400).json({
+          error: `\`cron\` exceeds ${MAX_CRON_LENGTH}-character limit`,
           code: 'invalid_cron',
         });
         return;
@@ -696,332 +481,637 @@ function registerScheduledTaskCrudRoutes(
         res.status(400).json({ error: cronError, code: 'invalid_cron' });
         return;
       }
-      patch.cron = cron;
-    }
-    if ('prompt' in body) {
+
       const prompt =
         typeof body['prompt'] === 'string' ? body['prompt'].trim() : '';
-      if (prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) {
+      if (prompt.length === 0) {
         res.status(400).json({
-          error: '`prompt` must be a non-empty string within the length limit',
+          error: '`prompt` is required and must be a non-empty string',
           code: 'invalid_prompt',
         });
         return;
       }
-      patch.prompt = prompt;
-    }
-    if ('name' in body) {
+      if (prompt.length > MAX_PROMPT_LENGTH) {
+        res.status(400).json({
+          error: `\`prompt\` exceeds ${MAX_PROMPT_LENGTH}-character limit`,
+          code: 'invalid_prompt',
+        });
+        return;
+      }
+
       const nameResult = parseNameField(body['name']);
       if (nameResult.error) {
         res.status(400).json({ error: nameResult.error, code: 'invalid_name' });
         return;
       }
-      if (nameResult.value === undefined) {
-        clearName = true;
-      } else {
-        patch.name = nameResult.value;
-      }
-    }
-    if ('recurring' in body) {
-      if (typeof body['recurring'] !== 'boolean') {
+
+      if (
+        body['recurring'] !== undefined &&
+        typeof body['recurring'] !== 'boolean'
+      ) {
         res.status(400).json({
           error: '`recurring` must be a boolean',
           code: 'invalid_recurring',
         });
         return;
       }
-      patch.recurring = body['recurring'];
-    }
-    if ('enabled' in body) {
-      if (typeof body['enabled'] !== 'boolean') {
+      if (
+        body['enabled'] !== undefined &&
+        typeof body['enabled'] !== 'boolean'
+      ) {
         res.status(400).json({
           error: '`enabled` must be a boolean',
           code: 'invalid_enabled',
         });
         return;
       }
-      patch.enabled = body['enabled'];
-    }
-    if ('delivery' in body) {
-      if (body['delivery'] === null) {
-        clearDelivery = true;
-      } else {
+      let delivery: PublicChannelDelivery | undefined;
+      if (body['delivery'] !== undefined) {
         try {
-          patch.delivery = parseChannelDelivery(body['delivery']);
+          delivery = parseChannelDelivery(body['delivery']);
         } catch (err) {
           if (!isChannelDeliveryError(err)) throw err;
           res.status(400).json({ error: err.message, code: err.code });
           return;
         }
       }
-    }
-    if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
-      res.status(400).json({
-        error: 'No updatable fields provided',
-        code: 'empty_patch',
-      });
-      return;
-    }
+      const removedField = findRemovedTaskField(body);
+      if (removedField) {
+        res.status(400).json(removedFieldError(removedField));
+        return;
+      }
+      const recurring = body['recurring'] !== false;
+      const enabled = body['enabled'] !== false;
+      const taskId = generateCronTaskId();
 
-    let found = false;
-    let updated: DurableCronTask | undefined;
-    let blockedByArchive = false;
-    let blockedLegacy = false;
-    let rollbackBefore: DurableCronTask[] | undefined;
-    let rollbackAfter: DurableCronTask[] | undefined;
-    try {
-      await runWithScheduledTaskTarget(target, () =>
-        updateCronTasks(
-          workspaceCwd,
-          (tasks) => {
-            const idx = tasks.findIndex((t) => t.id === id);
-            if (idx === -1) return tasks; // not found → no write
-            found = true;
-            const current = tasks[idx]!;
-            // A legacy guarded task (isolated + precondition, both removed) can't be
-            // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
-            // sends for it is the Enable toggle — which would 200 here and then read
-            // back disabled again, an Enable control that can never succeed with no
-            // error explaining why. Reject the enable with the recreate remediation
-            // instead of acknowledging an update that changes nothing runnable.
-            if (patch.enabled === true && taskHasLegacyCondition(current)) {
-              blockedLegacy = true;
-              return tasks; // no write
-            }
-            // A task disabled BY archiving its session (`disabledByArchive`) can't
-            // be re-enabled through this generic PATCH: its bound session is still
-            // archived and can't fire, so flipping `enabled: true` here would show
-            // an enabled task with a countdown that never runs. The task/session
-            // lifecycle must stay coupled — the caller has to unarchive the session
-            // (which clears the marker and reloads it). Reject and leave the file
-            // untouched.
-            if (patch.enabled === true && current.disabledByArchive === true) {
-              blockedByArchive = true;
-              return tasks; // no write
-            }
-            const next: DurableCronTask = { ...current, ...patch };
-            // `name: null/""` clears the field rather than storing an empty name,
-            // so toView reports it as unnamed and isValidTask never sees a "".
-            if (clearName) delete next.name;
-            if (clearDelivery) delete next.delivery;
-            // Re-seat the task's schedule anchor to "now" whenever an edit would
-            // otherwise let the scheduler retroactively fire an already-past slot.
-            const justReEnabled =
-              current.enabled === false && patch.enabled === true;
-            // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
-            // (`0 9 * * *` → `00 9 * * *`, whitespace) must not re-seat the anchor
-            // and drop a legitimately-pending catch-up fire.
-            const cronChanged =
-              patch.cron !== undefined &&
-              canonicalCron(patch.cron) !== canonicalCron(current.cron);
-            const becameRecurring =
-              patch.recurring === true && current.recurring !== true;
-            const becameOneShot =
-              patch.recurring === false && current.recurring !== false;
-            // Re-seated REGARDLESS of enabled: a schedule edit made while the task
-            // is paused must not leave a stale anchor that fires retroactively when
-            // it's later re-enabled in a SEPARATE request (the re-enable patch has no
-            // schedule change of its own to trigger the re-seat). Re-seating a paused
-            // task's anchor is harmless — it doesn't fire until enabled.
-            {
-              const now = Date.now();
-              const minute = now - (now % 60_000);
-              if (
-                next.recurring &&
-                (justReEnabled || cronChanged || becameRecurring)
-              ) {
-                // A recurring task's anchor is lastFiredAt: resume from now so a
-                // re-enable / cron edit / one-shot→recurring flip doesn't retroactively
-                // fire a past slot (matters most for a bound task, whose catch-up runs
-                // on every file-watch reload).
-                next.lastFiredAt = minute;
-              } else if (
-                !next.recurring &&
-                (justReEnabled || cronChanged || becameOneShot)
-              ) {
-                // A one-shot's anchor is createdAt. Re-seat it on a schedule change
-                // (cron edit, or recurring→one-shot) OR a re-enable so the task fires
-                // at its NEXT occurrence — otherwise the scheduler reads its original
-                // long-past slot as a MISSED one-shot and fires + permanently deletes
-                // it. A one-shot disabled past its slot then re-enabled would
-                // otherwise be silently destroyed on the next reload.
-                next.createdAt = now;
-                next.lastFiredAt = minute;
+      // Mint the task's dedicated session up front. The task is BOUND to it and
+      // fires only inside it — its transcript becomes the task's run history, and
+      // archiving/deleting the session stops the task. Done before the write so a
+      // task never lands on disk without its session; if the bridge is absent
+      // (minimal embedding) the task is created unbound (shared-owner firing).
+      //
+      // `sessionScope: 'thread'` is REQUIRED: the daemon's default scope is
+      // 'single', which would attach to (and reuse) the shared workspace session
+      // instead of minting a fresh one. Two tasks — or a task and an open chat —
+      // would then bind to the same session: the task renames it, scheduled runs
+      // land in the wrong transcript, and deleting one task closes the shared
+      // session. Forcing 'thread' guarantees each task gets an isolated session.
+      let boundSessionId: string | undefined;
+      if (bridge) {
+        // Pre-check the cap BEFORE spawning: an over-cap create must not spawn a
+        // session it will immediately tear down, because closeSession removes the
+        // live bridge entry but can leave the just-spawned+named session listed as
+        // an orphan with no owning task. Best-effort — the write-lock cap check
+        // below stays authoritative for the concurrent-create race.
+        try {
+          if (
+            (
+              await runWithScheduledTaskTarget(target, () =>
+                readCronTasks(workspaceCwd),
+              )
+            ).length >= MAX_SCHEDULED_TASKS
+          ) {
+            res.status(409).json({
+              error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+              code: 'max_tasks_reached',
+            });
+            return;
+          }
+        } catch {
+          // Read failure → skip the pre-check; the write below is authoritative.
+        }
+        if (!requireOpenGeneration(target, res)) return;
+        try {
+          const session = await runWithScheduledTaskTarget(target, () =>
+            bridge.spawnOrAttach({
+              workspaceCwd,
+              sessionScope: 'thread',
+              sourceType: 'scheduled_task',
+              sourceId: taskId,
+            }),
+          );
+          boundSessionId = session.sessionId;
+          if (!requireOpenGeneration(target, res)) {
+            await teardownBoundSession(target, boundSessionId);
+            return;
+          }
+          // Name the session after the task so it's recognizable in the session
+          // list. Best-effort — a nameless session still fires correctly.
+          try {
+            await runWithScheduledTaskTarget(target, async () =>
+              bridge.updateSessionMetadata(boundSessionId!, {
+                displayName: scheduledTaskSessionName(
+                  nameResult.value ?? prompt,
+                ),
+              }),
+            );
+          } catch {
+            // metadata update is non-critical
+          }
+        } catch (err) {
+          if (sendActivityGateError(res, err)) return;
+          if (sendGenerationClosedError(res, err)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          res.status(500).json({
+            error: "Failed to create the task's session",
+            code: 'scheduled_tasks_session_failed',
+          });
+          return;
+        }
+      }
+
+      const now = Date.now();
+      const task: DurableCronTask = {
+        id: taskId,
+        cron,
+        prompt,
+        recurring,
+        createdAt: now,
+        // Pin to the creation minute so the scheduler can't fire during the
+        // minute the task was created — same guard cronScheduler.create uses.
+        lastFiredAt: now - (now % 60_000),
+        enabled,
+        ...(delivery !== undefined ? { delivery } : {}),
+        ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
+        ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
+      };
+
+      // Best-effort teardown of the just-minted session when the create can't be
+      // committed. closeSession only tears down the live child; removeSession also
+      // deletes the persisted transcript/title record — both are needed, or a
+      // rejected create (the loser of a concurrent create at the cap boundary,
+      // which passes the pre-check but loses the authoritative write) would leave
+      // a named "⏰ …" session in the list with no owning task.
+      const rollbackSession = async () => {
+        if (boundSessionId !== undefined) {
+          await teardownBoundSession(target, boundSessionId);
+        }
+      };
+
+      let overCap = false;
+      let rollbackBefore: DurableCronTask[] | undefined;
+      let rollbackAfter: DurableCronTask[] | undefined;
+      try {
+        await runWithScheduledTaskTarget(target, () =>
+          updateCronTasks(
+            workspaceCwd,
+            (tasks) => {
+              // Cap check under the write lock so two concurrent creates can't both
+              // slip past a stale count. Returning the input unchanged is a no-op
+              // (no write), which the flag below turns into a 409.
+              if (tasks.length >= MAX_SCHEDULED_TASKS) {
+                overCap = true;
+                return tasks;
               }
-            }
-            updated = next;
-            rollbackBefore = tasks;
-            rollbackAfter = tasks.map((t, i) => (i === idx ? next : t));
-            return rollbackAfter;
-          },
-          { assertCanCommit: target.assertGenerationOpen },
-        ),
-      );
-    } catch (err) {
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: PATCH ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to update scheduled task',
-        code: 'scheduled_tasks_write_failed',
-      });
-      return;
-    }
-    if (rollbackBefore && rollbackAfter) {
-      try {
-        target.assertGenerationOpen?.();
-      } catch (error) {
-        await rollbackCronMutation(
-          target,
-          rollbackBefore,
-          rollbackAfter,
-          `PATCH ${base}/${id}`,
+              rollbackBefore = tasks;
+              rollbackAfter = [...tasks, task];
+              return rollbackAfter;
+            },
+            { assertCanCommit: target.assertGenerationOpen },
+          ),
         );
-        if (sendGenerationClosedError(res, error)) return;
-        throw error;
-      }
-    }
-    if (blockedLegacy) {
-      res.status(409).json({
-        error:
-          'This task uses the removed isolated run mode with a precondition and can no longer be enabled or run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
-        code: 'task_legacy_unsupported',
-      });
-      return;
-    }
-    if (blockedByArchive) {
-      res.status(409).json({
-        error:
-          'This task was disabled by archiving its session; unarchive the session to re-enable it.',
-        code: 'task_session_archived',
-      });
-      return;
-    }
-    if (!found || !updated) {
-      res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
-      return;
-    }
-    // Keep the bound session's display name in sync with the task's effective
-    // label (its name, or its prompt when unnamed) — the session was named
-    // after the task at create, so a rename (or a prompt edit while unnamed)
-    // should follow. Only when the effective label actually changed, so a bare
-    // cron/enabled edit doesn't touch the session. Best-effort: a metadata
-    // failure must not fail the PATCH the schedule already committed.
-    const effectiveLabelChanged =
-      patch.name !== undefined ||
-      clearName ||
-      (patch.prompt !== undefined && updated.name === undefined);
-    if (bridge && updated.sessionId && effectiveLabelChanged) {
-      try {
-        bridge.updateSessionMetadata(updated.sessionId, {
-          displayName: scheduledTaskSessionName(updated.name ?? updated.prompt),
+      } catch (err) {
+        await rollbackSession();
+        if (sendActivityGateError(res, err)) return;
+        if (sendGenerationClosedError(res, err)) return;
+        writeStderrLine(
+          `qwen serve: POST ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error: 'Failed to create scheduled task',
+          code: 'scheduled_tasks_write_failed',
         });
-      } catch {
-        // non-critical — the schedule change already persisted
+        return;
       }
-    }
-    if (updated.delivery && updated.sessionId) {
-      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
-        sessionId: updated.sessionId,
-        taskId: updated.id,
-        target: updated.delivery.target,
-        recurring: updated.recurring,
-        lastFiredAt: updated.lastFiredAt ?? undefined,
-      });
-    }
-    if (clearDelivery && updated.sessionId) {
-      channelDeliveryAuthorizations?.revokeScheduledTask(
-        workspaceCwd,
-        updated.sessionId,
-        updated.id,
-      );
-    }
-    res.status(200).json(toView(updated));
-  });
+      if (rollbackBefore && rollbackAfter) {
+        try {
+          target.assertGenerationOpen?.();
+        } catch (error) {
+          await rollbackCronMutation(
+            target,
+            rollbackBefore,
+            rollbackAfter,
+            `POST ${base}`,
+          );
+          await rollbackSession();
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
+      if (overCap) {
+        await rollbackSession();
+        res.status(409).json({
+          error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+          code: 'max_tasks_reached',
+        });
+        return;
+      }
+      if (task.delivery && task.sessionId) {
+        channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+          sessionId: task.sessionId,
+          taskId: task.id,
+          target: task.delivery.target,
+          recurring: task.recurring,
+          lastFiredAt: task.lastFiredAt ?? undefined,
+        });
+      }
+      res.status(201).json(toView(task));
+    }),
+  );
+
+  // ── Update (name / enabled / cron / prompt / recurring / delivery) ──
+  app.patch(
+    `${base}/:id`,
+    mutate(),
+    withTarget(async (req, res, target) => {
+      const { workspaceCwd, bridge } = target;
+      const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+      if (id.length === 0) {
+        res
+          .status(400)
+          .json({ error: 'Task id is required', code: 'invalid_id' });
+        return;
+      }
+      const body = safeBody(req);
+
+      // Pre-validate every provided field OUTSIDE the write lock — cron parsing
+      // and type checks don't need it, and validating inside the mutate callback
+      // would mean holding the lock to reject a bad request.
+      const patch: Partial<DurableCronTask> = {};
+      let clearName = false;
+      let clearDelivery = false;
+
+      const removedPatchField = findRemovedTaskField(body);
+      if (removedPatchField) {
+        res.status(400).json(removedFieldError(removedPatchField));
+        return;
+      }
+
+      if ('cron' in body) {
+        const cron =
+          typeof body['cron'] === 'string' ? body['cron'].trim() : '';
+        if (cron.length === 0 || cron.length > MAX_CRON_LENGTH) {
+          res.status(400).json({
+            error: '`cron` must be a non-empty string within the length limit',
+            code: 'invalid_cron',
+          });
+          return;
+        }
+        const cronError = validateCron(cron);
+        if (cronError) {
+          res.status(400).json({ error: cronError, code: 'invalid_cron' });
+          return;
+        }
+        patch.cron = cron;
+      }
+      if ('prompt' in body) {
+        const prompt =
+          typeof body['prompt'] === 'string' ? body['prompt'].trim() : '';
+        if (prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) {
+          res.status(400).json({
+            error:
+              '`prompt` must be a non-empty string within the length limit',
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        patch.prompt = prompt;
+      }
+      if ('name' in body) {
+        const nameResult = parseNameField(body['name']);
+        if (nameResult.error) {
+          res
+            .status(400)
+            .json({ error: nameResult.error, code: 'invalid_name' });
+          return;
+        }
+        if (nameResult.value === undefined) {
+          clearName = true;
+        } else {
+          patch.name = nameResult.value;
+        }
+      }
+      if ('recurring' in body) {
+        if (typeof body['recurring'] !== 'boolean') {
+          res.status(400).json({
+            error: '`recurring` must be a boolean',
+            code: 'invalid_recurring',
+          });
+          return;
+        }
+        patch.recurring = body['recurring'];
+      }
+      if ('enabled' in body) {
+        if (typeof body['enabled'] !== 'boolean') {
+          res.status(400).json({
+            error: '`enabled` must be a boolean',
+            code: 'invalid_enabled',
+          });
+          return;
+        }
+        patch.enabled = body['enabled'];
+      }
+      if ('delivery' in body) {
+        if (body['delivery'] === null) {
+          clearDelivery = true;
+        } else {
+          try {
+            patch.delivery = parseChannelDelivery(body['delivery']);
+          } catch (err) {
+            if (!isChannelDeliveryError(err)) throw err;
+            res.status(400).json({ error: err.message, code: err.code });
+            return;
+          }
+        }
+      }
+      if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
+        res.status(400).json({
+          error: 'No updatable fields provided',
+          code: 'empty_patch',
+        });
+        return;
+      }
+
+      let found = false;
+      let updated: DurableCronTask | undefined;
+      let blockedByArchive = false;
+      let blockedLegacy = false;
+      let rollbackBefore: DurableCronTask[] | undefined;
+      let rollbackAfter: DurableCronTask[] | undefined;
+      try {
+        await runWithScheduledTaskTarget(target, () =>
+          updateCronTasks(
+            workspaceCwd,
+            (tasks) => {
+              const idx = tasks.findIndex((t) => t.id === id);
+              if (idx === -1) return tasks; // not found → no write
+              found = true;
+              const current = tasks[idx]!;
+              // A legacy guarded task (isolated + precondition, both removed) can't be
+              // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
+              // sends for it is the Enable toggle — which would 200 here and then read
+              // back disabled again, an Enable control that can never succeed with no
+              // error explaining why. Reject the enable with the recreate remediation
+              // instead of acknowledging an update that changes nothing runnable.
+              if (patch.enabled === true && taskHasLegacyCondition(current)) {
+                blockedLegacy = true;
+                return tasks; // no write
+              }
+              // A task disabled BY archiving its session (`disabledByArchive`) can't
+              // be re-enabled through this generic PATCH: its bound session is still
+              // archived and can't fire, so flipping `enabled: true` here would show
+              // an enabled task with a countdown that never runs. The task/session
+              // lifecycle must stay coupled — the caller has to unarchive the session
+              // (which clears the marker and reloads it). Reject and leave the file
+              // untouched.
+              if (
+                patch.enabled === true &&
+                current.disabledByArchive === true
+              ) {
+                blockedByArchive = true;
+                return tasks; // no write
+              }
+              const next: DurableCronTask = { ...current, ...patch };
+              // `name: null/""` clears the field rather than storing an empty name,
+              // so toView reports it as unnamed and isValidTask never sees a "".
+              if (clearName) delete next.name;
+              if (clearDelivery) delete next.delivery;
+              // Re-seat the task's schedule anchor to "now" whenever an edit would
+              // otherwise let the scheduler retroactively fire an already-past slot.
+              const justReEnabled =
+                current.enabled === false && patch.enabled === true;
+              // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
+              // (`0 9 * * *` → `00 9 * * *`, whitespace) must not re-seat the anchor
+              // and drop a legitimately-pending catch-up fire.
+              const cronChanged =
+                patch.cron !== undefined &&
+                canonicalCron(patch.cron) !== canonicalCron(current.cron);
+              const becameRecurring =
+                patch.recurring === true && current.recurring !== true;
+              const becameOneShot =
+                patch.recurring === false && current.recurring !== false;
+              // Re-seated REGARDLESS of enabled: a schedule edit made while the task
+              // is paused must not leave a stale anchor that fires retroactively when
+              // it's later re-enabled in a SEPARATE request (the re-enable patch has no
+              // schedule change of its own to trigger the re-seat). Re-seating a paused
+              // task's anchor is harmless — it doesn't fire until enabled.
+              {
+                const now = Date.now();
+                const minute = now - (now % 60_000);
+                if (
+                  next.recurring &&
+                  (justReEnabled || cronChanged || becameRecurring)
+                ) {
+                  // A recurring task's anchor is lastFiredAt: resume from now so a
+                  // re-enable / cron edit / one-shot→recurring flip doesn't retroactively
+                  // fire a past slot (matters most for a bound task, whose catch-up runs
+                  // on every file-watch reload).
+                  next.lastFiredAt = minute;
+                } else if (
+                  !next.recurring &&
+                  (justReEnabled || cronChanged || becameOneShot)
+                ) {
+                  // A one-shot's anchor is createdAt. Re-seat it on a schedule change
+                  // (cron edit, or recurring→one-shot) OR a re-enable so the task fires
+                  // at its NEXT occurrence — otherwise the scheduler reads its original
+                  // long-past slot as a MISSED one-shot and fires + permanently deletes
+                  // it. A one-shot disabled past its slot then re-enabled would
+                  // otherwise be silently destroyed on the next reload.
+                  next.createdAt = now;
+                  next.lastFiredAt = minute;
+                }
+              }
+              updated = next;
+              rollbackBefore = tasks;
+              rollbackAfter = tasks.map((t, i) => (i === idx ? next : t));
+              return rollbackAfter;
+            },
+            { assertCanCommit: target.assertGenerationOpen },
+          ),
+        );
+      } catch (err) {
+        if (sendActivityGateError(res, err)) return;
+        if (sendGenerationClosedError(res, err)) return;
+        writeStderrLine(
+          `qwen serve: PATCH ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error: 'Failed to update scheduled task',
+          code: 'scheduled_tasks_write_failed',
+        });
+        return;
+      }
+      if (rollbackBefore && rollbackAfter) {
+        try {
+          target.assertGenerationOpen?.();
+        } catch (error) {
+          await rollbackCronMutation(
+            target,
+            rollbackBefore,
+            rollbackAfter,
+            `PATCH ${base}/${id}`,
+          );
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
+      if (blockedLegacy) {
+        res.status(409).json({
+          error:
+            'This task uses the removed isolated run mode with a precondition and can no longer be enabled or run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+          code: 'task_legacy_unsupported',
+        });
+        return;
+      }
+      if (blockedByArchive) {
+        res.status(409).json({
+          error:
+            'This task was disabled by archiving its session; unarchive the session to re-enable it.',
+          code: 'task_session_archived',
+        });
+        return;
+      }
+      if (!found || !updated) {
+        res
+          .status(404)
+          .json({ error: 'Task not found', code: 'task_not_found' });
+        return;
+      }
+      // Keep the bound session's display name in sync with the task's effective
+      // label (its name, or its prompt when unnamed) — the session was named
+      // after the task at create, so a rename (or a prompt edit while unnamed)
+      // should follow. Only when the effective label actually changed, so a bare
+      // cron/enabled edit doesn't touch the session. Best-effort: a metadata
+      // failure must not fail the PATCH the schedule already committed.
+      const effectiveLabelChanged =
+        patch.name !== undefined ||
+        clearName ||
+        (patch.prompt !== undefined && updated.name === undefined);
+      if (bridge && updated.sessionId && effectiveLabelChanged) {
+        try {
+          bridge.updateSessionMetadata(updated.sessionId, {
+            displayName: scheduledTaskSessionName(
+              updated.name ?? updated.prompt,
+            ),
+          });
+        } catch {
+          // non-critical — the schedule change already persisted
+        }
+      }
+      if (updated.delivery && updated.sessionId) {
+        channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+          sessionId: updated.sessionId,
+          taskId: updated.id,
+          target: updated.delivery.target,
+          recurring: updated.recurring,
+          lastFiredAt: updated.lastFiredAt ?? undefined,
+        });
+      }
+      if (clearDelivery && updated.sessionId) {
+        channelDeliveryAuthorizations?.revokeScheduledTask(
+          workspaceCwd,
+          updated.sessionId,
+          updated.id,
+        );
+      }
+      res.status(200).json(toView(updated));
+    }),
+  );
 
   // ── Delete ────────────────────────────────────────────────────────
-  app.delete(`${base}/:id`, mutate(), async (req, res) => {
-    const target = resolveTarget(req, res);
-    if (!target) return;
-    if (!requireOpenGeneration(target, res)) return;
-    const { workspaceCwd, bridge } = target;
-    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
-    if (id.length === 0) {
-      res
-        .status(400)
-        .json({ error: 'Task id is required', code: 'invalid_id' });
-      return;
-    }
-    // Single atomic read-modify-write: capture the task's bound session AND
-    // remove it in one cycle, closing the TOCTOU window a separate
-    // read-then-remove would open (and cutting three file reads to one). The
-    // dedicated session exists only to run this task, so it's torn down after.
-    let boundSessionId: string | undefined;
-    let removed = false;
-    let rollbackBefore: DurableCronTask[] | undefined;
-    let rollbackAfter: DurableCronTask[] | undefined;
-    try {
-      await runWithScheduledTaskTarget(target, () =>
-        updateCronTasks(
-          workspaceCwd,
-          (tasks) => {
-            const idx = tasks.findIndex((t) => t.id === id);
-            if (idx === -1) return tasks; // not found → no write
-            const match = tasks[idx]!.sessionId;
-            if (typeof match === 'string' && match.length > 0) {
-              boundSessionId = match;
-            }
-            removed = true;
-            rollbackBefore = tasks;
-            rollbackAfter = tasks.filter((_, i) => i !== idx);
-            return rollbackAfter;
-          },
-          { assertCanCommit: target.assertGenerationOpen },
-        ),
-      );
-    } catch (err) {
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: DELETE ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to delete scheduled task',
-        code: 'scheduled_tasks_write_failed',
-      });
-      return;
-    }
-    if (rollbackBefore && rollbackAfter) {
-      try {
-        target.assertGenerationOpen?.();
-      } catch (error) {
-        await rollbackCronMutation(
-          target,
-          rollbackBefore,
-          rollbackAfter,
-          `DELETE ${base}/${id}`,
-        );
-        if (sendGenerationClosedError(res, error)) return;
-        throw error;
+  app.delete(
+    `${base}/:id`,
+    mutate(),
+    withTarget(async (req, res, target) => {
+      const { workspaceCwd, bridge } = target;
+      const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+      if (id.length === 0) {
+        res
+          .status(400)
+          .json({ error: 'Task id is required', code: 'invalid_id' });
+        return;
       }
-    }
-    if (!removed) {
-      res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
-      return;
-    }
-    // Stop the now-orphaned session (keeps its transcript on disk as history).
-    if (boundSessionId && bridge) {
-      await bridge.closeSession(boundSessionId).catch(() => {});
-    }
-    if (boundSessionId) {
-      channelDeliveryAuthorizations?.revokeScheduledTask(
-        workspaceCwd,
-        boundSessionId,
-        id,
-      );
-    }
-    res.status(200).json({ deleted: true, id });
-  });
+      // Single atomic read-modify-write: capture the task's bound session AND
+      // remove it in one cycle, closing the TOCTOU window a separate
+      // read-then-remove would open (and cutting three file reads to one). The
+      // dedicated session exists only to run this task, so it's torn down after.
+      let boundSessionId: string | undefined;
+      let removed = false;
+      let rollbackBefore: DurableCronTask[] | undefined;
+      let rollbackAfter: DurableCronTask[] | undefined;
+      try {
+        await runWithScheduledTaskTarget(target, () =>
+          updateCronTasks(
+            workspaceCwd,
+            (tasks) => {
+              const idx = tasks.findIndex((t) => t.id === id);
+              if (idx === -1) return tasks; // not found → no write
+              const match = tasks[idx]!.sessionId;
+              if (typeof match === 'string' && match.length > 0) {
+                boundSessionId = match;
+              }
+              removed = true;
+              rollbackBefore = tasks;
+              rollbackAfter = tasks.filter((_, i) => i !== idx);
+              return rollbackAfter;
+            },
+            { assertCanCommit: target.assertGenerationOpen },
+          ),
+        );
+      } catch (err) {
+        if (sendActivityGateError(res, err)) return;
+        if (sendGenerationClosedError(res, err)) return;
+        writeStderrLine(
+          `qwen serve: DELETE ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error: 'Failed to delete scheduled task',
+          code: 'scheduled_tasks_write_failed',
+        });
+        return;
+      }
+      if (rollbackBefore && rollbackAfter) {
+        try {
+          target.assertGenerationOpen?.();
+        } catch (error) {
+          await rollbackCronMutation(
+            target,
+            rollbackBefore,
+            rollbackAfter,
+            `DELETE ${base}/${id}`,
+          );
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
+      if (!removed) {
+        res
+          .status(404)
+          .json({ error: 'Task not found', code: 'task_not_found' });
+        return;
+      }
+      // Stop the now-orphaned session (keeps its transcript on disk as history).
+      if (boundSessionId && bridge) {
+        try {
+          await runWithScheduledTaskTarget(target, () =>
+            bridge.closeSession(boundSessionId!),
+          );
+        } catch (error) {
+          if (sendActivityGateError(res, error)) return;
+        }
+      }
+      if (boundSessionId) {
+        channelDeliveryAuthorizations?.revokeScheduledTask(
+          workspaceCwd,
+          boundSessionId,
+          id,
+        );
+      }
+      res.status(200).json({ deleted: true, id });
+    }),
+  );
 
   // ── Record a manual run ───────────────────────────────────────────
   // Marks the task as run *now* (updates lastFiredAt + appends a 'manual' run
@@ -1029,135 +1119,148 @@ function registerScheduledTaskCrudRoutes(
   // prompt itself is executed by the client in the task's bound session; this
   // route only records that a run happened, keeping manual and scheduled runs
   // consistent in the history.
-  app.post(`${base}/:id/run`, mutate(), async (req, res) => {
-    const target = resolveTarget(req, res);
-    if (!target) return;
-    if (!requireOpenGeneration(target, res)) return;
-    const { workspaceCwd } = target;
-    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
-    if (id.length === 0) {
-      res
-        .status(400)
-        .json({ error: 'Task id is required', code: 'invalid_id' });
-      return;
-    }
-    // A manual run is stamped at its exact instant (not minute-rounded like a
-    // scheduler fire): the scheduler compares slots as `slot > lastFiredAt`, so
-    // a precise timestamp behaves correctly, and — unlike rounding — it can't
-    // collide with the creation-minute anchor that describeLastRun reads as
-    // "never run" when a task is run manually within its creation minute.
-    const now = Date.now();
-    let found = false;
-    let blockedDisabled = false;
-    let blockedLegacy = false;
-    let updated: DurableCronTask | undefined;
-    let rollbackBefore: DurableCronTask[] | undefined;
-    let rollbackAfter: DurableCronTask[] | undefined;
-    try {
-      await runWithScheduledTaskTarget(target, () =>
-        updateCronTasks(
-          workspaceCwd,
-          (tasks) => {
-            const idx = tasks.findIndex((t) => t.id === id);
-            if (idx === -1) return tasks; // not found → no write
-            found = true;
-            const current = tasks[idx]!;
-            // A legacy guarded task (isolated + precondition, both removed) must not
-            // run from ANY path. The scheduler already skips it and the list view
-            // reports it disabled; reject a direct `/run` too — its on-disk
-            // `enabled` may still be true, so the disabled check below is not enough.
-            // Executing it here would run the prompt with its safety gate ignored,
-            // which is exactly what the removal must never allow.
-            if (taskHasLegacyCondition(current)) {
-              blockedLegacy = true;
-              return tasks; // no write
-            }
-            // A disabled task must not record a manual run: it's paused (and if it
-            // was disabled by archiving its session, that session can't even fire),
-            // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
-            // record. Mirrors the PATCH route's refusal to re-enable such tasks and
-            // the UI, where onRunPrompt already rejects before recording.
-            if (current.enabled === false) {
-              blockedDisabled = true;
-              return tasks; // no write
-            }
-            const next: DurableCronTask = {
-              ...current,
-              lastFiredAt: now,
-              runs: appendCronRun(current.runs, {
-                at: now,
-                kind: 'manual',
-                ...(current.sessionId ? { sessionId: current.sessionId } : {}),
-              }),
-            };
-            updated = next;
-            // A one-shot's manual run IS its single fire — remove it from the store
-            // so the scheduler doesn't ALSO fire it at its original scheduled time
-            // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
-            // stop that fire). The response still returns the recorded run.
-            rollbackBefore = tasks;
-            const nextTasks = !current.recurring
-              ? tasks.filter((_, i) => i !== idx)
-              : tasks.map((t, i) => (i === idx ? next : t));
-            rollbackAfter = nextTasks;
-            return nextTasks;
-          },
-          { assertCanCommit: target.assertGenerationOpen },
-        ),
-      );
-    } catch (err) {
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: POST ${base}/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to record scheduled task run',
-        code: 'scheduled_tasks_write_failed',
-      });
-      return;
-    }
-    if (rollbackBefore && rollbackAfter) {
-      try {
-        target.assertGenerationOpen?.();
-      } catch (error) {
-        await rollbackCronMutation(
-          target,
-          rollbackBefore,
-          rollbackAfter,
-          `POST ${base}/${id}/run`,
-        );
-        if (sendGenerationClosedError(res, error)) return;
-        throw error;
+  app.post(
+    `${base}/:id/run`,
+    mutate(),
+    withTarget(async (req, res, target) => {
+      const { workspaceCwd } = target;
+      const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+      if (id.length === 0) {
+        res
+          .status(400)
+          .json({ error: 'Task id is required', code: 'invalid_id' });
+        return;
       }
-    }
-    if (blockedLegacy) {
-      res.status(409).json({
-        error:
-          'This task uses the removed isolated run mode with a precondition and can no longer run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
-        code: 'task_legacy_unsupported',
-      });
-      return;
-    }
-    if (blockedDisabled) {
-      res.status(409).json({
-        error:
-          'Cannot run a disabled task; enable it first (unarchive its session if it was archived).',
-        code: 'task_disabled',
-      });
-      return;
-    }
-    if (!found || !updated) {
-      res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
-      return;
-    }
-    const view = toView(updated);
-    // A consumed one-shot was removed from the store — its manual run WAS its
-    // single fire, so the returned view must not advertise a future nextRunAt on
-    // an entity the next GET omits (the shipped dialog reloads, but an embedder
-    // gets this object from the SDK).
-    if (!updated.recurring) view.nextRunAt = null;
-    res.status(200).json(view);
-  });
+      // A manual run is stamped at its exact instant (not minute-rounded like a
+      // scheduler fire): the scheduler compares slots as `slot > lastFiredAt`, so
+      // a precise timestamp behaves correctly, and — unlike rounding — it can't
+      // collide with the creation-minute anchor that describeLastRun reads as
+      // "never run" when a task is run manually within its creation minute.
+      const now = Date.now();
+      let found = false;
+      let blockedDisabled = false;
+      let blockedLegacy = false;
+      let updated: DurableCronTask | undefined;
+      let rollbackBefore: DurableCronTask[] | undefined;
+      let rollbackAfter: DurableCronTask[] | undefined;
+      try {
+        await runWithScheduledTaskTarget(target, () =>
+          updateCronTasks(
+            workspaceCwd,
+            (tasks) => {
+              const idx = tasks.findIndex((t) => t.id === id);
+              if (idx === -1) return tasks; // not found → no write
+              found = true;
+              const current = tasks[idx]!;
+              // A legacy guarded task (isolated + precondition, both removed) must not
+              // run from ANY path. The scheduler already skips it and the list view
+              // reports it disabled; reject a direct `/run` too — its on-disk
+              // `enabled` may still be true, so the disabled check below is not enough.
+              // Executing it here would run the prompt with its safety gate ignored,
+              // which is exactly what the removal must never allow.
+              if (taskHasLegacyCondition(current)) {
+                blockedLegacy = true;
+                return tasks; // no write
+              }
+              // A disabled task must not record a manual run: it's paused (and if it
+              // was disabled by archiving its session, that session can't even fire),
+              // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
+              // record. Mirrors the PATCH route's refusal to re-enable such tasks and
+              // the UI, where onRunPrompt already rejects before recording.
+              if (current.enabled === false) {
+                blockedDisabled = true;
+                return tasks; // no write
+              }
+              const next: DurableCronTask = {
+                ...current,
+                lastFiredAt: now,
+                runs: appendCronRun(current.runs, {
+                  at: now,
+                  kind: 'manual',
+                  ...(current.sessionId
+                    ? { sessionId: current.sessionId }
+                    : {}),
+                }),
+              };
+              updated = next;
+              // A one-shot's manual run IS its single fire — remove it from the store
+              // so the scheduler doesn't ALSO fire it at its original scheduled time
+              // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
+              // stop that fire). The response still returns the recorded run.
+              rollbackBefore = tasks;
+              const nextTasks = !current.recurring
+                ? tasks.filter((_, i) => i !== idx)
+                : tasks.map((t, i) => (i === idx ? next : t));
+              rollbackAfter = nextTasks;
+              return nextTasks;
+            },
+            { assertCanCommit: target.assertGenerationOpen },
+          ),
+        );
+      } catch (err) {
+        if (sendActivityGateError(res, err)) return;
+        if (sendGenerationClosedError(res, err)) return;
+        writeStderrLine(
+          `qwen serve: POST ${base}/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error: 'Failed to record scheduled task run',
+          code: 'scheduled_tasks_write_failed',
+        });
+        return;
+      }
+      if (rollbackBefore && rollbackAfter) {
+        try {
+          target.assertGenerationOpen?.();
+        } catch (error) {
+          await rollbackCronMutation(
+            target,
+            rollbackBefore,
+            rollbackAfter,
+            `POST ${base}/${id}/run`,
+          );
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
+      if (blockedLegacy) {
+        res.status(409).json({
+          error:
+            'This task uses the removed isolated run mode with a precondition and can no longer run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+          code: 'task_legacy_unsupported',
+        });
+        return;
+      }
+      if (blockedDisabled) {
+        res.status(409).json({
+          error:
+            'Cannot run a disabled task; enable it first (unarchive its session if it was archived).',
+          code: 'task_disabled',
+        });
+        return;
+      }
+      if (!found || !updated) {
+        res
+          .status(404)
+          .json({ error: 'Task not found', code: 'task_not_found' });
+        return;
+      }
+      if (!updated.recurring && updated.sessionId) {
+        channelDeliveryAuthorizations?.revokeScheduledTask(
+          workspaceCwd,
+          updated.sessionId,
+          updated.id,
+        );
+      }
+      const view = toView(updated);
+      // A consumed one-shot was removed from the store — its manual run WAS its
+      // single fire, so the returned view must not advertise a future nextRunAt on
+      // an entity the next GET omits (the shipped dialog reloads, but an embedder
+      // gets this object from the SDK).
+      if (!updated.recurring) view.nextRunAt = null;
+      res.status(200).json(view);
+    }),
+  );
 }
 
 /**
@@ -1238,13 +1341,20 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
   registerScheduledTaskCrudRoutes(app, {
     prefix: '/workspaces/:workspace',
     resolveTarget: (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
         workspaceRegistry,
         req,
         res,
       );
       if (!runtime) return null;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        !deps.conversationRuntimeActivity
+      ) {
+        sendConversationRuntimeUnavailable(res);
+        return null;
+      }
       if (
         runtime.provenance === 'live-conversation' &&
         req.method === 'POST' &&
@@ -1260,6 +1370,10 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       return {
         workspaceCwd: runtime.workspaceCwd,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        ...(runtime.provenance === 'live-conversation' &&
+        deps.conversationRuntimeActivity
+          ? { activity: deps.conversationRuntimeActivity }
+          : {}),
         ...(cleanupSession
           ? {
               cleanupSession: (sessionId: string) =>

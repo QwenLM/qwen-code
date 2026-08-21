@@ -49,6 +49,28 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
   });
 
+  it('rejects the two substitution forms from issue #8582', async () => {
+    for (const command of [
+      'echo "$\\\n(touch /tmp/pwned)"',
+      'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+    }
+  });
+
+  it('keeps literal twins of issue #8582 read-only', async () => {
+    for (const command of [
+      'echo "\\$\\\n(touch /tmp/pwned)"',
+      'echo "$$\\\n(touch /tmp/pwned)"',
+      "echo '$\\\n(touch /tmp/pwned)'",
+      "echo '${two@P}'",
+      'echo "${two@Q}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+    }
+  });
+
   describe('repository-local Git config (#8575)', () => {
     const tempDirs: string[] = [];
     const createRepo = (): string => {
@@ -78,6 +100,17 @@ describe('isShellCommandReadOnlyAST', () => {
       ).toBe(true);
 
       gitConfig(cwd, '--unset', 'diff.external');
+      gitConfig(cwd, 'diff.untrusted.textconv', 'example-textconv');
+      for (const command of ['git diff', 'git log -p -1', 'git show HEAD']) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git log --oneline', cwd),
+      ).toBe(true);
+
+      gitConfig(cwd, '--unset', 'diff.untrusted.textconv');
       gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
       expect(
         await isShellCommandReadOnlyASTInDirectory('git status', cwd),
@@ -90,6 +123,12 @@ describe('isShellCommandReadOnlyAST', () => {
       ).toBe(false);
       expect(
         await isShellCommandReadOnlyASTInDirectory('git ls-files', cwd),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git blame README.md', cwd),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git grep needle', cwd),
       ).toBe(false);
 
       gitConfig(cwd, 'core.fsmonitor', 'false');

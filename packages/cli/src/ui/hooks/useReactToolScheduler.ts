@@ -234,7 +234,14 @@ export function useReactToolScheduler(
           signal,
           undefined,
           toolInvocationGuard,
-        );
+        ).catch((error: unknown) => {
+          if (signal.aborted) return;
+          debugLogger.error(
+            `Tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
         return;
       }
       void (async () => {

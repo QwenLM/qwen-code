@@ -30,7 +30,6 @@ const DREAM_TOOL_NAMES = [
   ToolNames.READ_FILE,
   ToolNames.GREP,
   ToolNames.GLOB,
-  ToolNames.LS,
   ToolNames.SHELL,
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,

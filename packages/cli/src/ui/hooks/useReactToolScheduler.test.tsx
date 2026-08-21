@@ -188,3 +188,41 @@ describe('useReactToolScheduler turn guard forwarding', () => {
     });
   });
 });
+
+describe('useReactToolScheduler', () => {
+  it('handles a queued tool cancellation at the fire-and-forget boundary', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const { result } = renderHook(() =>
+      useReactToolScheduler(
+        vi.fn(),
+        { getToolRegistry: () => ({}) } as unknown as Config,
+        () => undefined,
+        vi.fn(),
+      ),
+    );
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'queued-call',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'queued-prompt',
+        },
+        abortController.signal,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(scheduleSpy).toHaveBeenCalledOnce();
+    scheduleSpy.mockRestore();
+  });
+});

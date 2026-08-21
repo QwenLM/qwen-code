@@ -9,15 +9,18 @@ import { statSync } from 'node:fs';
 
 interface LocalGitConfigRisk {
   diffExternal: boolean;
+  diffTextconv: boolean;
   fsmonitor: boolean;
 }
 
 const NO_RISK: LocalGitConfigRisk = {
   diffExternal: false,
+  diffTextconv: false,
   fsmonitor: false,
 };
 const PROBE_FAILED: LocalGitConfigRisk = {
   diffExternal: true,
+  diffTextconv: true,
   fsmonitor: true,
 };
 
@@ -38,7 +41,7 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       '--show-scope',
       '--null',
       '--get-regexp',
-      '^diff\\.external$|^core\\.fsmonitor$',
+      '^diff\\.external$|^diff\\..*\\.textconv$|^core\\.fsmonitor$',
     ],
     {
       encoding: 'utf8',
@@ -72,10 +75,17 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       : undefined;
   };
   const diffExternal = localValue('diff.external');
+  const diffTextconv = [...effective.entries()].some(
+    ([key, entry]) =>
+      /^diff\..+\.textconv$/i.test(key) &&
+      (entry.scope === 'local' || entry.scope === 'worktree') &&
+      entry.value.trim() !== '',
+  );
   const fsmonitor = localValue('core.fsmonitor');
 
   return {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
+    diffTextconv,
     fsmonitor:
       fsmonitor !== undefined &&
       fsmonitor !== '' &&

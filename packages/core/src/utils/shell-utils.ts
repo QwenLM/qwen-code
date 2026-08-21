@@ -1156,6 +1156,7 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  innerArgsSeparator?: ' ' | '\n';
 }
 
 export interface NormalizedMonitorCommand {
@@ -1435,6 +1436,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         innerCommand,
         innerQuote,
         innerArgsSuffix: commandToken.rest.trimStart(),
+        innerArgsSeparator: /^[^\S\r\n]*(?:\r\n?|\n)/.test(commandToken.rest)
+          ? '\n'
+          : ' ',
       };
     }
 
@@ -1465,8 +1469,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    innerArgsSeparator = ' ',
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1477,28 +1486,35 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
-  const safetyParts = [
+  const safetyBase = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
-    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
-  ];
-  const safetyCommand =
-    wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
-      : analysisCommand;
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  const safetyCommand = wrapperTokens
+    ? `${safetyBase}${
+        normalizedInnerArgsSuffix ? innerArgsSeparator : ''
+      }${normalizedInnerArgsSuffix}`.trim()
+    : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const spawnCommand = wrapperTokens
+  const spawnBase = wrapperTokens
     ? [
         wrapperTokens.join(' '),
         innerQuote
           ? `${innerQuote}${analysisCommand}${innerQuote}`
           : analysisCommand,
-        normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)
         .join(' ')
+    : analysisCommand;
+  const spawnCommand = wrapperTokens
+    ? `${spawnBase}${
+        normalizedInnerArgsSuffix ? innerArgsSeparator : ''
+      }${normalizedInnerArgsSuffix}`
     : analysisCommand;
 
   return {
@@ -1824,6 +1840,23 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
+        }
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
+        }
+        if (
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
+        ) {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -1862,6 +1895,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1889,12 +1930,13 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
 
 /**
  * Single dual-check predicate: does the command contain shell command
@@ -1985,7 +2027,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }
