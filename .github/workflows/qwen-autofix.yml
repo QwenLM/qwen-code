@@ -5581,6 +5581,7 @@ jobs:
           if-no-files-found: 'ignore'
 
       - name: 'Push and report'
+        id: 'push_report'
         if: |-
           ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
@@ -5659,6 +5660,19 @@ jobs:
           # between a check and a later execution read. The type check and
           # bounded reads make a planted FIFO or directory a refusal rather
           # than a hang until timeout-minutes.
+          #
+          # R6-8 liveness: LD_* cannot be enumerated — LD_TRACE_LOADED_OBJECTS
+          # is presence-tested by the loader (even an empty assignment leaves
+          # it on), and it fires at the execve of /usr/bin/env itself: ld.so
+          # prints the library list and exits 0 without ever running the
+          # heredoc body. This child has no downstream detector the other
+          # env -i launches have, so the plant would turn the round
+          # silent-green — nothing pushed, no report posted. The body prints
+          # a sentinel first; the step captures the child's merged output,
+          # re-emits it, and refuses loud when the sentinel is absent
+          # (builtins-only inspection, same rationale as the upsert twin),
+          # then propagates the child's exit status.
+          GATE_OUT="$(
           LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
             /usr/bin/env -i \
             PATH="${TRUSTED_PATH}" \
@@ -5702,8 +5716,9 @@ jobs:
             TAKEOVER_LABEL="${TAKEOVER_LABEL}" \
             TAKEOVER_COMMAND="${TAKEOVER_COMMAND}" \
             TAKEOVER_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}" \
-            bash --norc <<'AUTOFIX_PUSH_REPORT_GATE'
+            bash --norc <<'AUTOFIX_PUSH_REPORT_GATE' 2>&1
           set -eo pipefail
+          printf '%s\n' "__push_gate_live__"
           if [[ -z "${PUSH_REPORT_SHA256}" ]]; then
             echo '::error::the stage step recorded no digest for autofix-push-and-report.sh — refusing to run it.'
             exit 1
@@ -5725,6 +5740,16 @@ jobs:
           fi
           bash --norc -c "${push_report_body}"
           AUTOFIX_PUSH_REPORT_GATE
+          )" && GATE_STATUS=0 || GATE_STATUS=$?
+          printf '%s\n' "${GATE_OUT}"
+          if [[ "${GATE_OUT}" != *'__push_gate_live__'* ]]; then
+            echo '::error::the push-and-report gate child never started (loader trace mode or exec failure) — the round neither pushed nor reported.'
+            exit 1
+          fi
+          if [[ "${GATE_STATUS}" == 0 ]]; then
+            echo 'round_reported=true' >> "${GITHUB_OUTPUT}"
+          fi
+          exit "${GATE_STATUS}"
 
       - name: 'Report dry-run / failure'
         if: |-
@@ -6384,6 +6409,11 @@ jobs:
           # flip and no reason to scan for one. A previous round's comment is
           # already terminal, and the next round's announcement re-PATCHes it.
           STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'
+          # 'Push and report' writes this only after its sentinel-verified
+          # gate child exits 0; empty means the step no-oped (an env plant
+          # can kill its shell at execve, silent exit 0) — the success text
+          # must not assert a report that never posted.
+          PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
         run: |-
           set -uo pipefail
           MARKER='<!-- autofix-status -->'
@@ -6402,8 +6432,15 @@ jobs:
           # the outcomes that published a round report — handoff and the two
           # brake-violation rejections post their note + eval marker from the
           # report step; anything else means the round stopped before
-          # publishing one.
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ]]; then
+          # publishing one. fixed/noop additionally condition on the push
+          # step's own success output: an env plant can kill that step's
+          # shell at execve (silent exit 0, gate body never ran), and the
+          # success text would otherwise assert a report that never posted.
+          PUBLISHED=true
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]] && [[ "${PUSH_REPORTED:-}" != 'true' ]]; then
+            PUBLISHED=false
+          fi
+          if [[ "${PUBLISHED}" == 'true' && ( "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ) ]]; then
             EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
             ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
           else

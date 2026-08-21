@@ -1625,7 +1625,7 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'checked_out_head=${CHECKED_OUT_HEAD}',
     );
-    expect(workflow).not.toContain('REPORT_HEAD="$(gh api');
+    expect(workflowWithScripts).not.toContain('REPORT_HEAD="$(gh api');
     // The handoff step must NOT stamp the redcheck marker when the agent
     // evaluated nothing (sentinel ts): doing so would make RED_HEAD ==
     // LIVE_HEAD and the retry scan would see N_RED_NOW=0, going idle
@@ -3114,7 +3114,7 @@ describe('qwen-autofix workflow', () => {
     // The two-page fixtures below are synthetic (the per-page shape gh <
     // v2.31.0 emitted): they exercise the jq mechanics of the normalizer and
     // its consumers, not the wire format current gh produces.
-    expect(workflow).not.toContain('--paginate > "');
+    expect(workflowWithScripts).not.toContain('--paginate > "');
     // Pin the total --paginate code-site count so ANY new paginated site
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
@@ -10424,6 +10424,51 @@ exit 1
       /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\\n\s*\/usr\/bin\/env -i \\\n\s*PATH="\$\{TRUSTED_PATH\}"/,
     );
     expect(pushAndReportStepYaml).toContain('bash --norc <<');
+    // The QUOTED delimiter is load-bearing: unquoted, every expansion of
+    // the gate body moves into the plantable step shell (the child receives
+    // an empty body; a planted PATH/BASH_FUNC hijacks the expansions, which
+    // carry the PAT). Pin the quoted opening and the closing delimiter line.
+    expect(pushAndReportStepYaml).toContain(
+      "bash --norc <<'AUTOFIX_PUSH_REPORT_GATE'",
+    );
+    expect(pushAndReportStepYaml).toMatch(/^\s*AUTOFIX_PUSH_REPORT_GATE\s*$/m);
+    // R3-1: this child is the file's only env -i launch with neither the
+    // upsert children's liveness sentinel nor downstream detection. An
+    // LD_TRACE_LOADED_OBJECTS plant is presence-tested by the loader (even
+    // an empty assignment leaves it on), survives the three LD_* prefix
+    // clears, and fires at the execve of /usr/bin/env itself: ld.so prints
+    // the library list and exits 0, the heredoc body never runs, and the
+    // round goes silent-green. R6-8 doctrine: the body prints a sentinel
+    // first; the step captures the child's merged output, re-emits it, and
+    // refuses loud when the sentinel is absent (builtins-only inspection —
+    // under trace mode an external grep would itself print-and-exit-0).
+    // The child's exit status rides an explicit propagation: inside a
+    // command substitution it no longer falls out of the step on its own.
+    const gateSentinel = 'printf \'%s\\n\' "__push_gate_live__"';
+    expect(pushAndReportStepYaml).toContain(gateSentinel);
+    expect(pushAndReportStepYaml.indexOf(gateSentinel)).toBeLessThan(
+      pushAndReportStepYaml.indexOf('if [[ -z "${PUSH_REPORT_SHA256}"'),
+    );
+    expect(pushAndReportStepYaml).toContain('printf \'%s\\n\' "${GATE_OUT}"');
+    expect(pushAndReportStepYaml).toMatch(
+      /if \[\[ "\$\{GATE_OUT\}" != \*'__push_gate_live__'\* \]\]; then/,
+    );
+    expect(pushAndReportStepYaml).toMatch(
+      /__push_gate_live__'\* \]\]; then[\s\S]*?::error::the push-and-report gate child never started[\s\S]*?exit 1/,
+    );
+    expect(pushAndReportStepYaml).not.toMatch(/GATE_OUT\}" \| grep/);
+    expect(pushAndReportStepYaml).toContain(
+      ')" && GATE_STATUS=0 || GATE_STATUS=$?',
+    );
+    expect(pushAndReportStepYaml).toContain('exit "${GATE_STATUS}"');
+    // Downstream detection for the plant shape that kills the STEP shell
+    // itself at execve (the in-step sentinel never runs then): the success
+    // output is written only after the sentinel-verified child exits 0, and
+    // Finalize demotes its success text when the output is absent.
+    expect(pushAndReportStepYaml).toContain("id: 'push_report'");
+    expect(pushAndReportStepYaml).toMatch(
+      /if \[\[ "\$\{GATE_STATUS\}" == 0 \]\]; then\n\s*echo 'round_reported=true' >> "\$\{GITHUB_OUTPUT\}"/,
+    );
 
     // Single open: the staged path is type-checked, then read ONCE; the
     // digest is computed over the captured bytes and those same bytes
@@ -10432,9 +10477,12 @@ exit 1
     expect(pushAndReportStepYaml).toContain(
       'timeout 30 cat "${RUNNER_TEMP}/autofix-push-and-report.sh"',
     );
+    // Spelling-insensitive: an unbraced $RUNNER_TEMP re-open of the staged
+    // path is the same second-open hole as the braced one.
     expect(
-      pushAndReportStepYaml.split('${RUNNER_TEMP}/autofix-push-and-report.sh')
-        .length - 1,
+      pushAndReportStepYaml.split(
+        /\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/,
+      ).length - 1,
     ).toBe(2);
     const digestCheck =
       'push_report_digest="$(printf \'%s\' "${push_report_body}" | sha256sum | cut -d\' \' -f1)"';
@@ -10443,6 +10491,25 @@ exit 1
     expect(pushAndReportStepYaml).toContain(call);
     expect(pushAndReportStepYaml.indexOf(digestCheck)).toBeLessThan(
       pushAndReportStepYaml.indexOf(call),
+    );
+    // The digest gates execution only through the mismatch comparison and
+    // its refusal — pin both between the anchors above. Deleting the
+    // comparison-plus-exit block computes the digest but never enforces it,
+    // flipping != to == refuses every legitimate round, and a defanged
+    // guard body executes mismatched bytes in the PAT-bearing step (all
+    // three mutants ship green against presence/order pins alone).
+    expect(pushAndReportStepYaml).toContain(
+      'if [[ "${push_report_digest}" != "${PUSH_REPORT_SHA256}" ]]; then',
+    );
+    expect(pushAndReportStepYaml).toMatch(
+      /if \[\[ "\$\{push_report_digest\}" != "\$\{PUSH_REPORT_SHA256\}" \]\]; then[\s\S]*?refusing to run it[\s\S]*?exit 1[\s\S]*?bash --norc -c "\$\{push_report_body\}"/,
+    );
+    // The trailing-newline marker keeps the captured bytes byte-identical:
+    // without it the digest can never match and every round dies at the
+    // gate.
+    expect(pushAndReportStepYaml).toContain("; printf 'x')");
+    expect(pushAndReportStepYaml).toContain(
+      'push_report_body="${push_report_body%x}"',
     );
     // Never the path-opening verify form, and never softened.
     expect(pushAndReportStepYaml).not.toMatch(
@@ -10477,6 +10544,17 @@ exit 1
       );
       expect(half).not.toMatch(
         /(?:^|\s)(?:source|\.)\s+"?\.github\/scripts\/autofix-push-and-report\.sh/m,
+      );
+      // …and the staged path: a second execution of it re-opens the
+      // branch-writable copy after the gate's one-time verify-and-run, so
+      // a watcher swaps the bytes after the gate read and the second
+      // execution runs them with the bot PAT. Both spellings — the
+      // single-open count above is scoped to this step's YAML half alone.
+      expect(half).not.toMatch(
+        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
+      );
+      expect(half).not.toMatch(
+        /(?:^|\s)(?:source|\.)\s+"?\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
       );
     }
     // GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`. The
@@ -15509,9 +15587,24 @@ exit 1
     // handoff publishes one too (the handoff note + eval marker), and so do
     // the two brake-violation rejections (their note + marker post from the
     // report step), so all five read "finished", never "ended without
-    // publishing a report" above their own report.
+    // publishing a report" above their own report — fixed/noop
+    // additionally prove publication through the push step's output, since
+    // an env plant can no-op that step with exit 0 (R3-1).
     expect(finalizeStatusCommentStep).toContain(
-      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ]]',
+      '[[ "${PUBLISHED}" == \'true\' && ( "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ) ]]',
+    );
+    // R3-1 downstream half: an env plant can kill 'Push and report's shell
+    // at execve (silent exit 0, gate body never ran) — the in-step sentinel
+    // never runs in that shape, so the missing success output is the
+    // detection: it is written only after the sentinel-verified child exits
+    // 0, and absent it the success text would assert a report that never
+    // posted.
+    expect(finalizeStatusCommentStep).toContain(
+      "PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'",
+    );
+    expect(finalizeStatusCommentStep).toContain('PUBLISHED=true');
+    expect(finalizeStatusCommentStep).toMatch(
+      /if \[\[ "\$\{OUTCOME:-\}" == 'fixed' \|\| "\$\{OUTCOME:-\}" == 'noop' \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != 'true' \]\]; then\n\s*PUBLISHED=false/,
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
