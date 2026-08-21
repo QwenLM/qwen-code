@@ -731,6 +731,193 @@ describe('--capture', () => {
   });
 });
 
+describe('--capture: the invariants the docblocks claim', () => {
+  const specsOf = (entries: string[]) => {
+    const parsed = parseCaptureSpecs(entries);
+    if (!('specs' in parsed))
+      throw new Error(`unexpected error: ${parsed.error}`);
+    return parsed.specs;
+  };
+
+  it('a declared group the match left unfilled is null, not the whole match', () => {
+    // `m[1] ?? m[0]` reads as "group 1, or else the match", and for an OPTIONAL
+    // group that is a silent substitution: the caller asked what `x` matched
+    // and would receive the whole match under the same name, with nothing in
+    // the report saying a different question had been answered.
+    expect(extractCaptures('b', specsOf(['v=(?:a(x))?b']))).toEqual({
+      v: null,
+    });
+    // ...while a pattern that declares NO group still yields the whole match.
+    expect(extractCaptures('b', specsOf(['v=(?:ax)?b']))).toEqual({ v: 'b' });
+  });
+
+  it('keeps an empty capture as "", which is a measurement, not an absence', () => {
+    // The two are different claims and the report must not merge them: `null`
+    // is "nothing was captured", `''` is "the group captured zero characters".
+    expect(extractCaptures('pid=abc', specsOf(['pid=pid=(\\d*)']))).toEqual({
+      pid: '',
+    });
+    expect(extractCaptures('pid=abc', specsOf(['pid=pid=(\\d+)']))).toEqual({
+      pid: null,
+    });
+  });
+
+  it('takes the FIRST match, so a restart later in the log cannot rewrite it', () => {
+    // Every other capture test has exactly one occurrence, where first and last
+    // are the same value — which pins nothing about the rule the docblock
+    // states. This one differs on purpose.
+    const log = [
+      'listening on http://127.0.0.1:8932',
+      'restarting',
+      'listening on http://127.0.0.1:9999',
+    ].join('\n');
+    expect(extractCaptures(log, specsOf(['u=listening on (\\S+)']))).toEqual({
+      u: 'http://127.0.0.1:8932',
+    });
+  });
+
+  it('rejects a pattern past the length cap, not just an empty one', () => {
+    // The cap's lower bound was pinned and its upper bound was not, so the
+    // number could drift to anything without a test noticing.
+    expect(parseCaptureSpecs([`v=${'a'.repeat(200)}`])).toHaveProperty('specs');
+    expect(parseCaptureSpecs([`v=${'a'.repeat(201)}`])).toHaveProperty('error');
+  });
+});
+
+describe('--capture and the head-trim are reconciled in the note', () => {
+  it('says captures survive the trim, for the matched and the missed alike', () => {
+    // Without this the report reads as a self-contradiction: "early output is
+    // missing" sits directly beside a value that came OUT of the missing head,
+    // and beside a null the reader would reasonably blame the trim for.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-trim-'));
+    const logPath = join(dir, 'drive.log');
+    const workDir = join(tmpdir(), 'qwen-review-drive-trim1');
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'tmux' && args[2] === 'new-session') {
+        writeFileSync(
+          logPath,
+          `listening on http://127.0.0.1:8432\n${'x'.repeat(400_000)}`,
+        );
+        mkdirSync(workDir, { recursive: true });
+        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
+        return ok();
+      }
+      return ok();
+    };
+    const r = runDrive({
+      script: 'noisy',
+      cwd: dir,
+      readyTimeout: 1,
+      timeout: 30,
+      server: 'trim1',
+      capture: ['baseUrl=listening on (\\S+)', 'pid=pid=(\\d+)'],
+      exec,
+      logPath,
+    });
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workDir, { recursive: true, force: true });
+
+    expect(r.truncated).toBe(true);
+    expect(r.captured).toEqual({
+      baseUrl: 'http://127.0.0.1:8432',
+      pid: null,
+    });
+    // the trim clause, the reconciliation, and the named miss — in that order
+    expect(r.note).toContain('trimmed at the head');
+    expect(r.note).toContain('--capture reads the untrimmed log');
+    expect(r.note).toContain('"pid"');
+    expect(r.note.indexOf('trimmed at the head')).toBeLessThan(
+      r.note.indexOf('--capture reads the untrimmed log'),
+    );
+    expect(r.note.indexOf('--capture reads the untrimmed log')).toBeLessThan(
+      r.note.indexOf('"pid"'),
+    );
+  });
+
+  it('adds no reconciliation when nothing was trimmed', () => {
+    // The clause is scoped to the case it explains; a short log gets no
+    // sentence about a trim that did not happen.
+    const r = runDrive({
+      script: 's',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 0,
+      server: 'trim2',
+      capture: ['v=nope'],
+      exec: harness({}).exec,
+    });
+    expect(r.truncated).toBe(false);
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
+  });
+});
+
+describe('--capture reaches runDrive through the real CLI seam', () => {
+  // The handler casts `argv as unknown as DriveArgs`, which type-checks
+  // whatever the option is called. Rename `DriveArgs.capture` — or the yargs
+  // option — and `--capture` silently stops working end to end while every
+  // runDrive test above stays green and tsc exits 0. This drives the real
+  // builder with a real flag string and asserts the value lands in the report
+  // the handler prints.
+  it('parses the flag and the captured value reaches the printed report', async () => {
+    const { default: yargs } = await import('yargs');
+    const dir = mkdtempSync(join(tmpdir(), 'drv-seam-'));
+    const logPath = join(dir, 'drive.log');
+    const workDir = join(tmpdir(), 'qwen-review-drive-seam1');
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'tmux' && args[2] === 'new-session') {
+        writeFileSync(logPath, 'listening on http://127.0.0.1:8932\n');
+        mkdirSync(workDir, { recursive: true });
+        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
+        return ok();
+      }
+      return ok();
+    };
+
+    const argv = (
+      yargs([
+        'drive',
+        '--script',
+        'true',
+        '--cwd',
+        dir,
+        '--server',
+        'seam1',
+        '--capture',
+        'baseUrl=listening on (\\S+)',
+      ]).command({
+        ...driveCommand,
+        handler: () => {},
+      }) as unknown as { parseSync: () => Record<string, unknown> }
+    ).parseSync();
+
+    // The flag string reached the option name the handler reads.
+    expect(argv['capture']).toEqual(['baseUrl=listening on (\\S+)']);
+
+    vi.mocked(writeStdoutLine).mockClear();
+    const originalExit = process.exitCode;
+    try {
+      (driveCommand.handler as (a: unknown) => void)({
+        ...argv,
+        readyTimeout: 1,
+        timeout: 30,
+        exec,
+        logPath,
+      });
+    } finally {
+      process.exitCode = originalExit;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true });
+    }
+
+    const printed = vi.mocked(writeStdoutLine).mock.calls.at(-1)?.[0] as string;
+    expect(JSON.parse(printed).captured).toEqual({
+      baseUrl: 'http://127.0.0.1:8932',
+    });
+  });
+});
+
 describe('a partial observation is never presented as a whole one', () => {
   it('a timed-out drive sets observed=false and says the capture is partial', () => {
     const h = harness({});

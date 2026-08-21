@@ -100,9 +100,15 @@ export interface DriveReport {
    * Measured: a full verification cycle spent on a daemon that was not the one
    * under test.
    *
-   * `null` for a pattern that never matched, never `''` — a service that did
-   * not print what it was expected to print is a different fact from one that
-   * printed an empty value, and only the second is a measurement.
+   * `null` when nothing was captured — the pattern never matched, or it
+   * declares a group the match left unfilled. That is a different fact from a
+   * captured empty string, and only the second is a measurement.
+   *
+   * `''` is narrower than it looks, and the narrowing is the pattern's rather
+   * than the service's: it means the pattern matched and its group captured
+   * zero characters, which a `*`-quantified group does wherever it is anchored
+   * — `pid=(\d*)` returns `''` against `pid=abc`. A pattern meant to tell
+   * "printed nothing" from "printed something" needs `+`, not `*`.
    *
    * Absent entirely when nothing was captured, so a report from a drive that
    * asked for nothing does not claim an empty result set.
@@ -206,6 +212,37 @@ const CAPTURE_VALUE_MAX = 4096;
 export interface CaptureSpec {
   name: string;
   re: RegExp;
+  /**
+   * Whether the pattern declares a capturing group, decided when it is parsed
+   * rather than from whether group 1 happened to participate in a match.
+   *
+   * Those are different questions and conflating them loses a value silently.
+   * `(?:a(x))?b` against `b` matches with group 1 absent; a runtime
+   * `m[1] ?? m[0]` then reports the WHOLE MATCH under a name whose pattern
+   * asked for the group — the caller receives `"b"` where it asked for what
+   * `x` matched, and nothing says a substitution happened. A pattern that
+   * declares a group and did not fill it captured nothing, which is `null`.
+   */
+  hasGroup: boolean;
+}
+
+/**
+ * Does this pattern declare a capturing group?
+ *
+ * Counted by matching `<source>|` against the empty string — the alternation
+ * always matches, and the result's length is 1 + the group count, which is the
+ * standard way to ask this without parsing regex syntax. Guarded because it
+ * builds a second pattern from the first: any source that survived
+ * `new RegExp` should survive this too, and a source that somehow does not
+ * falls back to "no group", which is the pre-existing whole-match behaviour
+ * rather than a throw from a helper that only counts.
+ */
+function declaresGroup(re: RegExp): boolean {
+  try {
+    return (new RegExp(`${re.source}|`).exec('')?.length ?? 1) > 1;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -270,7 +307,7 @@ export function parseCaptureSpecs(
       };
     }
     seen.add(name);
-    specs.push({ name, re });
+    specs.push({ name, re, hasGroup: declaresGroup(re) });
   }
   return { specs };
 }
@@ -282,8 +319,10 @@ export function parseCaptureSpecs(
  * tail, and the line a service prints when it binds is near the head — the one
  * value this feature exists for is exactly the one a trimmed capture loses.
  *
- * Group 1 when the pattern has one, the whole match otherwise, so both
- * `listening on http://\S+` and `listening on (\S+)` do what they look like.
+ * Group 1 when the pattern declares one, the whole match otherwise, so both
+ * `listening on \S+` and `listening on (\S+)` do what they look like — and a
+ * declared group the match left unfilled is `null`, not a quiet substitution
+ * of the whole match under the same name.
  *
  * FIRST match, unlike `sentinelExitCode`'s last. The two are answering
  * different questions: the sentinel's decoys come from the driven script's own
@@ -301,9 +340,13 @@ export function extractCaptures(
   specs: readonly CaptureSpec[],
 ): Record<string, string | null> {
   const out: Record<string, string | null> = {};
-  for (const { name, re } of specs) {
+  for (const { name, re, hasGroup } of specs) {
     const m = re.exec(output);
-    const v = m ? (m[1] ?? m[0]) : null;
+    // A pattern that declares a group is asking for the group. When it matched
+    // but the group did not participate, nothing was captured — `null` — and
+    // NOT the whole match, which would answer a question the caller did not
+    // ask under the name it did.
+    const v = m ? (hasGroup ? (m[1] ?? null) : m[0]) : null;
     out[name] =
       v !== null && v.length > CAPTURE_VALUE_MAX
         ? `${v.slice(0, CAPTURE_VALUE_MAX)}... [truncated, ${v.length} characters total]`
@@ -617,6 +660,17 @@ export function runDrive(args: DriveArgs): DriveReport {
       ? ` — no output matched --capture ${missed.map((n) => JSON.stringify(n)).join(', ')}, so ${missed.length === 1 ? 'that value is' : 'those values are'} null rather than measured; anything addressed by ${missed.length === 1 ? 'it' : 'them'} was addressed by assumption`
       : '';
 
+  // Reconciles the head-trim clause with the capture block beside it. `output`
+  // is trimmed at the head and `captured` is read BEFORE that trim, so without
+  // this the report says "early output is missing" immediately beside values
+  // that came out of the missing head — and, for a miss, beside a `null` the
+  // reader would reasonably blame the trim for. Both misreadings run the same
+  // way: they invite doubt about a measurement that is sound.
+  const trimScopeNote =
+    captured && truncated
+      ? ' — --capture reads the untrimmed log, so the head-trim above does not reach it and a null capture is a miss against the whole run rather than against what survived the trim'
+      : '';
+
   return {
     outcome,
     observed: outcome === 'completed',
@@ -627,7 +681,7 @@ export function runDrive(args: DriveArgs): DriveReport {
     truncated,
     killedStale,
     ...(captured ? { captured } : {}),
-    note: `${note}${captureNote}`,
+    note: `${note}${trimScopeNote}${captureNote}`,
   };
 }
 
