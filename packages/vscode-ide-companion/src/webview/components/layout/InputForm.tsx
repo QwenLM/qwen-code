@@ -76,10 +76,16 @@ export const InputForm: FC<InputFormProps> = ({
   const editModeInfo = getEditModeInfo(editMode);
 
   return (
-    <>
-      {/* ModelSelector rendered above InputForm as a portal-like overlay */}
+    // The wrapper doubles as the positioning context for the ModelSelector:
+    // the base input form anchors to its bottom edge, and the selector grows
+    // upward from it (bottom-full), so the dropdown attaches to the input
+    // area instead of floating over the message list (issue #8617).
+    <div className="relative">
       {showModelSelector && onSelectModel && onCloseModelSelector && (
-        <div className="fixed bottom-[120px] left-4 right-4 z-[1001] max-w-[600px] mx-auto">
+        // z-0 keeps ModelSelector's internal z-index inside this stacking
+        // context so the base input form (rendered later) stays painted
+        // above the dropdown's hidden bottom section.
+        <div className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto">
           <ModelSelector
             visible={showModelSelector}
             models={availableModels ?? []}
@@ -90,6 +96,6 @@ export const InputForm: FC<InputFormProps> = ({
         </div>
       )}
       <BaseInputForm editModeInfo={editModeInfo} {...rest} />
-    </>
+    </div>
   );
 };

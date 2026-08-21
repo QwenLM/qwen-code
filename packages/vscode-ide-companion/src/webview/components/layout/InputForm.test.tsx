@@ -10,6 +10,7 @@ import type React from 'react';
 import { act, createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
 import { ApprovalMode } from '../../../types/acpTypes.js';
 import type { CompletionItem } from '../../../types/completionItemTypes.js';
 import { InputForm } from './InputForm.js';
@@ -22,6 +23,7 @@ vi.mock('@qwen-code/webui', async () => {
   return {
     InputForm: actual.InputForm,
     getEditModeIcon: actual.getEditModeIcon,
+    PlanCompletedIcon: () => null,
   };
 });
 
@@ -35,6 +37,11 @@ const completionItem: CompletionItem = {
 function renderInputForm(props?: {
   onCompletionSelect?: (item: CompletionItem) => void;
   onCompletionFill?: (item: CompletionItem) => void;
+  showModelSelector?: boolean;
+  availableModels?: ModelInfo[];
+  currentModelId?: string | null;
+  onSelectModel?: (modelId: string) => void;
+  onCloseModelSelector?: () => void;
 }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -44,6 +51,8 @@ function renderInputForm(props?: {
     createRef<HTMLDivElement>() as unknown as React.RefObject<HTMLDivElement>;
   const onCompletionSelect = props?.onCompletionSelect ?? vi.fn();
   const onCompletionFill = props?.onCompletionFill ?? vi.fn();
+  const onSelectModel = props?.onSelectModel ?? vi.fn();
+  const onCloseModelSelector = props?.onCloseModelSelector ?? vi.fn();
 
   act(() => {
     root.render(
@@ -75,6 +84,11 @@ function renderInputForm(props?: {
         onCompletionSelect={onCompletionSelect}
         onCompletionFill={onCompletionFill}
         onCompletionClose={vi.fn()}
+        showModelSelector={props?.showModelSelector}
+        availableModels={props?.availableModels}
+        currentModelId={props?.currentModelId}
+        onSelectModel={onSelectModel}
+        onCloseModelSelector={onCloseModelSelector}
       />,
     );
   });
@@ -84,6 +98,8 @@ function renderInputForm(props?: {
     root,
     onCompletionSelect,
     onCompletionFill,
+    onSelectModel,
+    onCloseModelSelector,
   };
 }
 
@@ -151,5 +167,146 @@ describe('InputForm completion keyboard handling', () => {
 
     expect(rendered.onCompletionSelect).toHaveBeenCalledWith(completionItem);
     expect(rendered.onCompletionFill).not.toHaveBeenCalled();
+  });
+});
+
+describe('InputForm model selector positioning (issue #8617)', () => {
+  let root: Root | null = null;
+  let container: HTMLDivElement | null = null;
+
+  const models: ModelInfo[] = [
+    { modelId: 'model-a', name: 'Model A' },
+    { modelId: 'model-b', name: 'Model B' },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    if (root) {
+      act(() => {
+        root?.unmount();
+      });
+      root = null;
+    }
+    if (container) {
+      container.remove();
+      container = null;
+    }
+  });
+
+  function collectAncestors(el: HTMLElement): HTMLElement[] {
+    const ancestors: HTMLElement[] = [];
+    let current = el.parentElement;
+    while (current && current !== document.body) {
+      ancestors.push(current);
+      current = current.parentElement;
+    }
+    return ancestors;
+  }
+
+  it('anchors the dropdown to the input form instead of the viewport', () => {
+    const rendered = renderInputForm({
+      showModelSelector: true,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    const menu = container.querySelector(
+      '.model-selector',
+    ) as HTMLElement | null;
+    expect(menu).not.toBeNull();
+
+    const ancestors = collectAncestors(menu as HTMLElement);
+
+    // The dropdown must not float above the message list via a
+    // viewport-fixed wrapper (the #8617 occlusion).
+    const fixedWrapper = ancestors.find((el) =>
+      /(^|\s)fixed(\s|$)/.test(el.className),
+    );
+    expect(fixedWrapper).toBeUndefined();
+
+    // The dropdown's positioning wrapper must grow upward from its anchor
+    // (same layout as webui CompletionMenu: absolute bottom-full).
+    const positionedWrapper = ancestors.find((el) =>
+      /(^|\s)(absolute|fixed)(\s|$)/.test(el.className),
+    );
+    expect(positionedWrapper).toBeDefined();
+    expect(positionedWrapper?.className).toMatch(/(^|\s)bottom-full(\s|$)/);
+
+    // The selector must live inside the input form's own stacking context:
+    // a shared relative wrapper that also contains the composer form.
+    const sharedWrapper = ancestors.find((el) =>
+      /(^|\s)relative(\s|$)/.test(el.className),
+    );
+    expect(sharedWrapper).toBeDefined();
+    expect(sharedWrapper?.querySelector('form.composer-form')).not.toBeNull();
+  });
+
+  it('does not render the selector when showModelSelector is false', () => {
+    const rendered = renderInputForm({
+      showModelSelector: false,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    expect(container.querySelector('.model-selector')).toBeNull();
+  });
+
+  it('still selects a model on click and closes the selector', () => {
+    const rendered = renderInputForm({
+      showModelSelector: true,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    const row = container.querySelector(
+      '[data-index="1"]',
+    ) as HTMLElement | null;
+    expect(row).not.toBeNull();
+
+    act(() => {
+      (row as HTMLElement).click();
+    });
+
+    expect(rendered.onSelectModel).toHaveBeenCalledWith('model-b');
+    expect(rendered.onCloseModelSelector).toHaveBeenCalledTimes(1);
+  });
+
+  it('still closes the selector on Escape', () => {
+    const rendered = renderInputForm({
+      showModelSelector: true,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(rendered.onCloseModelSelector).toHaveBeenCalledTimes(1);
+    expect(rendered.onSelectModel).not.toHaveBeenCalled();
   });
 });
