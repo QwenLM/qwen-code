@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-dws",
-  "version": "0.21.11",
+  "version": "0.21.14",
   "description": "DingTalk Workspace channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.21.11"
+    "@qwen-code/channel-base": "0.21.14"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
