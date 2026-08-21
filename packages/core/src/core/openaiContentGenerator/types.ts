@@ -95,6 +95,16 @@ export interface RequestContext {
    * literal tag references are only sanctioned before a demotion happens.
    */
   inlineThinkingBlockDemoted?: boolean;
+  /**
+   * Trailing suffix of emitted visible text held back after an inline
+   * thinking block demotion (issue #9348). Once visible content exists the
+   * candidate machinery is disengaged, so a thinking tag assembled across
+   * chunk boundaries would never appear complete in any one chunk; any
+   * trailing suffix that could still complete into a tag is held here, the
+   * leak gate runs on tail + next chunk, and finish fails closed if the held
+   * suffix never resolves.
+   */
+  pendingPostDemotionTagTail?: string;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';

@@ -889,6 +889,168 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects an embedded thinking tag assembled across chunk boundaries after a demotion (issue #9348 fail-closed)', () => {
+      // Chunk-split twin of the test above: no single chunk contains a
+      // complete tag, so the per-chunk gate alone never fires. The demoted
+      // turn must keep holding the trailing potential-tag suffix of emitted
+      // text and gate on tail + next chunk together.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const leading = converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+
+      expect(leading.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: 'Answer ' },
+      ]);
+
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thi');
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('tag-completes', { content: 'nking>b</thi' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects a thinking tag assembled across many chunks after a demotion (issue #9348 fail-closed)', () => {
+      // The rolling tail must survive multiple fragment chunks before the
+      // completed tag trips the gate.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment-1', { content: '<thi' }),
+        stream,
+      );
+      const middle = converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment-2', { content: 'nki' }),
+        stream,
+      );
+
+      expect(middle.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thinki');
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'fragment-3',
+            { content: 'ng>b</thinking> done' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed at finish on an unresolved held tag tail after a demotion (issue #9348 fail-closed)', () => {
+      // The held trailing suffix never resolves before the stream ends: it
+      // must fail closed instead of being released as literal text.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thi');
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('fails closed when the demotion chunk itself ends in a tag prefix at finish (issue #9348 fail-closed)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'demote-and-fragment',
+            { content: '<thinking>a</thinking>Answer <thi' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('releases a held tag-like tail once it resolves into ordinary text after a demotion (issue #9348)', () => {
+      // The hold must not swallow or corrupt ordinary text: a held suffix
+      // that turns out not to be a tag is emitted verbatim and the turn
+      // succeeds.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const resolved = converter.convertOpenAIChunkToGemini(
+        streamChunk('resolved', { content: 's is not a tag.' }, 'stop'),
+        stream,
+      );
+
+      expect(resolved.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<this is not a tag.' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
     it('rejects a stray closing tag after a demoted leading block (issue #9348 fail-closed)', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
