@@ -179,7 +179,7 @@ describe('a1 (the read path) transient-error retry — the POSITIVE side', () =>
   });
 });
 
-describe('parseA1Version / a1VersionAtLeast', () => {
+describe('parseA1Version / a1VersionAtLeast (the version-floor helpers)', () => {
   it('parses the `a1 --version` line', () => {
     expect(parseA1Version('a1 version 0.2.51 (2026-08-20)')).toEqual([
       0, 2, 51,
@@ -221,7 +221,7 @@ describe('parseA1Version / a1VersionAtLeast', () => {
   });
 });
 
-describe('ensureAoneAuthenticated — presence, version floor, auth', () => {
+describe('ensureAoneAuthenticated — presence, version floor, and the account', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -250,10 +250,15 @@ describe('ensureAoneAuthenticated — presence, version floor, auth', () => {
   it('accepts the floor version itself and proceeds to the auth check', () => {
     mockExecFileSync
       .mockReturnValueOnce(`a1 version ${A1_MIN_VERSION} (2026-07-15)\n`)
-      .mockReturnValueOnce('account: someone\n');
+      .mockReturnValueOnce('{"account":"someone"}\n');
     expect(() => ensureAoneAuthenticated()).not.toThrow();
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
-    expect(mockExecFileSync.mock.calls[1][1]).toEqual(['auth', 'whoami']);
+    expect(mockExecFileSync.mock.calls[1][1]).toEqual([
+      'auth',
+      'whoami',
+      '--format',
+      'json',
+    ]);
   });
 
   it('accepts a newer version', () => {
@@ -319,8 +324,60 @@ describe('ensureAoneAuthenticated — presence, version floor, auth', () => {
     mockExecFileSync
       .mockReturnValueOnce('a1 version 0.2.51 (2026-08-20)\n')
       .mockImplementationOnce(() => {
-        throw new Error('Command failed: a1 auth whoami\nnot logged in\n');
+        throw new Error(
+          'Command failed: a1 auth whoami --format json\nnot logged in\n',
+        );
       });
     expect(() => ensureAoneAuthenticated()).toThrow(/a1 auth login/);
+  });
+
+  // The account contract #9629 added — the gate returns the authenticated
+  // account for presubmit's self-MR comparison. Each dispatches the
+  // version probe and the whoami by argv, so the floor and the account
+  // read stay one gate.
+  const versionThen = (whoamiOut: string) =>
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) =>
+      args[0] === '--version' ? 'a1 version 0.2.51 (2026-08-20)\n' : whoamiOut,
+    );
+
+  it('returns the account field of ONE `a1 auth whoami --format json`', () => {
+    versionThen('{"account":"wenshao"}\n');
+    expect(ensureAoneAuthenticated()).toBe('wenshao');
+    // Pin the FULL argv and the spawn COUNT: presubmit's self-PR comparison
+    // reads this account off the gate, so a botched spread here would exec
+    // a different whoami shape — and a restored plain-whoami gate beside
+    // the JSON read would double the spawn — without any other test
+    // noticing (aone.test.ts mocks the module wholesale). The version
+    // probe precedes the whoami (the floor), hence calls[1].
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    const args = mockExecFileSync.mock.calls[1][1] as string[];
+    expect(args).toEqual(['auth', 'whoami', '--format', 'json']);
+  });
+
+  it('returns empty (fail-soft) when whoami names no account', () => {
+    // An empty account makes presubmit's self-PR comparison fail soft —
+    // isSelfPr false — exactly like the GitHub path's empty login; a throw
+    // here would kill the whole presubmit over a shape quirk.
+    versionThen('{}\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+    versionThen('{"account":42}\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+  });
+
+  it('trims the account — parity with gh.ts currentUser().trim()', () => {
+    // A padded account would silently miss the self-PR comparison against a
+    // clean MR author (fail-open on exactly the protection this exists for).
+    versionThen('{"account":"  wenshao\\n"}\n');
+    expect(ensureAoneAuthenticated()).toBe('wenshao');
+  });
+
+  it('returns empty when an EXEC-successful answer does not parse', () => {
+    // The exec's success IS the auth proof; an unreadable account degrades
+    // the self-PR comparison to fail-soft instead of throwing the run with
+    // no report — the pre-merge second whoami detonated on exactly this
+    // anomaly class, after the plain-format gate had waved it through.
+    versionThen('user: wenshao\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
   });
 });

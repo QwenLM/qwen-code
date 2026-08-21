@@ -150,15 +150,23 @@ export function a1VersionAtLeast(
 }
 
 /**
- * Fail fast with an actionable message when `a1` cannot run. Three distinct
- * states, three distinct remedies: a missing binary (ENOENT — the dominant
- * first-run state for this dependency) → install; a version below
- * A1_MIN_VERSION → upgrade; an unauthenticated login → `a1 auth login`.
- * The checks run in that order — presence, then version, then auth — so a
- * stale install is named BEFORE a login that upgrading would invalidate
- * anyway.
+ * Fail fast with an actionable message when `a1` cannot run, and return the
+ * authenticated account. Three failure states, three distinct remedies: a
+ * missing binary (ENOENT — the dominant first-run state for this
+ * dependency) → install; a version below A1_MIN_VERSION → upgrade; an
+ * unauthenticated login → `a1 auth login`. The checks run in that order —
+ * presence, then version, then auth — so a stale install is named BEFORE a
+ * login that upgrading would invalidate anyway. The whoami runs ONCE,
+ * `--format json`: the JSON spelling fully subsumes a plain auth gate, so
+ * presubmit reads its self-MR comparison account off this call instead of
+ * spawning a second whoami (which retried its own delays a second time
+ * under the same transient outage, and could throw uncaught after the
+ * report's graceful path had already been decided). An EXEC-successful
+ * answer that does not parse or names no account returns '': the exec's
+ * success already proves the auth state, and an unreadable account fails
+ * presubmit's self-MR comparison soft, like the GitHub path's empty login.
  */
-export function ensureAoneAuthenticated(): void {
+export function ensureAoneAuthenticated(): string {
   // `a1 --version` is a local op — no auth, no network — so it can precede
   // the login check.
   let versionOut: string | undefined;
@@ -216,8 +224,9 @@ export function ensureAoneAuthenticated(): void {
       );
     }
   }
+  let raw: string;
   try {
-    a1('auth', 'whoami');
+    raw = a1('auth', 'whoami', '--format', 'json');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
@@ -232,9 +241,9 @@ export function ensureAoneAuthenticated(): void {
       );
     }
     // execFileSync failure messages BEGIN with the fixed preamble
-    // "Command failed: a1 auth whoami"; a1's real first stderr line is the
-    // first NON-empty line after it. `.split('\n')[0]` would render only the
-    // preamble and drop the cause.
+    // "Command failed: a1 auth whoami --format json"; a1's real first stderr
+    // line is the first NON-empty line after it. `.split('\n')[0]` would
+    // render only the preamble and drop the cause.
     const cause =
       e.message
         .split('\n')
@@ -251,5 +260,11 @@ export function ensureAoneAuthenticated(): void {
         (cause ? ` — ${cause}` : '') +
         ` (if you have not logged in, run \`a1 auth login\`)`,
     );
+  }
+  try {
+    const out = JSON.parse(raw) as { account?: unknown };
+    return typeof out.account === 'string' ? out.account.trim() : '';
+  } catch {
+    return '';
   }
 }
