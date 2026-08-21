@@ -2351,6 +2351,25 @@ export class GeminiChat {
         info.newTokenCount,
         info.newTokenCountIsEstimated,
       );
+      // setLastPromptTokenCount re-keyed the fresh count to the ACTIVE
+      // route, but in-send callers compress for the REQUEST route: the
+      // session-token-limit gate reads by that key (client.ts's sole
+      // SessionTokenLimitExceeded yield site), and a request that ends
+      // without a usage report (abort, 400 — the reactive-overflow path
+      // exists for exactly those) never stamps a count of its own. Re-key
+      // the fresh count to the request route, retaining it under the
+      // active key first: the compressed history is shared, so the count
+      // must anchor BOTH routes' next gate reads (#9506).
+      if (
+        options?.requestRouteKey &&
+        this.tokenCountsRouteKey !== options.requestRouteKey
+      ) {
+        this.retainCurrentTokenCounts();
+        this.tokenCountsRouteKey = options.requestRouteKey;
+        // Same invariant as the other count writers: the fresh count
+        // supersedes anything the request route retained.
+        this.tokenCountsByRouteKey.delete(options.requestRouteKey);
+      }
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2708,6 +2727,12 @@ export class GeminiChat {
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
+      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount (via
+      // setLastPromptTokenCount), so the rollback below must restore the
+      // output half of the resurrected count pair alongside the prompt
+      // half, or the next turn's additive prompt estimate under-counts by
+      // the last response's size (#9506).
+      const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
       // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
       // setLastPromptTokenCount on the success path) even though this send
       // targets the REQUEST route — and hard-rescue only fires for
@@ -2801,6 +2826,7 @@ export class GeminiChat {
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
+          this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
           // Restore the retention map alongside the slots: the rescue's
           // compression consumed/cleared entries mid-flight, and without

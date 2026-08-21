@@ -15966,6 +15966,67 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('restores the output token count when a failed hard-rescue rolls counts back (#9506)', async () => {
+      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount via
+      // setLastPromptTokenCount. The rollback restores the resurrected
+      // prompt count, its provenance, the route key and the retention map
+      // — it must restore the output half of the pair too, or the next
+      // turn's additive prompt estimate (prompt + output + new content)
+      // under-counts by the last response's size.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'override-model@route',
+      );
+      const rescueChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'earlier turn' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        {
+          recordAssistantTurn: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      // Authoritative count pair recorded by an earlier override-route turn.
+      rescueChat.seedResumeTokenCounts(170_000, 8_000, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'still large summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 180_000,
+          newTokenCount: 177_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await expect(
+        rescueChat.sendMessageStream(
+          'override-model',
+          { message: 'continue' },
+          'prompt-hard-rescue-output-restore',
+        ),
+      ).rejects.toThrow(/compression status: COMPRESSED/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      // Reading through the override route (the resurrected slot's key)
+      // must return the full pre-rescue pair, output half included.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'override-model@route',
+      );
+      expect(rescueChat.getLastPromptTokenCount()).toBe(170_000);
+      expect(rescueChat.getLastOutputTokenCount()).toBe(8_000);
+    });
+
     it('re-adopts the request route after the compression service flips the slots (#9506)', async () => {
       // ChatCompressionService.compress reads the KEYLESS count getters,
       // which adopt the ACTIVE route. On a non-exact override send whose
@@ -16096,6 +16157,86 @@ describe('GeminiChat', async () => {
       );
       // ...and the active route's post-compression count was retained,
       // not destroyed by the re-keying stamp.
+      expect(stampChat.getLastPromptTokenCount('active@route')).toBe(60_000);
+    });
+
+    it('stamps the compressed count under the request route when the send ends without usage (#9506)', async () => {
+      // In-send compression runs for the REQUEST route, but
+      // setLastPromptTokenCount re-keys the fresh count to the ACTIVE
+      // route. If the request then ends without a usage report (abort,
+      // 400 — the reactive-overflow path exists for exactly those), the
+      // request route never stamps a count of its own, and its next
+      // session-token-limit gate read passes with 0 even though the
+      // shared compressed history's exact measure is on record.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'active@route',
+      );
+      const stampChat = new GeminiChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
+        {
+          recordAssistantTurn: vi.fn(),
+          // Successful hard-rescue compression records after the
+          // post-compression guard passes (deferred recording).
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      stampChat.setLastPromptTokenCount(150_000, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockImplementationOnce(async (chatToCompress) => {
+        chatToCompress.getLastPromptTokenCount();
+        chatToCompress.isLastPromptTokenCountEstimated();
+        return {
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 60_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        };
+      });
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'ok' }], role: 'model' },
+                finishReason: 'STOP',
+                index: 0,
+              },
+            ],
+            // No usageMetadata: the request route never stamps a count of
+            // its own, so the compression stamp must be readable under it.
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await stampChat.sendMessageStream(
+        'override-model',
+        { message: 'continue' },
+        'prompt-compression-stamps-request-route',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // The request route's keyed read sees the compressed history's
+      // count instead of passing the gate with 0...
+      expect(stampChat.getLastPromptTokenCount('override-model@route')).toBe(
+        60_000,
+      );
+      // ...and the active route still sees it through the retained entry,
+      // because the compressed history is shared by every route.
       expect(stampChat.getLastPromptTokenCount('active@route')).toBe(60_000);
     });
 
