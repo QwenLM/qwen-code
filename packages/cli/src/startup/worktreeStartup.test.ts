@@ -146,9 +146,9 @@ describe('setupStartupWorktree', () => {
     expect(res?.ok).toBe(true);
     if (!res?.ok) return;
 
-    await expect(
-      discardCreatedStartupWorktree(res.context),
-    ).resolves.toBeUndefined();
+    await expect(discardCreatedStartupWorktree(res.context)).resolves.toEqual(
+      {},
+    );
 
     expect(process.cwd()).toBe(tempRepo);
     await expect(fs.stat(res.context.worktreePath)).rejects.toThrow();
@@ -164,6 +164,69 @@ describe('setupStartupWorktree', () => {
     expect(branches.trim()).toBe('');
   });
 
+  it('discards a clean worktree with a CLI-created configured symlink', async () => {
+    tempRepo = await makeTempRepo();
+    await fs.writeFile(path.join(tempRepo, '.env.local'), 'secret');
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('managed-resume-symlink', {
+      symlinkDirectories: ['.env.local'],
+    });
+    expect(res?.ok).toBe(true);
+    if (!res?.ok) return;
+    expect(res.context.createdSymlinkPaths).toEqual(['.env.local']);
+    expect(
+      (
+        await fs.lstat(path.join(res.context.worktreePath, '.env.local'))
+      ).isSymbolicLink(),
+    ).toBe(true);
+
+    await expect(discardCreatedStartupWorktree(res.context)).resolves.toEqual(
+      {},
+    );
+
+    expect(process.cwd()).toBe(tempRepo);
+    await expect(fs.stat(res.context.worktreePath)).rejects.toThrow();
+  });
+
+  it('does not treat configured symlink names as git pathspec patterns', async () => {
+    tempRepo = await makeTempRepo();
+    await fs.writeFile(path.join(tempRepo, '[secret]'), 'secret');
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('managed-resume-literal-symlink', {
+      symlinkDirectories: ['[secret]'],
+    });
+    expect(res?.ok).toBe(true);
+    if (!res?.ok) return;
+    await fs.writeFile(path.join(res.context.worktreePath, 's'), 'user work');
+
+    await expect(discardCreatedStartupWorktree(res.context)).resolves.toEqual({
+      preserved: expect.stringContaining('uncommitted changes'),
+    });
+    expect((await fs.stat(res.context.worktreePath)).isDirectory()).toBe(true);
+  });
+
+  it('preserves a configured symlink replaced with user work', async () => {
+    tempRepo = await makeTempRepo();
+    await fs.writeFile(path.join(tempRepo, '.env.local'), 'secret');
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('managed-resume-replaced-symlink', {
+      symlinkDirectories: ['.env.local'],
+    });
+    expect(res?.ok).toBe(true);
+    if (!res?.ok) return;
+    const worktreeEnv = path.join(res.context.worktreePath, '.env.local');
+    await fs.unlink(worktreeEnv);
+    await fs.writeFile(worktreeEnv, 'user work');
+
+    await expect(discardCreatedStartupWorktree(res.context)).resolves.toEqual({
+      preserved: expect.stringContaining('uncommitted changes'),
+    });
+    expect((await fs.stat(res.context.worktreePath)).isDirectory()).toBe(true);
+  });
+
   it('preserves a newly-created worktree when another process may own work', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
@@ -175,17 +238,20 @@ describe('setupStartupWorktree', () => {
 
     const pendingPath = path.join(context.worktreePath, 'pending.txt');
     await fs.writeFile(pendingPath, 'pending');
-    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
-      'uncommitted changes',
-    );
+    await expect(discardCreatedStartupWorktree(context)).resolves.toEqual({
+      preserved: expect.stringContaining('uncommitted changes'),
+    });
     await fs.rm(pendingPath);
 
     await writeWorktreeSessionMarker(context.worktreePath, 'other-session');
-    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
-      'owned by session other-session',
-    );
+    await expect(discardCreatedStartupWorktree(context)).resolves.toEqual({
+      preserved: expect.stringContaining('owned by session other-session'),
+    });
     await fs.rm(path.join(context.worktreePath, '.qwen-session'));
 
+    await exec('git', ['tag', context.branch, context.originalHeadCommit], {
+      cwd: tempRepo,
+    });
     await fs.writeFile(
       path.join(context.worktreePath, 'committed.txt'),
       'work',
@@ -194,11 +260,22 @@ describe('setupStartupWorktree', () => {
     await exec('git', ['commit', '-m', 'work from another process'], {
       cwd: context.worktreePath,
     });
-    await expect(discardCreatedStartupWorktree(context)).resolves.toContain(
-      `branch ${context.branch} changed after startup`,
-    );
+    const { stdout: branchHead } = await exec('git', ['rev-parse', 'HEAD'], {
+      cwd: context.worktreePath,
+    });
+    await expect(discardCreatedStartupWorktree(context)).resolves.toEqual({
+      preserved: expect.stringContaining(
+        `branch ${context.branch} changed after startup`,
+      ),
+    });
 
     expect((await fs.stat(context.worktreePath)).isDirectory()).toBe(true);
+    const { stdout: preservedBranchHead } = await exec(
+      'git',
+      ['rev-parse', `refs/heads/${context.branch}`],
+      { cwd: tempRepo },
+    );
+    expect(preservedBranchHead.trim()).toBe(branchHead.trim());
   });
 
   it('keeps a reattached worktree on an early startup exit', async () => {
@@ -216,7 +293,7 @@ describe('setupStartupWorktree', () => {
 
     await expect(
       discardCreatedStartupWorktree(second.context),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({});
 
     expect(process.cwd()).toBe(second.context.worktreePath);
     expect((await fs.stat(second.context.worktreePath)).isDirectory()).toBe(

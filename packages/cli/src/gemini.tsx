@@ -29,6 +29,7 @@ import {
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -479,22 +480,6 @@ export async function main() {
     }
   }
 
-  if (argv.background) {
-    const prompt = argv.query;
-    if (!prompt) {
-      throw new Error('Cannot use --bg/--background without a prompt.');
-    }
-    const { handleAgentViewBackgroundPrompt } = await import(
-      './commands/agents.js'
-    );
-    await handleAgentViewBackgroundPrompt(prompt);
-    // Drain before exiting: on POSIX pipes stdout flushes asynchronously, so
-    // a bare process.exit(0) could discard the --bg handoff block for large
-    // outputs piped elsewhere (e.g. `qwen --bg ... | tee log`).
-    await drainStdioBeforeExit();
-    process.exit(0);
-  }
-
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
@@ -505,6 +490,15 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+
+  if (argv.background) {
+    const { handleAgentViewBackgroundPrompt } = await import(
+      './commands/agents.js'
+    );
+    await handleAgentViewBackgroundPrompt(argv.query ?? '', settings.merged);
+    await drainStdioBeforeExit();
+    process.exit(0);
+  }
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -637,7 +631,12 @@ export async function main() {
     if (sandboxConfig) {
       const partialConfig = await loadCliConfig(
         settings.merged,
-        argv,
+        {
+          ...argv,
+          continue: false,
+          resume: undefined,
+          forkSession: false,
+        },
         undefined,
         [],
         // Pass separated hooks for proper source attribution
@@ -857,16 +856,104 @@ export async function main() {
     }
   }
 
+  const exitStartup = async (
+    code: number,
+    message?: string,
+  ): Promise<never> => {
+    if (message) writeStderrLine(message);
+    const cleanup = await discardCreatedStartupWorktree(startupWorktreeContext);
+    if (cleanup.error) {
+      writeStderrLine(`Failed to clean up startup worktree: ${cleanup.error}`);
+      code = 1;
+    }
+    process.exit(code);
+  };
+
+  if (argv.resume !== undefined || argv.continue) {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
+  }
+
+  if (argv.continue) {
+    const sessionService = new SessionService(process.cwd());
+    const sessionData = await sessionService.loadLastSession();
+    if (!sessionData) {
+      if (argv.forkSession) {
+        await exitStartup(
+          1,
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
+      }
+    } else {
+      const sourceSessionId = sessionData.conversation.sessionId;
+      const {
+        isManagedAgentViewContinueBlocked,
+        isManagedAgentViewResumeBlocked,
+        MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+        releaseExitedManagedSessionForContinue,
+      } = await import('./startup/agent-view-resume-guard.js');
+      const agentViewEnabled = settings.merged.experimental?.agentView === true;
+      if (
+        !agentViewEnabled &&
+        (await isManagedAgentViewResumeBlocked(sourceSessionId))
+      ) {
+        const { AGENT_VIEW_DISABLED_MESSAGE } = await import(
+          './agent-view/feature.js'
+        );
+        await exitStartup(1, AGENT_VIEW_DISABLED_MESSAGE);
+      }
+      let ownershipReleased = false;
+      if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
+        if (!argv.forkSession) {
+          ownershipReleased = await releaseExitedManagedSessionForContinue(
+            sourceSessionId,
+            process.env,
+            agentViewEnabled,
+          );
+        }
+        if (!ownershipReleased) {
+          await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        }
+      }
+      if (argv.forkSession) {
+        const forkedSessionId = randomUUID();
+        try {
+          await sessionService.forkSession(sourceSessionId, forkedSessionId);
+        } catch (error) {
+          await exitStartup(
+            1,
+            `Failed to fork session ${sourceSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        argv = {
+          ...argv,
+          continue: false,
+          resume: forkedSessionId,
+          forkSession: false,
+        };
+      } else {
+        if (
+          !ownershipReleased &&
+          !(await releaseExitedManagedSessionForContinue(
+            sourceSessionId,
+            process.env,
+            agentViewEnabled,
+          ))
+        ) {
+          await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        }
+        argv = { ...argv, continue: false, resume: sourceSessionId };
+      }
+    }
+  }
+
   // Handle --resume without a session ID, or with a custom title, by showing
   // the session picker. Set the runtime output dir early so the picker can find
   // sessions stored under a custom runtimeOutputDir (setRuntimeBaseDir is
   // idempotent and will be called again inside loadCliConfig).
   if (argv.resume !== undefined) {
-    Storage.setRuntimeBaseDir(
-      settings.merged.advanced?.runtimeOutputDir,
-      process.cwd(),
-    );
-
     let resolvedSessionId: string | undefined;
 
     if (argv.resume === '') {
@@ -902,10 +989,12 @@ export async function main() {
     } else if (argv.resume === '' || !cliConfig.isValidSessionId(argv.resume)) {
       // User cancelled the picker or no sessions found for the title
       if (argv.resume !== '') {
-        writeStderrLine(`No saved session found with title "${argv.resume}".`);
-        process.exit(1);
+        await exitStartup(
+          1,
+          `No saved session found with title "${argv.resume}".`,
+        );
       } else {
-        process.exit(0);
+        await exitStartup(0);
       }
     }
     // else: argv.resume is already a valid UUID, pass through to loadCliConfig
@@ -927,16 +1016,39 @@ export async function main() {
         argv.resume,
         process.env,
         hasOneShotInput,
+        settings.merged.experimental?.agentView === true,
       )
     ) {
-      const cleanupError = await discardCreatedStartupWorktree(
-        startupWorktreeContext,
+      await exitStartup(
+        typeof process.exitCode === 'number' ? process.exitCode : 1,
       );
-      if (cleanupError) {
-        writeStderrLine(`Failed to clean up startup worktree: ${cleanupError}`);
-        process.exitCode = 1;
+    }
+  }
+
+  if (argv.resume !== undefined) {
+    const sessionService = new SessionService(process.cwd());
+    if (argv.forkSession) {
+      const sourceSessionId = argv.resume;
+      const forkedSessionId = randomUUID();
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (error) {
+        await exitStartup(
+          1,
+          `Failed to fork session ${sourceSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      process.exit(process.exitCode ?? 0);
+      argv = {
+        ...argv,
+        resume: forkedSessionId,
+        continue: false,
+        forkSession: false,
+      };
+    } else if (!(await sessionService.loadSession(argv.resume))) {
+      await exitStartup(
+        1,
+        `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`,
+      );
     }
   }
 
@@ -958,50 +1070,37 @@ export async function main() {
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
-    const config = await loadCliConfig(
-      settings.merged,
-      argv.acp || argv.experimentalAcp
-        ? { ...argv, chatRecording: false }
-        : argv,
-      process.cwd(),
-      argv.extensions,
-      // Pass separated hooks for proper source attribution
-      {
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
-      buildDisabledSkillNamesProvider(settings),
-      undefined,
-      settingsWatcher,
-    );
+    let config: Config;
+    try {
+      config = await loadCliConfig(
+        settings.merged,
+        argv.acp || argv.experimentalAcp
+          ? { ...argv, chatRecording: false }
+          : argv,
+        process.cwd(),
+        argv.extensions,
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
+        buildDisabledSkillNamesProvider(settings),
+        undefined,
+        settingsWatcher,
+      );
+    } catch (error) {
+      const cleanup = await discardCreatedStartupWorktree(
+        startupWorktreeContext,
+      );
+      if (cleanup.error) {
+        writeStderrLine(
+          `Failed to clean up startup worktree: ${cleanup.error}`,
+        );
+      }
+      throw error;
+    }
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
-
-    // --continue resolves the last session inside loadCliConfig, past the
-    // --resume startup guard above; mirror that guard here so a managed
-    // background session is never resumed by a second foreground runtime.
-    if (argv.continue) {
-      const {
-        isManagedAgentViewContinueBlocked,
-        MANAGED_AGENT_VIEW_RESUME_MESSAGE,
-        releaseExitedManagedSessionForContinue,
-      } = await import('./startup/agent-view-resume-guard.js');
-      if (
-        (await isManagedAgentViewContinueBlocked(config.getSessionId())) ||
-        !(await releaseExitedManagedSessionForContinue(config.getSessionId()))
-      ) {
-        writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
-        const cleanupError = await discardCreatedStartupWorktree(
-          startupWorktreeContext,
-        );
-        if (cleanupError) {
-          writeStderrLine(
-            `Failed to clean up startup worktree: ${cleanupError}`,
-          );
-        }
-        process.exit(1);
-      }
-    }
 
     {
       const {
@@ -1127,8 +1226,6 @@ export async function main() {
 
     // Persist session usage for cross-session reports (must run before
     // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
     registerCleanup(() => {
       try {
         const metrics = uiTelemetryService.getMetrics();
@@ -1136,9 +1233,14 @@ export async function main() {
           (m) => m.api.totalRequests > 0,
         );
         if (!hasActivity) return;
+        const resumedStartTime = Date.parse(
+          config.getResumedSessionData()?.conversation.startTime ?? '',
+        );
         persistSessionUsage({
           sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
+          startTime: Number.isFinite(resumedStartTime)
+            ? new Date(resumedStartTime)
+            : uiTelemetryService.getSessionStartTime(),
           endTime: new Date(),
           project: config.getProjectRoot(),
           metrics,

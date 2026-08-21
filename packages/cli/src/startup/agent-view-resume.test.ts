@@ -19,6 +19,7 @@ const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
   readAgentViewSessionState: mockReadAgentViewSessionState,
+  sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
 }));
 
 vi.mock('../utils/stdioHelpers.js', () => ({
@@ -49,7 +50,7 @@ describe('routeManagedAgentViewResume', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Session session-1 is managed by Agent View; attaching via supervisor...',
     );
-    expect(process.exitCode).toBeUndefined();
+    expect(process.exitCode).toBe(0);
   });
 
   it('rejects one-shot input for managed Agent View resumes', async () => {
@@ -62,6 +63,37 @@ describe('routeManagedAgentViewResume', () => {
     expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     expect(mockAttach).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot use one-shot input'),
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('blocks managed resumes when Agent View is disabled', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
+
+    await expect(
+      routeManagedAgentViewResume('session-1', process.env, false, false),
+    ).resolves.toBe(true);
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Agent View is disabled'),
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('reports the disabled gate before one-shot restrictions', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
+
+    await expect(
+      routeManagedAgentViewResume('session-1', process.env, true, false),
+    ).resolves.toBe(true);
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Agent View is disabled'),
+    );
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Cannot use one-shot input'),
     );
     expect(process.exitCode).toBe(1);

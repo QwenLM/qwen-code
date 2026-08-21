@@ -921,9 +921,15 @@ describe('AppContainer State Management', () => {
         'process.exit(0)',
       ]);
       const requestShutdown = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
         requestShutdown,
       } as unknown as GeminiClient);
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        flush,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
       const exit = vi
         .spyOn(process, 'exit')
         .mockImplementation((() => undefined) as never);
@@ -950,6 +956,11 @@ describe('AppContainer State Management', () => {
         expect(requestShutdown).toHaveBeenCalledOnce();
         expect(runExitCleanup).toHaveBeenCalledOnce();
         expect(exit).toHaveBeenCalledWith(0);
+        expect(flush).toHaveBeenCalledOnce();
+        expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
+          agentViewHandoffMocks.detachCurrentSession.mock
+            .invocationCallOrder[0],
+        );
         expect(
           agentViewHandoffMocks.detachCurrentSession.mock
             .invocationCallOrder[0],

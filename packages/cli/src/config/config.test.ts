@@ -79,6 +79,10 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
   connectExistingAgentViewSupervisor: mockConnectExistingAgentViewSupervisor,
 }));
 
+vi.mock('../agent-view/feature.js', () => ({
+  requireAgentViewEnabled: vi.fn(),
+}));
+
 const createNativeLspServiceInstance = () => ({
   discoverAndPrepare: vi.fn(),
   start: vi.fn(),
@@ -420,7 +424,7 @@ describe('parseArguments', () => {
     mockWriteStdoutLine.mockClear();
 
     try {
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      await expect(parseArguments()).rejects.toThrow(/process\.exit/);
 
       expect(mockExit).toHaveBeenCalledWith(0);
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
@@ -589,17 +593,14 @@ describe('parseArguments', () => {
     ['--json=1', 'agents'],
   ])('rejects assigned agents boolean %s', async (...args) => {
     process.argv = ['node', 'script.js', ...args];
+    mockEnsureAgentViewSupervisor.mockClear();
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
 
     try {
-      await expect(parseArguments()).rejects.toThrow(
-        'process.exit unexpectedly called with "1"',
-      );
-      expect(mockWriteStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('does not accept an assigned value'),
-      );
+      await expect(parseArguments()).rejects.toThrow(/process\.exit/);
+      expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     } finally {
       mockExit.mockRestore();
     }
@@ -683,6 +684,71 @@ describe('parseArguments', () => {
       mockExit.mockRestore();
     }
   });
+
+  it.each([
+    ['--bg', 'serve'],
+    ['--background', 'update'],
+    ['--continue', 'update'],
+    ['-c', 'update'],
+  ])(
+    'rejects %s with the %s subcommand before its handler runs',
+    async (flag, command) => {
+      process.argv = ['node', 'script.js', flag, command];
+      mockUpdateHandler.mockClear();
+      mockEnsureAgentViewSupervisor.mockClear();
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(mockUpdateHandler).not.toHaveBeenCalled();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+      }
+    },
+  );
+
+  it('allows a --bg prompt matching a subcommand after the separator', async () => {
+    process.argv = ['node', 'script.js', '--bg', '--', 'serve'];
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+
+    try {
+      const argv = await parseArguments();
+      expect(argv.background).toBe(true);
+      expect(argv.query).toBe('serve');
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it.each(['--continue', '-c'])(
+    'rejects %s before an agents command instead of treating agents as a prompt',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'agents',
+        'attach',
+        'session-1',
+      ];
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow(
+          'cannot be combined with a CLI subcommand',
+        );
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+      }
+    },
+  );
 
   it('shows the agents attach help for `agents attach --help`', async () => {
     process.argv = ['node', 'script.js', 'agents', 'attach', '--help'];
@@ -936,8 +1002,12 @@ describe('parseArguments', () => {
     try {
       await expect(parseArguments()).rejects.toThrow('process.exit called');
 
+      const expectedMessage =
+        args.length === 1 && args[0] === '--background'
+          ? message
+          : 'Cannot use --bg/--background with other CLI options';
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining(message),
+        expect.stringContaining(expectedMessage),
       );
     } finally {
       mockExit.mockRestore();
@@ -2180,6 +2250,17 @@ describe('loadCliConfig', () => {
       expect.objectContaining({
         sessionWriterLeaseEnabled: false,
       }),
+    );
+  });
+
+  it('should propagate the Agent View gate', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { agentView: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({ agentViewEnabled: true }),
     );
   });
 

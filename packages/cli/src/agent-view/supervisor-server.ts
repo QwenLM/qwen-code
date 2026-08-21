@@ -45,6 +45,7 @@ export interface AgentViewSupervisorHandler {
   stop?: AgentViewSupervisorHandlerMethod<'stop'>;
   kill?: AgentViewSupervisorHandlerMethod<'kill'>;
   respawn?: AgentViewSupervisorHandlerMethod<'respawn'>;
+  release?: AgentViewSupervisorHandlerMethod<'release'>;
   remove?: AgentViewSupervisorHandlerMethod<'remove'>;
   pin?: AgentViewSupervisorHandlerMethod<'pin'>;
   rename?: AgentViewSupervisorHandlerMethod<'rename'>;
@@ -68,12 +69,14 @@ export interface AgentViewSupervisorServerHandle {
 }
 
 const MAX_SUPERVISOR_REQUEST_LINE_BYTES = 1024 * 1024;
+const SUPERVISOR_OPERATION_DRAIN_TIMEOUT_MS = 30_000;
 
 export function createAgentViewSupervisorServer(
   handler: AgentViewSupervisorHandler,
   options: AgentViewSupervisorServerOptions,
 ): AgentViewSupervisorServerHandle {
   const sockets = new Set<net.Socket>();
+  const operationGate = new SupervisorOperationGate();
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
@@ -99,6 +102,7 @@ export function createAgentViewSupervisorServer(
         options.authToken,
         options.authorizeSideband,
         remaining,
+        operationGate,
       );
     });
   });
@@ -143,6 +147,10 @@ export async function handleAgentViewSupervisorRequest(
   handler: AgentViewSupervisorHandler,
   authToken?: string,
   authorizeSideband?: AgentViewSidebandAuthorizer,
+  invoke: (
+    op: AgentViewSupervisorOperation,
+    action: () => Promise<unknown> | unknown,
+  ) => Promise<unknown> = async (_op, action) => action(),
 ): Promise<AgentViewSupervisorResponse> {
   if (!isRecord(request) || typeof request['id'] !== 'string') {
     return errorResponse('', 'invalid_request', 'Invalid supervisor request.');
@@ -205,7 +213,7 @@ export async function handleAgentViewSupervisorRequest(
           params: Record<string, unknown> | undefined,
         ) => Promise<unknown> | unknown)
       | undefined;
-    const result = await method?.call(handler, params);
+    const result = await invoke(op, () => method?.call(handler, params));
     return {
       id: request['id'],
       ok: true,
@@ -228,6 +236,90 @@ interface ParsedRequest {
   params?: Record<string, unknown>;
 }
 
+class SupervisorOperationGate {
+  private state: 'running' | 'draining' | 'closed' = 'running';
+  private readonly active = new Set<Promise<unknown>>();
+  private shutdownPromise: Promise<unknown> | undefined;
+
+  async run(
+    op: AgentViewSupervisorOperation,
+    action: () => Promise<unknown> | unknown,
+  ): Promise<unknown> {
+    if (op === 'shutdown') {
+      if (this.shutdownPromise) return this.shutdownPromise;
+      this.state = 'draining';
+      this.shutdownPromise = this.drainAndShutdown(action);
+      return this.shutdownPromise;
+    }
+    if (isDrainSafeOperation(op)) {
+      return action();
+    }
+    if (this.state !== 'running') {
+      throw new Error('Agent View supervisor is shutting down.');
+    }
+    const operation = Promise.resolve().then(action);
+    this.active.add(operation);
+    try {
+      return await operation;
+    } finally {
+      this.active.delete(operation);
+    }
+  }
+
+  private async drainAndShutdown(
+    action: () => Promise<unknown> | unknown,
+  ): Promise<unknown> {
+    try {
+      await waitForSupervisorOperations(this.active);
+      const result = await action();
+      if (isRecord(result) && result['shuttingDown'] === false) {
+        this.state = 'running';
+        this.shutdownPromise = undefined;
+      } else {
+        this.state = 'closed';
+      }
+      return result;
+    } catch (error) {
+      this.state = 'running';
+      this.shutdownPromise = undefined;
+      throw error;
+    }
+  }
+
+  canStartStream(op: 'attachStream' | 'subscribe'): boolean {
+    return this.state === 'running' || op === 'subscribe';
+  }
+}
+
+async function waitForSupervisorOperations(
+  active: ReadonlySet<Promise<unknown>>,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled([...active]).then(() => undefined),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'Agent View supervisor shutdown timed out while waiting for active operations.',
+              ),
+            ),
+          SUPERVISOR_OPERATION_DRAIN_TIMEOUT_MS,
+        );
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function isDrainSafeOperation(op: AgentViewSupervisorOperation): boolean {
+  return op === 'status' || op === 'workerEvent' || op === 'workerControl';
+}
+
 async function respondToLine(
   line: string,
   handler: AgentViewSupervisorHandler,
@@ -235,6 +327,7 @@ async function respondToLine(
   authToken: string | undefined,
   authorizeSideband: AgentViewSidebandAuthorizer | undefined,
   remaining: Buffer,
+  operationGate: SupervisorOperationGate,
 ): Promise<void> {
   const request = parseRequestLine(line);
   if (
@@ -242,6 +335,18 @@ async function respondToLine(
     request.op === 'attachStream' &&
     typeof handler.attachStream === 'function'
   ) {
+    if (!operationGate.canStartStream('attachStream')) {
+      socket.end(
+        `${JSON.stringify(
+          errorResponse(
+            request.id,
+            'internal_error',
+            'Agent View supervisor is shutting down.',
+          ),
+        )}\n`,
+      );
+      return;
+    }
     await handleStreamingOp(
       request,
       socket,
@@ -278,6 +383,7 @@ async function respondToLine(
       handler,
       authToken,
       authorizeSideband,
+      operationGate.run.bind(operationGate),
     );
   } catch {
     response = errorResponse('', 'invalid_json', 'Invalid JSON request.');
@@ -424,6 +530,7 @@ function isSupervisorOperation(
     value === 'stop' ||
     value === 'kill' ||
     value === 'respawn' ||
+    value === 'release' ||
     value === 'remove' ||
     value === 'pin' ||
     value === 'rename'

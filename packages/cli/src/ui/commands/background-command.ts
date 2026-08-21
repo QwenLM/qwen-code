@@ -12,6 +12,11 @@ import {
 } from './types.js';
 import { t } from '../../i18n/index.js';
 import { readAgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
+import { AGENT_VIEW_DISABLED_MESSAGE } from '../../agent-view/feature.js';
+import {
+  buildBackgroundWorkBlockedMessage,
+  hasBlockingBackgroundWork,
+} from '../utils/backgroundWorkUtils.js';
 
 export const backgroundCommand: SlashCommand = {
   name: 'background',
@@ -26,6 +31,33 @@ export const backgroundCommand: SlashCommand = {
   ): Promise<AgentViewDetachActionReturn | MessageActionReturn> => {
     if (readAgentViewWorkerSidebandEnv() !== undefined) {
       return { type: 'agent_view_detach' };
+    }
+
+    const config = context.services.config;
+    if (!config) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Cannot detach Agent View before configuration is loaded.'),
+      };
+    }
+    if (!config.isAgentViewEnabled()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: AGENT_VIEW_DISABLED_MESSAGE,
+      };
+    }
+
+    if (hasBlockingBackgroundWork(config)) {
+      const message = t(
+        "Stop the current session's running background tasks before detaching it.",
+      );
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: buildBackgroundWorkBlockedMessage(config, message),
+      };
     }
 
     const idleGateState = context.ui.agentViewIdleGateStateRef?.current;
@@ -90,15 +122,6 @@ export const backgroundCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Cannot detach Agent View while a turn is running.'),
-      };
-    }
-
-    const config = context.services.config;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Cannot detach Agent View before configuration is loaded.'),
       };
     }
 

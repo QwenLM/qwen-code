@@ -17,21 +17,24 @@ import {
 } from './agent-view-resume-guard.js';
 
 const mockReadAgentViewSessionState = vi.hoisted(() => vi.fn());
-const mockPatchAgentViewSessionStateIf = vi.hoisted(() =>
-  vi.fn().mockResolvedValue(true),
+const mockRelease = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ released: true }),
 );
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
   readAgentViewSessionState: mockReadAgentViewSessionState,
   readAgentViewSessionStateStrict: mockReadAgentViewSessionState,
-  patchAgentViewSessionStateIf: mockPatchAgentViewSessionStateIf,
   sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
+}));
+
+vi.mock('../agent-view/supervisor-runner.js', () => ({
+  ensureAgentViewSupervisor: vi.fn(async () => ({ release: mockRelease })),
 }));
 
 describe('managed Agent View resume guards', () => {
   beforeEach(() => {
     mockReadAgentViewSessionState.mockReset();
-    mockPatchAgentViewSessionStateIf.mockReset().mockResolvedValue(true);
+    mockRelease.mockReset().mockResolvedValue({ released: true });
   });
 
   it('blocks --resume for managed sessions regardless of liveness', async () => {
@@ -165,6 +168,23 @@ describe('managed Agent View resume guards', () => {
     );
   });
 
+  it('blocks ordinary resume/continue while allowing an explicit release retry', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(
+      state('removing', 'exited'),
+    );
+
+    await expect(isManagedAgentViewResumeBlocked('session-1')).resolves.toBe(
+      true,
+    );
+    await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
+      true,
+    );
+    await expect(
+      releaseExitedManagedSessionForContinue('session-1'),
+    ).resolves.toBe(true);
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
+  });
+
   it('does not release ownership during the adopting window', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(
       state('adopting', 'starting'),
@@ -174,28 +194,16 @@ describe('managed Agent View resume guards', () => {
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(false);
 
-    expect(mockPatchAgentViewSessionStateIf).not.toHaveBeenCalled();
+    expect(mockRelease).not.toHaveBeenCalled();
   });
 
   it('releases an exited managed session for foreground --continue', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
-    mockPatchAgentViewSessionStateIf.mockImplementation(
-      async (_sessionId, decidePatch) => {
-        expect(decidePatch(state('managed', 'exited'))).toMatchObject({
-          ownership: 'unmanaged',
-        });
-        return true;
-      },
-    );
-
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(true);
 
-    expect(mockPatchAgentViewSessionStateIf).toHaveBeenCalledWith(
-      'session-1',
-      expect.any(Function),
-    );
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
   });
 
   it('releases a hibernated managed session for foreground --continue', async () => {
@@ -205,10 +213,7 @@ describe('managed Agent View resume guards', () => {
 
     await releaseExitedManagedSessionForContinue('session-1');
 
-    expect(mockPatchAgentViewSessionStateIf).toHaveBeenCalledWith(
-      'session-1',
-      expect.any(Function),
-    );
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
   });
 
   it('keeps ownership for live or unmanaged sessions', async () => {
@@ -216,7 +221,7 @@ describe('managed Agent View resume guards', () => {
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(false);
-    expect(mockPatchAgentViewSessionStateIf).not.toHaveBeenCalled();
+    expect(mockRelease).not.toHaveBeenCalled();
 
     mockReadAgentViewSessionState.mockResolvedValue(
       state('unmanaged', 'exited'),
@@ -224,7 +229,7 @@ describe('managed Agent View resume guards', () => {
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(true);
-    expect(mockPatchAgentViewSessionStateIf).not.toHaveBeenCalled();
+    expect(mockRelease).not.toHaveBeenCalled();
   });
 
   it('does not release ownership from inside a worker', async () => {
@@ -235,7 +240,7 @@ describe('managed Agent View resume guards', () => {
       workerEnv('session-1'),
     );
 
-    expect(mockPatchAgentViewSessionStateIf).not.toHaveBeenCalled();
+    expect(mockRelease).not.toHaveBeenCalled();
   });
 
   it('releases ownership when the worker env belongs to another session', async () => {
@@ -246,10 +251,7 @@ describe('managed Agent View resume guards', () => {
       workerEnv('other-session'),
     );
 
-    expect(mockPatchAgentViewSessionStateIf).toHaveBeenCalledWith(
-      'session-1',
-      expect.any(Function),
-    );
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
   });
 
   it('still releases ownership when only a stray worker marker is set', async () => {
@@ -259,24 +261,26 @@ describe('managed Agent View resume guards', () => {
       QWEN_AGENT_VIEW_WORKER: '1',
     });
 
-    expect(mockPatchAgentViewSessionStateIf).toHaveBeenCalledWith(
-      'session-1',
-      expect.any(Function),
-    );
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
   });
 
   it('re-blocks continue when the managed session becomes live before release', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
-    mockPatchAgentViewSessionStateIf.mockImplementation(
-      async (_sessionId, decidePatch) => {
-        expect(decidePatch(state('managed', 'alive'))).toBeUndefined();
-        return false;
-      },
-    );
+    mockRelease.mockRejectedValueOnce(new Error('session became active'));
 
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).resolves.toBe(false);
+  });
+
+  it('does not start the supervisor to release ownership when the gate is disabled', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await expect(
+      releaseExitedManagedSessionForContinue('session-1', process.env, false),
+    ).resolves.toBe(false);
+
+    expect(mockRelease).not.toHaveBeenCalled();
   });
 });
 

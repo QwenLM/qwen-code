@@ -206,6 +206,10 @@ vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
   showResumeSessionPickerItem: mockShowResumeSessionPickerItem,
 }));
 
+vi.mock('../agent-view/feature.js', () => ({
+  requireAgentViewEnabled: vi.fn(),
+}));
+
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
@@ -1068,5 +1072,13 @@ describe('agents command', () => {
       'Attach with qwen agents attach session-2.',
       'View logs with qwen agents logs session-2.',
     ]);
+  });
+
+  it('rejects a whitespace-only background prompt before supervisor startup', async () => {
+    await expect(handleAgentViewBackgroundPrompt('   ')).rejects.toThrow(
+      'Cannot use --bg/--background without a prompt.',
+    );
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
   });
 });

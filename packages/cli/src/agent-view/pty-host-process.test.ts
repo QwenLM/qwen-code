@@ -19,7 +19,7 @@ import {
   launchAgentViewPtyHostProcess,
   runAgentViewPtyHostProcess,
 } from './pty-host-process.js';
-import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { PTY_HOST_AUTH_TOKEN_ENV, PTY_HOST_ID_ENV } from './pty-host-env.js';
 import {
   BoundedOutputRing,
   type AgentViewPtyHostExit,
@@ -1072,12 +1072,14 @@ describe('Agent View PTY host process server', () => {
       globalDir,
     });
     socketDirs.add(path.dirname(socketPath));
-    const server = await createStatusServer(socketPath);
+    const hostId = 'host-spawn-contract';
+    const server = await createStatusServer(socketPath, [], hostId);
     const child = fakeChildProcess(2468);
     const spawnProcess = vi.fn(() => child);
     try {
       await launchAgentViewPtyHostProcess(launch, {
         globalDir,
+        identity: { hostId, endpoint: socketPath, authToken: 'host-token' },
         spawnProcess,
       });
 
@@ -1088,9 +1090,8 @@ describe('Agent View PTY host process server', () => {
           socketPath,
         ],
         expect.objectContaining({
-          [PTY_HOST_AUTH_TOKEN_ENV]: expect.stringMatching(
-            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-          ),
+          [PTY_HOST_AUTH_TOKEN_ENV]: 'host-token',
+          [PTY_HOST_ID_ENV]: hostId,
         }),
         expect.stringContaining('host-stderr.log'),
       );
@@ -1110,11 +1111,13 @@ describe('Agent View PTY host process server', () => {
     });
     socketDirs.add(path.dirname(socketPath));
     const operations: string[] = [];
-    const server = await createStatusServer(socketPath, operations);
+    const hostId = 'host-dispose-child';
+    const server = await createStatusServer(socketPath, operations, hostId);
     const child = fakeChildProcess(2468);
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
+        identity: { hostId, endpoint: socketPath, authToken: 'host-token' },
         spawnProcess: () => child,
       });
 
@@ -1141,11 +1144,13 @@ describe('Agent View PTY host process server', () => {
     });
     socketDirs.add(path.dirname(socketPath));
     const operations: string[] = [];
-    const server = await createStatusServer(socketPath, operations);
+    const hostId = 'host-kill-child';
+    const server = await createStatusServer(socketPath, operations, hostId);
     const child = fakeChildProcess(2468);
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
+        identity: { hostId, endpoint: socketPath, authToken: 'host-token' },
         spawnProcess: () => child,
       });
 
@@ -1168,11 +1173,13 @@ describe('Agent View PTY host process server', () => {
       globalDir,
     });
     socketDirs.add(path.dirname(socketPath));
-    const server = await createStatusServer(socketPath);
+    const hostId = 'host-child-signal';
+    const server = await createStatusServer(socketPath, [], hostId);
     const child = fakeChildProcess(2468);
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
+        identity: { hostId, endpoint: socketPath, authToken: 'host-token' },
         spawnProcess: () => child,
       });
 
@@ -1327,6 +1334,7 @@ async function listenServer(
 async function createStatusServer(
   socketPath: string,
   operations: string[] = [],
+  hostId?: string,
 ): Promise<net.Server> {
   if (!isWindowsPipePath(socketPath)) {
     await fs.mkdir(path.dirname(socketPath), { recursive: true });
@@ -1350,7 +1358,11 @@ async function createStatusServer(
           ok: true,
           result:
             request.op === 'status'
-              ? { pid: process.pid, workerPid: 1234 }
+              ? {
+                  ...(hostId ? { hostId } : {}),
+                  pid: process.pid,
+                  workerPid: 1234,
+                }
               : request.op === 'kill'
                 ? { killed: true }
                 : { shuttingDown: true },

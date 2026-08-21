@@ -75,6 +75,7 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
 import { agentsCommand } from '../commands/agents.js';
+import { setInvocationScopedEnv } from './invocation-env.js';
 import { isValidSessionId } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -549,37 +550,6 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-function hasRawOption(
-  rawArgv: readonly string[],
-  longName: string,
-  shortName?: string,
-): boolean {
-  const separatorIndex = rawArgv.indexOf('--');
-  const optionTokens = rawArgv.slice(
-    0,
-    separatorIndex === -1 ? rawArgv.length : separatorIndex,
-  );
-  const camelName = `--${longName
-    .slice(2)
-    .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())}`;
-  const longNames = camelName === longName ? [longName] : [longName, camelName];
-  return optionTokens.some(
-    (token) =>
-      longNames.some(
-        (name) =>
-          token === name ||
-          token.startsWith(`${name}=`) ||
-          token === `--no-${name.slice(2)}`,
-      ) ||
-      token === shortName ||
-      (shortName !== undefined && token.startsWith(`${shortName}=`)) ||
-      (shortName !== undefined &&
-        token.startsWith('-') &&
-        !token.startsWith('--') &&
-        token.slice(1).includes(shortName.slice(1))),
-  );
-}
-
 function buildCliParser(rawArgv: string[]): Argv {
   const parser = yargs(rawArgv)
     .parserConfiguration({ 'populate--': true })
@@ -679,6 +649,19 @@ function buildCliParser(rawArgv: string[]): Argv {
       description:
         'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
     })
+    .option('background', {
+      alias: 'bg',
+      type: 'boolean',
+      nargs: 0,
+      description: 'Start a new Agent View background session',
+    })
+    .option('continue', {
+      alias: 'c',
+      type: 'boolean',
+      nargs: 0,
+      description: 'Resume the most recent session for the current project.',
+      default: false,
+    })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
         .positional('query', {
@@ -710,11 +693,6 @@ function buildCliParser(rawArgv: string[]): Argv {
           type: 'string',
           description:
             'Execute the provided prompt and continue in interactive mode',
-        })
-        .option('background', {
-          alias: 'bg',
-          type: 'boolean',
-          description: 'Start a new Agent View background session',
         })
         .option('system-prompt', {
           type: 'string',
@@ -893,13 +871,6 @@ function buildCliParser(rawArgv: string[]): Argv {
             'File path for receiving remote input commands (bidirectional sync). ' +
             'An external process writes JSONL commands; the TUI watches and processes them.',
         })
-        .option('continue', {
-          alias: 'c',
-          type: 'boolean',
-          description:
-            'Resume the most recent session for the current project.',
-          default: false,
-        })
         .option('resume', {
           alias: 'r',
           type: 'string',
@@ -1014,123 +985,12 @@ function buildCliParser(rawArgv: string[]): Argv {
           const separatorTail = Array.isArray(argv['--']) ? argv['--'] : [];
           const hasQuery = hasPositionalQuery || separatorTail.length > 0;
 
-          if (argv['background'] && !hasQuery) {
-            return 'Cannot use --bg/--background without a positional prompt';
-          }
-          if (argv['background'] && argv['prompt'] !== undefined) {
-            return 'Cannot use --bg/--background with --prompt (-p)';
-          }
-          if (argv['background'] && argv['promptInteractive'] !== undefined) {
-            return 'Cannot use --bg/--background with --prompt-interactive (-i)';
-          }
-          if (
-            argv['background'] &&
-            (hasRawOption(rawArgv, '--acp') ||
-              hasRawOption(rawArgv, '--experimental-acp'))
-          ) {
-            return 'Cannot use --bg/--background with ACP mode';
-          }
-          if (argv['background'] && argv['inputFormat'] === 'stream-json') {
-            return 'Cannot use --bg/--background with --input-format stream-json';
-          }
-          if (
-            argv['background'] &&
-            (argv['outputFormat'] === OutputFormat.JSON ||
-              argv['outputFormat'] === OutputFormat.STREAM_JSON)
-          ) {
-            return 'Cannot use --bg/--background with JSON output';
-          }
-          if (argv['background'] && argv['jsonSchema'] !== undefined) {
-            return 'Cannot use --bg/--background with --json-schema';
-          }
-          if (
-            argv['background'] &&
-            (argv['resume'] !== undefined ||
-              hasRawOption(rawArgv, '--continue', '-c') ||
-              argv['sessionId'] !== undefined)
-          ) {
-            return 'Cannot use --bg/--background with --resume, --continue, or --session-id';
-          }
-          if (argv['background'] && argv['worktree'] !== undefined) {
-            return 'Cannot use --bg/--background with --worktree';
-          }
-          if (argv['background'] && argv['model'] !== undefined) {
-            return 'Cannot use --bg/--background with --model';
-          }
-          if (argv['background'] && argv['approvalMode'] !== undefined) {
-            return 'Cannot use --bg/--background with --approval-mode';
-          }
-          if (argv['background'] && argv['includeDirectories']) {
-            return 'Cannot use --bg/--background with --include-directories';
-          }
-          if (argv['background'] && hasRawOption(rawArgv, '--yolo', '-y')) {
-            return 'Cannot use --bg/--background with --yolo (-y)';
-          }
-          if (
-            argv['background'] &&
-            (hasRawOption(rawArgv, '--sandbox', '-s') ||
-              argv['sandboxImage'] !== undefined ||
-              argv['systemPrompt'] !== undefined ||
-              argv['appendSystemPrompt'] !== undefined ||
-              argv['mcpConfig'] !== undefined ||
-              argv['extensions'] ||
-              argv['allowedTools'] ||
-              argv['allowedMcpServerNames'])
-          ) {
-            return 'Cannot use --bg/--background with --sandbox, --sandbox-image, --system-prompt, --append-system-prompt, --mcp-config, --extensions, --allowed-tools, or --allowed-mcp-server-names';
-          }
-          if (
-            argv['background'] &&
-            (argv['inputFile'] !== undefined ||
-              argv['fallbackModel'] !== undefined ||
-              argv['coreTools'] !== undefined ||
-              argv['excludeTools'] !== undefined ||
-              argv['disabledSlashCommands'] !== undefined ||
-              argv['authType'] !== undefined ||
-              hasRawOption(rawArgv, '--experimental-lsp') ||
-              argv['jsonFile'] !== undefined ||
-              argv['jsonFd'] !== undefined)
-          ) {
-            return 'Cannot use --bg/--background with --input-file, --fallback-model, --core-tools, --exclude-tools, --disabled-slash-commands, --auth-type, --experimental-lsp, --json-file, or --json-fd';
-          }
-          if (
-            argv['background'] &&
-            (argv['maxWallTime'] !== undefined ||
-              argv['maxSessionTurns'] !== undefined ||
-              argv['maxToolCalls'] !== undefined ||
-              argv['maxSubagentDepth'] !== undefined)
-          ) {
-            return 'Cannot use --bg/--background with --max-wall-time, --max-session-turns, --max-tool-calls, or --max-subagent-depth';
-          }
-          if (
-            argv['background'] &&
-            (hasRawOption(rawArgv, '--safe-mode') ||
-              argv['proxy'] !== undefined ||
-              hasRawOption(rawArgv, '--insecure') ||
-              hasRawOption(rawArgv, '--chat-recording') ||
-              hasRawOption(rawArgv, '--openai-logging') ||
-              argv['openaiLoggingDir'] !== undefined ||
-              argv['openaiApiKey'] !== undefined ||
-              argv['openaiBaseUrl'] !== undefined ||
-              hasRawOption(rawArgv, '--screen-reader') ||
-              hasRawOption(rawArgv, '--bare') ||
-              hasRawOption(rawArgv, '--debug', '-d'))
-          ) {
-            return 'Cannot use --bg/--background with --safe-mode, --proxy, --insecure, --chat-recording, --openai-logging, --openai-logging-dir, --openai-api-key, --openai-base-url, --screen-reader, --bare, or --debug';
-          }
-          if (
-            argv['background'] &&
-            (hasRawOption(rawArgv, '--telemetry') ||
-              argv['telemetryTarget'] !== undefined ||
-              argv['telemetryOtlpEndpoint'] !== undefined ||
-              argv['telemetryOtlpProtocol'] !== undefined ||
-              hasRawOption(rawArgv, '--telemetry-log-prompts') ||
-              argv['telemetryOutfile'] !== undefined ||
-              argv['channel'] !== undefined ||
-              hasRawOption(rawArgv, '--list-extensions', '-l') ||
-              argv['sandboxSessionId'] !== undefined)
-          ) {
-            return 'Cannot use --bg/--background with telemetry flags, --channel, --list-extensions, or --sandbox-session-id';
+          if (argv['background']) {
+            if (!hasQuery) {
+              return 'Cannot use --bg/--background without a positional prompt';
+            }
+            const backgroundError = validateBackgroundInvocation(rawArgv);
+            if (backgroundError) return backgroundError;
           }
           if (argv['background'] && !process.stdin.isTTY) {
             // The positional-prompt gate above already ran, so the prompt
@@ -1254,6 +1114,32 @@ function buildCliParser(rawArgv: string[]): Argv {
   return parser;
 }
 
+function validateBackgroundInvocation(rawArgv: string[]): string | undefined {
+  try {
+    yargs(rawArgv)
+      .exitProcess(false)
+      .help(false)
+      .version(false)
+      .parserConfiguration({ 'populate--': true })
+      .option('background', {
+        alias: 'bg',
+        type: 'boolean',
+        nargs: 0,
+      })
+      .command('$0 [query..]', false, (parser: Argv) =>
+        parser.positional('query', { type: 'string' }),
+      )
+      .strictOptions()
+      .fail((message, error) => {
+        throw error ?? new Error(message);
+      })
+      .parseSync();
+    return undefined;
+  } catch {
+    return 'Cannot use --bg/--background with other CLI options; pass only a positional prompt or place option-looking prompt text after `--`';
+  }
+}
+
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
@@ -1269,6 +1155,16 @@ export async function parseArguments(): Promise<CliArgs> {
 
   const yargsInstance = buildCliParser(rawArgv);
   yargsInstance.command(agentsCommand);
+  yargsInstance.middleware((argv) => {
+    if (
+      argv._.length > 0 &&
+      (argv['background'] === true || argv['continue'] === true)
+    ) {
+      throw new Error(
+        '`--bg/--background` and `--continue/-c` cannot be combined with a CLI subcommand. Place `--` before prompt text that matches a command name.',
+      );
+    }
+  });
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1754,7 +1650,7 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
-    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    setInvocationScopedEnv('QWEN_DEBUG_LOG_FILE', '1');
   }
   const bareMode = isBareMode(argv.bare);
   const safeMode =
@@ -1765,7 +1661,7 @@ export async function loadCliConfig(
   // every content generator and the preconnect path. Resolution there ORs this
   // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
   if (argv.insecure) {
-    process.env['QWEN_TLS_INSECURE'] = '1';
+    setInvocationScopedEnv('QWEN_TLS_INSECURE', '1');
   }
   // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
   // process-wide. The custom undici dispatcher handles the Node path, but this
@@ -1777,7 +1673,7 @@ export async function loadCliConfig(
     isTlsVerificationDisabled() &&
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
   ) {
-    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    setInvocationScopedEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
     // The setting is process-wide, so the blast radius is every outbound HTTPS
     // connection (model API, OAuth, MCP servers, and child processes that
     // inherit the env), not just model calls. Log to the debug file too, so the
@@ -2218,26 +2114,6 @@ export async function loadCliConfig(
 
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
-      // --continue/--resume --fork-session: the continue guard in gemini.tsx
-      // runs after this fork and would check the fresh fork UUID, so gate
-      // the source here — a live managed session must never be forked into
-      // a second foreground runtime. In the sandbox-host partial-config
-      // process the --resume routing never runs at all, so the resume case
-      // must be gated here too.
-      if (argv.continue || argv.resume) {
-        const {
-          isManagedAgentViewContinueBlocked,
-          isManagedAgentViewResumeBlocked,
-          MANAGED_AGENT_VIEW_RESUME_MESSAGE,
-        } = await import('../startup/agent-view-resume-guard.js');
-        const blocked = argv.resume
-          ? await isManagedAgentViewResumeBlocked(sourceSessionId)
-          : await isManagedAgentViewContinueBlocked(sourceSessionId);
-        if (blocked) {
-          writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
-          process.exit(1);
-        }
-      }
       const forkedSessionId = randomUUID();
       try {
         await sessionService.forkSession(sourceSessionId, forkedSessionId);
@@ -2474,6 +2350,7 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    agentViewEnabled: settings.experimental?.agentView === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,

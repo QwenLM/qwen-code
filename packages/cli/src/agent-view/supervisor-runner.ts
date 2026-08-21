@@ -35,6 +35,7 @@ import {
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { restoreInvocationScopedEnv } from '../config/invocation-env.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -47,6 +48,7 @@ const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
 const LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS = 30_000;
+const AGENT_VIEW_SHUTDOWN_TIMEOUT_MS = 60_000;
 
 export interface AgentViewSupervisorClientHandle {
   socketPath: string;
@@ -67,6 +69,7 @@ export interface AgentViewSupervisorClientHandle {
   stop(sessionId: string): Promise<unknown>;
   kill(sessionId: string): Promise<unknown>;
   respawn(sessionId?: string): Promise<unknown>;
+  release(sessionId: string): Promise<unknown>;
   remove(sessionId: string): Promise<unknown>;
   pin(sessionId: string, pinned?: boolean): Promise<unknown>;
   rename(sessionId: string, displayName: string): Promise<unknown>;
@@ -144,6 +147,7 @@ export async function runAgentViewSupervisor(
   const authToken = randomUUID();
   const startedAt = new Date().toISOString();
   let closeRequested = false;
+  let closeServer = (): Promise<void> => Promise.resolve();
   const handler = createAgentViewSupervisorHandler({
     ...(options.globalDir ? { globalDir: options.globalDir } : {}),
     ...(options.hibernationPolicy
@@ -152,7 +156,7 @@ export async function runAgentViewSupervisor(
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
-        void Promise.resolve(server.close()).catch(() => {});
+        void closeServer().catch(() => {});
       });
     },
   });
@@ -178,6 +182,8 @@ export async function runAgentViewSupervisor(
     authToken,
     authorizeSideband,
   });
+  let serverClosePromise: Promise<void> | undefined;
+  closeServer = () => (serverClosePromise ??= server.close());
 
   await server.listen();
   await writeAgentViewSupervisor(
@@ -199,16 +205,14 @@ export async function runAgentViewSupervisor(
     const onSigterm = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
     const onSigint = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void closeServer()
         .catch(() => {})
         .finally(resolve);
     };
@@ -224,13 +228,7 @@ export async function runAgentViewSupervisor(
     process.once('SIGTERM', onSigterm);
     process.once('SIGINT', onSigint);
   });
-  await fs
-    .unlink(
-      getAgentViewStorePaths({
-        ...(options.globalDir ? { globalDir: options.globalDir } : {}),
-      }).supervisorPath,
-    )
-    .catch(() => {});
+  await closeServer().catch(() => {});
 }
 
 function createSupervisorHandle(
@@ -298,9 +296,25 @@ function createSupervisorHandle(
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
     stop: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'stop', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'stop',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     kill: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'kill', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'kill',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     respawn: (sessionId?: string) =>
       callAgentViewSupervisor(
         socketPath,
@@ -311,8 +325,26 @@ function createSupervisorHandle(
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
         },
       ),
+    release: (sessionId: string) =>
+      callAgentViewSupervisor(
+        socketPath,
+        'release',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     remove: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'remove', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'remove',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     pin: (sessionId: string, pinned?: boolean) =>
       callAgentViewSupervisor(
         socketPath,
@@ -335,7 +367,10 @@ function createSupervisorHandle(
         socketPath,
         'shutdown',
         keepWorkers === undefined ? undefined : { keepWorkers },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: AGENT_VIEW_SHUTDOWN_TIMEOUT_MS,
+        },
       ),
   };
 }
@@ -503,7 +538,7 @@ function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
   // Invocation-scoped flags must not leak into the long-lived daemon: a
   // `--bare` caller would otherwise contaminate every session the daemon
   // later spawns (bare mode is env-driven via QWEN_CODE_SIMPLE).
-  const env = { ...process.env };
+  const env = restoreInvocationScopedEnv(process.env);
   delete env['QWEN_CODE_SIMPLE'];
   return spawn(argv[0]!, argv.slice(1), {
     detached: true,

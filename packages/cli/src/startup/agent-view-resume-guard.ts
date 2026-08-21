@@ -5,11 +5,11 @@
  */
 
 import {
-  patchAgentViewSessionStateIf,
   readAgentViewSessionState,
   readAgentViewSessionStateStrict,
   sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
+import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
 export const MANAGED_AGENT_VIEW_RESUME_MESSAGE =
@@ -42,17 +42,22 @@ export async function isManagedAgentViewResumeBlocked(
 ): Promise<boolean> {
   if (isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
-  // Block during the 'adopting' window too: /background adopt writes
+  // Block during ownership transitions too: /background adopt writes
   // 'adopting', spawns the --resume worker, and only patches 'managed'
-  // afterwards — a concurrent foreground resume would double-run the session.
-  return state?.ownership === 'managed' || state?.ownership === 'adopting';
+  // afterwards; 'removing' may still have a live host or durable cleanup to
+  // finish. A concurrent foreground resume would race either transition.
+  return (
+    state?.ownership === 'managed' ||
+    state?.ownership === 'adopting' ||
+    state?.ownership === 'removing'
+  );
 }
 
 /**
- * `--continue` has no supervisor routing to revive exited sessions (unlike
- * `--resume`, which attaches through the supervisor), so block only while
- * the managed worker is still alive; an exited managed session is safe to
- * resume directly in the foreground.
+ * `--continue` releases an exited managed session through the supervisor
+ * before resuming it in the foreground. Block live sessions and ownership
+ * transitions; callers may explicitly retry an interrupted removal through
+ * the release RPC below.
  */
 export async function isManagedAgentViewContinueBlocked(
   sessionId: string,
@@ -64,7 +69,8 @@ export async function isManagedAgentViewContinueBlocked(
     (state?.ownership === 'managed' &&
       state.processState !== 'exited' &&
       state.processState !== 'hibernated') ||
-    state?.ownership === 'adopting'
+    state?.ownership === 'adopting' ||
+    state?.ownership === 'removing'
   );
 }
 
@@ -97,27 +103,35 @@ export async function isManagedAgentViewDeleteBlocked(
 export async function releaseExitedManagedSessionForContinue(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
+  agentViewEnabled = true,
 ): Promise<boolean> {
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
   if (isSessionWorker(sessionId, env)) return true;
   const state = await readAgentViewSessionState(sessionId);
   if (state?.ownership === 'adopting') return false;
-  if (state?.ownership !== 'managed') {
+  if (state?.ownership !== 'managed' && state?.ownership !== 'removing') {
     return true;
   }
-  if (state.processState !== 'exited' && state.processState !== 'hibernated') {
+  if (
+    state.ownership === 'managed' &&
+    state.processState !== 'exited' &&
+    state.processState !== 'hibernated'
+  ) {
     return false;
   }
-  return patchAgentViewSessionStateIf(sessionId, (current) =>
-    current.ownership === 'managed' &&
-    (current.processState === 'exited' || current.processState === 'hibernated')
-      ? {
-          ownership: 'unmanaged',
-          updatedAt: new Date().toISOString(),
-        }
-      : undefined,
-  );
+  if (!agentViewEnabled) return false;
+  try {
+    const result = await (await ensureAgentViewSupervisor()).release(sessionId);
+    return (
+      typeof result === 'object' &&
+      result !== null &&
+      'released' in result &&
+      result.released === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function isAgentViewWorkerResumeCommandBlocked(
