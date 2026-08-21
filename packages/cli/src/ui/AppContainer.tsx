@@ -2292,7 +2292,9 @@ export const AppContainer = (props: AppContainerProps) => {
         confirmationRequest ||
         loopDetectionConfirmationRequest,
     ),
-    hasForegroundShell: Boolean(activePtyId || embeddedShellFocused),
+    hasForegroundShell: Boolean(
+      activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
+    ),
     hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
     hasQueuedPrompt:
       goalQueueRef.current?.hasQueuedUserMessages?.() === true ||

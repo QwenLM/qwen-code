@@ -1230,14 +1230,9 @@ export async function main() {
           (m) => m.api.totalRequests > 0,
         );
         if (!hasActivity) return;
-        const resumedStartTime = Date.parse(
-          config.getResumedSessionData()?.conversation.startTime ?? '',
-        );
         persistSessionUsage({
           sessionId: config.getSessionId(),
-          startTime: Number.isFinite(resumedStartTime)
-            ? new Date(resumedStartTime)
-            : uiTelemetryService.getSessionStartTime(),
+          startTime: uiTelemetryService.getSessionStartTime(),
           endTime: new Date(),
           project: config.getProjectRoot(),
           metrics,

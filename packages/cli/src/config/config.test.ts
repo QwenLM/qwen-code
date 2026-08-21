@@ -1633,6 +1633,30 @@ describe('parseArguments', () => {
     }
   });
 
+  it('should accept --json-schema with a prompt after the separator', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":"object"}',
+      '--',
+      'fix',
+      'the',
+      '-p',
+      'bug',
+    ];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      const argv = await parseArguments();
+      expect(argv.jsonSchema).toBe('{"type":"object"}');
+      expect(argv['--']).toEqual(['fix', 'the', '-p', 'bug']);
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
   it('should throw when --json-schema is combined with --input-format stream-json', async () => {
     // stream-json input runs through runNonInteractiveStreamJson which
     // doesn't honor the structured-output single-shot termination

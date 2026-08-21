@@ -8,6 +8,7 @@ import {
   readAgentViewSessionState,
   sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
+import { requireValidWorkerToken } from '../agent-view/supervisor-process.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { readAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
@@ -20,23 +21,30 @@ export const AGENT_VIEW_WORKER_RESUME_MESSAGE =
 export const MANAGED_AGENT_VIEW_ONE_SHOT_RESUME_MESSAGE =
   'Cannot use one-shot input (-p/--prompt, -i, --input-file, --fork-session, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
 
-// The worker-env bypass is load-bearing (respawned workers resume their own
-// session), so require the full sideband env plus a matching session id —
-// both production spawn paths build env via createAgentViewWorkerSidebandEnv,
-// while a pasted/stray marker+id pair must not defeat the guard.
-function isSessionWorker(sessionId: string, env: NodeJS.ProcessEnv): boolean {
-  const workerSessionId = readAgentViewWorkerSidebandEnv(env)?.sessionId;
-  return (
-    workerSessionId !== undefined &&
-    sanitizeSessionId(workerSessionId) === sanitizeSessionId(sessionId)
-  );
+async function isSessionWorker(
+  sessionId: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const sideband = readAgentViewWorkerSidebandEnv(env);
+  if (
+    !sideband ||
+    sanitizeSessionId(sideband.sessionId) !== sanitizeSessionId(sessionId)
+  ) {
+    return false;
+  }
+  try {
+    await requireValidWorkerToken(sessionId, { token: sideband.token }, {});
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function isManagedAgentViewResumeBlocked(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  if (isSessionWorker(sessionId, env)) return false;
+  if (await isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
   // Block during ownership transitions too: /background adopt writes
   // 'adopting', spawns the --resume worker, and only patches 'managed'
@@ -59,7 +67,7 @@ export async function isManagedAgentViewContinueBlocked(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  if (isSessionWorker(sessionId, env)) return false;
+  if (await isSessionWorker(sessionId, env)) return false;
   const state = await readAgentViewSessionState(sessionId);
   return (
     (state?.ownership === 'managed' &&
@@ -82,7 +90,7 @@ export async function releaseExitedManagedSessionForContinue(
 ): Promise<boolean> {
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
-  if (isSessionWorker(sessionId, env)) return true;
+  if (await isSessionWorker(sessionId, env)) return true;
   const state = await readAgentViewSessionState(sessionId);
   if (state?.ownership === 'adopting') return false;
   if (state?.ownership !== 'managed' && state?.ownership !== 'removing') {
