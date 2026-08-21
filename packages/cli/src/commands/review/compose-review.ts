@@ -5000,7 +5000,7 @@ function ledgerClaimLine(body: unknown): string {
  * A pathless comment is excluded for the same reason by a different route:
  * it cannot become a deferral entry at all, so no floor could have moved it.
  */
-function deferrableSuggestionsInline(drafted: unknown): number {
+export function deferrableSuggestionsInline(drafted: unknown): number {
   if (!Array.isArray(drafted)) return 0;
   let n = 0;
   for (const c of drafted as Array<{ body?: unknown; path?: unknown }>) {
@@ -5035,7 +5035,7 @@ function deferrableSuggestionsInline(drafted: unknown): number {
  * model-written state JSON, and a non-array reaching `.map` throws out of
  * `composeReviewBody` and loses the whole round.
  */
-function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
+export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
   if (!Array.isArray(drafted)) return [];
   const out: DraftedFinding[] = [];
   // Deduped exactly as `idFor` dedupes: the ledger keeps the FIRST comment

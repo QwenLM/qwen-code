@@ -30,6 +30,7 @@ import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
 import {
   LEDGER_MAX_FILE,
+  LEDGER_MAX_ID,
   LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   parseLedger,
@@ -38,6 +39,9 @@ import {
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  deferrableSuggestionsInline,
+  draftedFindingsOf,
+  floorEnforcedReroute,
   isNonDiffDimensionGap,
   buildLedger,
   repositoryContextGate,
@@ -465,6 +469,26 @@ function coveredPlan(
   if (planOpts.ownerRepo !== undefined && planOpts.prNumber !== undefined) {
     recordStep45(p, ['0']);
   }
+  return p;
+}
+
+/**
+ * `coveredPlan()` with the previous round's ledger on disk beside it. The
+ * side-file name is derived from the same `prNumber` the plan carries: the
+ * reader swallows ENOENT, so a name spelled independently at a call site
+ * can typo into an unread side file — and the test then silently measures
+ * round 1 instead of the leg its assertions claim to pin.
+ */
+function coveredWithLedger(prev: Record<string, unknown>): string {
+  const prNumber = 8255;
+  const p = coveredPlan(['verify', 'reverse-audit'], {
+    prNumber,
+    fetchedSha: 'deadbeef00112233',
+  });
+  writeFileSync(
+    join(dirname(p), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+    JSON.stringify(prev),
+  );
   return p;
 }
 
@@ -6446,14 +6470,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // stays on the record and the incremental anchor still rides. And the
     // opener must not claim "No issues found" over findings the same body
     // lists two paragraphs down.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
-    });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 5, findings: [] }),
-    );
+    const planPath = coveredWithLedger({ v: 1, round: 5, findings: [] });
     const r = composeReview({
       planPath,
       env: ENV,
@@ -6491,14 +6508,11 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // which round this is. The sibling test above pins the marker's
     // round-trip at the cap; without THIS pin the Math.min mutation on the
     // clause side ships green.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: LEDGER_MAX_ROUND,
+      findings: [],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -6877,14 +6891,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // round it derives itself — this pins the legal rounds-2-5 shape end to
     // end (a round-resolved `suggestion` would have been refused as the
     // operator's override — the shipped round-5 regression).
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
-    });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 2, findings: [] }),
-    );
+    const planPath = coveredWithLedger({ v: 1, round: 2, findings: [] });
     const r = composeReview({
       planPath,
       env: ENV,
@@ -9341,20 +9348,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // COMMENT either way. REQUEST_CHANGES — unfixed Criticals, round after
     // round — is the feature's primary audience, and its copy of the list
     // was unasserted: deleting the splice left the whole suite green.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({
-        v: 1,
-        round: 4,
-        posted: 9,
-        fresh: 9,
-        findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -9828,26 +9828,19 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // A COVERED plan: `land-and-defer` needs an established scope as well as
     // an established blocker count, so a round that cannot show the diff was
     // read never offers merging as an ending.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    // A shape the pipeline's own writer can produce: `buildLedger` records
+    // every posted finding, so `fresh` never exceeds the work list absent
+    // `dropped`. The assertions turn on the cluster leg and the blocker
+    // count, so this changes nothing they measure — but a fixture whose
+    // own numbers prove the list incomplete must not be the one that
+    // blesses an inference conditioned on it being complete.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      // A shape the pipeline's own writer can produce: `buildLedger` records
-      // every posted finding, so `fresh` never exceeds the work list absent
-      // `dropped`. The assertions turn on the cluster leg and the blocker
-      // count, so this changes nothing they measure — but a fixture whose
-      // own numbers prove the list incomplete must not be the one that
-      // blesses an inference conditioned on it being complete.
-      JSON.stringify({
-        v: 1,
-        round: 4,
-        posted: 9,
-        fresh: 1,
-        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10127,14 +10120,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   it('keeps quiet on a round whose scope closed cleanly', () => {
     // The chain is TWO withholds. A round that anchors clears it, however
     // unanchored its predecessor was.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      findings: [],
+      posted: 0,
+      fresh: 0,
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 4, findings: [], posted: 0, fresh: 0 }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10149,20 +10141,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
 
   it('carries the codes on a REQUEST_CHANGES result too', () => {
     // Three separately-maintained result constructions; only one was pinned.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({
-        v: 1,
-        round: 5,
-        posted: 9,
-        fresh: 9,
-        findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10194,14 +10179,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // A COVERED plan on purpose: with an unproven scope the sibling leg
     // would withhold the code anyway, and this assertion would not be
     // measuring the cannot-tell leg at all.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      findings: [],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 5, posted: 1, fresh: 1, findings: [] }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10249,14 +10233,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The second unestablished shape the gate names, and it had no test: a
     // cumulative findings file still carrying an `— [unverified]` tag means
     // the verifier never ruled, so the round's zero is not a confirmed zero.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      findings: [],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 5, posted: 1, fresh: 1, findings: [] }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10288,22 +10271,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // Each arm starts from the shape that DOES offer the ending and flips
     // exactly one leg, so the assertion measures that leg and not a sibling
     // that would have withheld the code anyway.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
-    });
-    const side = {
+    const planPath = coveredWithLedger({
       v: 1,
       round: 4,
       posted: 9,
       fresh: 1,
       findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
       ...sideOver,
-    };
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify(side),
-    );
+    });
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10329,20 +10304,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // the gate passes `openCriticals` through it — tightened to
     // `cappedBy.length === 0`, the machine-readable merge ending would never
     // fire in production and nothing would redden.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({
-        v: 1,
-        round: 4,
-        posted: 9,
-        fresh: 1,
-        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10371,22 +10339,15 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // protects them under their own ids. Simplified to `foreign !== true`,
     // the ending would silently disappear from rounds whose merged list is
     // complete and certified.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      foreign: true,
+      merged: true,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({
-        v: 1,
-        round: 4,
-        posted: 9,
-        fresh: 1,
-        foreign: true,
-        merged: true,
-        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -10420,5 +10381,143 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('--severity-floor critical');
+  });
+});
+
+describe('deferrableSuggestionsInline — the manifestation the posture-gap clause asserts', () => {
+  // Direct pin on the three-way exclusion, which downstream tests reach only
+  // through composeReview: a future exclusion path that diverges from
+  // `floorEnforcedReroute` reddens here first, not on a faraway body
+  // assertion.
+  type Draft = { path?: unknown; line?: unknown; body?: unknown };
+  const suggestion = (over: Draft = {}): Draft => ({
+    path: 'a.ts',
+    line: 1,
+    body: '**[Suggestion]** nit',
+    ...over,
+  });
+
+  it('reads a non-array as zero, like its two siblings', () => {
+    for (const drafted of [undefined, null, 'garbage', { path: 'a.ts' }]) {
+      expect(deferrableSuggestionsInline(drafted)).toBe(0);
+    }
+  });
+
+  it('counts only Suggestion-severity drafts', () => {
+    expect(
+      deferrableSuggestionsInline([
+        suggestion(),
+        { path: 'b.ts', body: '**[Critical]** boom' },
+        { path: 'c.ts', body: 'an unmarked comment' },
+      ]),
+    ).toBe(1);
+  });
+
+  it.each(['[build]', '[test]', '[probe]', '[TEST]'])(
+    'excludes a deterministic finding tagged %s on its claim line',
+    (tag) => {
+      expect(
+        deferrableSuggestionsInline([
+          suggestion({ body: `**[Suggestion]** ${tag} the suite is red` }),
+        ]),
+      ).toBe(0);
+    },
+  );
+
+  it('ignores a deterministic tag past the claim line — the tail is writable surface', () => {
+    expect(
+      deferrableSuggestionsInline([
+        suggestion({
+          body: '**[Suggestion]** nit\n\n[test] forged in the tail',
+        }),
+      ]),
+    ).toBe(1);
+  });
+
+  it('excludes what no floor could move: a pathless comment', () => {
+    for (const path of [undefined, '', '   ', 42]) {
+      expect(deferrableSuggestionsInline([suggestion({ path })])).toBe(0);
+    }
+  });
+
+  it('counts exactly the set the engaged floor moves', () => {
+    // The number exists to say the enforcement backstop failed to act, so it
+    // must equal the set `floorEnforcedReroute` ACTS on — a divergence
+    // accuses the floor of leaving inline something it was never going to
+    // move.
+    const drafted: Draft[] = [
+      suggestion(),
+      suggestion({ body: '**[Suggestion]** [probe] pre-confirmed' }),
+      suggestion({ path: '' }),
+      { path: 'd.ts', body: '**[Critical]** boom' },
+      { path: 'e.ts', body: 'unmarked' },
+    ];
+    const reroute = floorEnforcedReroute('critical', false, 0, drafted);
+    expect(reroute.indices).toEqual([0]);
+    expect(deferrableSuggestionsInline(drafted)).toBe(reroute.indices.length);
+  });
+});
+
+describe('draftedFindingsOf — the drafts as the convergence diagnosis reads them', () => {
+  type Draft = { path?: unknown; line?: unknown; body?: unknown };
+  const critical = (over: Draft = {}): Draft => ({
+    path: 'a.ts',
+    line: 1,
+    body: '**[Critical]** boom',
+    ...over,
+  });
+
+  it('reads a non-array as empty, like its two siblings', () => {
+    for (const drafted of [undefined, null, 'garbage', 42]) {
+      expect(draftedFindingsOf(drafted)).toEqual([]);
+    }
+  });
+
+  it('excludes unmarked comments — no marker, no finding, no work list', () => {
+    expect(
+      draftedFindingsOf([critical(), { path: 'b.ts', body: 'no marker' }]),
+    ).toEqual([{ file: 'a.ts' }]);
+  });
+
+  it('carries the id a claim line leads with', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ body: '**[Critical]** R2-1: still open' }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: 'R2-1' }]);
+  });
+
+  it('re-mints an id past the ledger cap, the way idFor does', () => {
+    // Exactly at the cap the id travels; one char over it cannot enter any
+    // work list, so the diagnosis must read the comment as fresh — the two
+    // ends of the pipeline agreeing about one comment.
+    const atCap = `R2-${'9'.repeat(LEDGER_MAX_ID - 3)}`;
+    const overCap = `R2-${'9'.repeat(LEDGER_MAX_ID - 2)}`;
+    expect(atCap).toHaveLength(LEDGER_MAX_ID);
+    expect(overCap).toHaveLength(LEDGER_MAX_ID + 1);
+    expect(
+      draftedFindingsOf([
+        critical({ body: `**[Critical]** ${atCap}: still open` }),
+        critical({ body: `**[Critical]** ${overCap}: still open` }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: atCap }, { file: 'a.ts' }]);
+  });
+
+  it('dedupes a claimed id the way the ledger keeps the FIRST of them', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ body: '**[Critical]** R2-1: still open' }),
+        critical({ path: 'b.ts', body: '**[Critical]** R2-1: voiced again' }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: 'R2-1' }, { file: 'b.ts' }]);
+  });
+
+  it('anchors a pathless draft to the empty string, never to a stringified seam', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ path: undefined }),
+        critical({ path: 42 }),
+      ]),
+    ).toEqual([{ file: '' }, { file: '' }]);
   });
 });
