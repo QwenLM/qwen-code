@@ -112,6 +112,18 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
+ * Login of the currently authenticated Aone account — the sibling of
+ * gh.ts's `currentUser`. Reads the `account` field of
+ * `a1 auth whoami --format json`; empty when whoami succeeds but names no
+ * account (presubmit's self-PR comparison then fails soft, like the GitHub
+ * path's empty login).
+ */
+export function aoneCurrentUser(): string {
+  const out = a1Json<{ account?: unknown }>('auth', 'whoami');
+  return typeof out.account === 'string' ? out.account.trim() : '';
+}
+
+/**
  * Fail fast with an actionable message when `a1` cannot run. A missing
  * binary (ENOENT — the dominant first-run state for this new dependency) is
  * a different remedy than an unauthenticated one.

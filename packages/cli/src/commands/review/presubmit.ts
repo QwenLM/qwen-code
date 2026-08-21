@@ -8,7 +8,11 @@
 // gh-API queries and emits a single JSON report describing self-PR status,
 // CI / build status, existing Qwen Code comment classification, and the
 // downgrade decisions the LLM should apply when constructing the review
-// event.
+// event. On an Aone target the command routes at the `a1` CLI instead and
+// emits the SAME report shape with only the backed slice filled in:
+// self-PR detection (whoami account vs the MR author) and head drift
+// (`sourceBranch` is the live head); CI status and existing-comment
+// classification are unbacked there and report neutral/empty.
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, readFileSync } from 'node:fs';
@@ -19,8 +23,15 @@ import {
   ghApiAllNested,
   currentUser,
   ensureAuthenticated,
+  isOwnerRepo,
   setGhHost,
 } from './lib/gh.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import {
+  aoneCurrentUser,
+  ensureAoneAuthenticated,
+} from './lib/platform/aone-client.js';
+import { mrPresubmitFacts } from './lib/platform/aone.js';
 import {
   LEADING_INVISIBLE_RE,
   carriedClaimLine,
@@ -853,6 +864,131 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   writeStdoutLine(`Wrote presubmit report to ${outPath}`);
 }
 
+/**
+ * The Aone path. Self-PR detection and head drift are backed — one
+ * `mr view` fetch plus `a1 auth whoami`; CI status and existing-comment
+ * classification have NO Aone backing and report the same neutral shape a
+ * GitHub repo with zero checks and zero prior comments produces, so the
+ * report's consumers (Step 7's apply-the-report rules, compose-review's
+ * downgrade fields) are unchanged. `--new-findings` is unused here: both
+ * of its consumers are unbacked (no dedup) or fail safe without it (no
+ * compare API exists on Aone, so a drifted head is always anchors-at-risk).
+ */
+async function runAonePresubmit(args: PresubmitArgs): Promise<void> {
+  const {
+    pr_number: prNumber,
+    commit_sha: commitSha,
+    owner_repo: ownerRepo,
+    out_path: outPath,
+  } = args;
+
+  // Usage errors surface BEFORE the auth gate and the platform-fetch
+  // try/catch: a malformed positional is a deterministic invocation
+  // problem, not a metadata blip — catching it below would emit a
+  // "metadata unavailable" downgrade report instead of failing the call.
+  // The id check matches the sibling subcommands (meta/fetch-pr/…); it is
+  // also an argv gate — the value reaches `a1 repo mr view` as a
+  // positional, and a `-1` would parse as a flag if it rode through.
+  if (
+    !/^[0-9]+$/.test(prNumber) ||
+    !Number.isInteger(Number(prNumber)) ||
+    Number(prNumber) <= 0
+  ) {
+    throw new TypeError(
+      `presubmit: pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
+  // The same shape check the Aone reader seam applies (meta/fetch-pr
+  // already refused anything else before this command could run).
+  if (!isOwnerRepo(ownerRepo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(ownerRepo)}`,
+    );
+  }
+
+  ensureAoneAuthenticated();
+
+  // --- Self-PR detection + live head (one fetch) -------------------------
+  // The same two failure classes as the GitHub path. A readable MR whose
+  // author is absent (deleted account) is fail-SOFT — isSelfPr false is the
+  // right answer. A THROWN mr view (auth expiry, a network blip, a bad id)
+  // is fail-CLOSED: with no head to compare, self-PR and drift are both
+  // undetectable, so the run must not silently proceed as if it had
+  // checked — it emits a downgrade reason and caps the Approve.
+  let author = '';
+  let liveHeadSha = '';
+  let metaUnavailable = false;
+  try {
+    ({ author, headSha: liveHeadSha } = mrPresubmitFacts(
+      Number(prNumber),
+      ownerRepo,
+    ));
+  } catch {
+    metaUnavailable = true;
+  }
+  const me = aoneCurrentUser();
+  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
+
+  // --- Head drift ---------------------------------------------------------
+  // Under AGit-Flow `sourceBranch` IS the head; Aone has no compare API, so
+  // the detail stays null and a drifted head rules anchors-at-risk
+  // fail-safe. submit's pre-write drift gate re-checks this at post time.
+  const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
+    commitSha,
+    liveHeadSha,
+    null,
+    null,
+  );
+
+  // --- Downgrade decisions ----------------------------------------------
+  const downgradeReasons: string[] = [];
+  if (isSelfPr) downgradeReasons.push('self-PR');
+  if (driftReason) downgradeReasons.push(driftReason);
+  if (metaUnavailable) {
+    downgradeReasons.push(
+      'MR metadata unavailable — could not verify self-PR status or head drift',
+    );
+  }
+
+  const noComments: CommentSummary[] = [];
+  const result = {
+    prNumber,
+    commitSha,
+    ownerRepo,
+    isSelfPr,
+    ciStatus: {
+      class: 'no_checks' as const,
+      failedCheckNames: [] as string[],
+      skippedCheckNames: [] as string[],
+      totalChecks: 0,
+    },
+    existingComments: {
+      total: 0,
+      byBucket: {
+        stale: 0,
+        resolved: 0,
+        overlap: 0,
+        repost: 0,
+        noConflict: 0,
+      },
+      overlap: noComments,
+      repost: noComments,
+      stale: noComments,
+      resolved: noComments,
+      noConflict: noComments,
+    },
+    downgradeApprove: isSelfPr || headDrift.drifted || metaUnavailable,
+    downgradeRequestChanges: isSelfPr,
+    downgradeReasons,
+    blockOnExistingComments: false,
+    findingsFileInvalid: false,
+    headDrift,
+  };
+
+  writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  writeStdoutLine(`Wrote presubmit report to ${outPath}`);
+}
+
 export const presubmitCommand: CommandModule = {
   command: 'presubmit <pr_number> <commit_sha> <owner_repo> <out_path>',
   describe:
@@ -872,7 +1008,8 @@ export const presubmitCommand: CommandModule = {
       .positional('owner_repo', {
         type: 'string',
         demandOption: true,
-        describe: 'GitHub "owner/repo"',
+        describe:
+          'Target coordinate: GitHub "owner/repo" or Aone "group/project"',
       })
       .positional('out_path', {
         type: 'string',
@@ -882,15 +1019,20 @@ export const presubmitCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on. SELECTS the platform: an Aone host routes the checks at the a1 CLI (self-PR detection and head drift; CI and existing-comment checks report neutral), anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). Omitted: detected from the clone's origin, else GitHub.",
       })
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match. Ignored on Aone targets (existing-comment classification has no Aone backing).",
       }),
   handler: async (argv) => {
-    setGhHost((argv as { host?: string }).host);
+    const host = (argv as { host?: string }).host;
+    if (detectPlatformKind({ host }) === 'aone') {
+      await runAonePresubmit(argv as unknown as PresubmitArgs);
+      return;
+    }
+    setGhHost(host);
     await runPresubmit(argv as unknown as PresubmitArgs);
   },
 };

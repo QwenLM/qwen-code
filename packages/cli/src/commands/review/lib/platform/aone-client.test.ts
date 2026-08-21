@@ -15,7 +15,7 @@ vi.mock('node:child_process', () => ({
   execFileSync: mockExecFileSync,
 }));
 
-import { a1, a1JsonOnce, a1Once } from './aone-client.js';
+import { a1, a1JsonOnce, a1Once, aoneCurrentUser } from './aone-client.js';
 
 function transientError(): Error {
   // The message shape execFileSync produces, carrying a transient marker
@@ -168,5 +168,39 @@ describe('a1 (the read path) transient-error retry — the POSITIVE side', () =>
     });
     expect(() => a1('repo', 'mr', 'view', '7')).toThrow();
     expect(mockExecFileSync).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+  });
+});
+
+describe('aoneCurrentUser — the whoami sibling of gh.ts currentUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the account field of `a1 auth whoami --format json`', () => {
+    mockExecFileSync.mockReturnValue('{"account":"wenshao"}\n');
+    expect(aoneCurrentUser()).toBe('wenshao');
+    // Pin the FULL argv: the self-PR comparison presubmit runs reads this
+    // account, and a botched spread here would exec a different whoami
+    // shape without any other test noticing (aone.test.ts mocks the module
+    // wholesale).
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    expect(args).toEqual(['auth', 'whoami', '--format', 'json']);
+  });
+
+  it('returns empty (fail-soft) when whoami names no account', () => {
+    // An empty login makes presubmit's self-PR comparison fail soft —
+    // isSelfPr false — exactly like the GitHub path's empty login; a throw
+    // here would kill the whole presubmit over a shape quirk.
+    mockExecFileSync.mockReturnValue('{}\n');
+    expect(aoneCurrentUser()).toBe('');
+    mockExecFileSync.mockReturnValue('{"account":42}\n');
+    expect(aoneCurrentUser()).toBe('');
+  });
+
+  it('trims the account — parity with gh.ts currentUser().trim()', () => {
+    // A padded account would silently miss the self-PR comparison against a
+    // clean MR author (fail-open on exactly the protection this exists for).
+    mockExecFileSync.mockReturnValue('{"account":"  wenshao\\n"}\n');
+    expect(aoneCurrentUser()).toBe('wenshao');
   });
 });

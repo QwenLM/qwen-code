@@ -222,6 +222,32 @@ function mrHeadRefSpec(prNumber: number): string {
 }
 
 /**
+ * The two MR facts presubmit's gate compares, from ONE `mr view` fetch:
+ * the author's account name (self-PR detection — compared against
+ * `aoneCurrentUser`'s whoami account) and the live head SHA (the drift
+ * check — under AGit-Flow `sourceBranch` IS the head). A missing author
+ * (deleted account) reports '', which fails the comparison soft, like the
+ * GitHub path's `author: null`. `username` is server-controlled, so it is
+ * type-guarded to a string and trimmed exactly like `aoneCurrentUser`'s
+ * `account` — a non-string reaching `.toLowerCase()` would crash the
+ * command outside presubmit's fetch try/catch instead of failing soft.
+ */
+export function mrPresubmitFacts(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author:
+      typeof view.author?.username === 'string'
+        ? view.author.username.trim()
+        : '',
+    headSha: (view.sourceBranch ?? '').trim(),
+  };
+}
+
+/**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
  * shapes (`+`, `:`), no rev-parse metasyntax (`^`, `~`, `@{`), no ranges
