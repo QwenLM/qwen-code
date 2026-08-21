@@ -182,6 +182,7 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '审查模型',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.DisplayImage': '显示图片',
@@ -2241,6 +2242,8 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
+  'Configure the native Advisor model, or run /advisor review for a manual second opinion':
+    '配置原生 Advisor 模型，或运行 /advisor review 获取手动触发的第二意见',
   'Consulting advisor...': '正在咨询审查模型...',
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
