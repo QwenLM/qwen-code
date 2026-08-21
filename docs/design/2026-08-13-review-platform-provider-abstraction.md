@@ -407,6 +407,31 @@ Enterprise paragraph.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
+  - **Landed (2026-08-21): the incremental-cache ancestry fallback (D7,
+    #9618).** `resolveIncrementalAnchor` gained a `noAncestry` mode that
+    `fetch-pr` selects when the platform is Aone: an AGit-Flow update
+    AMENDS the single CR commit in place, orphaning the cached head, so
+    the anchor-behind-head test failed for EVERY update and an
+    amend-and-re-review never scoped. Both ancestry tests — the
+    anchor-behind-head test and the behind-merge-base clamp — are
+    skipped (the clamp only ever fired when the update ALSO rebased onto
+    newer master, moving the merge base past the cached head; a pure
+    amend passed it); after the fetch both heads are local, so
+    `anchor..head` IS the update's delta, and the narrowing step
+    assembles the published scope from the CR's own diff exactly as it
+    does for an ancestrally valid GitHub anchor (an amended-and-rebased
+    update's delta carries the rebase drift, but the join reads it only
+    for which files changed — no drift byte reaches the published scope
+    — and drift touching a file outside the CR's diff falls back to the
+    full range there).
+    The existence checks and the `base-untrusted` refusal stay — they
+    guard presence and the base-derived capture, not the lineage. The
+    head-drift checks Aone has were confirmed to compare the live
+    `sourceBranch` SHA against the reviewed SHA the same way D7 names —
+    submit's pre-write gate and mid-batch re-read, and fetch-pr's resume
+    probe; none consults a platform compare API or an ancestry test.
+    GitHub keeps the tests: there an ancestor-less anchor is a
+    force-push, and the tests are the detection.
 
 ## Testing strategy
 
