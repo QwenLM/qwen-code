@@ -306,6 +306,12 @@ jobs:
       - uses: 'dtolnay/rust-toolchain@stable'
         with:
           targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+      - name: 'Verify Rust target installation'
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target list --installed | grep -Fx aarch64-apple-darwin
+          rustup target list --installed | grep -Fx x86_64-apple-darwin
       - uses: 'actions/cache@v4'
         with:
           path: |
