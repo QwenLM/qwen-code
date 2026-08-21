@@ -816,6 +816,14 @@ export interface QwenProviderSummary {
     modelIds?: string[]
     /** Stored model ids grouped by canonical endpoint URL. */
     modelIdsByBaseUrl?: Record<string, string[]>
+    /**
+     * Per-protocol saved views (R35-12): stored model ids grouped by endpoint
+     * for each protocol bucket, so the form can re-seed the model field when
+     * the protocol Select changes.
+     */
+    modelIdsByBaseUrlByProtocol?: Record<string, Record<string, string[]>>
+    /** The saved baseUrl for each protocol bucket. */
+    baseUrlByProtocol?: Record<string, string>
     advancedConfig?: QwenProviderAdvancedConfig
   }
 }

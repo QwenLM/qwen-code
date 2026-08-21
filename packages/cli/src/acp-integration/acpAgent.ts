@@ -2341,6 +2341,50 @@ function readExistingProviderConfig(
           )
         : undefined;
 
+  // Per-protocol views (R35-12): a Custom Provider can be connected
+  // under several protocol buckets at the same baseUrl. The client seeds the
+  // model field from the first bucket only, so flipping the protocol Select
+  // shows the wrong models and submitting rebuilds the selected bucket from
+  // the other protocol's ids (silently deleting the selected bucket's
+  // models). Expose each supported protocol's saved endpoint->ids view and
+  // baseUrl so the client can re-seed on protocol change. Only meaningful
+  // for providers that expose a protocol choice (protocolOptions); single-
+  // protocol providers never show the protocol Select.
+  const modelProvidersRecord = (settings.merged as Record<string, unknown>)[
+    'modelProviders'
+  ] as Record<string, unknown> | undefined;
+  const modelIdsByBaseUrlByProtocol: Record<
+    string,
+    Record<string, string[]>
+  > = {};
+  const baseUrlByProtocol: Record<string, string> = {};
+  if (config.protocolOptions?.length) {
+    for (const proto of config.protocolOptions) {
+      const savedForProto = findExistingProviderModels(
+        config,
+        modelProvidersRecord,
+        proto,
+      );
+      if (!savedForProto || savedForProto.models.length === 0) continue;
+      const protoFirstBaseUrl = savedForProto.models[0]?.baseUrl;
+      const protoBaseUrl =
+        typeof protoFirstBaseUrl === 'string'
+          ? protoFirstBaseUrl
+          : resolveBaseUrl(config);
+      baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
+      const byEndpoint: Record<string, string[]> = {};
+      for (const model of savedForProto.models) {
+        const endpoint = normalizeBaseUrlForMatching(
+          model.baseUrl ?? protoBaseUrl,
+        );
+        const ids = byEndpoint[endpoint] ?? [];
+        if (!ids.includes(model.id)) ids.push(model.id);
+        byEndpoint[endpoint] = ids;
+      }
+      modelIdsByBaseUrlByProtocol[proto] = byEndpoint;
+    }
+  }
+
   return {
     protocol,
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
@@ -2369,6 +2413,10 @@ function readExistingProviderConfig(
             : {}),
         }
       : {}),
+    ...(Object.keys(modelIdsByBaseUrlByProtocol).length > 0
+      ? { modelIdsByBaseUrlByProtocol }
+      : {}),
+    ...(Object.keys(baseUrlByProtocol).length > 0 ? { baseUrlByProtocol } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }

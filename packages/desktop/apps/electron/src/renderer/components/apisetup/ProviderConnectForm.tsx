@@ -38,6 +38,8 @@ import {
   defaultModelIds,
   initialApiKey,
   parseModelIds,
+  protocolBaseUrl,
+  seedProtocolModelState,
   seedProviderModelState,
   switchEndpointModelState,
   trimmedDefaultModelIds,
@@ -210,6 +212,35 @@ export function ProviderConnectForm({
     );
     setFormError(null);
   }, []);
+
+  // Re-seed the model field from the selected protocol bucket's own saved
+  // models (R35-12). Without this, flipping the protocol Select kept the
+  // previous protocol's models and submitting rebuilt the selected bucket
+  // from the wrong protocol's ids, silently deleting its saved models.
+  const handleProtocolChange = useCallback(
+    (nextProtocol: string) => {
+      setProtocol(nextProtocol);
+      if (!selectedProvider || nextProtocol === protocol) return;
+      const savedBaseUrl = protocolBaseUrl(selectedProvider, nextProtocol);
+      const nextBaseUrl = canonicalBaseUrl(
+        selectedProvider,
+        savedBaseUrl ?? defaultBaseUrl(selectedProvider),
+      );
+      setBaseUrl(nextBaseUrl);
+      committedBaseUrlRef.current = nextBaseUrl;
+      const seeded = seedProtocolModelState(
+        selectedProvider,
+        nextProtocol,
+        nextBaseUrl,
+      );
+      customModelIdsRef.current = seeded.customModelIds;
+      customModelIdsByBaseUrlRef.current = seeded.customModelIdsByBaseUrl;
+      trimmedDefaultModelIdsRef.current = seeded.trimmedDefaultModelIds;
+      setModelIdsText(seeded.modelIds.join(', '));
+      setFormError(null);
+    },
+    [selectedProvider, protocol],
+  );
 
   const handleSubmit = useCallback(async () => {
     if (!selectedProvider) return;
@@ -414,7 +445,7 @@ export function ProviderConnectForm({
             <Label>{t('providerConnect.protocol')}</Label>
             <Select
               value={protocol}
-              onValueChange={setProtocol}
+              onValueChange={handleProtocolChange}
               disabled={submitting}
             >
               <SelectTrigger>

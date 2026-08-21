@@ -10,7 +10,9 @@ import {
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
+  protocolBaseUrl,
   resetTrimmedDefaultModelIds,
+  seedProtocolModelState,
   seedProviderModelState,
   switchEndpointModelState,
   shouldResetApiKeyAfterBaseUrlChange,
@@ -671,5 +673,86 @@ describe('provider endpoint state', () => {
     expect(
       apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a2', drafts),
     ).toBe('key-b');
+  });
+});
+
+describe('protocol-axis model seeding (R35-12)', () => {
+  const proxyUrl = 'https://proxy.example/v1';
+  const custom: QwenProviderSummary = {
+    ...kimi,
+    id: 'custom-openai-compatible',
+    protocol: 'openai',
+    protocolOptions: ['openai', 'anthropic', 'gemini'],
+    baseUrl: undefined,
+    defaultModelIds: [],
+    models: [],
+    baseUrlPlaceholder: 'https://api.example.com/v1',
+  };
+
+  it('protocolBaseUrl returns the saved baseUrl for a connected protocol', () => {
+    const provider: QwenProviderSummary = {
+      ...custom,
+      existingConfig: {
+        baseUrlByProtocol: {
+          openai: proxyUrl,
+          anthropic: proxyUrl,
+        },
+      },
+    };
+    expect(protocolBaseUrl(provider, 'openai')).toBe(proxyUrl);
+    expect(protocolBaseUrl(provider, 'anthropic')).toBe(proxyUrl);
+    expect(protocolBaseUrl(provider, 'gemini')).toBeUndefined();
+  });
+
+  it('seeds the model field from the selected protocol bucket, not the first', () => {
+    const provider: QwenProviderSummary = {
+      ...custom,
+      existingConfig: {
+        protocol: 'openai',
+        baseUrl: proxyUrl,
+        modelIds: ['m1', 'm2'],
+        modelIdsByBaseUrl: { [proxyUrl]: ['m1', 'm2'] },
+        modelIdsByBaseUrlByProtocol: {
+          openai: { [proxyUrl]: ['m1', 'm2'] },
+          anthropic: { [proxyUrl]: ['a1', 'a2'] },
+        },
+        baseUrlByProtocol: {
+          openai: proxyUrl,
+          anthropic: proxyUrl,
+        },
+      },
+    };
+
+    // Default seed shows the first bucket's models (m1, m2).
+    const openaiSeed = seedProtocolModelState(provider, 'openai', proxyUrl);
+    expect(openaiSeed.modelIds).toEqual(['m1', 'm2']);
+
+    // Flipping to anthropic must re-seed with that bucket's own models,
+    // not keep m1/m2 (which would delete a1/a2 on submit).
+    const anthropicSeed = seedProtocolModelState(
+      provider,
+      'anthropic',
+      proxyUrl,
+    );
+    expect(anthropicSeed.modelIds).toEqual(['a1', 'a2']);
+    expect(anthropicSeed.customModelIds).toEqual(['a1', 'a2']);
+    expect(anthropicSeed.customModelIdsByBaseUrl.get(proxyUrl)).toEqual([
+      'a1',
+      'a2',
+    ]);
+  });
+
+  it('falls back to defaults for a protocol with no saved state', () => {
+    const provider: QwenProviderSummary = {
+      ...custom,
+      defaultModelIds: ['default-model'],
+      existingConfig: {
+        modelIdsByBaseUrlByProtocol: { openai: { [proxyUrl]: ['m1'] } },
+        baseUrlByProtocol: { openai: proxyUrl },
+      },
+    };
+    const geminiSeed = seedProtocolModelState(provider, 'gemini', proxyUrl);
+    expect(geminiSeed.modelIds).toEqual(['default-model']);
+    expect(geminiSeed.customModelIds).toEqual([]);
   });
 });

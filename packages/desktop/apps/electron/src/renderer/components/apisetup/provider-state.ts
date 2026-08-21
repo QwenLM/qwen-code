@@ -62,19 +62,19 @@ export function initialModelIds(
     : defaultModelIds(provider, baseUrl);
 }
 
-export function seedProviderModelState(
-  provider: QwenProviderSummary,
-  baseUrl: string,
-): {
+export type ProviderModelSeed = {
   modelIds: string[];
   customModelIds: string[];
   customModelIdsByBaseUrl: Map<string, string[]>;
   trimmedDefaultModelIds: Map<string, string[]>;
-} {
-  const modelIds = initialModelIds(provider, baseUrl);
-  const endpointEntries = Object.entries(
-    provider.existingConfig?.modelIdsByBaseUrl ?? {},
-  );
+};
+
+function buildModelStateFromEntries(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+  modelIds: string[],
+  endpointEntries: Array<[string, string[]]>,
+): ProviderModelSeed {
   const savedEntries: Array<[string, string[]]> =
     endpointEntries.length > 0 ? endpointEntries : [[baseUrl, modelIds]];
   const customModelIds = new Set<string>();
@@ -99,6 +99,55 @@ export function seedProviderModelState(
     customModelIdsByBaseUrl: customsByBaseUrl,
     trimmedDefaultModelIds: trims,
   };
+}
+
+export function seedProviderModelState(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): ProviderModelSeed {
+  const modelIds = initialModelIds(provider, baseUrl);
+  const endpointEntries = Object.entries(
+    provider.existingConfig?.modelIdsByBaseUrl ?? {},
+  );
+  return buildModelStateFromEntries(provider, baseUrl, modelIds, endpointEntries);
+}
+
+/** The saved baseUrl for a protocol bucket, if the provider was connected under it. */
+export function protocolBaseUrl(
+  provider: QwenProviderSummary,
+  protocol: string,
+): string | undefined {
+  return provider.existingConfig?.baseUrlByProtocol?.[protocol];
+}
+
+/**
+ * Seeds the model state for a SPECIFIC protocol bucket (R35-12). The form
+ * seeds from the first bucket by default; when the user flips the protocol
+ * Select it must re-seed from the selected bucket's own saved models, else
+ * submitting rebuilds that bucket from the wrong protocol's ids.
+ */
+export function seedProtocolModelState(
+  provider: QwenProviderSummary,
+  protocol: string,
+  baseUrl: string,
+): ProviderModelSeed {
+  const byProtocol =
+    provider.existingConfig?.modelIdsByBaseUrlByProtocol?.[protocol];
+  if (!byProtocol) {
+    // No saved state for this protocol: seed the endpoint's defaults.
+    return buildModelStateFromEntries(
+      provider,
+      baseUrl,
+      defaultModelIds(provider, baseUrl),
+      [],
+    );
+  }
+  const endpointEntries = Object.entries(byProtocol);
+  const modelIds =
+    endpointEntries.find(
+      ([endpoint]) => normalizeBaseUrl(endpoint) === normalizeBaseUrl(baseUrl),
+    )?.[1] ?? defaultModelIds(provider, baseUrl);
+  return buildModelStateFromEntries(provider, baseUrl, modelIds, endpointEntries);
 }
 
 export function customModelIdsAfterEdit(
