@@ -1758,7 +1758,7 @@ describe('AgentTool', () => {
         expect(spawnTeammate).toHaveBeenCalledWith(
           expect.objectContaining({
             name: 'reviewer',
-            cwd: '/test/project/.qwen/tmp/review-pr-1',
+            cwd: path.resolve('/test/project', '.qwen/tmp/review-pr-1'),
           }),
         );
       } finally {
