@@ -290,7 +290,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       expect.stringContaining('ai_comment'),
     );
     expect(stderrMock).toHaveBeenCalledWith(
-      expect.stringContaining('cannot set the flag'),
+      expect.stringContaining('does not track them'),
     );
   });
 
