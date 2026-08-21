@@ -272,7 +272,10 @@ import {
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  backgroundShellTaskId,
+  isBackgroundSubAgentToolCall,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -1313,6 +1316,7 @@ function parseRenameArgument(
 function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'monitor') return true;
+  if (backgroundShellTaskId(tool) !== undefined) return true;
   if (tool.args?.is_background !== true) return false;
   return (
     name === 'shell' ||
@@ -4013,6 +4017,24 @@ export function App({
     taskActivityKey,
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
+  );
+  const terminalBackgroundShellTaskIdsKey = useMemo(
+    () =>
+      sessionTasks
+        .filter((task) => task.kind === 'shell' && task.status !== 'running')
+        .map((task) => task.id)
+        .join(','),
+    [sessionTasks],
+  );
+  // Preserve Set identity when polling returns an equivalent task snapshot.
+  const terminalBackgroundShellTaskIds = useMemo(
+    () =>
+      new Set(
+        terminalBackgroundShellTaskIdsKey
+          ? terminalBackgroundShellTaskIdsKey.split(',')
+          : [],
+      ),
+    [terminalBackgroundShellTaskIdsKey],
   );
   const environmentAgentTasks = useMemo(
     () => getEnvironmentAgentTasks(messages, sessionTasks),
@@ -12388,6 +12410,9 @@ export function App({
                               <MessageList
                                 ref={messageListRef}
                                 messages={displayMessages}
+                                terminalBackgroundShellTaskIds={
+                                  terminalBackgroundShellTaskIds
+                                }
                                 pendingApproval={pendingToolApproval}
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
