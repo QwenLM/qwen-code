@@ -57,7 +57,7 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
-import { parseReceiptIds } from './lib/receipt.js';
+import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
 import {
   composeReview,
   normalizeSeverityFloor,
@@ -99,16 +99,46 @@ import {
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
 
 /**
- * Review ids a prior submit in this window already recorded. Best-effort: an
- * absent or unreadable receipt is an empty list, never a throw — the caller
- * adds the current id regardless. The shape parse is shared with cleanup's
- * reader (`lib/receipt.ts`) so the two halves cannot drift.
+ * Ids a prior submit in this window already recorded, through one axis
+ * parse. Best-effort: an absent or unreadable receipt is an empty list,
+ * never a throw — the caller adds the current ids regardless. The shape
+ * parse is shared with cleanup's reader (`lib/receipt.ts`) so the two
+ * halves cannot drift.
  */
-function readReceiptIds(receiptPath: string): number[] {
+function readReceiptIds(
+  receiptPath: string,
+  parse: (raw: string) => number[],
+): number[] {
   try {
-    return parseReceiptIds(readFileSync(receiptPath, 'utf8'));
+    return parse(readFileSync(receiptPath, 'utf8'));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Receipt for cleanup's Aone bypass audit: EVERY comment this session was
+ * authorised to post, by id — the Aone twin of the gh receipt below. There
+ * submit posts a *review* and the audit flags issue comments it never
+ * posts; on Aone submit POSTS COMMENTS (inline findings + summary), so
+ * sanctioned-vs-bypass keys on comment ids instead. Accumulates prior ids
+ * for the same reason the gh half does (the window spans drift restarts).
+ * Best-effort: a receipt failure must never fail a review that DID post,
+ * and zero landed ids write nothing (nothing to vouch for).
+ */
+function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
+  if (newIds.length === 0) return;
+  try {
+    const receiptPath = tmpFile(`pr-${pr}`, 'submit-receipt.json');
+    const priorIds = readReceiptIds(receiptPath, parseReceiptCommentIds);
+    const commentIds = [...new Set([...priorIds, ...newIds])];
+    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    atomicWriteFileSync(
+      receiptPath,
+      `${JSON.stringify({ commentIds, event, postedAt: new Date().toISOString() })}\n`,
+    );
+  } catch {
+    /* audit metadata only — the post itself succeeded */
   }
 }
 
@@ -960,6 +990,12 @@ export function runSubmit(
       // JSON too: all-zero counts with a silent ambiguous flag read as a
       // clean total failure, and a user hand-posting the "remainder"
       // double-posts the comment the count never saw.
+      // Vouch for the writes that DID land: cleanup still runs after this
+      // failure (Step 9), and without the ids the tripwire would flag
+      // submit's own partial post as a bypass. The ambiguous write has no
+      // id to vouch with — it stays unvouched, and any flag it draws is
+      // the "inspect the MR" this report asks for.
+      recordAoneReceipt(args.pr, partial.inlineCommentIds, event);
       const landed =
         partial.postedInline > 0 || partial.summaryPosted || partial.ambiguous;
       writeStderrLine(
@@ -1042,6 +1078,21 @@ export function runSubmit(
           `new head before relying on the posted pins.`,
       );
     }
+    // Receipt for cleanup's Aone bypass audit — see recordAoneReceipt. An
+    // accepted-but-unreadable comment carries no id (inlineCommentIds holds
+    // only the ids a1 reported); it cannot be vouched for and may draw a
+    // flag — the same trade-off the gh half makes on an unreadable review
+    // id, fail-safe toward over-flagging.
+    recordAoneReceipt(
+      args.pr,
+      [
+        ...result.inlineCommentIds,
+        ...(typeof result.summaryCommentId === 'number'
+          ? [result.summaryCommentId]
+          : []),
+      ],
+      event,
+    );
     writeStdoutLine(
       JSON.stringify(
         {
@@ -1105,7 +1156,7 @@ export function runSubmit(
   try {
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
-      const priorIds = readReceiptIds(receiptPath);
+      const priorIds = readReceiptIds(receiptPath, parseReceiptIds);
       const reviewIds = [...new Set([...priorIds, reviewId])];
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
       atomicWriteFileSync(

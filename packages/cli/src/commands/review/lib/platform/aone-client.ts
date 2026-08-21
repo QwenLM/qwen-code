@@ -112,6 +112,21 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
+ * The authenticated Aone account — the `account` field of `a1 auth whoami`.
+ * cleanup's bypass audit filters the MR's comment list by it (the author
+ * arm, design D8). A missing or unreadable account THROWS: matching nothing
+ * would read exactly like a clean window, and a tripwire whose off state is
+ * indistinguishable from its all-clear state is off.
+ */
+export function aoneWhoamiAccount(): string {
+  const out = a1Json<{ account?: unknown }>('auth', 'whoami');
+  if (typeof out.account !== 'string' || out.account.trim() === '') {
+    throw new Error('a1 auth whoami returned no account');
+  }
+  return out.account;
+}
+
+/**
  * Fail fast with an actionable message when `a1` cannot run. A missing
  * binary (ENOENT — the dominant first-run state for this new dependency) is
  * a different remedy than an unauthenticated one.

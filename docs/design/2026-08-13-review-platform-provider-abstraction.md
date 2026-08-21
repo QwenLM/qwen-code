@@ -355,8 +355,43 @@ Enterprise paragraph.
     actor; the completion contract reads `partial`/`approved`; and the
     repeat-round caveats (no dedup backing, no self-PR detection) are
     documented for the user. Still open: dedup/self-PR backing for Aone,
-    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
+    `composeUrl`, AI-comment marking (Q4), the
     render-adjudication carve-out.
+  - **Landed (2026-08-21, #9617):** the cleanup bypass audit — D8's
+    "`comment list` filtered by author within the audit window". `cleanup`
+    selects the audit backend from the fetch report's recorded host, with
+    the registry's cwd-origin fall-through for a hostless report (a
+    bare-number Aone run that omitted `--host`), so an Aone window is
+    never audited against GitHub — the misroute that queried github.com's
+    same-named repo (host null) or pointed gh at a host it has no auth on
+    (host recorded), skipping the tripwire either way. The author arm
+    keys on `author.username == aoneWhoamiAccount()`; the window arm
+    compares epoch milliseconds, because Aone stamps a numeric utc offset
+    (`+08:00`) and a lexicographic comparison across offsets orders by
+    local wall clock, not instant. Sanctioned-vs-bypass keys on COMMENT
+    ids — Aone's submit posts comments, not a review — so the submit
+    receipt grew a `commentIds` axis beside `reviewIds`, written on a
+    successful post (inline ids + summary id) and on a mid-batch failure
+    (the landed ids) so the audit never flags submit's own writes; an id
+    never read back is unvouchable and may draw a flag (fail-safe). The
+    automation-marker filter and the best-effort skip note carry over
+    unchanged; the audit stays read-only and offline-safe. Hardened by the
+    change's own review round, which measured two more platform facts: the
+    default `comment list` EXCLUDES resolved comments (an MR's `comments`
+    minus `closedComments` is exactly what it returns), so the audit
+    unions a `--resolved` query — a posted-then-resolved bypass inside the
+    window is still flagged — but judges a resolved comment by its
+    CREATION only, because a resolution bumps `updatedAt` exactly like an
+    edit and is not edit evidence; and a1 can answer a well-formed
+    `a1.error/v1` error object with exit 0 (a backend auth failure or a
+    client timeout), whose `message` now rides the skip note instead of a
+    bare "unexpected shape". Two disclosed residuals: resolved REPLIES
+    have no a1 listing at all, and an EDIT of a receipt-vouched
+    (submit-posted) comment is outside the tripwire's sight — the
+    `updatedAt` bump cannot be told from a resolution or other state flip,
+    so detecting it would flag healthy runs, and a1 has no comment-edit
+    subcommand to begin with (the GitHub twin's sanctioned channel, the
+    review, is likewise uneditable).
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
