@@ -574,9 +574,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 300-minute cap) so an active run is never aged out
+    // job runs up to its 330-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=360');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -14358,9 +14358,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 55');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '1080000'",
+      "QWEN_TIMEOUT_MS: '2700000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
