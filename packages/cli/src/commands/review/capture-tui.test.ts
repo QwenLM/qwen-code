@@ -176,15 +176,17 @@ function leakedSentinels(pid: number = process.pid): string[] {
 }
 
 describe('hostStateFor', () => {
-  // Three of these four arms were asserted nowhere: reaching them through
+  // Five of these six arms were asserted nowhere: reaching them through
   // the real syscalls needs a fault injector, so deleting any one shipped
   // green while the refusal blamed the caller's --out for the host.
   it.each([
     ['EMFILE', 'out of file descriptors'],
-    ['ENFILE', 'out of file descriptors'],
+    ['ENFILE', 'system file table is full'],
     ['ENOSPC', 'filesystem is full'],
     ['EDQUOT', 'disk quota is exhausted'],
     ['EROFS', 'filesystem is read-only'],
+    ['EIO', 'I/O errors'],
+    ['ESTALE', 'network filesystem handle is stale'],
   ])('names the host state for %s', (code, expected) => {
     expect(hostStateFor(code)).toContain(expected);
   });
@@ -314,6 +316,56 @@ describe('capture-tui without tmux (probe seam)', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'refuses a file-shaped TMPDIR at the gate, not at the sentinel removal',
+    async () => {
+      // The existing-but-unusable shapes the nonexistent-dir test cannot
+      // reach: `force` suppresses ENOENT only, so the clear-phase sentinel
+      // removal threw ENOTDIR here and the --out-attributing catch claimed
+      // it ('--out is not writable: ENOTDIR'), shadowing the dedicated gate
+      // — and the gate itself checked only W_OK|X_OK, which a mode-0777
+      // regular file PASSES (probe-verified), so without the directoryness
+      // check the run burns the full holder-init window and then blames
+      // the pane ('capture never started'), naming TMPDIR nowhere.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-filetmp-'));
+      // Created BEFORE TMPDIR is overridden — mkdtemp reads the same
+      // variable (same discipline as the nonexistent-dir sibling).
+      const fileTmp = join(dir, 'tmp-as-file');
+      writeFileSync(fileTmp, 'not a directory');
+      chmodSync(fileTmp, 0o777);
+      const realTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = fileTmp;
+      const started = performance.now();
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 60_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('temporary directory is not usable');
+        expect(stderr).toContain('TMPDIR');
+        expect(stderr).not.toContain('--out is not writable');
+        // Refused in milliseconds, not after the holder-init window: the
+        // sail-through mutant pays the full 10s before blaming the pane.
+        expect(performance.now() - started).toBeLessThan(5_000);
+      } finally {
+        if (realTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = realTmp;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'refuses an over-long tmux socket path up front, naming it',
     async () => {
       // A unix socket path is capped by sockaddr_un (104 bytes on macOS,
@@ -332,13 +384,15 @@ describe('capture-tui without tmux (probe seam)', () => {
       // Sized AGAINST THE CONSTANT, not just "very long": the previous
       // fixture overflowed by ~100 bytes, so any mutant bound in roughly
       // [104, 197] refused it too and the gate's defining 103 was
-      // undiscriminated. This lands a few bytes over, built from the same
-      // pieces production measures.
+      // undiscriminated. This lands exactly one byte over the gate's 103
+      // bound (a 104-byte path), built from the same pieces production
+      // measures — the `> 104` off-by-one admits it and this refusal goes
+      // missing.
       const socketTail = `/tmux-${process.getuid?.() ?? 0}/${captureServerName(
         process.pid,
         'deadbeef',
       )}`;
-      const pad = Math.max(1, 104 - Buffer.byteLength(dir) - socketTail.length);
+      const pad = Math.max(1, 103 - Buffer.byteLength(dir) - socketTail.length);
       const longBase = join(dir, 'x'.repeat(pad));
       mkdirSync(longBase, { recursive: true, mode: 0o700 });
       process.env['TMUX_TMPDIR'] = longBase;
@@ -363,6 +417,1451 @@ describe('capture-tui without tmux (probe seam)', () => {
       } finally {
         if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
         else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'measures the CANONICAL socket base — a lengthening symlink cannot slip past the gate',
+    async () => {
+      // tmux resolves a symlinked base before it binds, and the sockaddr
+      // bound applies to the CANONICAL path: a lexical measure admitted
+      // this run and the start then failed mid-capture with ENAMETOOLONG,
+      // blaming tmux for a path this command chose (probe-verified on 3.4;
+      // macOS meets the default shape, /tmp -> /private/tmp).
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-gatel-'));
+      const deep = join(dir, 'y'.repeat(50), 'y'.repeat(50));
+      mkdirSync(deep, { recursive: true, mode: 0o700 });
+      const link = join(dir, 'link');
+      symlinkSync(deep, link);
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['TMUX_TMPDIR'] = link;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('too long for a unix socket');
+        expect(stderr).not.toContain('mid-capture');
+      } finally {
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a run whose CANONICAL socket path fits a lexical path that does not',
+    async () => {
+      // The converse arm of the gate above: a long lexical path through a
+      // deep link whose TARGET is short fits the sockaddr bound once
+      // canonicalized — the lexical measure refused a capture that was
+      // about to succeed (probe-verified on 3.4).
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-gates-'));
+      const real = join(dir, 'real');
+      mkdirSync(real, { mode: 0o700 });
+      const deep = join(dir, 'z'.repeat(60), 'z'.repeat(60));
+      mkdirSync(deep, { recursive: true });
+      const link = join(deep, 'link');
+      symlinkSync(real, link);
+      writeFakeTmux(dir, '    :');
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = link;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses arguments past the manifest cap measured in BYTES, not code units', async () => {
+    // The reader caps a manifest at MAX_MANIFEST_BYTES of UTF-8, so the
+    // writer gate must measure the same unit: multibyte arguments between
+    // half the cap in CHARACTERS and the cap in BYTES used to pass it and
+    // wrote a manifest the next run could not verify — artifacts no longer
+    // clearable, every re-run refused on the collision (probe-reproduced
+    // with CJK --keys tokens). 180k CJK chars are one UTF-16 code unit
+    // each (well under half the cap) and three UTF-8 bytes each (over it).
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-bigargs-'));
+    try {
+      const { stdout, stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: ['\u4e00'.repeat(180_000)],
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('would not fit a readable manifest');
+      // The refusal JSON rides on stdout too, like every sibling refusal.
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('would not fit a readable manifest'),
+      });
+      // The gate fires before anything starts.
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(leakedSentinels()).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses small tokens that pass DENSE but overflow the cap pretty-printed', async () => {
+    // The writer emits JSON.stringify(manifest, null, 2); the gate used to
+    // measure the DENSE serialization. Pretty-printing an array of many
+    // small elements expands ~2.25x: 130k one-char --keys tokens measure
+    // ~520kB dense (under the gate) and ~1.17MB pretty — past the reader
+    // cap — so the run passed, wrote a manifest its own next run could not
+    // verify, and every re-run against the same --out refused on the
+    // collision instead (probe-reproduced).
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-prettyargs-'));
+    try {
+      const { stdout, stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          // Never matches: on pre-gate code the run proceeds, and withheld
+          // keys keep that run fast instead of typing 130k send-keys calls.
+          ready: 'NEVER-MATCHES',
+          keys: Array.from({ length: 130_000 }, () => 'k'),
+          out: join(dir, 'cap'),
+          timeoutMs: 500,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('would not fit a readable manifest');
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('would not fit a readable manifest'),
+      });
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the --no-keys negation with the reason that names it', async () => {
+    // yargs's default boolean-negation parses `--no-keys` on the
+    // array-typed option to [false] (probed on this repo's yargs): the
+    // caller supplied no key tokens at all, and the refusal must not say
+    // their tokens have the wrong type — an agent consumer would go
+    // inspect tokens it never passed and retry unchanged. Every sibling
+    // flag's negation gets the accurate "given exactly once" message.
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-nokeys-'));
+    try {
+      const { stdout, stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: [false],
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('--keys must be given exactly once');
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: '--keys must be given exactly once, as strings.',
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The png rung's mid-window occupancy, driven with NO real tmux: a PATH
+  // shim answers every control call — planting at <out>.png where the
+  // pane's command would — and the freeze seam does the render. The
+  // ladder's occupancy decision runs identically, so these pins also work
+  // on tmux-less hosts where the real-tmux planter fixtures skip.
+  function writeFakeTmux(dir: string, plant: string): void {
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+${plant}
+    s=$(printf '%s\\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then exit 0; fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+      { mode: 0o755 },
+    );
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'does not render THROUGH a symlink planted at <out>.png mid-window',
+    async () => {
+      // The png stamp is taken before the window, and the ladder used to
+      // consult nothing but it: an occupant arriving at <out>.png during
+      // the window was written through by freeze (following the link out
+      // of the --out base), the exact escape writeArtifact's changed()
+      // closes for the .ans and the manifest. The ladder must decide
+      // occupancy AGAIN at render time.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngsym-'));
+      const outside = join(dir, 'victim.txt');
+      writeFileSync(outside, 'VICTIM-CONTENT');
+      writeFakeTmux(dir, `    ln -s '${outside}' '${join(dir, 'cap.png')}'`);
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nprintf \'PNG-BYTES\' > "$5"\nexit 0\n',
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        // The link's target never received the render...
+        expect(readFileSync(outside, 'utf8')).toBe('VICTIM-CONTENT');
+        // ...and the link itself is not ours to remove.
+        expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'holds a file this capture did not write',
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not DELETE a file planted at <out>.png mid-window when the render fails',
+    async () => {
+      // The sibling harm on the failed-render cleanup: it removes the png
+      // only when `changed()` credits it to this run, but with no occupant
+      // stamped before the window, a file the captured command planted
+      // mid-window counted as ours and was silently deleted on a run that
+      // reported success.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngplant-'));
+      writeFakeTmux(
+        dir,
+        `    printf 'PLANTED-BY-COMMAND' > '${join(dir, 'cap.png')}'`,
+      );
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(freezeBin, '#!/bin/sh\nexit 9\n', { mode: 0o755 });
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe(
+          'PLANTED-BY-COMMAND',
+        );
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'holds a file this capture did not write',
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'leaves a TORN png when the render fails — deletion cannot attribute it',
+    async () => {
+      // Sibling of the plant test above for the occupant THIS run's
+      // freeze wrote: a torn png at the path the manifest is about to
+      // deny is indistinguishable from a foreign file claimed during the
+      // probe/render window — an empty pre-window stamp makes changed()
+      // reduce to occupied() — and deleting on presence alone destroyed
+      // the foreign shape (probe-reproduced). The sibling manifest-write
+      // cleanup already spares the png whenever the render produced
+      // nothing; the failed-render arm keeps its hands off too and names
+      // the leftover.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngtorn-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(freezeBin, '#!/bin/sh\nprintf torn > "$5"\nexit 9\n', {
+        mode: 0o755,
+      });
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('torn');
+        expect(manifest.degradedBecause).toContain('left in place');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'spares a spared png the owner rewrote when the MANIFEST write fails',
+    async () => {
+      // The clear phase left the user's png (no manifest proved ownership)
+      // and the ladder degraded on the stamp — png null, never touched.
+      // The owner rewriting their own file inside the window then
+      // answered changed() true, and the manifest-write cleanup deleted a
+      // file the ladder had classified as not ours: changed() answers
+      // "the occupant changed", not "this run put it there"
+      // (probe-reproduced; no adversarial race — the window legally runs
+      // up to an hour). The plant stands in for the owner's rewrite AND
+      // for the manifest write failing, so the shape needs no real tmux.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngspare-'));
+      writeFileSync(join(dir, 'cap.png'), 'USER-ORIGINAL');
+      writeFakeTmux(
+        dir,
+        `    printf 'USER-REWRITTEN-BY-OWNER' > '${join(dir, 'cap.png')}'\n    mkdir '${join(dir, 'cap.json')}'`,
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('cannot write capture manifest');
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe(
+          'USER-REWRITTEN-BY-OWNER',
+        );
+        // The cleanup DID run — the .ans this run wrote is gone with it,
+        // and the collision occupant is never ours to remove.
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+        expect(statSync(join(dir, 'cap.json')).isDirectory()).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not land a render THROUGH a symlink planted during the render window',
+    async () => {
+      // The pngsym sibling plants its link during the CAPTURE; this one
+      // plants it inside the render itself — the check-then-write window
+      // the pre-staging ladder left open (probe-verified on freeze v0.2.2:
+      // freeze opens the OUTPUT name it is given and follows the link).
+      // The render writes a nonce'd sibling and lands by rename, and a
+      // claimant at the landing path degrades the ladder instead of being
+      // replaced.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngland-'));
+      const outside = join(dir, 'victim.txt');
+      writeFileSync(outside, 'VICTIM-CONTENT');
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        `#!/bin/sh
+ln -s '${outside}' '${join(dir, 'cap.png')}'
+printf 'PNG-BYTES' > "$5"
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(readFileSync(outside, 'utf8')).toBe('VICTIM-CONTENT');
+        expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'holds a file this capture did not write',
+        );
+        // The nonce'd stage never outlives the run.
+        expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
+          [],
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stages the render INPUT under a nonce — freeze never reads the .ans by name',
+    async () => {
+      // A swap of the .ans during the probe window fed foreign bytes to a
+      // by-name render input (probe-verified): the staged hard link pins
+      // the bytes this run wrote under a name only this run knows. The
+      // fake refuses to render from the literal .ans name — the
+      // pre-staging argv fails it.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-ansstage-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        `#!/bin/sh
+[ "$3" = '${join(dir, 'cap.ans')}' ] && { echo "render read the .ans by name" >&2; exit 9; }
+[ -s "$3" ] || { echo "render input missing" >&2; exit 9; }
+printf 'x' > "$5"
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('png');
+        expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
+          [],
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink swapped in for the .ans before staging — link() clones it',
+    async () => {
+      // The staging comment claimed link() refuses a symlinked ansPath
+      // with ELOOP; measured on Linux it CLONES the link, so a survivor
+      // swapping ansPath for a symlink during the probe window (a fresh
+      // freeze availability probe — seconds, not microseconds) staged the
+      // link intact and freeze rendered the victim's bytes, credited as
+      // "evidence": "png" (probe-verified end to end). lstat never
+      // follows: only a staged regular file may reach the render.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-anssym-'));
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'FOREIGN-VICTIM-BYTES');
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      const rendered = join(dir, 'freeze-ran');
+      writeFileSync(
+        freezeBin,
+        // Reads the staged input by name — following a symlink exactly
+        // like the real freeze (measured on v0.2.2) — and records that it
+        // ran at all.
+        `#!/bin/sh\ncat "$3" > "$5"\n: > '${rendered}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      // The swap rides the freeze AVAILABILITY probe: it runs after the
+      // .ans is on disk and before the staging linkSync — the seconds-long
+      // window the survivor class plants in.
+      probes.freeze = () => {
+        rmSync(join(dir, 'cap.ans'));
+        symlinkSync(victim, join(dir, 'cap.ans'));
+        return { status: 'ok', out: '' } as const;
+      };
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        // freeze never saw the staged input...
+        expect(existsSync(rendered)).toBe(false);
+        expect(readFileSync(victim, 'utf8')).toBe('FOREIGN-VICTIM-BYTES');
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        // ...and the victim's bytes are never credited as this capture's
+        // image.
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'was replaced while the render was being prepared',
+        );
+        // The link this run's linkSync staged is this run's to remove.
+        expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
+          [],
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a stage replaced by a directory during the render does not mask the capture result',
+    async () => {
+      // The stage-removal rmSync pair in the render finally was the only
+      // unguarded fs operation in runCaptureTui: an actor with write access
+      // to the --out directory (the class the clear phase and collision
+      // gate exist for) replacing a stage with a directory mid-render made
+      // the finally throw EISDIR out of the function — exit 1, a stack
+      // trace, no contract JSON, and drainSignalsThenRelease never ran.
+      // Litter is cosmetic; the capture's result is not.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-stagedir-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        `#!/bin/sh
+rm -f "$3" && mkdir "$3"
+printf 'x' > "$5"
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        const { stdout } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('png');
+        expect(JSON.parse(stdout)).toMatchObject({ captured: true });
+        // The planted directory is another actor's — left in place, never
+        // recursively deleted, and the run still completed its contract.
+        const litter = readdirSync(dir).filter((f) => f.includes('.render-'));
+        expect(litter).toHaveLength(1);
+        expect(lstatSync(join(dir, litter[0])).isDirectory()).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'records the -T caveat — erased cells still capture as trailing spaces',
+    async () => {
+      // -T trims only positions that never held a character; cells written
+      // and later erased still capture as trailing spaces on the very
+      // versions that take the flag, and the joined marker view carries
+      // them mid-line (measured on 3.4) — so the manifest carries the
+      // caveat the way the pad case does.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-tcaveat-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(freezeBin, '#!/bin/sh\nprintf x > "$5"\nexit 0\n', {
+        mode: 0o755,
+      });
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.degradedBecause).toContain(
+          'trims only never-written trailing positions',
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reaps where the server ACTUALLY lives when the socket base moves mid-window',
+    async () => {
+      // tmux resolves the socket base from the CLIENT's environment at kill
+      // time, but the server starts under the first USABLE base: a stale
+      // TMUX_TMPDIR pointing at an unusable path puts the socket under /tmp,
+      // and when the env base becomes usable before the reap, a bare kill
+      // answers tmux's "nothing to kill" wordings ABOUT THE ENV BASE — the
+      // goal state, with the server alive under /tmp — and the reap that
+      // trusted the verdict unlinked the live server's real socket: no
+      // WARNING, and invisible to the orphan sweep that discovers orphans by
+      // readdir of the very socket dirs the unlink emptied (probe-reproduced
+      // on real tmux 3.4). The shim models tmux's own rule: it records which
+      // base a start would use, creates the env base inside the window, and
+      // answers kill-server goal-state only about the base its own env
+      // resolves — so an env-resolved kill reads as a nothing-to-kill here
+      // exactly as it does against real tmux.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-reapbase-'));
+      const envBase = join(dir, 'env-base'); // nonexistent at start
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    if [ -n "$TMUX_TMPDIR" ] && [ -d "$TMUX_TMPDIR" ]; then
+      printf '%s' "$TMUX_TMPDIR" > "${stateDir}/alive-base"
+    else
+      printf '%s' /tmp > "${stateDir}/alive-base"
+    fi
+    [ -n "$TMUX_TMPDIR" ] && mkdir -p "$TMUX_TMPDIR"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ "\${TMUX_TMPDIR:-/tmp}" = "$(cat "${stateDir}/alive-base")" ]; then
+      printf 'killed\n' >> "${stateDir}/kills"
+      exit 0
+    fi
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-1000/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        // The kill was pinned to BOTH candidate bases — the env-resolved
+        // call alone answers goal-state about the wrong base.
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain('/tmp');
+        // ...and a kill actually REACHED the base the server lives under —
+        // the env-resolved verdict never killed anything.
+        expect(existsSync(join(stateDir, 'kills'))).toBe(true);
+        expect(readFileSync(join(stateDir, 'kills'), 'utf8')).toContain(
+          'killed',
+        );
+        // The server is confirmed dead, so the run stays silent: a false
+        // WARNING here would send an operator hunting a reaped server.
+        expect(stderr).not.toContain('WARNING');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit a goal-state verdict the client answered about the FALLBACK base',
+    async () => {
+      // The server starts under the env base (usable at start) and the base
+      // is deleted mid-window: at reap the client falls back to /tmp and
+      // answers the goal-state wording ABOUT /tmp while the kill was pinned
+      // to the vanished base (probe-verified on 3.4). Crediting that
+      // verdict to the pinned base read the live server as reaped — no
+      // WARNING, and invisible to the sweep once the socket dir went with
+      // the base. The shim models tmux's rule: a kill pinned at a vanished
+      // base answers with /tmp's path, exactly as the real client did.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      // SHORT base, never under tmpdir(): the socket-length gate refuses
+      // a socket path over 103 bytes, and a macOS-shaped tmpdir
+      // (/var/folders/<2>/<32>/T/, ~50 bytes) pushed this fixture's usable
+      // env base past the bound — the run refused before any window opened
+      // and the kill-verdict pins never executed while short-tmpdir hosts
+      // showed green (probe-verified with a long-TMPDIR arm).
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapfb-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    printf '%s' "$TMUX_TMPDIR" > "${stateDir}/alive-base"
+    rm -rf "$TMUX_TMPDIR"
+    s=$(printf '%s\\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    if [ -n "$TMUX_TMPDIR" ] && [ ! -d "$TMUX_TMPDIR" ]; then
+      echo "error connecting to /tmp/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+      exit 1
+    fi
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        // Both candidate bases were tried...
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        expect(killCalls).toContain('/tmp');
+        // ...and the env-base verdict — the goal-state wording naming /tmp
+        // — must NOT have been credited: the server's fate under the
+        // vanished base is unconfirmed, and a presumed-alive server is
+        // never a silent outcome.
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit a create-directory verdict on a base that HELD the server at start',
+    async () => {
+      // The sibling arm: the base is replaced by a regular file mid-window.
+      // The client answers `couldn't create directory` naming the pinned
+      // base — but it examined nothing behind it, and the server that
+      // started there may still be alive. The verdict is credited only
+      // where the server could never have started (the next test).
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      // SHORT base — same gate reason as the reapfb sibling above.
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapcd-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    printf '%s' "$TMUX_TMPDIR" > "${stateDir}/alive-base"
+    rm -rf "$TMUX_TMPDIR" && : > "$TMUX_TMPDIR"
+    s=$(printf '%s\\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    if [ -f "$TMUX_TMPDIR" ]; then
+      echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (Not a directory)" >&2
+      exit 1
+    fi
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        expect(killCalls).toContain('/tmp');
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'credits the create-directory verdict when start itself failed before binding a socket',
+    async () => {
+      // The third arm of the create-directory exclusion: the base passes
+      // the start-time W_OK|X_OK gate, but tmux's mkdir of tmux-<uid>
+      // persistently fails there (ENOSPC on that filesystem, EROFS under
+      // root, NFS root-squash). Start throws, no server ever existed, and
+      // both kills answer the same persistent wording — yet the exclusion,
+      // unconditional on the stamp (which never ran either), vetoed credit
+      // and the reap printed a false orphan WARNING next to the refusal.
+      // The discriminating signal is whether the start call threw.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapns-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (No space left on device)" >&2
+    exit 1
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ "$TMUX_TMPDIR" = '${envBase}' ]; then
+      echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (No space left on device)" >&2
+      exit 1
+    fi
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "no server running on \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" >&2
+    exit 1
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stdout, stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('refused');
+        expect(stderr).toContain("couldn't create directory");
+        // Both candidate bases were tried...
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        expect(killCalls).toContain('/tmp');
+        // ...but a start that threw never bound a socket, so the server
+        // never existed: the persistent create failure on the start base
+        // IS the goal state there, and no orphan WARNING may print.
+        expect(stderr).not.toContain('WARNING');
+        expect(JSON.parse(stdout)).toMatchObject({ captured: false });
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'still credits a create-directory verdict on a base that never held the server',
+    async () => {
+      // The balance point of the arm above: an env base ALREADY unusable at
+      // start (a regular file) never held the server — tmux started it
+      // under /tmp — so the same `couldn't create directory` wording IS
+      // honest there, and a false WARNING would send an operator hunting a
+      // server that was confirmed dead by the /tmp kill (the measured harm
+      // that folded the wording into the goal state in the first place).
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-reapnc-'));
+      const envBase = join(dir, 'file-base');
+      writeFileSync(envBase, 'not a directory');
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    printf '%s' /tmp > "${stateDir}/alive-base"
+    s=$(printf '%s\\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ -f "$TMUX_TMPDIR" ]; then
+      echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (Permission denied)" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        expect(killCalls).toContain('/tmp');
+        expect(stderr).not.toContain('WARNING');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit an ENOENT verdict once start STAMPED a socket — the file can vanish under a live server',
+    async () => {
+      // The shim's start binds a socket under the env base and the kill
+      // removes it, answering the ENOENT wording naming the pinned base.
+      // The wording proves only that the path was gone at look time — a
+      // live server behind a removed socket file answers exactly this
+      // (probed live on tmux) — so once start stamped a socket the verdict
+      // is unconfirmed and the presumed-alive server surfaces as the
+      // WARNING. Crediting it read the live server as reaped.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapabs-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    mkdir -p "$TMUX_TMPDIR/tmux-$(id -u)"
+    : > "$TMUX_TMPDIR/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    rm -f "$TMUX_TMPDIR/tmux-$(id -u)/$SRV"
+    echo "error connecting to $TMUX_TMPDIR/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit a start-base verdict about a socket that is not the stamped one',
+    async () => {
+      // The base's socket is replaced mid-window and the kill answers `no
+      // server running` about the REPLACEMENT — the shape a base destroyed
+      // and recreated mid-window produces (probe-verified on 3.4). The
+      // stamped inode separates a verdict about THIS run's server from one
+      // about a socket this run never owned; crediting the latter read the
+      // live server behind the destroyed socket as dead, with no WARNING.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapid-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    mkdir -p "$TMUX_TMPDIR/tmux-$(id -u)"
+    : > "$TMUX_TMPDIR/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    if [ "$TMUX_TMPDIR" = "${envBase}" ]; then
+      p="$TMUX_TMPDIR/tmux-$(id -u)/$SRV"
+      rm -f "$p"
+      : > "$p"
+      echo "no server running on $p" >&2
+      exit 1
+    fi
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a wall of freeze stderr cannot push the manifest past the reader cap',
+    async () => {
+      // The writer gate caps the EMBEDDED arguments, but degradedBecause
+      // is added later: the errTail carried the last two lines of up to
+      // FREEZE_MAX_BUFFER of freeze output verbatim, and one newline-free
+      // megabyte-line of it pushed a successful run's manifest past
+      // MAX_MANIFEST_BYTES — which its own next run could not verify,
+      // refusing on the collision forever after (probe-reproduced).
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-errtail-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        "#!/bin/sh\nhead -c 3145728 /dev/zero | tr '\\0' 'x' >&2\nexit 9\n",
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifestPath = join(dir, 'cap.json');
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.degradedBecause).toContain('freeze failed (exit 9');
+        // The tail stops at its cap, and the manifest a SUCCESSFUL run
+        // writes stays small enough for the next run to verify.
+        expect(manifest.degradedBecause.length).toBeLessThan(8192);
+        expect(statSync(manifestPath).size).toBeLessThan(64 * 1024);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
         rmSync(dir, { recursive: true, force: true });
       }
     },
@@ -692,6 +2191,53 @@ describe('capture-tui without tmux (probe seam)', () => {
     });
   }
 
+  it('a manifest whose pngPath names ANOTHER file cannot authorize clearing <out>.png', async () => {
+    // The internally inconsistent png-rung shape: the signature passes
+    // (evidence rung, exact ansPath, closed-set settledBy) but the
+    // recorded pngPath points elsewhere — a manifest this writer never
+    // produces, since every png rung it writes records THIS <out>.png.
+    // The evidence rung alone licensed deleting the user's cap.png
+    // (probe-reproduced); unverified is not permission to delete.
+    probes.tmux = () => ({ status: 'absent' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-foreignpng-'));
+    try {
+      writeFileSync(join(dir, 'cap.ans'), 'user file');
+      writeFileSync(join(dir, 'cap.png'), 'user file');
+      const json = JSON.stringify({
+        evidence: 'png',
+        ansPath: join(dir, 'cap.ans'),
+        pngPath: '/elsewhere/foreign.png',
+        settledBy: 'timeout',
+      });
+      writeFileSync(join(dir, 'cap.json'), json);
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      // The refusal is the probe's (the ans and the manifest verified as
+      // ours and were cleared, so no collision remains to name) — the
+      // teeth are in the file assertions below.
+      expect(stderr).toContain('tmux is not installed');
+      // The png survives: the manifest's own pngPath never named it.
+      expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+      // The signature-passing halves were verified ours and cleared.
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('never touches a user DIRECTORY at <out>.holder-ready, refusal or not', async () => {
     // Was: the sentinel sat at this path and its unlink was the one clear
     // that could THROW (EISDIR, which `force` does not suppress), so it had
@@ -774,7 +2320,7 @@ describe('capture-tui without tmux (probe seam)', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'cuts a HANGING availability probe with the belt — absent, not stuck',
+    'cuts a HANGING availability probe with the belt — wedged, not absent',
     async () => {
       // A tmux -V that hangs would otherwise block before the refusal
       // contract or any signal handler exists; through the seam the belt is
@@ -1018,15 +2564,20 @@ describe('capture-tui without tmux (probe seam)', () => {
   for (const [label, makeJson] of [
     ['a bare oversize file', (): string => 'x'.repeat(1024 * 1024 + 10)],
     [
-      // VALID JSON, shaped like a manifest, so the CAP is what decides:
+      // VALID JSON carrying the FULL ownership signature (evidence rung,
+      // exact ansPath, closed-set settledBy), so the CAP is what decides:
       // without it the file parses, `shaped` is true, and the clear phase
       // deletes the sibling artifacts. A garbage payload would not
-      // discriminate — JSON.parse rejects it either way.
+      // discriminate — JSON.parse rejects it either way — and neither
+      // would a partial signature, which fails `shaped` with or without
+      // the cap.
       'valid manifest-shaped JSON past the cap',
       (base: string): string =>
         JSON.stringify({
           evidence: 'png',
+          ansPath: `${base}.ans`,
           pngPath: `${base}.png`,
+          settledBy: 'timeout',
           pad: 'x'.repeat(2 * 1024 * 1024),
         }),
     ],
@@ -2075,7 +3626,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // A 60-char marker in a 40-column pane wraps; only the joined (-J)
     // matching view can see it whole. The .ans stays physical: two lines.
     await run({
-      command: `s=$(printf 'M%.0s' $(seq 1 60)); printf "%sEND\\n" "$s"; sleep 30`,
+      // The repeated marker is built in NODE, not `$(seq …)`: seq is GNU
+      // coreutils, and a pane shell without it (stock macOS userland ships
+      // jot) expanded the fixture to `MEND` — the until marker never
+      // matched and the test failed red while Linux CI showed green
+      // (probe-verified with an exit-127 PATH shim).
+      command: `printf "%sEND\\n" "${'M'.repeat(60)}"; sleep 30`,
       cols: 40,
       until: 'M{60}END',
     });
@@ -2094,7 +3650,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // stepped by NTP mid-test and read a wrong elapsed value either way.
     const started = performance.now();
     await run({
-      command: `printf 'a%.0s' $(seq 1 79); printf '\\n'; sleep 30`,
+      // Node-built repetition — the `$(seq …)` fixture was GNU-only; see
+      // the wrap-boundary sibling for the probe.
+      command: `printf '%s\\n' "${'a'.repeat(79)}"; sleep 30`,
       until: '(a+)+b',
       timeoutMs: 1500,
     });
@@ -2458,6 +4016,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       `#!/bin/sh\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
+    // TMUX_TMPDIR controlled like the sibling socket-dir tests: the reap
+    // iterates one candidate base per distinct value, and a host exporting
+    // one logged 4 kill calls against this test's 2-call cap — a false red
+    // unrelated to the retry count (CI lanes export none, so the
+    // fragility shipped invisibly).
+    const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+    delete process.env['TMUX_TMPDIR'];
     // The control-call belt through its SEAM: the fake kill HANGS (sleep 5)
     // and the shortened belt must cut it — a hardcoded-timeout mutant waits
     // out both 5s hangs and blows the wall bound.
@@ -2475,6 +4040,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
+      if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+      else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
       tmuxControl.timeoutMs = realBelt;
     }
     expect(performance.now() - started).toBeLessThan(8_000);
@@ -3097,19 +4664,25 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
   });
 
-  it('removes a TORN png when the render fails mid-write', async () => {
-    // A fake that writes bytes to the png path and THEN fails: without the
-    // failed-render cleanup a torn png persists at the very path the
-    // manifest denies (evidence 'ans-only', pngPath null), and a consumer
-    // globbing <out>.png picks it up as evidence (probe-verified: the
-    // rmSync-deletion mutant left torn bytes at cap.png).
+  it('leaves a TORN png in place when the render fails — deletion cannot attribute it', async () => {
+    // A freeze that writes bytes to the png path and THEN fails leaves an
+    // occupant an empty pre-window stamp cannot attribute: the identical
+    // shape is a foreign file claimed during the probe/render window (the
+    // captured command is the named planter), and deleting on presence
+    // alone destroyed such a file on a run that reported success
+    // (probe-reproduced). The sibling manifest-write cleanup already
+    // spares the png whenever the render produced nothing; the
+    // failed-render arm keeps its hands off too. The leftover is loud,
+    // not lost: the manifest denies the png rung and names it, and the
+    // next run's ladder degrades on the occupant.
     await withFakeFreeze('#!/bin/sh\nprintf torn > "$5"\nexit 9\n', () =>
       run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.pngPath).toBeNull();
-    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('torn');
+    expect(manifest.degradedBecause).toContain('left in place');
   });
 
   it('cuts a HANGING freeze with the timeout belt and keeps the .ans', async () => {
@@ -3339,8 +4912,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.pngPath).toBeNull();
-    // The failed-render cleanup removes the empty shell too.
-    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+    // The empty shell stays for the same reason a torn png does: with an
+    // empty pre-window stamp, presence alone cannot attribute it.
+    expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+    expect(manifest.degradedBecause).toContain('left in place');
   });
 
   it('names a freeze that could not SPAWN, not "exit null"', async () => {
@@ -3556,7 +5131,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Deleting matchOverruns++ from the ready loop shipped green — only the
     // until loop's accounting was pinned.
     await run({
-      command: `printf 'a%.0s' $(seq 1 79); printf '\\n'; sleep 30`,
+      // Node-built repetition — the `$(seq …)` fixture was GNU-only; see
+      // the wrap-boundary sibling for the probe.
+      command: `printf '%s\\n' "${'a'.repeat(79)}"; sleep 30`,
       ready: '(a+)+b',
       until: undefined,
       settleMs: 0,

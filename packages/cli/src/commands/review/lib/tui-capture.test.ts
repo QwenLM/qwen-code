@@ -9,13 +9,19 @@ import {
   captureServerName,
   freezePlan,
   isNothingToKill,
+  isSocketDirNeverCreated,
   isSocketDirUnusable,
+  isSocketPathAbsent,
+  verdictExaminedBase,
   tmuxPlan,
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
   validGeometry,
 } from './tui-capture.js';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('kill-server stderr classification', () => {
   // The two predicates answer DIFFERENT questions, and conflating them
@@ -23,14 +29,6 @@ describe('kill-server stderr classification', () => {
   // so it may only contain wordings that establish there is no server.
   const nothingToKill = [
     'no server running on /tmp/tmux-501/qwen-review-capture-1-a',
-    'error connecting to /tmp/x (No such file or directory)',
-    // The bare wording, matched by its own regex branch: the entry above
-    // satisfies the `error connecting` branch AND this one, so deleting
-    // either shipped green.
-    // Capital N, as strerror actually renders it: the all-lowercase
-    // fixture left the /i flag on this branch unpinned while the sibling
-    // `file name too long` branch had it covered by a capital F.
-    'No such file or directory',
     // All FOUR alternates of the create-directory branch: only two were
     // pinned, so narrowing the regex to those two shipped green while the
     // other wordings printed a false orphan WARNING.
@@ -43,6 +41,25 @@ describe('kill-server stderr classification', () => {
   for (const line of nothingToKill) {
     it(`treats as nothing to kill: ${line.slice(0, 40)}`, () => {
       expect(isNothingToKill(line)).toBe(true);
+      expect(isSocketDirUnusable(line)).toBe(false);
+    });
+  }
+
+  // The ENOENT class proves only that the socket path was absent when the
+  // client looked — a LIVE server behind a removed socket file answers
+  // exactly these (probed live on tmux), so the class left isNothingToKill
+  // for its own predicate the way isSocketDirUnusable did for the same
+  // folded-in reason. Both wordings: the `error connecting` shape always
+  // carries the bare one, and the bare capital-N fixture pins the /i flag
+  // independently of that shape (strerror renders it capital N).
+  const pathAbsent = [
+    'error connecting to /tmp/x (No such file or directory)',
+    'No such file or directory',
+  ];
+  for (const line of pathAbsent) {
+    it(`never establishes death on its own: ${line.slice(0, 40)}`, () => {
+      expect(isSocketPathAbsent(line)).toBe(true);
+      expect(isNothingToKill(line)).toBe(false);
       expect(isSocketDirUnusable(line)).toBe(false);
     });
   }
@@ -67,6 +84,105 @@ describe('kill-server stderr classification', () => {
   it('answers neither for an unrecognized failure', () => {
     expect(isNothingToKill('server exited unexpectedly')).toBe(false);
     expect(isSocketDirUnusable('server exited unexpectedly')).toBe(false);
+  });
+});
+
+describe('kill-verdict base attribution', () => {
+  // A goal-state wording establishes death only about the base the client
+  // EXAMINED: tmux falls back to /tmp when the pinned base is unusable and
+  // answers about IT (probe-verified on 3.4 with a mid-window-deleted
+  // base), and crediting that verdict to the pinned base read a live
+  // server as reaped.
+  it('credits a wording naming a path under the pinned base', () => {
+    expect(
+      verdictExaminedBase(
+        'error connecting to /tmp/tmux-501/srv (No such file or directory)',
+        '/tmp',
+      ),
+    ).toBe(true);
+    expect(
+      verdictExaminedBase(
+        'no server running on /scratch/base/tmux-501/srv',
+        '/scratch/base',
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a wording whose path names the FALLBACK base', () => {
+    expect(
+      verdictExaminedBase(
+        'error connecting to /tmp/tmux-501/srv (No such file or directory)',
+        '/scratch/gone',
+      ),
+    ).toBe(false);
+    expect(
+      verdictExaminedBase(
+        "couldn't create directory /tmp/tmux-501 (Permission denied)",
+        '/scratch/gone',
+      ),
+    ).toBe(false);
+  });
+
+  it('normalizes the base before comparing', () => {
+    expect(
+      verdictExaminedBase('no server running on /tmp/tmux-501/srv', '/tmp/'),
+    ).toBe(true);
+    expect(
+      verdictExaminedBase(
+        'no server running on /scratch/base/tmux-501/srv',
+        '/scratch/base/',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the old meaning for a wording that names no path', () => {
+    expect(verdictExaminedBase('No such file or directory', '/tmp')).toBe(true);
+  });
+
+  it('canonicalizes a symlinked base the way tmux canonicalizes its wordings', () => {
+    // tmux names the REALPATH of a symlinked socket base in its wordings
+    // (probed on 3.4): under a linked TMUX_TMPDIR every honest verdict
+    // names the target while the kill was pinned to the link, and the
+    // lexical comparison rejected every one of them — a false orphan
+    // WARNING for every server that predeceased its reap.
+    const root = mkdtempSync(join(tmpdir(), 'tui-cap-verdict-'));
+    try {
+      const real = join(root, 'real');
+      mkdirSync(real);
+      const link = join(root, 'link');
+      symlinkSync(real, link);
+      expect(
+        verdictExaminedBase(`no server running on ${real}/tmux-501/srv`, link),
+      ).toBe(true);
+      expect(
+        verdictExaminedBase(
+          `error connecting to ${real}/tmux-501/srv ` +
+            '(No such file or directory)',
+          link,
+        ),
+      ).toBe(true);
+      // A wording about an UNRELATED directory stays refused.
+      expect(
+        verdictExaminedBase(
+          `no server running on ${root}/elsewhere/tmux-501/srv`,
+          link,
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes every create-directory wording', () => {
+    for (const line of [
+      "couldn't create directory /tmp/tmux-501 (Permission denied)",
+      "can't create directory /tmp/tmux-501: Not a directory",
+      'could not create directory /tmp/tmux-501 (Permission denied)',
+      'cannot create directory /tmp/tmux-501: Permission denied',
+    ]) {
+      expect(isSocketDirNeverCreated(line)).toBe(true);
+    }
+    expect(isSocketDirNeverCreated('no server running on /tmp/x')).toBe(false);
   });
 });
 
@@ -408,7 +524,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\n/bin/sh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
@@ -423,7 +539,8 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       readyFile: '/ready',
     });
     // ONE layer: the plan hands tmux the holder SCRIPT, whose single
-    // `sh -c '<command>'` line is the only place the command is quoted. A
+    // `/bin/sh -c '<command>'` line is the only place the command is
+    // quoted. A
     // single quote in the command must not close that quoting. The
     // expectation is COMPOSED with the same POSIX escaping rule stated
     // independently ('→'\''): dropping esc() breaks the equality
@@ -431,7 +548,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // unmatched quote, while the structural assertions all stayed green).
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
     const cmd = `printf '%s' "it's"`;
-    const inner = `sh -c '${esc(cmd)}'`;
+    const inner = `/bin/sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
       `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
@@ -458,7 +575,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       readyFile,
     });
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
-    const inner = `sh -c '${esc('node cli.js')}'`;
+    const inner = `/bin/sh -c '${esc('node cli.js')}'`;
     const held = p.start[p.start.length - 1];
     // Single layer now: the plan hands tmux the SCRIPT itself (default-shell
     // is pinned to /bin/sh in the same invocation), so the trap lives at

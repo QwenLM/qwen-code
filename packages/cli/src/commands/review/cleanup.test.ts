@@ -5,13 +5,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
+/** The fields the sweep's entry guard and post-kill identity re-check
+ * read from an lstat result. */
+type SweepEntryStat = {
+  isSymbolicLink: () => boolean;
+  isSocket: () => boolean;
+  nlink: number;
+  ino: number;
+  mode: number;
+};
+
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn((_path: string): boolean => false),
+  // The path is taken because several tests dispatch on it. The default
+  // answer serves BOTH lstat consumers at once: the redirect guard reads
+  // isSymbolicLink/isDirectory, and the capture-server reap's entry guard
+  // and post-kill identity re-check read the SweepEntryStat fields
+  // (isSocket/nlink/ino/mode) — "a plain entry that is a socket" lets the
+  // name-matched fixtures reach the pid probe and kill while no ancestor
+  // looks redirected.
   lstatSync: vi.fn(
-    (): { isSymbolicLink: () => boolean; isDirectory: () => boolean } => ({
+    (
+      _path: string,
+    ): SweepEntryStat & { isDirectory: () => boolean } => ({
       isSymbolicLink: () => false,
       isDirectory: () => true,
+      isSocket: () => true,
+      nlink: 1,
+      ino: 1,
+      mode: 0o140700,
     }),
   ),
   // The path is taken because several tests dispatch on it, and the return
@@ -156,6 +179,15 @@ describe('runCleanup', () => {
     // path-dependent implementations, and a later test reading the declared
     // `[]` default would otherwise inherit them.
     mocks.readdirSync.mockImplementation((_path: string): string[] => []);
+    mocks.lstatSync.mockImplementation(
+      (_path: string): SweepEntryStat => ({
+        isSymbolicLink: () => false,
+        isSocket: () => true,
+        nlink: 1,
+        ino: 1,
+        mode: 0o140700,
+      }),
+    );
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -475,10 +507,45 @@ describe('runCleanup', () => {
           `${dir}/some-other-socket`,
           expect.anything(),
         );
-        // Something WAS cleaned, so the nothing-to-clean claim must not print.
-        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
-          expect.stringContaining('Nothing to clean'),
+        // The orphans were host-wide reaps, not target-scoped removals:
+        // the target-scoped answer stands on target-scoped facts, and
+        // nothing of THIS target's was there to clean.
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          'Nothing to clean for target "local".',
         );
+      });
+
+      it('sweeps orphans even when another session holds the lease', () => {
+        // The harness crash that leaves an orphan leaves the lease too,
+        // held by the dead session — and the lease check is session-id
+        // only. A sweep gated behind the lease skipped on exactly the
+        // cleanup calls meant to reclaim the orphan (probe-reproduced);
+        // the sweep touches only servers whose launcher pid is dead,
+        // never the leased worktree, so the skip and the sweep coexist.
+        const lease = {
+          sessionId: 'session-a',
+          promptId: 'prompt-a',
+          target: 'pr-123',
+          repositoryRoot: '/repo',
+          worktreePath: '/repo/.qwen/tmp/review-pr-123',
+          branch: 'qwen-review/pr-123',
+        };
+        mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+        mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
+          (l: unknown) => l === lease,
+        );
+        runCleanup('pr-123');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining('skipped cleanup for "pr-123"'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The skip still protects the holder's worktree.
+        expect(mocks.releaseWorktree).not.toHaveBeenCalled();
       });
 
       it('notes a server it cannot kill and does not unlink a live server socket', () => {
@@ -504,9 +571,7 @@ describe('runCleanup', () => {
         // the sweep itself needed: without it `-L` resolves elsewhere and
         // answers 'no server running', reading as "already gone".
         expect(mocks.writeStderrLine).toHaveBeenCalledWith(
-          expect.stringContaining(
-            `TMUX_TMPDIR="${dir.replace(/\/tmux-\d+$/, '')}"`,
-          ),
+          expect.stringContaining(`TMUX_TMPDIR='/fake-tmp'`),
         );
         expect(mocks.rmSync).not.toHaveBeenCalledWith(
           `${dir}/${orphan}`,
@@ -548,6 +613,28 @@ describe('runCleanup', () => {
         );
       });
 
+      it('shell-quotes the manual-reap base — $ and backticks survive the paste', () => {
+        // JSON.stringify does not escape $ or backticks: a base carrying
+        // one expanded when the operator pasted the suggested command,
+        // resolving the wrong base and answering 'already gone' while the
+        // orphan ran out its window (probe-verified for a $-carrying
+        // base).
+        const base = '/fake-$tmp';
+        const dollarDir = `${base}/tmux-${String(uid)}`;
+        process.env['TMUX_TMPDIR'] = base;
+        mocks.existsSync.mockImplementation((p: string) => p === dollarDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dollarDir ? [orphan] : [],
+        );
+        mocks.execFileSync.mockImplementation(() => {
+          throw Object.assign(new Error('wedged'), { stderr: 'wedged' });
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`TMUX_TMPDIR='/fake-$tmp'`),
+        );
+      });
+
       it('treats "no server running" as reaped — socket unlinked, success printed', () => {
         // The kill throwing because the server is ALREADY dead is the goal
         // state, not a failure: the socket is litter and must still go. A
@@ -571,6 +658,201 @@ describe('runCleanup', () => {
         );
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('never follows a symlink planted under a capture-shaped name', () => {
+        // The sweep matches by NAME and used to inspect nothing else: a
+        // symlink planted under a capture-shaped name redirected the
+        // pinned kill-server to whatever socket it points at — the user's
+        // own server among them — and the exit-0 branch printed "Reaped"
+        // while the victim died and the link was unlinked behind it
+        // (probe-verified end to end; no race needed). The guard inspects
+        // the entry TYPE before the pid probe.
+        const planted = captureServerName(Number(deadPid), 'eeee');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (p: string): SweepEntryStat => ({
+            isSymbolicLink: () => p === `${dir}/${planted}`,
+            isSocket: () => p !== `${dir}/${planted}`,
+            nlink: 1,
+            ino: 1,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${planted}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('never reaps through a HARD LINK to a foreign socket', () => {
+        // link() succeeds on a unix socket (measured on Linux: same inode,
+        // nlink 2), and connect(2) is inode-addressed — so a hard link to
+        // the user's own server sails through a symlink-only guard, the
+        // dead-pid probe and the pinned kill-server, and destroys the
+        // victim race-free with exit 0 while the sweep prints "Reaped"
+        // (probe-verified end to end). A tmux-created socket has exactly
+        // one link, so nlink > 1 is never an orphan.
+        const planted = captureServerName(Number(deadPid), 'ffff');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => true,
+            nlink: 2,
+            ino: 1,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${planted}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('never reaps a non-socket entry under a capture-shaped name', () => {
+        // isSocket() completes the guard: a planted regular file or FIFO
+        // is not a server, and a kill-server pointed at it probes at best
+        // an error and at worst something unrelated.
+        const planted = captureServerName(Number(deadPid), 'gggg');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => false,
+            nlink: 1,
+            ino: 1,
+            mode: 0o100644,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('warns instead of claiming "Reaped" when the entry changed under the kill', () => {
+        // tmux re-resolves the entry at connect(), after the fork+exec, so
+        // a racer can swap it between the guard's lstat and the kill and
+        // land the pinned kill-server on an unrelated server (probe-
+        // verified: the race won on the first attempt). No portable close
+        // exists on the connect itself — but the success line must not
+        // assert a certainty the sweep does not have, so the post-kill
+        // identity re-check names the swap instead.
+        const planted = captureServerName(Number(deadPid), 'hhhh');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        let lstatCalls = 0;
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => true,
+            nlink: 1,
+            // The guard's lstat and the post-kill re-check disagree on the
+            // entry's identity: the racer won the window.
+            ino: lstatCalls++ === 0 ? 111 : 222,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        // The planted name is still unlinked — but never announced as a
+        // clean reap.
+        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${planted}`, {
+          force: true,
+        });
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `${planted} changed between the type guard and the kill`,
+          ),
+        );
+        // A possibly-wrong kill is not a clean nothing.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('does not credit an ENOENT answer as death — the file can vanish under a live server', () => {
+        // The sweep found the entry by readdir, so an ENOENT answer from
+        // the kill means the file vanished between the scan and the kill —
+        // possibly off a LIVE server (probed: rm the socket under a
+        // running server and kill answers exactly this). Not death, not an
+        // unlink, and loud like the other never-death wordings.
+        mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
+          if (bin === 'tmux' && argv?.[1] === orphan) {
+            throw Object.assign(new Error('exited 1'), {
+              stderr: Buffer.from(
+                `error connecting to ${dir}/${orphan} ` +
+                  '(No such file or directory)',
+              ),
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${orphan}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `could not reap orphaned capture server ${orphan}`,
+          ),
         );
       });
 
@@ -1992,4 +2274,5 @@ describe('runCleanup — bypass-write audit', () => {
     expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
   });
 });
+
 

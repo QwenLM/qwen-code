@@ -22,6 +22,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  type Stats,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -482,6 +483,40 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   for (const { dir, name } of entries) {
     const m = orphanRe.exec(name);
     if (!m) continue;
+    // The sweep matches by NAME; inspect the entry's TYPE before anything
+    // connects to it. A planted entry under a capture-shaped name
+    // redirects the pinned kill-server to whatever socket it resolves to —
+    // including the user's own tmux server — and the exit-0 success branch
+    // then reports "Reaped" while the victim is destroyed (probe-verified
+    // end to end; the planter class is this PR's own documented
+    // daemonized descendant). Three entrances, all rejected here: a
+    // SYMLINK (kill-server follows it to the target), a HARD LINK to a
+    // foreign socket — link() succeeds on a socket and connect(2) is
+    // inode-addressed, so the kill lands on the foreign server race-free
+    // (measured on Linux) — and any non-socket entry. A tmux-created
+    // socket has exactly one link, so nlink > 1 is never an orphan. A
+    // gone entry is nothing to reap. The rename race between this lstat
+    // and tmux's connect() after the fork+exec has no portable close —
+    // the post-kill identity re-check below makes a won swap loud
+    // instead of printing "Reaped".
+    let entryStat: Stats;
+    try {
+      entryStat = lstatSync(join(dir, name));
+    } catch {
+      continue;
+    }
+    if (
+      entryStat.isSymbolicLink() ||
+      !entryStat.isSocket() ||
+      entryStat.nlink > 1
+    ) {
+      writeStderrLine(
+        `note: not reaping ${name}: not a plain socket — kill-server ` +
+          'would connect whatever this entry resolves to, which may be ' +
+          'an unrelated server',
+      );
+      continue;
+    }
     let alive = true;
     try {
       process.kill(Number(m[1]), 0);
@@ -535,7 +570,11 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
         // removing it makes the server unreachable forever while this
         // sweep reports "Reaped".
         serverDead = isNothingToKill(stderrText);
-        dirUnusable = isSocketDirUnusable(stderrText);
+        // ACCUMULATED, like capture-tui's own reap: the reassignment this
+        // replaces let a second attempt that failed for another reason (an
+        // EMFILE spawn failure, the 15s belt) reset the flag and drop the
+        // note's one actionable parenthetical.
+        if (isSocketDirUnusable(stderrText)) dirUnusable = true;
       }
     }
     if (!serverDead) {
@@ -552,17 +591,44 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
           // the very hosts where this note appears the bare command
           // resolves elsewhere and answers 'no server running' — reading
           // as "already gone" while the orphan runs out its window.
-          `(TMUX_TMPDIR=${JSON.stringify(dirname(dir))} tmux -L ${name} ` +
-          `kill-server to reap it by hand)`,
+          // Shell-single-quoted, never JSON.stringify: a base carrying $
+          // or a backtick expands at paste time and resolves the wrong
+          // base — the same confusion this note exists to prevent.
+          `(TMUX_TMPDIR='${dirname(dir).replaceAll("'", "'\\''")}' ` +
+          `tmux -L ${name} kill-server to reap it by hand)`,
       );
       continue;
+    }
+    // tmux re-resolves the entry at connect(), after the fork+exec, so a
+    // racer can swap it between the guard's lstat and the kill — no
+    // portable close exists on the connect itself. When the entry the
+    // kill ran under is not the one the guard inspected, "Reaped" would
+    // assert a certainty the sweep does not have; name the swap instead.
+    let entryChanged = false;
+    try {
+      const postKill = lstatSync(join(dir, name));
+      entryChanged =
+        postKill.ino !== entryStat.ino || postKill.mode !== entryStat.mode;
+    } catch {
+      // Gone between the kill and the re-check — only a racer removes an
+      // entry this sweep has not unlinked yet.
+      entryChanged = true;
     }
     try {
       rmSync(join(dir, name), { force: true });
     } catch {
       // Litter is cosmetic; the server itself is already gone.
     }
-    writeStdoutLine(`Reaped orphaned capture server: ${name}`);
+    if (entryChanged) {
+      failedAny = true;
+      writeStderrLine(
+        `WARNING: ${name} changed between the type guard and the kill — ` +
+          'the server killed may not be the orphan this sweep matched; ' +
+          'check your tmux servers',
+      );
+    } else {
+      writeStdoutLine(`Reaped orphaned capture server: ${name}`);
+    }
     reapedAny = true;
   }
   return { reaped: reapedAny, failed: failedAny };
@@ -1022,3 +1088,5 @@ export const cleanupCommand: CommandModule = {
     runCleanup((argv as unknown as CleanupArgs).target);
   },
 };
+
+
