@@ -283,6 +283,15 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('1 inline Critical(s) block the merge'),
     );
+    // The Q4 probe outcome (issue #9614) is disclosed in the same note:
+    // a1 cannot mark a comment as AI, so the posted Criticals join the
+    // discussion gate only — the repo's ai_comment gate never sees them.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('ai_comment'),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('cannot set the flag'),
+    );
   });
 
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
