@@ -112,6 +112,8 @@ function anchorRefusalReason(
   model: string,
   headSha: string | null,
   target: string,
+  /** The path `target` was flattened from, when the review names one. */
+  source: string | undefined,
   skippedCount: number,
   treeHeldStill: boolean,
 ): string | null {
@@ -151,6 +153,21 @@ function anchorRefusalReason(
     // describes a different reviewed scope entirely.
     return `the cache belongs to target ${display(cache.target.slice(0, 64))}, not ${display(target)}`;
   }
+  if ((cache.source ?? undefined) !== source) {
+    // …and the TOKEN alone cannot answer that question, because
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` flatten to
+    // one token, as do `foo.ts`/`.foo.ts` and `foo..bar`/`foo/bar`. Under
+    // matching HEAD and identity the token gate passed each file the other's
+    // cache — scoping against a state describing a different file, and
+    // erasing that file's anchor and open findings on promotion. The capture
+    // records the path it flattened; compare that.
+    //
+    // A cache from before the field carries none, which reads as a mismatch
+    // against a file review and costs one full round — the safe direction.
+    return `the cache belongs to source path ${display(
+      (cache.source ?? 'an unrecorded path').slice(0, 96),
+    )}, not ${display(source ?? 'an unrecorded path')}`;
+  }
   if (cache.stateId !== stateIdOf(cache.headSha, cache.files)) {
     // Integrity: a shape-valid cache whose hashes were edited without
     // recomputing stateId is not the state any clean round certified.
@@ -180,13 +197,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // One deriver, in code. A caller that passes an explicit `--target` still
   // wins: the plain local review names `local`, and the cache-target gate
   // below compares whatever was used.
-  const target =
+  const sourcePath =
     file !== undefined && (args.target === undefined || args.target === 'local')
-      ? safeTarget(
-          repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file)
-            .rel,
-        )
-      : args.target;
+      ? repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file).rel
+      : undefined;
+  const target =
+    sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
   const capture = captureLocalDiff({
     file,
@@ -284,6 +300,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // empty string means the runtime published nothing, which the gate reads
     // as a mismatch rather than a pass.
     lastModelId: roundModelIdFrom(process.env),
+    // The path the target token was FLATTENED from, when there is one.
+    //
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
+    // flatten to `src_foo.ts`, as do `foo.ts`/`.foo.ts` and
+    // `foo..bar`/`foo/bar`. This PR newly keys the review cache by that
+    // token, so the gate below — comparing tokens alone — could not tell two
+    // different files apart: a review of `src_foo.ts` accepted `src/foo.ts`'s
+    // cache, scoped against a state describing another file, and promoting it
+    // erased the first file's anchor and its open findings.
+    ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
   if (treeHeldStill) {
@@ -308,6 +334,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       roundModelIdFrom(process.env),
       headSha,
       target,
+      sourcePath,
       capture.skipped.length,
       treeHeldStill,
     );

@@ -49,6 +49,15 @@ export interface LocalCacheCandidate {
   /** Content-addressed id of the whole reviewed state, for display and logs. */
   stateId: string;
   /**
+   * The repo-relative path `target` was flattened from, on a file review.
+   *
+   * `safeTarget` is not injective — `src/foo.ts` and `src_foo.ts` flatten to
+   * one token — and the cache is keyed by the token, so the token alone
+   * cannot tell two files apart. Absent on a plain `local` round, which has
+   * no single source.
+   */
+  source?: string;
+  /**
    * The identity reviewing this round, provider-qualified, as the runtime
    * published it — written by the CAPTURE, not merged in afterwards.
    *
@@ -324,6 +333,7 @@ export function readLocalCache(path: string): LocalReviewCache | null {
   const c = raw as {
     v?: unknown;
     target?: unknown;
+    source?: unknown;
     headSha?: unknown;
     files?: unknown;
     stateId?: unknown;
@@ -364,6 +374,11 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     ...(typeof c.lastModelId === 'string'
       ? { lastModelId: c.lastModelId }
       : {}),
+    // Carried through, because the target token it sits beside is not
+    // injective and the gate compares this instead. Absent stays absent: a
+    // cache from before the field reads as a mismatch against a file review,
+    // which costs one full round.
+    ...(typeof c.source === 'string' ? { source: c.source } : {}),
   };
 }
 

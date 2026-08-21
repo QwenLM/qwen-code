@@ -388,6 +388,47 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — the cache key is the SOURCE path, not the token', () => {
+  it('refuses a cache whose flattened token collides with another file', () => {
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
+    // flatten to `src_foo.ts`, and this PR keys the cache by that token. The
+    // token gate alone passed each file the other's cache — scoping against a
+    // state describing a different file, and erasing that file's anchor and
+    // open findings on promotion.
+    seedDirtyTree();
+    write('src_foo.ts', 'export const collide = 1;\n');
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    expect(first['target']).toBe('src_foo.ts');
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(candidate['source']).toBe('src/foo.ts');
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    const cachePath = join(repo, '.qwen/review-cache/src_foo.ts.json');
+    writeFileSync(cachePath, JSON.stringify(candidate));
+
+    // The OTHER file, whose token is the same one.
+    const other = capture({
+      file: 'src_foo.ts',
+      cache: cachePath,
+      model: 'model-a',
+    });
+    expect(other['target']).toBe('src_foo.ts');
+    expect(other.incremental).toBeUndefined();
+
+    // …and the file the cache actually belongs to still scopes.
+    write('src/foo.ts', 'export const real = 2;\n');
+    const same = capture({
+      file: 'src/foo.ts',
+      cache: cachePath,
+      model: 'model-a',
+    });
+    expect(same.incremental).toBeDefined();
+  });
+});
+
 describe('capture-local — the local same-model gate', () => {
   const A = 'qwen3-max@aaaaaaaa';
   const B = 'qwen3-max@bbbbbbbb';
