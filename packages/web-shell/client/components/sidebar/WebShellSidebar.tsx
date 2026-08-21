@@ -113,7 +113,10 @@ import {
   useSessionCatalogQueries,
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
-import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
+import {
+  getSessionCatalogQueryKey,
+  type SessionCatalogQuery,
+} from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -159,6 +162,26 @@ function getSessionIdentity(
   return `${workspaceCwd ?? ''}\0${sessionId}`;
 }
 
+/** A tracked catalog page the pin reconciliation evaluates. */
+interface PinCatalogSlot {
+  /** Catalog query key identifying the page across renders and scope shifts. */
+  key: string;
+  /** Loaded page rows; undefined while the query is disabled or unloaded. */
+  page: DaemonSessionSummary[] | undefined;
+  /** True for pinned-group pages, where a successful pin's row lands. */
+  pinnedPage: boolean;
+}
+
+/** Settle-time snapshot of the tracked catalog pages for one pin entry. */
+interface PinReconciliationBaseline {
+  /** Query key -> page reference for every tracked slot at settle time. */
+  pages: ReadonlyMap<string, DaemonSessionSummary[] | undefined>;
+  /** Query keys of the pages carrying the toggled row at settle time. */
+  carriers: ReadonlySet<string>;
+  /** Query keys of the pinned-group pages tracked at settle time. */
+  pinnedPages: ReadonlySet<string>;
+}
+
 /** A pin toggle applied optimistically before the daemon RPC settles. */
 interface OptimisticPinEntry {
   /** Session snapshot captured at toggle time, for rendering the row. */
@@ -167,8 +190,8 @@ interface OptimisticPinEntry {
   /** Pin timestamp assigned optimistically (present when pinning). */
   pinnedAt?: string;
   rpcSettled: boolean;
-  /** Catalog pages observed when the organization RPC settled. */
-  catalogPages?: readonly (DaemonSessionSummary[] | undefined)[];
+  /** Settle-time catalog baseline the reconciliation compares against. */
+  baseline?: PinReconciliationBaseline;
 }
 
 function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
@@ -1057,19 +1080,22 @@ export function WebShellSidebar({
   }, [sessionsPage, sessionSource]);
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
-  const { sessions: primaryPinnedSessions, data: primaryPinnedSessionsPage } =
-    useWebShellSessions({
-      autoLoad:
-        sessionCatalogRequestsEnabled &&
-        loadPinnedSessions &&
-        !primaryWorkspaceSessionLiveStateEnabled,
-      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
-      pageSize: SESSION_LIST_PAGE_SIZE,
-      archiveState: 'active',
-      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
-      view: 'organized',
-      group: 'pinned',
-    });
+  const {
+    sessions: primaryPinnedSessions,
+    data: primaryPinnedSessionsPage,
+    catalogQuery: primaryPinnedCatalogQuery,
+  } = useWebShellSessions({
+    autoLoad:
+      sessionCatalogRequestsEnabled &&
+      loadPinnedSessions &&
+      !primaryWorkspaceSessionLiveStateEnabled,
+    enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+    pageSize: SESSION_LIST_PAGE_SIZE,
+    archiveState: 'active',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+    view: 'organized',
+    group: 'pinned',
+  });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
   // Pin toggles applied optimistically while the daemon organization RPC
@@ -1385,27 +1411,65 @@ export function WebShellSidebar({
       ),
     [secondaryPinnedSnapshots],
   );
-  const optimisticCatalogPages = useMemo(
-    () => [
-      ...(includePrimaryWorkspaceSessions ? [primaryPinnedSessionsPage] : []),
-      ...secondaryPinnedSnapshots.map((snapshot) => snapshot.page?.sessions),
-      sessionsPage,
-      ...secondaryActiveSnapshots.map((snapshot) => snapshot.page?.sessions),
-    ],
-    [
-      includePrimaryWorkspaceSessions,
-      primaryPinnedSessionsPage,
-      secondaryActiveSnapshots,
-      secondaryPinnedSnapshots,
-      sessionsPage,
-    ],
-  );
-  // Settle-time baseline for the reconciliation effect. A page swap caused by
-  // polling or live ticks while the RPC is in flight must not drop the entry
-  // the moment it settles; snapshot the pages when the RPC settles, not from
-  // the click-time closure.
-  const optimisticCatalogPagesRef = useRef(optimisticCatalogPages);
-  optimisticCatalogPagesRef.current = optimisticCatalogPages;
+  // The tracked catalog pages the pin reconciliation evaluates, keyed by
+  // catalog query identity so scope/composition changes cannot be mistaken
+  // for page refreshes (and vice versa).
+  const optimisticCatalogSlots = useMemo<PinCatalogSlot[]>(() => {
+    const slots: PinCatalogSlot[] = [];
+    if (includePrimaryWorkspaceSessions) {
+      slots.push({
+        key: primaryPinnedCatalogQuery
+          ? getSessionCatalogQueryKey(primaryPinnedCatalogQuery)
+          : 'primary-pinned',
+        page: primaryPinnedSessionsPage,
+        pinnedPage: true,
+      });
+    }
+    secondaryPinnedSnapshots.forEach((snapshot, index) => {
+      const query = secondaryPinnedQueries[index];
+      slots.push({
+        key: query
+          ? getSessionCatalogQueryKey(query)
+          : `secondary-pinned:${index}`,
+        page: snapshot.page?.sessions,
+        pinnedPage: true,
+      });
+    });
+    slots.push({
+      key: catalogQuery
+        ? getSessionCatalogQueryKey(catalogQuery)
+        : 'primary-all',
+      page: sessionsPage,
+      pinnedPage: false,
+    });
+    secondaryActiveSnapshots.forEach((snapshot, index) => {
+      const query = secondaryActiveQueries[index];
+      slots.push({
+        key: query
+          ? getSessionCatalogQueryKey(query)
+          : `secondary-active:${index}`,
+        page: snapshot.page?.sessions,
+        pinnedPage: false,
+      });
+    });
+    return slots;
+  }, [
+    catalogQuery,
+    includePrimaryWorkspaceSessions,
+    primaryPinnedCatalogQuery,
+    primaryPinnedSessionsPage,
+    secondaryActiveQueries,
+    secondaryActiveSnapshots,
+    secondaryPinnedQueries,
+    secondaryPinnedSnapshots,
+    sessionsPage,
+  ]);
+  // Settle-time baseline source for the reconciliation effect. A page swap
+  // caused by polling or live ticks while the RPC is in flight must not drop
+  // the entry the moment it settles; snapshot the slots when the RPC settles,
+  // not from the click-time closure.
+  const optimisticCatalogSlotsRef = useRef(optimisticCatalogSlots);
+  optimisticCatalogSlotsRef.current = optimisticCatalogSlots;
   const secondaryArchivedEnabled =
     archivedExpanded &&
     sessionArchiveEnabled &&
@@ -1577,33 +1641,96 @@ export function WebShellSidebar({
     },
     [optimisticPins, getIdentityForSession],
   );
-  // Drop optimistic entries only after the RPC has settled and every loaded
-  // catalog page that changed afterwards corroborates the target state. One
-  // page can refresh before its sibling, so a partial refresh must not expose
-  // stale data from the page that has not settled yet.
+  const capturePinBaseline = useCallback(
+    (identity: string): PinReconciliationBaseline => {
+      const pages = new Map<string, DaemonSessionSummary[] | undefined>();
+      const carriers = new Set<string>();
+      const pinnedPages = new Set<string>();
+      for (const slot of optimisticCatalogSlotsRef.current) {
+        pages.set(slot.key, slot.page);
+        if (slot.pinnedPage) pinnedPages.add(slot.key);
+        if (
+          slot.page?.some(
+            (candidate) => getIdentityForSession(candidate) === identity,
+          )
+        ) {
+          carriers.add(slot.key);
+        }
+      }
+      return { pages, carriers, pinnedPages };
+    },
+    [getIdentityForSession],
+  );
+  // Drop optimistic entries only after the RPC has settled and post-settle
+  // catalog refreshes corroborate the toggle's outcome. Evidence is keyed by
+  // catalog query identity, not array position: a page counts as refreshed
+  // only when the same query's loaded page reference changed after settle.
+  // Churn that recreates a row-carrying page without touching pin state
+  // (patchSession, live-state ticks), pages reshaped by a scope shift, and
+  // disabled/unloaded pages (undefined) are never evidence. A pinned entry
+  // drops once any refreshed page shows the row pinned, or once every tracked
+  // pinned-group page refreshed without the row pinned anywhere — the settled
+  // catalog wins then, even when it contradicts the toggle. An unpinned entry
+  // drops only once every page that carried the row at settle time refreshed
+  // and no refreshed page shows it pinned, so a partial refresh never exposes
+  // a stale sibling page; refreshed pages still showing it pinned keep the
+  // mask until a later refresh settles the identity.
   useEffect(() => {
     if (optimisticPins.size === 0) return;
-    const pages = optimisticCatalogPages;
+    const slots = optimisticCatalogSlots;
     const staleIdentities: string[] = [];
     for (const [identity, entry] of optimisticPins) {
-      if (!entry.rpcSettled || !entry.catalogPages) continue;
-      const pagesChanged = pages.some(
-        (page, index) => page !== entry.catalogPages?.[index],
-      );
-      if (!pagesChanged) continue;
-      const matchingSessions = pages.flatMap((page) =>
-        (page ?? []).filter(
-          (candidate) => getIdentityForSession(candidate) === identity,
-        ),
-      );
-      const firstPinned = matchingSessions[0]?.isPinned === true;
-      const pagesAgree =
-        matchingSessions.length > 0 &&
-        matchingSessions.every(
-          (session) => (session.isPinned === true) === firstPinned,
+      if (!entry.rpcSettled || !entry.baseline) continue;
+      const { pages: baselinePages, carriers, pinnedPages } = entry.baseline;
+      // Evidence: settle-time-tracked slots whose loaded page changed.
+      const evidencePages: (DaemonSessionSummary[] | undefined)[] = [];
+      const evidencedKeys = new Set<string>();
+      const trackedKeys = new Set<string>();
+      for (const slot of slots) {
+        if (!baselinePages.has(slot.key)) continue;
+        trackedKeys.add(slot.key);
+        if (
+          slot.page !== undefined &&
+          slot.page !== baselinePages.get(slot.key)
+        ) {
+          evidencePages.push(slot.page);
+          evidencedKeys.add(slot.key);
+        }
+      }
+      if (evidencePages.length === 0) continue;
+      const showsIdentityPinned = (
+        page: DaemonSessionSummary[] | undefined,
+      ): boolean =>
+        (page ?? []).some(
+          (candidate) =>
+            getIdentityForSession(candidate) === identity &&
+            candidate.isPinned === true,
         );
-      const corroborated =
-        pagesAgree || (!entry.pinned && matchingSessions.length === 0);
+      let corroborated: boolean;
+      if (entry.pinned) {
+        const success = evidencePages.some(showsIdentityPinned);
+        const trackedPinnedKeys = [...pinnedPages].filter((key) =>
+          trackedKeys.has(key),
+        );
+        const pinnedHomeRefreshed =
+          trackedPinnedKeys.length > 0 &&
+          trackedPinnedKeys.every((key) => evidencedKeys.has(key));
+        corroborated =
+          success ||
+          (pinnedHomeRefreshed &&
+            !slots.some(
+              (slot) =>
+                slot.page !== undefined && showsIdentityPinned(slot.page),
+            ));
+      } else {
+        const trackedCarriers = [...carriers].filter((key) =>
+          trackedKeys.has(key),
+        );
+        corroborated =
+          trackedCarriers.length > 0 &&
+          trackedCarriers.every((key) => evidencedKeys.has(key)) &&
+          !evidencePages.some(showsIdentityPinned);
+      }
       if (corroborated) staleIdentities.push(identity);
     }
     if (staleIdentities.length === 0) return;
@@ -1612,7 +1739,7 @@ export function WebShellSidebar({
       for (const identity of staleIdentities) next.delete(identity);
       return next;
     });
-  }, [getIdentityForSession, optimisticPins, optimisticCatalogPages]);
+  }, [getIdentityForSession, optimisticPins, optimisticCatalogSlots]);
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     const addCandidate = (
@@ -3139,7 +3266,7 @@ export function WebShellSidebar({
           next.set(sessionIdentity, {
             ...entry,
             rpcSettled: true,
-            catalogPages: optimisticCatalogPagesRef.current,
+            baseline: capturePinBaseline(sessionIdentity),
           });
           return next;
         });
@@ -3197,6 +3324,7 @@ export function WebShellSidebar({
     },
     [
       bumpWorkspaceReload,
+      capturePinBaseline,
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,

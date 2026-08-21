@@ -658,6 +658,111 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
+  it('keeps a settled pin when churn refreshes only the row-carrying page', async () => {
+    // patchSession (prompt admission, rename) and live-state ticks recreate
+    // only the pages carrying the touched row and never touch isPinned. Such
+    // churn is not the post-toggle refresh: the pinned page keeps its
+    // reference, so the settled entry must survive it.
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    active.sessions = [
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: false,
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps a settled unpin while only the pinned page has refreshed', async () => {
+    // The row is carried by both pages. When the pinned-page refetch lands
+    // first, the stale all-sessions row (still isPinned) must not surface in
+    // the pinned section until its own page refreshes.
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
+  it('keeps a settled unpin across a scope shift and does not re-expose stale pages', async () => {
+    // Switching scopes disables the pinned query (page becomes undefined) and
+    // reshapes the all-sessions page into one that cannot carry the row. That
+    // absence is not evidence: the entry must survive, and switching back to
+    // the still-stale baseline pages must not unpin the row again.
+    const row = makeSession('plain', {
+      displayName: 'Plain session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const pinnedRows = [row];
+    const activeRows = [row];
+    pinned.sessions = pinnedRows;
+    pinned.data = pinned.sessions;
+    active.sessions = activeRows;
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // Scope shift: pinned query disabled, reshaped all-page drops the row.
+    pinned.data = undefined;
+    active.sessions = [];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
+
+    // Switching back re-exposes the stale baseline pages (same references).
+    pinned.sessions = pinnedRows;
+    pinned.data = pinned.sessions;
+    active.sessions = activeRows;
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([]);
+  });
+
   it('reconciles an unpin whose row leaves every list, and never hides a later re-pin', async () => {
     // Rows that exist only in the pinned page (e.g. secondary-workspace rows
     // are absent from the primary all-sessions page): once unpinned, the
