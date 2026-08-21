@@ -948,6 +948,7 @@ const FIRE: ConvergenceFacts = {
   posted: 3,
   prevPosted: 3,
   floorEngaged: true,
+  prevFloor: 'c',
 };
 
 describe('convergenceAssessment', () => {
@@ -1024,9 +1025,28 @@ describe('convergenceAssessment', () => {
         posted: 0,
         prevPosted: 0,
         floorEngaged: true,
+        prevFloor: 'c',
       }),
     ).not.toBeNull();
   });
+});
+
+it('suppresses when the previous round posted under a DIFFERENT floor', () => {
+  // The round the floor engages on compares a Critical-only volume
+  // against a predecessor that was still posting Suggestions. That
+  // movement is the posture, not the loop — and "the severity floor will
+  // not converge it" is not a claim one round of the floor can support.
+  expect(convergenceAssessment({ ...FIRE, prevFloor: 'o' })).toBeNull();
+});
+
+it('still evaluates when the previous floor was never recorded', () => {
+  // Read like the sibling diagnosis in this module: a floor that was not
+  // recorded is not a floor that DIFFERS. A marker written before the
+  // field existed must evaluate exactly as it did before this conjunct,
+  // or the advisory goes silent on every loop carrying an older marker.
+  expect(
+    convergenceAssessment({ ...FIRE, prevFloor: undefined }),
+  ).not.toBeNull();
 });
 
 describe('convergenceAdvisory', () => {
@@ -1054,12 +1074,26 @@ describe('convergenceAdvisory', () => {
     // Advisory-only contract: it must say it blocks nothing.
     expect(en).toContain('does not block');
     expect(zh).toContain('不阻断');
-    // The scaffold names the three maintainer dimensions.
+    // The scaffold names the three maintainer dimensions — in BOTH
+    // languages. Pinned only in English, a zh scaffold that lost a column
+    // shipped green, and the Chinese reader is the one who cannot fall back
+    // to the other half of the paragraph.
     expect(en).toContain('attack surface');
     expect(en).toContain('attacker-dependency');
     expect(en).toContain('blast radius');
-    // Bounded by construction: the facts ride as numbers, never model prose.
-    expect(en).toContain('2');
-    expect(en).toContain('3');
+    expect(zh).toContain('攻击面');
+    expect(zh).toContain('攻击者依赖性');
+    expect(zh).toContain('影响范围');
+    // The claim the recommendation rests on, positively, in both.
+    expect(en).toContain('The severity floor will not converge it');
+    expect(zh).toContain('severity floor 无法使其收敛');
+    // Bounded by construction: the facts ride as numbers, never model
+    // prose — and the zh Critical COUNT is its own interpolation slot, not
+    // a repeat of the volume beside it. `FIRE` is deliberately asymmetric
+    // (2 Criticals, volume 3/3) so a template reading the wrong slot shows.
+    expect(en).toContain('2 Critical(s)');
+    expect(en).toContain('this round 3, previous 3');
+    expect(zh).toContain('本轮 2 条 Critical');
+    expect(zh).toContain('本轮 3，上一轮 3');
   });
 });

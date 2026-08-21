@@ -58,9 +58,11 @@ interface PersistedVerdict
    * recoverable from the marker chain inside `body`.
    *
    * `residualRisk` is NOT omitted, and for the reason its sibling
-   * `convergence` is not: both are shed by the body-budget ladder before
-   * anything else, and the artifact is where a trimmed round's record
-   * lives. "The advisory rides the persisted body" is true of every round
+   * `convergence` is not: the artifact is where a trimmed round's record
+   * lives. Not the same rank, though — `convergence` is rank 0 and sheds
+   * before everything, while this one is rank 2 and yields after the fold
+   * and the deferral display. What they share is that both CAN go, and the
+   * body is then not a copy of either. "The advisory rides the persisted body" is true of every round
    * except the ones that most need the durable copy — a maintainer reading
    * `.qwen/reviews` to make the `land-with-residual-risk` call would find a
    * "did not fit" breadcrumb and no facts. The validator carries and

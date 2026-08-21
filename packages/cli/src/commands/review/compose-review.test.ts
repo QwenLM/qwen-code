@@ -2837,6 +2837,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           posted: number;
           prevPosted: number;
         };
+        event?: string;
+        cappedBy?: string[];
         body?: string;
       };
     try {
@@ -2863,6 +2865,24 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(conv).toHaveLength(1);
       expect(conv[0]).toContain('land-with-residual-risk');
       expect(conv[0]).toContain('does not block');
+      // ONE record on a line-oriented channel, like the VOLUME line above
+      // it. The advisory carries a markdown table for the body, so printed
+      // verbatim this was one labelled line followed by six unlabelled
+      // ones (#9526).
+      expect(conv[0]).not.toContain('\n');
+      // Collapsed, not dropped: the inventory's three columns still reach
+      // the operator on the round where the body budget sheds the table.
+      for (const column of [
+        'attack surface',
+        'attacker-dependency',
+        'blast radius',
+      ]) {
+        expect(conv[0]).toContain(column);
+      }
+      // The claim the whole conjunction exists to license, stated
+      // POSITIVELY — every other fixture only pins its absence, so a
+      // template that stopped emitting it shipped green.
+      expect(conv[0]).toContain('The severity floor will not converge it');
       // Structured field on the composed JSON.
       const composed = stdoutJson();
       expect(composed.residualRisk).toMatchObject({
@@ -2874,6 +2894,20 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       // Body disclosure rides too, carrying the same recommendation code.
       expect(composed.body).toContain('land-with-residual-risk');
+      expect(composed.body).toContain(
+        'The severity floor will not converge it',
+      );
+      // ADVISORY ONLY — the guarantee the feature rests on, and the one
+      // nothing pinned. A fired advisory must leave the event exactly where
+      // the findings put it and must add nothing to `cappedBy`: this round
+      // stands behind an unverified Critical, so the event is the COMMENT
+      // the verification cap produces and the cap list names that cap and
+      // nothing about convergence.
+      expect(composed.event).toBe('COMMENT');
+      expect(composed.cappedBy ?? []).not.toContain('convergence');
+      expect((composed.cappedBy ?? []).join('\n')).not.toContain(
+        'residual-risk',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3243,6 +3277,76 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(composed.residualRisk).toBeUndefined();
       expect(composed.body ?? '').not.toContain('land-with-residual-risk');
       // And the unprovable claim itself never reaches the body.
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the round the floor ENGAGES on (#9526)', async () => {
+    // The posture-change arm, end to end. The predecessor recorded floor
+    // `o` — it was still posting Suggestions — and this round runs under
+    // the engaged floor, so the two volumes are not two points on one
+    // loop's trend: the drop between them is the Suggestions leaving the
+    // posting set. Firing here publishes "the severity floor will not
+    // converge it" after the floor has run for exactly one round.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-posture-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          // Every other conjunct holds; ONLY the recorded posture differs.
+          floor: 'o',
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // The predecessor WAS recovered — the silence is its posture, not a
+      // fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
       expect(composed.body ?? '').not.toContain('The severity floor will not');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -8242,14 +8346,79 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
         (l) =>
           l.startsWith('body budget:') &&
           l.includes('persistently-critical convergence advisory') &&
-          // The tail clause is the branch under test: the advisory keeps
-          // two more durable copies, so "their only other copy" (true only
-          // of rank-3 disclosures) would be a false record here.
+          // The tail clause is the branch under test. Rank 3 did NOT go
+          // here — the disclosures keep their place in the body — so every
+          // section that went (the advisory) does have a durable copy, and
+          // "their only other copy" would be a false record. The artifact
+          // is deliberately not named: this run holds no deferral list.
           l.includes(
-            'another copy — the advisory also rides the composed JSON',
+            'though every section that went also has a durable copy elsewhere',
           ),
       ),
     ).toBe(true);
+  });
+
+  it('warns for the disclosures when the advisory went with them (#9526)', () => {
+    // The COMBINED drop the rank-2 keying got wrong. With ranks 2 and 3
+    // both gone, a tail keyed on the advisory said "another copy — the
+    // advisory also rides the composed JSON": true of the advisory, false
+    // of the disclosures beside it, and the disclosures are the half that
+    // survives nowhere but the terminal summary. The sentence exists to
+    // tell the operator what they must repeat, so under-warning about
+    // exactly that half is the false-record class it is meant to refuse.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 6,
+        findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+        posted: 0,
+      }),
+    );
+    // A rank-3 section wide enough that shedding the advisory alone does
+    // not bring the body back under budget — so rung 2 goes on to rank 3
+    // and both are in `droppedRanks`. Sized off the disclosure block rather
+    // than off the advisory: a one-section window would make the fixture
+    // turn on a few characters of prose.
+    const dimensions = Array.from(
+      { length: 30 },
+      (_, i) => `dimension-number-${i}-with-a-long-name`,
+    );
+    const blocker = 'B'.repeat(56_200);
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      bodyCriticals: [blocker],
+      unreviewedDimensions: dimensions,
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    // Both ranks went, and nothing was cut — the tail cut has a notice of
+    // its own and would change the subject of the line under test.
+    expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.body).not.toContain('land-with-residual-risk');
+    const line = r.remediation.find((l) => l.startsWith('body budget:')) ?? '';
+    expect(line).toContain('the persistently-critical convergence advisory');
+    expect(line).toContain('the not-reviewed and non-blocking disclosures');
+    // The branch under test: rank 3 is among the dropped, so the terminal
+    // summary IS the only other copy of that half, and the line must say
+    // so rather than reporting the advisory's spare copies for both.
+    expect(line).toContain(
+      'which is the only other copy of the disclosures among them',
+    );
+    expect(line).not.toContain(
+      'though every section that went also has a durable copy elsewhere',
+    );
+    // Still no deferral list on this run, so still no artifact pointer.
+    expect(line).not.toContain('findings artifact');
   });
 
   it('keeps the verdict-qualifying opener through a truncation', () => {

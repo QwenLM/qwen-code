@@ -706,6 +706,20 @@ export interface ConvergenceFacts {
    * suppresses the signal — fail open, like every other conjunct.
    */
   floorEngaged: boolean | undefined;
+  /**
+   * The posting floor the PREVIOUS round ran under, when its marker
+   * recorded one. The volume window is a two-round comparison, and two
+   * rounds that posted under different postures are not two points on one
+   * loop's trend: the round the floor engages on drops its Suggestions, so
+   * its volume falls against a predecessor that still posted them, and the
+   * round after an operator loosens the floor rises for the same reason.
+   * Neither movement is the loop.
+   *
+   * Read the way the sibling diagnosis in this file reads it — a floor that
+   * was never recorded is not a floor that DIFFERS, so a pre-field marker
+   * evaluates exactly as it did before this conjunct existed.
+   */
+  prevFloor: 'c' | 'o' | undefined;
 }
 
 /** The one shape this module detects. */
@@ -746,6 +760,11 @@ export interface ConvergenceAssessment {
  *    where the floor is actually running; before engagement the loop may
  *    still converge once it does, so a disengaged floor suppresses the
  *    signal;
+ *  - the previous round posted under the SAME engaged floor, when its
+ *    marker recorded one — the round the floor engages on compares a
+ *    Critical-only volume against a predecessor that still posted
+ *    Suggestions, and "the floor will not converge it" is not a claim one
+ *    round of the floor can support;
  *  - the two-round posting window is present and NOT shrinking — both volumes
  *    recorded, and this round's at least the previous round's. A falling
  *    volume is a converging loop even with Criticals present (they are being
@@ -759,11 +778,21 @@ export interface ConvergenceAssessment {
 export function convergenceAssessment(
   facts: ConvergenceFacts,
 ): ConvergenceAssessment | null {
-  const { prevHadCritical, thisCriticals, posted, prevPosted, floorEngaged } =
-    facts;
+  const {
+    prevHadCritical,
+    thisCriticals,
+    posted,
+    prevPosted,
+    floorEngaged,
+    prevFloor,
+  } = facts;
   if (prevHadCritical !== true) return null;
   if (thisCriticals <= 0) return null;
   if (floorEngaged !== true) return null;
+  // This round is `c` by the line above, so a RECORDED `o` predecessor is a
+  // posture change and its volume is not a comparable point. Unrecorded
+  // stays evaluable, like the sibling diagnosis above.
+  if (prevFloor !== undefined && prevFloor !== 'c') return null;
   if (posted === undefined || prevPosted === undefined) return null;
   if (posted < prevPosted) return null;
   return {

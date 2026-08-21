@@ -2307,6 +2307,10 @@ function composeReviewBody(
     thisCriticals: criticalsInline + bodyCriticals.length,
     posted: postedInline,
     prevPosted: convergence?.prev.posted,
+    // Off the same recovered predecessor as the volume it qualifies — the
+    // marker records the floor its round ran under, and the observation
+    // above compares the pair for exactly this reason.
+    prevFloor: convergence?.prev.floor,
   });
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -3001,9 +3005,9 @@ function composeReviewBody(
    * degrade, and the ORDER of the degradation is the policy: the bilingual
    * fold yields FIRST (it is a translation of the English above it, so it
    * costs the author nothing the body does not still say), then parts by
-   * ascending `trim` rank (the deferral display, then the convergence
-   * advisory, then the not-reviewed disclosures), the blockers and the caps
-   * never, and every drop is
+   * ascending `trim` rank (the convergence observation, then the deferral
+   * display, then the residual-risk advisory, then the not-reviewed
+   * disclosures), the blockers and the caps never, and every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
    *
@@ -3023,12 +3027,22 @@ function composeReviewBody(
    * Every exit of `render` that dropped a rank owes this line — the
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
-   * Rank 1 has a second durable copy (each deferral is a `D<round>-<n>`
-   * entry in the findings artifact) and rank 0 has one too (the composed
-   * result carries the paragraph, and the command prints it as
-   * `CONVERGENCE:`); a trimmed disclosure section survives nowhere but the
-   * terminal summary, so ask for it there rather than pointing at an
-   * artifact that does not carry it.
+   * Three of the four ranks keep a second durable copy: rank 0's
+   * observation rides the composed result (and prints as `CONVERGENCE:`),
+   * rank 1's deferrals are each a `D<round>-<n>` entry in the findings
+   * artifact, and rank 2's residual-risk advisory rides the composed result
+   * too (and prints as `RESIDUAL-RISK:`). Rank 3 is the exception — a
+   * trimmed disclosure section survives nowhere but the terminal summary,
+   * so ask for it there rather than pointing at an artifact that does not
+   * carry it.
+   *
+   * Which is why the tail clause keys on rank 3 rather than on the
+   * advisory. Keyed on rank 2 it read "another copy — the advisory also
+   * rides the composed JSON" over a combined rank-2-and-3 drop, telling the
+   * operator the trimmed set was backed up when the half of it that is NOT
+   * backed up was exactly the half this sentence exists to rescue — and it
+   * read "their only other copy" over a rank-0 drop that the composed
+   * result does carry.
    */
   const noteTrimmedRanks = (droppedRanks: number[]): void => {
     if (droppedRanks.length === 0) return;
@@ -3041,10 +3055,18 @@ function composeReviewBody(
         (droppedRanks.includes(1)
           ? `the deferred findings are in the findings artifact; `
           : '') +
-        `repeat the trimmed sections in your terminal summary, which is ` +
-        (droppedRanks.includes(2)
-          ? `another copy — the advisory also rides the composed JSON`
-          : `their only other copy`),
+        `repeat the trimmed sections in your terminal summary` +
+        (droppedRanks.includes(3)
+          ? droppedRanks.length === 1
+            ? `, which is their only other copy`
+            : `, which is the only other copy of the disclosures among them`
+          : // Deliberately unnamed here: the ONE place the artifact may be
+            // named is the rank-1 clause above, which rides only when the
+            // deferral list actually went. Naming it in this tail sent the
+            // operator to a `D<round>-<n>` list that does not exist on a
+            // rank-0-or-2-only drop — the same false record the clause
+            // above was split out to refuse.
+            `, though every section that went also has a durable copy elsewhere`),
     );
   };
   const render = (parts: Bi[], sep: string): string => {
@@ -4878,8 +4900,18 @@ export const composeReviewCommand: CommandModule = {
     // land-with-residual-risk exit is the maintainer's to take. Printed only
     // when the shape is provable; absence is the fail-safe reading.
     if (result.residualRisk) {
+      // ONE line, like `VOLUME:`, `FIX:` and `CONVERGENCE:` beside it. The
+      // advisory carries a blank markdown table for the body, so printed
+      // verbatim it spread one labelled record over seven lines — six of
+      // them unlabelled, which is a record no line-oriented reader (an
+      // operator scanning, a `grep`, a log collector) can put back
+      // together. Collapsed rather than dropped: the pipes survive, so the
+      // inventory's three columns are still all there on the round where
+      // the body budget shed the formatted copy and this line is the copy.
       writeStderrLine(
-        `RESIDUAL-RISK: ${convergenceAdvisory(result.residualRisk).en}`,
+        `RESIDUAL-RISK: ${convergenceAdvisory(result.residualRisk)
+          .en.replace(/\s+/g, ' ')
+          .trim()}`,
       );
     }
     writeStderrLine(verdictLine(result));

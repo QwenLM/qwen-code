@@ -456,8 +456,12 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('rejected by the API **whole**');
     expect(body).toContain('**the Chinese fold first**');
+    // All four ranks, in the order the ladder actually drops them. The
+    // enumeration named two of them while the code had four, so a reader
+    // taking the skill at its word placed the advisory and the observation
+    // wherever seemed reasonable — and the ranks are the policy.
     expect(body).toContain(
-      'then the deferral display, then the not-reviewed disclosures',
+      'then the convergence observation, then the deferral display, then the residual-risk advisory, then the not-reviewed disclosures',
     );
     // The other half of the policy. A "simplify the prose" edit turning
     // `never` into `last` would leave every prefix pin matching while the
@@ -487,6 +491,13 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain(
       '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    // ...and the exception, so the terminal-summary duty above is asked for
+    // where it is actually owed. Both convergence paragraphs keep a copy on
+    // the composed verdict and on stderr, which is why the trim line names
+    // WHICH of the dropped kinds the summary is the only copy of.
+    expect(body).toContain(
+      'both the observation and the residual-risk advisory ride the composed verdict',
     );
     expect(body).toContain(
       '**say in your Step 6 terminal summary what was trimmed and what it said.**',
