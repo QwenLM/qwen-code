@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
@@ -19888,6 +19889,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.headAfter).toBe('feature');
   });
 
+  it('gates every mapfile-crossing runGate flow on the host probe', () => {
+    // These flows run the REAL script past the bite section's
+    // unconditional top-level `mapfile -d ''`: on a bash without mapfile
+    // (macOS ships 3.2) the spawn dies there with exit 127 before the
+    // semantics under test can execute, so each carries the host gate.
+    // Two siblings a main merge added went ungated and turned the revived
+    // macOS lane red; the pin keeps a dropped gate from doing it again.
+    const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    for (const title of [
+      'keeps the green path intact',
+      'rejects a conflict verdict whose round completed as fixed',
+      'locks the runner file-command backing files against env plants',
+    ]) {
+      expect(self).toMatch(
+        new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
+      );
+    }
+  });
+
   it.skipIf(!hasBashMapfile)('keeps the green path intact', () => {
     const r = runGate({ failAt: [] });
     expect(r.status).toBe(0);
@@ -20335,30 +20355,33 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     );
   });
 
-  it('rejects a conflict verdict whose round completed as fixed', () => {
-    // The routing check cannot see the planted-handoff shape: conflict +
-    // handoff.md + commit + address-summary + green checks clears every
-    // earlier gate and would push the contested code under outcome=fixed
-    // while the report posts the park marker. The refusal sits at the push
-    // boundary — NOT at the verdict gate, where it would also refuse a
-    // legitimate repair-pass re-audit to conflict (which runs behind the
-    // first pass's commit and stops with failure.md).
-    const r = runGate({
-      kissAudit: true,
-      auditJson: conflictAuditJson,
-      handoffMd: 'conflict handoff\n',
-    });
-    expect(r.status).toBe(1);
-    expect(r.outputs).not.toContain('outcome=fixed');
-    expect(r.outputs).not.toContain('retryable=true');
-    // The validated verdict still surfaces: the trail marker posts and the
-    // park engages on the handoff's question.
-    expect(r.outputs).toContain('audit_verdict=conflict');
-    expect(r.outputs).toContain('outcome=failed');
-    expect(r.rejection).toContain(
-      'growth-audit verdict is conflict but the round completed as fixed',
-    );
-  });
+  it.skipIf(!hasBashMapfile)(
+    'rejects a conflict verdict whose round completed as fixed',
+    () => {
+      // The routing check cannot see the planted-handoff shape: conflict +
+      // handoff.md + commit + address-summary + green checks clears every
+      // earlier gate and would push the contested code under outcome=fixed
+      // while the report posts the park marker. The refusal sits at the push
+      // boundary — NOT at the verdict gate, where it would also refuse a
+      // legitimate repair-pass re-audit to conflict (which runs behind the
+      // first pass's commit and stops with failure.md).
+      const r = runGate({
+        kissAudit: true,
+        auditJson: conflictAuditJson,
+        handoffMd: 'conflict handoff\n',
+      });
+      expect(r.status).toBe(1);
+      expect(r.outputs).not.toContain('outcome=fixed');
+      expect(r.outputs).not.toContain('retryable=true');
+      // The validated verdict still surfaces: the trail marker posts and the
+      // park engages on the handoff's question.
+      expect(r.outputs).toContain('audit_verdict=conflict');
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.rejection).toContain(
+        'growth-audit verdict is conflict but the round completed as fixed',
+      );
+    },
+  );
 
   it('passes a conflict round that stopped with a non-empty handoff', () => {
     // The handoff.md stop shape the routing check exists for: conflict +
@@ -20487,19 +20510,22 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('kiss_audit=true');
   });
 
-  it('locks the runner file-command backing files against env plants', () => {
-    // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
-    // backing files under $RUNNER_TEMP/_runner_file_commands/ stay
-    // discoverable (a predictable path) and writable — an append there
-    // plants environment into every later step of the job, the PAT-
-    // bearing one included. The gate locks them for the step's lifetime.
-    const r = runGate({ forgeEnvFile: true });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('env forge blocked: backing file locked');
-    // The gate's OWN channel keeps working through the lock.
-    expect(r.outputs).toContain('outcome=fixed');
-    expect(r.outputs).toContain('kiss_audit=false');
-  });
+  it.skipIf(!hasBashMapfile)(
+    'locks the runner file-command backing files against env plants',
+    () => {
+      // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
+      // backing files under $RUNNER_TEMP/_runner_file_commands/ stay
+      // discoverable (a predictable path) and writable — an append there
+      // plants environment into every later step of the job, the PAT-
+      // bearing one included. The gate locks them for the step's lifetime.
+      const r = runGate({ forgeEnvFile: true });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('env forge blocked: backing file locked');
+      // The gate's OWN channel keeps working through the lock.
+      expect(r.outputs).toContain('outcome=fixed');
+      expect(r.outputs).toContain('kiss_audit=false');
+    },
+  );
 
   it('leaves the growth-audit verdict check inert on non-audit rounds', () => {
     // Without the KISS_AUDIT tag a malformed verdict file must not engage
