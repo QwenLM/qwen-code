@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Content, Part } from '@google/genai';
+import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
@@ -12,7 +12,6 @@ import {
   getApiHistoryPromptId,
   getApiHistoryPromptIndexes,
 } from '../../services/session-api-history.js';
-import { isClearedMediaPlaceholder } from '../../services/microcompaction/microcompact.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -251,27 +250,19 @@ export function selectForkHistory(
     // every older (unmarked) turn from the fork window, so while any
     // identity-less real user turn exists, fall back to the positional
     // enumeration — the same guard Session.#getRewindTurnProjection keeps,
-    // including its exception for placeholder-ONLY entries (structural
-    // media-clear replacements inside an identified session; an entry
-    // mixing genuine text with a placeholder is still a real legacy turn).
+    // minus its placeholder-ONLY exception: isRealUserTurn counts
+    // media-only entries as real turns (the Session twin never did), so an
+    // UNMARKED placeholder-only entry is a microcompaction-cleared
+    // media-only LEGACY turn and must force the positional fallback —
+    // skipping it would flip the window to identified mode and silently
+    // drop the legacy boundary. Marked placeholders (true structural
+    // replacements; microcompaction rebuilds entries with their marks
+    // preserved) are already skipped by the promptId check above.
     let hasUnmarkedRealUserTurn = false;
     if (identifiedTurns !== undefined && realUserTurnIndexes.length > 0) {
       for (let index = syntheticPrefixLength; index < history.length; index++) {
         const content = history[index]!;
         if (!isRealUserTurn(content) || getApiHistoryPromptId(content)) {
-          continue;
-        }
-        const textParts =
-          content.parts
-            ?.filter(
-              (part): part is Part & { text: string } =>
-                typeof part.text === 'string',
-            )
-            .map((part) => part.text) ?? [];
-        if (
-          textParts.length > 0 &&
-          textParts.every(isClearedMediaPlaceholder)
-        ) {
           continue;
         }
         hasUnmarkedRealUserTurn = true;

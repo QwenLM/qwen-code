@@ -3563,7 +3563,10 @@ describe('Session', () => {
     it('fails closed on legacy snapshot pairing when turns lack snapshots', () => {
       // A resumed legacy prefix carries no snapshots, so zipping snapshot
       // indexes against positional turn indexes past the prefix would land
-      // on the wrong turn's boundary — refuse the pairing instead.
+      // on the wrong turn's boundary — refuse the pairing instead. Both
+      // entry points must agree: truncating the conversation while silently
+      // skipping the file restore reports a success the workspace did not
+      // earn, so rewindToTurn fail-closes exactly like rewindToPrompt.
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'legacy one' }] },
         { role: 'model', parts: [{ text: 'legacy reply one' }] },
@@ -3590,14 +3593,75 @@ describe('Session', () => {
       expect(() => session.rewindToPrompt('prompt-new')).toThrow(
         'Cannot rewind to the requested prompt',
       );
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 2,
-      });
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
       expect(
         mockFileHistoryService.restoreFromSnapshots,
       ).not.toHaveBeenCalled();
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('fails closed on legacy snapshot pairing when snapshots outnumber turns', () => {
+      // Chat compression removes turns from the API history but never
+      // prunes file-history snapshots, so a compressed legacy session
+      // carries more snapshots than positional turns. The positional zip
+      // would mispair every surviving turn by the compressed count
+      // (advertising compressed-away snapshots as the visible turns) —
+      // refuse the pairing in the surplus direction too.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'surviving one' }] },
+        { role: 'model', parts: [{ text: 'surviving reply one' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+        { role: 'model', parts: [{ text: 'new reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        'prompt-new',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'compressed-away-0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'compressed-away-1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'snap-surviving',
+          timestamp: new Date('2026-06-13T00:02:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-new',
+          timestamp: new Date('2026-06-13T00:03:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      expect(() => session.rewindToPrompt('prompt-new')).toThrow(
+        'Cannot rewind to the requested prompt',
+      );
+      // A compressed-away snapshot's positional index still lands inside the
+      // surviving turn range — the zip would pair it with the WRONG turn.
+      expect(() => session.rewindToPrompt('compressed-away-0')).toThrow(
+        'Cannot rewind to the requested prompt',
+      );
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
@@ -6340,6 +6404,76 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordFileHistorySnapshot,
       ).toHaveBeenCalledWith(latestSnapshot);
+    });
+
+    it('snapshots automatic cron and notification turns to keep legacy rewind aligned', async () => {
+      // Background-notification and cron/loop turns pass #isUserTextContent
+      // and therefore count as positional rewindable turns, but they bypass
+      // prompt(). Without a turn-start snapshot the legacy snapshot↔turn
+      // zip desyncs from the first automatic turn onward — rewind then
+      // truncates the conversation while restoring nothing (or a wrong
+      // slice) for the turns that follow.
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+        notificationCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
+        'test-session-id########1',
+      );
+
+      cronCallback?.({ prompt: 'scheduled prompt' });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(2);
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^test-session-id########cron/),
+      );
+
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      await vi.waitFor(() => {
+        expect(internals.notificationCompletion).toBeNull();
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(3);
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^test-session-id########notification/),
+      );
     });
 
     it('fires MessageDisplay with cumulative non-thought text and is_final on the ACP prompt path', async () => {

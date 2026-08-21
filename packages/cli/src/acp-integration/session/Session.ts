@@ -3545,11 +3545,13 @@ export class Session implements SessionContext {
     let target = projection?.turns.find((turn) => turn.promptId === promptId);
     if (projection?.mode === 'legacy') {
       const snapshots = this.config.getFileHistoryService().getSnapshots();
-      // A snapshot's array index is a positional turn index only while every
-      // positional turn has a snapshot. A resumed legacy prefix has none, so
-      // any pairing past it is misaligned — fail closed instead of rewinding
-      // to the wrong turn's boundary.
-      if (snapshots.length >= projection.turns.length) {
+      // A snapshot's array index is a positional turn index only while the
+      // two stores are exactly aligned. A deficit (a resumed legacy prefix
+      // has no snapshots) mispairs every slot past the prefix; a surplus
+      // (chat compression removes turns but never prunes file-history
+      // snapshots) mispairs every slot by the compressed count — fail closed
+      // in both directions instead of rewinding to the wrong turn's boundary.
+      if (snapshots.length === projection.turns.length) {
         const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
         const targetTurnIndex = snapshotIndexes?.get(promptId);
         target =
@@ -3602,18 +3604,38 @@ export class Session implements SessionContext {
     const fileHistoryService = this.config.getFileHistoryService();
     const snapshots = fileHistoryService.getSnapshots();
     // Legacy mode pairs snapshot indexes with positional turn indexes; the
-    // pairing is only sound while every positional turn has a snapshot
-    // (resumed legacy turns have none).
+    // pairing is only sound while the two stores are exactly aligned. A
+    // deficit means a resumed legacy prefix left turns without snapshots; a
+    // surplus means chat compression removed turns without pruning the
+    // snapshots (nothing in the compression path touches the file history).
+    // Either direction mispairs the positional zip — fail closed below.
     const legacySnapshotsAligned =
       mode === 'legacy' &&
       legacyTurnCount !== undefined &&
-      snapshots.length >= legacyTurnCount;
+      snapshots.length === legacyTurnCount;
     const effectivePromptId =
       target.promptId ??
       (legacySnapshotsAligned
         ? snapshots[target.turnIndex]?.promptId
         : undefined);
     const rewindFiles = opts?.rewindFiles !== false;
+    // A misaligned legacy zip cannot partially rewind files: the conversation
+    // would truncate while workspace files silently stay behind — or roll
+    // back to a wrong turn's boundary — and the result would still report
+    // success. rewindToPrompt refuses the identical state; fail closed here
+    // too. File history being disabled means there is nothing to restore, so
+    // conversation-only rewinds keep working.
+    if (
+      rewindFiles &&
+      mode === 'legacy' &&
+      fileHistoryService.isEnabled() &&
+      !legacySnapshotsAligned
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested turn. Its legacy file snapshot pairing is missing or ambiguous.',
+      );
+    }
     let survivingSnapshots:
       | ReturnType<typeof fileHistoryService.getSnapshots>
       | undefined;
@@ -3797,6 +3819,37 @@ export class Session implements SessionContext {
     return indexes;
   }
 
+  /**
+   * Snapshot file state at turn start (mirrors the makeSnapshot block in
+   * GeminiClient.sendMessageStream). Every entry #isUserTextContent counts
+   * as a positional user turn must own a snapshot: the legacy rewind path
+   * zips snapshot indexes against positional turn indexes, so a turn that
+   * skips its snapshot desyncs every slot after it (file restore lands on
+   * the wrong snapshot or is silently skipped). Ordinary prompts, goal
+   * turns, cron/loop turns, and background-notification turns all call this
+   * at turn start — the automatic ones bypass prompt(), so they must not
+   * bypass the snapshot. Resubmissions keep updating the original turn's
+   * latest snapshot.
+   */
+  async #snapshotTurnStart(promptId: string): Promise<void> {
+    try {
+      const fileHistoryService = this.config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot(promptId);
+      try {
+        const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+        if (latestSnapshot) {
+          this.config
+            .getChatRecordingService()
+            ?.recordFileHistorySnapshot(latestSnapshot);
+        }
+      } catch (e) {
+        debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+      }
+    } catch (e) {
+      debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+    }
+  }
+
   captureHistorySnapshot(): Content[] {
     return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
@@ -3814,10 +3867,12 @@ export class Session implements SessionContext {
     const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
     if (!snapshotIndexes) return [];
     if (projection.mode === 'legacy') {
-      // Same positional zip as the rewind path: unsound once a resumed
-      // legacy prefix leaves turns without snapshots — advertise nothing
-      // rather than mispaired slots.
-      if (snapshots.length < projection.turns.length) return [];
+      // Same positional zip as the rewind path: unsound once the stores are
+      // not exactly aligned — a resumed legacy prefix leaves turns without
+      // snapshots (deficit) and chat compression removes turns without
+      // pruning snapshots (surplus) — advertise nothing rather than
+      // mispaired slots.
+      if (snapshots.length !== projection.turns.length) return [];
       return snapshots
         .slice(0, projection.turns.length)
         .map((snapshot, turnIndex) => ({
@@ -5136,36 +5191,13 @@ export class Session implements SessionContext {
             );
             this.activeTodoWorkChainPromptId = promptId;
 
-            // Snapshot file state before this turn (mirrors the makeSnapshot
-            // block in GeminiClient.sendMessageStream). Placed after
+            // Snapshot file state before this turn. Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            // Resubmissions keep updating the original turn's latest snapshot.
-            // Goal-runtime turns MUST keep their snapshot: they still count
-            // as positional user turns (#isUserTextContent passes their plain
-            // text) and the legacy rewind path zips snapshot indexes against
-            // positional turn indexes — skipping the snapshot desyncs every
-            // slot after the first goal turn (file restore lands on the wrong
-            // snapshot or is silently skipped).
+            // Goal-runtime turns keep their snapshot too — every positional
+            // turn must own one (#snapshotTurnStart documents the invariant).
             if (!isContinue && !isRetry) {
-              try {
-                const fileHistoryService = this.config.getFileHistoryService();
-                await fileHistoryService.makeSnapshot(promptId);
-                try {
-                  const latestSnapshot = fileHistoryService
-                    .getSnapshots()
-                    .at(-1);
-                  if (latestSnapshot) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordFileHistorySnapshot(latestSnapshot);
-                  }
-                } catch (e) {
-                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-                }
-              } catch (e) {
-                debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-              }
+              await this.#snapshotTurnStart(promptId);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -7978,6 +8010,13 @@ export class Session implements SessionContext {
                   { text: modelText },
                 ],
               };
+              // A cron/loop turn bypasses prompt() but still counts as a
+              // positional user turn (#isUserTextContent passes its text),
+              // so it must own a turn-start snapshot like an ordinary prompt
+              // — skipping it desyncs the legacy snapshot↔turn zip from this
+              // turn onward. Placed after the loop-tick early returns so a
+              // tick that never sends creates no phantom snapshot.
+              await this.#snapshotTurnStart(promptId);
               const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
@@ -8660,6 +8699,12 @@ export class Session implements SessionContext {
               ...notificationParts,
             ],
           };
+          // A background-notification turn bypasses prompt() but still
+          // counts as a positional user turn (#isUserTextContent passes its
+          // text), so it must own a turn-start snapshot like an ordinary
+          // prompt — skipping it desyncs the legacy snapshot↔turn zip from
+          // this turn onward.
+          await this.#snapshotTurnStart(promptId);
           const toolLoopState = createDaemonToolLoopState('off');
 
           while (nextMessage !== null) {
