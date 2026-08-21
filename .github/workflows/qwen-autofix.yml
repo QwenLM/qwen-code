@@ -428,6 +428,7 @@ jobs:
                 # '<cmd> from N' — the ONE parameterized form, and the only
                 # place this workflow reads a value out of a comment body.
                 # Full rationale → qwen-autofix.md#af-007
+                # Operator guide → qwen-autofix-round-seed.md
                 if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
                   # Two statements, not one `[[ ... && ... ]]`: BASH_REMATCH is
                   # only guaranteed populated once the =~ test has completed,
