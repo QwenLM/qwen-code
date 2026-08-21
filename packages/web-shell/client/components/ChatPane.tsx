@@ -38,7 +38,7 @@ import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
@@ -258,8 +258,8 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();

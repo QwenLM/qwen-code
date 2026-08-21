@@ -3,33 +3,71 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import { useAnimationFrameTranscriptBlocks } from './useAnimationFrameTranscriptBlocks';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
+} from '@qwen-code/sdk/daemon';
+import { useAnimationFrameTranscriptSnapshot } from './useAnimationFrameTranscriptBlocks';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const testStore = vi.hoisted(() => {
   let blocks: readonly DaemonTranscriptBlock[] = [];
   let blockIndexById: Readonly<Record<string, number>> = {};
+  const blockChangeSource = {};
+  let blockChangeSummary = {
+    source: blockChangeSource,
+    revision: 0,
+    tailAppendBarrierRevision: 0,
+  };
   const listeners = new Set<() => void>();
   return {
     getSnapshot: () => ({ blocks, blockIndexById }),
+    getBlockChangeSummary: () => blockChangeSummary,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     update(nextBlocks: readonly DaemonTranscriptBlock[]) {
       blocks = nextBlocks;
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.revision + 1,
+      };
+      listeners.forEach((listener) => listener());
+    },
+    appendTail(
+      nextBlocks: readonly DaemonTranscriptBlock[],
+      tailBlockId: string,
+    ) {
+      blocks = nextBlocks;
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.tailAppendBarrierRevision,
+        tailBlockId,
+      };
       listeners.forEach((listener) => listener());
     },
     resetBlocks(nextBlocks: readonly DaemonTranscriptBlock[] = []) {
       blocks = nextBlocks;
       blockIndexById = {};
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.revision + 1,
+      };
       listeners.forEach((listener) => listener());
     },
     reset() {
       blocks = [];
       blockIndexById = {};
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: 0,
+        tailAppendBarrierRevision: 0,
+      };
       listeners.clear();
     },
   };
@@ -48,10 +86,13 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let renderCount = 0;
 let latestBlocks: readonly DaemonTranscriptBlock[] = [];
+let latestSummary: DaemonTranscriptBlockChangeSummary | undefined;
 let renderLog: string[][] = [];
 
 function Harness() {
-  latestBlocks = useAnimationFrameTranscriptBlocks();
+  const snapshot = useAnimationFrameTranscriptSnapshot();
+  latestBlocks = snapshot.blocks;
+  latestSummary = snapshot.blockChangeSummary;
   renderCount += 1;
   renderLog.push(latestBlocks.map((block) => block.id));
   return null;
@@ -64,13 +105,45 @@ afterEach(() => {
   container = null;
   renderCount = 0;
   latestBlocks = [];
+  latestSummary = undefined;
   renderLog = [];
   testStore.reset();
   testConnection.sessionId = 'session-a';
   vi.restoreAllMocks();
 });
 
-describe('useAnimationFrameTranscriptBlocks', () => {
+describe('useAnimationFrameTranscriptSnapshot', () => {
+  it('keeps coalesced tail blocks paired with their change summary', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    const first = { id: 'thought', text: 'a' } as DaemonTranscriptBlock;
+    testStore.update([first]);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(<Harness />));
+    const barrier = latestSummary?.tailAppendBarrierRevision;
+
+    const second = { ...first, text: 'ab' };
+    const third = { ...second, text: 'abc' };
+    act(() => {
+      testStore.appendTail([second], 'thought');
+      testStore.appendTail([third], 'thought');
+    });
+    act(() => pendingFrame?.(1_000));
+
+    expect(latestBlocks).toEqual([third]);
+    expect(latestSummary).toMatchObject({
+      revision: 3,
+      tailAppendBarrierRevision: barrier,
+      tailBlockId: 'thought',
+    });
+  });
+
   it('coalesces transcript notifications into one render per frame', () => {
     let pendingFrame: FrameRequestCallback | null = null;
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {

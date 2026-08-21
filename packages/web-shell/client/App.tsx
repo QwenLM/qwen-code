@@ -204,7 +204,7 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import { useMessagesFromBlocks } from './hooks/useMessages';
@@ -2087,7 +2087,7 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useAnimationFrameTranscriptBlocks();
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const connection = useConnection();
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -2503,7 +2503,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessagesFromBlocks(t, blocks);
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
@@ -12425,6 +12425,9 @@ export function App({
                                 isResponding={
                                   streamingState !== 'idle' &&
                                   !suppressFailedPromptRetryStreaming
+                                }
+                                transcriptReloadPaused={
+                                  streamingState !== 'idle'
                                 }
                                 activeTurnStartedAt={
                                   suppressFailedPromptRetryStreaming

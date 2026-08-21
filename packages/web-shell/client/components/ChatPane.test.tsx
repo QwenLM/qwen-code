@@ -157,7 +157,7 @@ vi.mock('../hooks/useMessages', () => ({
 }));
 
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => [],
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({

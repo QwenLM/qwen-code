@@ -79,6 +79,10 @@ vi.mock('./MessageItem', async () => {
             message.role === 'tool_group'
               ? message.tools.map((tool) => tool.callId).join(',')
               : undefined,
+          'data-thought-content':
+            message.role === 'tool_group'
+              ? message.thoughts?.map((thought) => thought.content).join('|')
+              : undefined,
         },
         sendFailed
           ? React.createElement(
@@ -533,6 +537,32 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
+  it('updates a streaming thinking tail inside the existing compact summary', () => {
+    const user = userMsg('u1');
+    const thinking = {
+      ...thinkingMsg('t1'),
+      content: 'first',
+      isStreaming: true,
+    };
+    const container = mount([user, thinking], undefined, {
+      compactMode: true,
+      isResponding: true,
+    });
+    const summary = container.querySelector('[data-testid="msg-summary-t1"]');
+    expect(summary?.getAttribute('data-thought-content')).toBe('first');
+
+    rerenderMessages(
+      container,
+      [user, { ...thinking, content: 'first second' }],
+      { isResponding: true },
+    );
+
+    expect(container.querySelector('[data-testid="msg-summary-t1"]')).toBe(
+      summary,
+    );
+    expect(summary?.getAttribute('data-thought-content')).toBe('first second');
+  });
+
   it('keeps thinking without adjacent tools visible in compact mode', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
@@ -699,42 +729,93 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
-  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+  it('reloads an oversized transcript after 15 quiet seconds at the tail', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
     let lastEventId = 10;
     let notifyActivity = () => undefined;
-    mount([userMsg('u1'), asstMsg('a1')], undefined, {
-      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
-      transcriptActivity: {
-        getSnapshot: () => ({ lastEventId }),
-        subscribe: (listener) => {
-          notifyActivity = listener;
-          return () => undefined;
-        },
+    const transcriptActivity = {
+      getSnapshot: () => ({ lastEventId }),
+      subscribe: (listener: () => void) => {
+        notifyActivity = listener;
+        return () => undefined;
       },
-      onReloadTranscript,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
     });
+    const render = (
+      transcriptBlockCount: number,
+      transcriptReloadPaused = false,
+    ) => {
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={[userMsg('u1'), asstMsg('a1')]}
+            pendingApproval={null}
+            transcriptBlockCount={transcriptBlockCount}
+            transcriptActivity={transcriptActivity}
+            onReloadTranscript={onReloadTranscript}
+            transcriptReloadPaused={transcriptReloadPaused}
+          />
+        </I18nProvider>,
+      );
+    };
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1));
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(7_500);
       lastEventId++;
       notifyActivity();
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(7_500);
     });
     expect(onReloadTranscript).not.toHaveBeenCalled();
 
-    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await act(async () => vi.advanceTimersByTimeAsync(7_500));
 
     expect(onReloadTranscript).toHaveBeenCalledOnce();
 
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(onReloadTranscript).toHaveBeenCalledOnce();
 
     lastEventId++;
     notifyActivity();
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+
+    lastEventId++;
+    notifyActivity();
+    const clearTimeout = vi
+      .spyOn(window, 'clearTimeout')
+      .mockImplementation(() => undefined);
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2, true));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+    clearTimeout.mockRestore();
+
+    let reloadSignal: AbortSignal | undefined;
+    let resolveReload = () => undefined;
+    onReloadTranscript.mockImplementationOnce((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(3);
+    expect(reloadSignal?.aborted).toBe(false);
+
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2, true));
+    expect(reloadSignal?.aborted).toBe(true);
+    await act(async () => resolveReload());
   });
 
   it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
@@ -765,7 +846,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       onReloadTranscript,
     });
 
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reloadSignal?.aborted).toBe(false);
 
     const list = container.firstElementChild as HTMLElement;
@@ -3663,6 +3744,48 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
     expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('does not scroll again for a content-only update in a virtual transcript', async () => {
+    let scrollTop = 0;
+    const getScrollHeight = vi.fn(() => 20_000);
+    const setScrollTop = vi.fn((value: number) => {
+      scrollTop = value;
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: getScrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: setScrollTop,
+    });
+    const messages = simpleTurns(101);
+    messages[messages.length - 1] = {
+      ...(messages[messages.length - 1] as AssistantMessage),
+      isStreaming: true,
+    };
+    const container = mount(messages, undefined, { isResponding: true });
+    await nextFrame();
+    await nextFrame();
+    getScrollHeight.mockClear();
+    setScrollTop.mockClear();
+
+    const updated = messages.slice();
+    updated[updated.length - 1] = {
+      ...(updated[updated.length - 1] as AssistantMessage),
+      content: 'answer with one more streamed token',
+    };
+    rerenderMessages(container, updated, { isResponding: true });
+    await nextFrame();
+
+    expect(getScrollHeight).not.toHaveBeenCalled();
+    expect(setScrollTop).not.toHaveBeenCalled();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
