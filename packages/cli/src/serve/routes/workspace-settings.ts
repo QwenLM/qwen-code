@@ -769,10 +769,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
                 SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
                 { enabled },
               ),
-            // This route only accepts workspace scope (QUALIFIED_WRITE_SCOPES),
-            // so the written value is the effective one — no user-scope
-            // shadowing to reconcile (that is the primary route's concern).
-            value as boolean,
+            // Push the post-write effective value, not the raw write: a
+            // system-scope (fleet) settings file shadows a workspace write in
+            // mergeSettings, so even on this workspace-only route the written
+            // value is not necessarily the effective one.
+            readEffectiveSessionWorkflow(runtime.workspaceCwd, true),
             runtime.workspaceCwd,
             res,
           ))

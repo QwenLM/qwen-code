@@ -12307,7 +12307,16 @@ class QwenAgent implements Agent {
           (merged as { experimental?: { sessionWorkflow?: unknown } })
             .experimental?.sessionWorkflow === true;
         const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
-        if (reloadedSessionWorkflow !== readSessionWorkflow(oldMerged)) {
+        // Diff against the live override too: the UI write path
+        // (workspaceSessionWorkflow) pins the override without updating
+        // `this.settings`, so a merged↔merged diff alone misses a disk change
+        // that contradicts a UI-pinned value — the gate would stay stuck
+        // against the file until daemon restart.
+        if (
+          reloadedSessionWorkflow !== readSessionWorkflow(oldMerged) ||
+          (this.sessionWorkflowEnabledOverride !== undefined &&
+            reloadedSessionWorkflow !== this.sessionWorkflowEnabledOverride)
+        ) {
           this.sessionWorkflowEnabledOverride = reloadedSessionWorkflow;
           this.applySessionWorkflowOverrideToLiveSessions();
         }

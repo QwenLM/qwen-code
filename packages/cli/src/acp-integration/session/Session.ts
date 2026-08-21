@@ -8751,7 +8751,18 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
-    if (previousApprovalMode !== approvalMode) {
+    // Only plan-involving transitions touch the revision: entering PLAN starts
+    // a fresh approval cycle and leaving PLAN abandons the draft, but an
+    // approved workflow plan keeps executing in a non-plan mode — switching
+    // between non-plan modes (default → auto-edit/yolo) must not disarm it
+    // mid-execution. Matches the sibling sessionApprovalMode ext route and the
+    // workspaceReload handler; the exit_plan_mode approval path deliberately
+    // retains the revision.
+    if (
+      previousApprovalMode !== approvalMode &&
+      (previousApprovalMode === ApprovalMode.PLAN ||
+        approvalMode === ApprovalMode.PLAN)
+    ) {
       this.clearActiveTodoPlanRevision();
     }
     if (approvalMode === ApprovalMode.PLAN) {
