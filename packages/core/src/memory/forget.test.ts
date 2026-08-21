@@ -313,6 +313,87 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     expect(prompt.match(/^scope: project$/gm)).toHaveLength(200);
   });
 
+  it('splits deletion seats per scope when matches exceed the limit', async () => {
+    // 450 user-scope and 50 project-scope entries all match, the side query is
+    // down, and the limit is the deletion ceiling. listIndexedForgetCandidates
+    // pushes user before project, so a plain slice would take 400 user entries
+    // and zero project ones while reporting a successful forget.
+    const matching = (
+      scope: 'user' | 'project',
+      dir: string,
+      count: number,
+      base: number,
+    ) =>
+      Array.from({ length: count }, (_, index) => ({
+        type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
+        filePath: `${dir}/doc-${index}.md`,
+        relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
+        filename: `doc-${index}.md`,
+        title: `Doc ${index}`,
+        description: 'Matching',
+        body: 'the saved codeword is overflow-zephyr-7040',
+        mtimeMs: base + index,
+      }));
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('user', '/tmp/user/memories/user', 450, 1_000),
+    );
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('project', '/tmp/project/memory/reference', 50, 1),
+    );
+    vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig, limit: 400 },
+    );
+
+    expect(result.matches).toHaveLength(400);
+    const projectMatches = result.matches.filter((match) =>
+      match.filePath.startsWith('/tmp/project/'),
+    );
+    // Every project entry keeps its seat; user scope absorbs the rest.
+    expect(projectMatches).toHaveLength(50);
+  });
+
+  it('keeps the newest of a scope when its own matches overflow the quota', async () => {
+    // Both scopes over quota and every entry matches literally, so the ranking
+    // inside the matched set decides who is seated. Oldest-first would drop the
+    // newest entries instead.
+    const matching = (scope: 'user' | 'project', dir: string) =>
+      Array.from({ length: 300 }, (_, index) => ({
+        type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
+        filePath: `${dir}/doc-${index}.md`,
+        relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
+        filename: `doc-${index}.md`,
+        title: `Doc ${index}`,
+        description: 'Matching',
+        body: 'the saved codeword is overflow-zephyr-7040',
+        mtimeMs: 1_000 + index,
+      }));
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('user', '/tmp/user/memories/user'),
+    );
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('project', '/tmp/project/memory/reference'),
+    );
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig },
+    );
+
+    const options = vi.mocked(runSideQuery).mock.calls[0]?.[1];
+    const prompt = options?.contents[0]?.parts?.[0]?.text ?? '';
+    expect(prompt.match(/^scope: user$/gm)).toHaveLength(200);
+    // doc-299 is the newest of its scope and must be seated; doc-0 the oldest
+    // and must not be.
+    expect(prompt).toContain('id: user:user/doc-299.md');
+    expect(prompt).not.toContain('id: user:user/doc-0.md');
+  });
+
   it('gives the heuristic fallback the full list, not the bounded one', async () => {
     // 450 literal matches with a limit above that: handing the fallback the
     // 400-candidate prompt budget instead of the full list would silently

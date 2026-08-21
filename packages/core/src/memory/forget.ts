@@ -54,6 +54,21 @@ const MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE = 200;
  */
 const MAX_MODEL_FORGET_CANDIDATES = MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE * 2;
 
+/**
+ * Per-call deletion ceiling for `forgetManagedAutoMemoryEntries`, the path
+ * MemoryManager.forget and ACP take, which deletes without confirmation.
+ *
+ * Deliberately its own literal rather than an alias of the prompt bound: the
+ * two happen to agree today, but resizing the model prompt is a cost decision
+ * and resizing this is a blast-radius decision. Coupling them would let a
+ * prompt-sizing change silently widen how much one unconfirmed call can
+ * delete.
+ */
+const MAX_UNCONFIRMED_FORGET_DELETIONS = 400;
+
+/** The scopes a forget candidate can come from, in prompt order. */
+const FORGET_SCOPES: readonly AutoMemoryStorageScope[] = ['user', 'project'];
+
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
   summary: string;
@@ -224,6 +239,28 @@ function rankScopeForPrompt(
 }
 
 /**
+ * Give every scope an equal share of `budget` before letting any scope's
+ * recency crowd another out, then hand whatever a smaller scope leaves unused
+ * to the rest. Without this, one scope's entries being uniformly newer takes
+ * every seat and the other scope becomes unreachable.
+ */
+function allocatePerScope<T>(rankedByScope: T[][], budget: number): T[] {
+  const perScope = Math.floor(budget / rankedByScope.length);
+  const take = rankedByScope.map((scopeRanked) =>
+    Math.min(scopeRanked.length, perScope),
+  );
+  let spare = budget - take.reduce((sum, n) => sum + n, 0);
+  for (let i = 0; i < rankedByScope.length && spare > 0; i++) {
+    const extra = Math.min(spare, rankedByScope[i].length - take[i]);
+    take[i] += extra;
+    spare -= extra;
+  }
+  return rankedByScope.flatMap((scopeRanked, i) =>
+    scopeRanked.slice(0, take[i]),
+  );
+}
+
+/**
  * Bound the model prompt. Each scope keeps its own quota so a scope whose
  * entries are all older than the other's still reaches the model, and whatever
  * a smaller scope leaves unused is handed to the other. Within a scope,
@@ -242,27 +279,13 @@ function selectModelForgetCandidates(
     return candidates;
   }
   const queryLower = normalizeForgetQuery(query);
-  const scopes: AutoMemoryStorageScope[] = ['user', 'project'];
-  const ranked = scopes.map((scope) =>
+  const ranked = FORGET_SCOPES.map((scope) =>
     rankScopeForPrompt(
       candidates.filter((candidate) => candidate.storageScope === scope),
       queryLower,
     ),
   );
-
-  const take = ranked.map((scopeRanked) =>
-    Math.min(scopeRanked.length, MAX_MODEL_FORGET_CANDIDATES_PER_SCOPE),
-  );
-  let spare = MAX_MODEL_FORGET_CANDIDATES - take.reduce((sum, n) => sum + n, 0);
-  for (let i = 0; i < ranked.length && spare > 0; i++) {
-    const extra = Math.min(spare, ranked[i].length - take[i]);
-    take[i] += extra;
-    spare -= extra;
-  }
-
-  const selected = ranked.flatMap((scopeRanked, i) =>
-    scopeRanked.slice(0, take[i]),
-  );
+  const selected = allocatePerScope(ranked, MAX_MODEL_FORGET_CANDIDATES);
   debugLogger.warn(
     `Managed auto-memory forget prompt bounded to ${selected.length} of ` +
       `${candidates.length} candidates; entries past the bound cannot be ` +
@@ -337,15 +360,26 @@ function selectByHeuristic(
   limit: number,
 ): AutoMemoryForgetSelectionResult {
   const queryLower = normalizeForgetQuery(query);
-  const matches = candidates
-    .filter((candidate) => matchesForgetQuery(candidate, queryLower))
-    .slice(0, limit)
-    .map(({ topic, summary, filePath, entryIndex }) => ({
-      topic,
-      summary,
-      filePath,
-      entryIndex,
-    }));
+  const matched = candidates.filter((candidate) =>
+    matchesForgetQuery(candidate, queryLower),
+  );
+  // Same per-scope split the model path uses. `listIndexedForgetCandidates`
+  // pushes every user entry before any project entry, so a plain slice hands
+  // all `limit` deletion seats to user scope once matches exceed it, deleting
+  // nothing from the other scope while still reporting success.
+  const matches = allocatePerScope(
+    FORGET_SCOPES.map((scope) =>
+      matched
+        .filter((candidate) => candidate.storageScope === scope)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs),
+    ),
+    limit,
+  ).map(({ topic, summary, filePath, entryIndex }) => ({
+    topic,
+    summary,
+    filePath,
+    entryIndex,
+  }));
 
   return {
     matches,
@@ -604,7 +638,7 @@ export async function forgetManagedAutoMemoryEntries(
     // short query matches nearly everything. The capped scanners this replaced
     // held the same failure to one scan's worth of candidates; keep that
     // ceiling rather than letting an uncapped scan widen it.
-    { ...options, limit: MAX_MODEL_FORGET_CANDIDATES },
+    { ...options, limit: MAX_UNCONFIRMED_FORGET_DELETIONS },
   );
   const result = await forgetManagedAutoMemoryMatches(
     projectRoot,
