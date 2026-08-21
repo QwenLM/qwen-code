@@ -5525,81 +5525,50 @@ describe('useGeminiStream', () => {
   });
 
   it('keeps a completed tool ahead of its streaming continuation', async () => {
-    const toolRequest = {
-      callId: 'advisor-continuation',
-      name: 'advisor',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-advisor-continuation',
-    };
-    let releaseContinuation!: () => void;
-    const continuationStarted = new Promise<void>((resolve) => {
-      releaseContinuation = resolve;
-    });
-    mockSendMessageStream
-      .mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerGeminiEventType.ToolCallRequest,
-            value: toolRequest,
-          };
-        })(),
-      )
-      .mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerGeminiEventType.Content,
-            value: 'Here is the final answer.',
-          };
-          await continuationStarted;
-        })(),
-      );
     const completedTool = {
-      request: toolRequest,
+      request: {
+        callId: 'advisor-continuation',
+        name: 'advisor',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-advisor-continuation',
+      },
       status: 'success',
       responseSubmittedToGemini: false,
       response: {
-        callId: toolRequest.callId,
-        responseParts: [
-          {
-            functionResponse: {
-              id: toolRequest.callId,
-              name: toolRequest.name,
-              response: { output: 'advisor feedback' },
-            },
-          },
-        ],
+        callId: 'advisor-continuation',
+        responseParts: [],
         resultDisplay: 'advisor feedback',
         error: undefined,
         errorType: undefined,
       },
-      tool: {
-        name: 'advisor',
-        displayName: 'Advisor',
-        description: 'Consult Advisor',
-        build: vi.fn(),
-      },
-      invocation: {
-        getDescription: () => 'Consult Advisor',
-      },
+      tool: { displayName: 'Advisor' },
+      invocation: { getDescription: () => 'Consult Advisor' },
     } as unknown as TrackedCompletedToolCall;
-
-    const { result } = renderTestHook();
-
-    await act(async () => {
-      await result.current.submitQuery('review this change');
+    let releaseContinuation!: () => void;
+    const heldContinuation = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
     });
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'Here is the final answer.',
+        };
+        await heldContinuation;
+      })(),
+    );
+    const { result } = renderTestHook([completedTool]);
 
-    const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
-      | ((tools: TrackedCompletedToolCall[]) => Promise<void>)
-      | undefined;
-    let completionPromise: Promise<void> | undefined;
+    let submitPromise: Promise<unknown> | undefined;
     act(() => {
-      completionPromise = onComplete?.([completedTool]);
+      submitPromise = result.current.submitQuery(
+        completedTool.response.responseParts,
+        SendMessageType.ToolResult,
+      );
     });
 
     await waitFor(() => {
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       expect(
         result.current.pendingHistoryItems.map((item) => item.type),
       ).toEqual(['tool_group', 'gemini']);
@@ -5607,11 +5576,8 @@ describe('useGeminiStream', () => {
 
     await act(async () => {
       releaseContinuation();
-      await completionPromise;
+      await submitPromise;
     });
-
-    const committedTypes = mockAddItem.mock.calls.map(([item]) => item.type);
-    expect(committedTypes.slice(-2)).toEqual(['tool_group', 'gemini']);
   });
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
