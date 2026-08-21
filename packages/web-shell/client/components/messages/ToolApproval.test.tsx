@@ -266,6 +266,112 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  describe('yielding to active typing (#9571)', () => {
+    let composer: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      // The user is typing in the composer when the approval arrives. In the
+      // app the overlay commit hides the composer in the same render, so the
+      // editable target still holds focus when the focus effect runs (jsdom
+      // mirrors that: display:none never blurs).
+      composer = document.createElement('textarea');
+      document.body.appendChild(composer);
+      composer.focus();
+    });
+
+    afterEach(() => {
+      composer.remove();
+    });
+
+    it('does not grab focus to the default option while an editable target is focused', () => {
+      expect(document.activeElement).toBe(composer);
+      render(undefined);
+      // Stealing focus here redirects the in-progress keystroke (Enter to
+      // send, Space, digits) onto the safe-default option and can confirm it.
+      expect(document.activeElement).toBe(composer);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+    });
+
+    it('does not re-grab focus when a new request arrives mid-typing', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      rerender(true, { ...request, id: 'req-2' });
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('does not grab focus on re-activation while typing', () => {
+      render(false);
+      expect(document.activeElement).toBe(composer);
+      rerender(true);
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('still operates by keyboard once the user tabs in', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      // Explicit tab-in: focusing an option engages the usual roving behavior.
+      const opts = optionButtons();
+      act(() => {
+        opts[0]!.focus();
+      });
+      pressKey(opts[0]!, 'ArrowDown');
+      expect(document.activeElement).toBe(opts[1]);
+    });
+
+    it('yields to a contenteditable composer (CodeMirror shape)', () => {
+      // The production composer is a CodeMirror EditorView — a contenteditable
+      // div inside `.cm-editor` (the textarea backend is touch devices only).
+      // The textarea cases above never exercise isEditableTarget's
+      // contenteditable branches; pin them so simplifying the helper to bare
+      // form controls cannot silently re-open #9571.
+      const editor = document.createElement('div');
+      editor.className = 'cm-editor';
+      const editable = document.createElement('div');
+      editable.setAttribute('contenteditable', 'true');
+      editor.appendChild(editable);
+      document.body.appendChild(editor);
+      act(() => {
+        editable.focus();
+      });
+      expect(document.activeElement).toBe(editable);
+      render(undefined);
+      expect(document.activeElement).toBe(editable);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+      editor.remove();
+    });
+
+    it('yields in shadow-DOM (portal) mode, where document.activeElement retargets', () => {
+      // Portal mode mounts the shell inside a shadow root, where
+      // document.activeElement retargets to the non-editable host; the guard
+      // must resolve the active element from the panel's own root instead.
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const shadowComposer = document.createElement('textarea');
+      shadowRoot.appendChild(shadowComposer);
+      const shadowContainer = document.createElement('div');
+      shadowRoot.appendChild(shadowContainer);
+      act(() => {
+        shadowComposer.focus();
+      });
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+
+      container = shadowContainer;
+      root = createRoot(container);
+      rerender(undefined);
+
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+      expect(optionButtons().some((o) => o === shadowRoot.activeElement)).toBe(
+        false,
+      );
+      host.remove();
+    });
+  });
+
   it('confirms the clicked option', () => {
     render(undefined);
     act(() => {
