@@ -12225,6 +12225,66 @@ describe('GeminiChat', async () => {
 
       expect(chat.getHistory()).toEqual([]);
     });
+
+    it('clears proxy-schema presentations when stripping a mixed tool-result entry (#6721)', () => {
+      const clearPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations: clearPresentations,
+      } as unknown as ReturnType<typeof mockConfig.getToolRegistry>);
+
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool_search', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool_search',
+                response: { result: 'schema' },
+              },
+            },
+            // A mixed entry (functionResponse + appended reminder text) is
+            // not a *pure* completed tool result, so it is stripped.
+            { text: 'todo reminder' },
+          ],
+        },
+      ]);
+      // setHistory itself clears the ledger; isolate the strip's own call.
+      clearPresentations.mockClear();
+
+      const stripped = chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(stripped).toHaveLength(1);
+      // The stripped entry carried a tool result, so the proxy-schema ledger
+      // must be cleared — otherwise a later model-emitted tool_call passes
+      // the stale-mark gate and executes on guessed arguments.
+      expect(clearPresentations).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not clear proxy-schema presentations when stripping a plain orphan prompt', () => {
+      const clearPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations: clearPresentations,
+      } as unknown as ReturnType<typeof mockConfig.getToolRegistry>);
+
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+        { role: 'user', parts: [{ text: 'orphaned prompt' }] },
+      ]);
+      // setHistory itself clears the ledger; isolate the strip's own call.
+      clearPresentations.mockClear();
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(clearPresentations).not.toHaveBeenCalled();
+    });
   });
 
   describe('partial-push marker invariants on history mutation', () => {

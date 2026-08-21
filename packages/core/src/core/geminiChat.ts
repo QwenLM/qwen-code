@@ -4520,6 +4520,7 @@ export class GeminiChat {
   /** Pop orphaned trailing user entries from chat history. */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
+    let strippedToolResult = false;
     while (
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
@@ -4564,7 +4565,24 @@ export class GeminiChat {
       if (isCompletedToolResult) {
         break;
       }
-      strippedEntries.unshift(this.history.pop()!);
+      const popped = this.history.pop()!;
+      // A MIXED trailing entry (e.g. [functionResponse(tool_search schema),
+      // {text: todo reminder}]) is not caught by isCompletedToolResult (the
+      // text part defeats the every-functionResponse check) and gets popped.
+      // Its presented proxy schema then leaves active history; remember that
+      // we stripped a tool result so the ledger marks are cleared below.
+      if (popped.parts?.some((part) => part.functionResponse !== undefined)) {
+        strippedToolResult = true;
+      }
+      strippedEntries.unshift(popped);
+    }
+    // If a popped entry carried a tool result, its presented proxy schema is
+    // no longer in history. Clear the ledger marks so a later model-emitted
+    // tool_call cannot pass the stale-mark gate and execute on guessed
+    // arguments (#6721). Fail-closed: clearing all presentations is safe —
+    // the next tool_search simply re-presents what is still needed.
+    if (strippedToolResult) {
+      this.clearProxySchemaPresentationsIfRegistryAvailable();
     }
     // Today this is safe even without the reset — only trailing user
     // entries are popped, which can't shift the index of an earlier
