@@ -652,7 +652,17 @@ function submit(
   //    write would land on the other's same-named repo — so the gate
   //    refuses instead of choosing. The recorded host is the user's own
   //    keystrokes; a caller-typed flag is not entitled to retarget it.
-  const recordedHost = auth.recordedHost;
+  // The recorded host is the operator's VERBATIM keystrokes, but every
+  // discriminating read below assumes the trimmed spelling — trim ONCE
+  // here so a padded canonical host is still recognised as Aone and a
+  // trim-equivalent flag cannot conflict with its own recording. An
+  // all-whitespace host stays intact so it reaches the HOSTNAME_RE check
+  // and refuses as invalid-host instead of collapsing to an absent host.
+  const rawRecordedHost = auth.recordedHost;
+  const recordedHost =
+    rawRecordedHost !== undefined && rawRecordedHost.trim() !== ''
+      ? rawRecordedHost.trim()
+      : rawRecordedHost;
   const explicitHost = args.host?.trim() || undefined;
   // A SHAPED-BUT-EMPTY flag is not an absent one. The host value rides
   // shell interpolation in agent-built commands (`--host "$REVIEW_HOST"`

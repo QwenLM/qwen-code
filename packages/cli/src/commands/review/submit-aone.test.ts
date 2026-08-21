@@ -898,6 +898,49 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
   });
 
+  it('a padded RECORDED canonical Aone host still selects the a1 path', () => {
+    // The platform selector reads the recorded host through the same
+    // one-time trim as the gh arm: parse-args records verbatim, and a
+    // padded canonical host the gh arm accepts as a known-good input
+    // class must also be RECOGNISED as Aone — read untrimmed, the
+    // selector misses it and routes the authorised Aone write down the
+    // gh path at a host gh cannot post to.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: ' code.alibaba-inc.com ',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(setGhHostMock).not.toHaveBeenCalled();
+  });
+
+  it('a padded recorded host and its trim-equivalent --host post — one platform', () => {
+    // The conflict gate compares the trimmed flag against the recorded
+    // host through hostsEquivalent; the recorded side must reach that
+    // comparison trimmed, or two spellings of ONE platform refuse as
+    // target-platform-conflict while the same recording posts fine the
+    // moment the flag is dropped.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: ' gitlab.alibaba-inc.com ',
+    });
+    expect(() =>
+      runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(postedJson().posted).toBe(true);
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('an INVALID cwd-origin host refuses naming the origin arm', () => {
     // The third provenance arm: no flag, no recorded host — the bound
     // host is the origin of the clone the cwd probe ran on.

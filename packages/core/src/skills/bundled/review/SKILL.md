@@ -103,6 +103,7 @@ For an **Aone Code** target, run `/review` **from inside a clone of that repo** 
 Every Aone run is **context-unavailable** this phase, and several flows must be skipped rather than allowed to hit github.com's same-named repo (one more, `presubmit`, runs on reduced backing — its bullet below):
 
 - `pr-context` and `comment-status` have no Aone backing — skip them. Step 7's context-unavailable cap keeps an Approve verdict at Comment (a Request-changes verdict still posts its blocking summary); findings are still generated.
+- `presubmit` **runs on Aone targets too** — backed for self-PR detection (the `a1 auth whoami` account vs the MR author) and head drift (`mr view`'s `sourceBranch` IS the live head; there is no compare API, so `compare` is null and a drifted head is always anchors-at-risk). Its CI classification and existing-comment dedup have NO Aone backing and come back neutral (`no_checks` with zero checks, zero comments — no downgrades from them, no overlap blocks); the dedup caveat in the `--comment` bullet below stands.
 - `test-plan` fetches the PR body via `gh pr view` (GitHub-direct) — unbacked on Aone; treat the Test Plan as unchecked.
 - Agent 0 (issue fidelity) is gated on `pr-context` success, so it is **skipped** on Aone — do not claim issue fidelity ran. (`issue-context` works standalone for the workitem evidence, but it is not wired to Agent 0.)
 - Step 9's bypass audit queries GitHub by host; on an Aone report (host null) skip it instead of querying github.com.
