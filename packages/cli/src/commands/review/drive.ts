@@ -88,6 +88,26 @@ export interface DriveReport {
   truncated: boolean;
   /** A stale server from an earlier run that this one had to kill first. */
   killedStale: boolean;
+  /**
+   * Facts read back out of THIS run's own output, one per `--capture`.
+   *
+   * The address a service actually bound is the motivating one, and it is not
+   * the address it was asked for: `qwen serve` handed a taken port prints
+   * `port 8931 is in use, trying 8932...` and listens on the next one. A caller
+   * that goes on addressing its requested port then reads a DIFFERENT, stale
+   * process for the rest of the run — and every number it reports is about that
+   * process, while the drive completes and looks exactly like a clean one.
+   * Measured: a full verification cycle spent on a daemon that was not the one
+   * under test.
+   *
+   * `null` for a pattern that never matched, never `''` — a service that did
+   * not print what it was expected to print is a different fact from one that
+   * printed an empty value, and only the second is a measurement.
+   *
+   * Absent entirely when nothing was captured, so a report from a drive that
+   * asked for nothing does not claim an empty result set.
+   */
+  captured?: Record<string, string | null>;
   note: string;
 }
 
@@ -112,6 +132,11 @@ export interface DriveArgs {
    * cannot be captured from, or killed, by this one.
    */
   server: string;
+  /**
+   * `name=<regex>` pairs read back out of the drive's own output. Repeatable.
+   * Capture group 1 when the pattern has one, the whole match otherwise.
+   */
+  capture?: string[];
   /** Test seam — production shells out for real. */
   exec?: (cmd: string, args: string[], input?: string) => ExecResult;
   /** Test seam — production derives it from `server`. */
@@ -148,6 +173,112 @@ export function shellQuote(v: string): string {
 
 /** Cap the captured pane the way build-test caps command output. */
 const CAPTURE_MAX = 200_000;
+
+/**
+ * Bounds on `--capture`. Small on purpose: this exists to lift a handful of
+ * run-derived facts out of a log — an address, a pid, a chosen path — not to
+ * become a reporting language. A caller who wants more than this wants `jq`
+ * over the log, which they already have.
+ */
+const MAX_CAPTURES = 8;
+const MAX_CAPTURE_PATTERN = 200;
+/** Capture names travel into a JSON key and a report a human reads. */
+const CAPTURE_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+
+export interface CaptureSpec {
+  name: string;
+  re: RegExp;
+}
+
+/**
+ * Parse `--capture name=<regex>` pairs, or say why they cannot be used.
+ *
+ * Rejects rather than skips, and rejects the whole set rather than the bad
+ * entry: a drive that quietly dropped one capture would report the others
+ * beside a missing key, which reads as "the service never printed it" — the
+ * one meaning `null` is reserved for. A malformed request is the caller's bug
+ * and must not be able to disguise itself as a measurement.
+ *
+ * Split on the FIRST `=` only, because a regex may hold as many as it likes
+ * (`--capture port=listening on \S+=(\d+)` is a legitimate pattern).
+ */
+export function parseCaptureSpecs(
+  raw: readonly string[] | undefined,
+): { specs: CaptureSpec[] } | { error: string } {
+  if (!raw || raw.length === 0) return { specs: [] };
+  if (raw.length > MAX_CAPTURES) {
+    return {
+      error: `--capture was given ${raw.length} patterns; the cap is ${MAX_CAPTURES}. This lifts a few run-derived facts out of the log, not a report format.`,
+    };
+  }
+  const specs: CaptureSpec[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const eq = entry.indexOf('=');
+    if (eq <= 0) {
+      return {
+        error: `--capture ${JSON.stringify(entry)} is not \`name=<regex>\` — the name comes first, then one \`=\`, then the pattern (later \`=\` characters belong to the pattern).`,
+      };
+    }
+    const name = entry.slice(0, eq);
+    const pattern = entry.slice(eq + 1);
+    if (!CAPTURE_NAME_RE.test(name)) {
+      return {
+        error: `--capture name ${JSON.stringify(name)} is not usable as a report key: letters, digits, underscore and dash, starting with a letter, max 32.`,
+      };
+    }
+    if (seen.has(name)) {
+      return {
+        error: `--capture name ${JSON.stringify(name)} was given twice; one of the two would silently win.`,
+      };
+    }
+    if (pattern.length === 0 || pattern.length > MAX_CAPTURE_PATTERN) {
+      return {
+        error: `--capture ${JSON.stringify(name)} needs a pattern of 1 to ${MAX_CAPTURE_PATTERN} characters.`,
+      };
+    }
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern);
+    } catch (err) {
+      return {
+        error: `--capture ${JSON.stringify(name)} is not a valid regular expression: ${(err as Error).message}`,
+      };
+    }
+    seen.add(name);
+    specs.push({ name, re });
+  }
+  return { specs };
+}
+
+/**
+ * Read each pattern out of the drive's output.
+ *
+ * Against the UNTRIMMED log, not the report's `output`: `trimCapture` keeps the
+ * tail, and the line a service prints when it binds is near the head — the one
+ * value this feature exists for is exactly the one a trimmed capture loses.
+ *
+ * Group 1 when the pattern has one, the whole match otherwise, so both
+ * `listening on http://\S+` and `listening on (\S+)` do what they look like.
+ *
+ * FIRST match, unlike `sentinelExitCode`'s last. The two are answering
+ * different questions: the sentinel's decoys come from the driven script's own
+ * text and the real one is written last by construction, whereas the value this
+ * exists for is printed once, at startup, before anything else could have
+ * echoed it. A caller who wants the most recent of several occurrences says so
+ * in the pattern rather than having the rule chosen for them.
+ */
+export function extractCaptures(
+  output: string,
+  specs: readonly CaptureSpec[],
+): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const { name, re } of specs) {
+    const m = re.exec(output);
+    out[name] = m ? (m[1] ?? m[0]) : null;
+  }
+  return out;
+}
 
 /**
  * Cap on the log FILE, not just on what gets reported from it.
@@ -290,6 +421,24 @@ export function runDrive(args: DriveArgs): DriveReport {
       note: `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
     };
   }
+  // Before anything is started, like the server-name check above: a caller who
+  // asked for a capture wants it in the witness, and discovering the pattern
+  // was malformed after a 300-second drive costs the drive.
+  const parsed = parseCaptureSpecs(args.capture);
+  if ('error' in parsed) {
+    return {
+      outcome: 'unavailable',
+      observed: false,
+      exitCode: null,
+      readyAfterMs: null,
+      droveForMs: 0,
+      output: '',
+      truncated: false,
+      killedStale: false,
+      note: `${parsed.error} Nothing was started.`,
+    };
+  }
+  const captureSpecs = parsed.specs;
   const tmux = (...a: string[]) => exec('tmux', ['-L', server, ...a]);
 
   if (exec('tmux', ['-V']).status !== 0) {
@@ -409,14 +558,32 @@ export function runDrive(args: DriveArgs): DriveReport {
     if (!args.logPath) rmSync(dir, { recursive: true, force: true });
   }
 
+  // From the untrimmed log, and on every outcome rather than only `completed`:
+  // a drive that timed out still bound its port, and the address it bound is
+  // often the fact that explains why the rest of it went nowhere.
+  const captured =
+    captureSpecs.length > 0 ? extractCaptures(output, captureSpecs) : undefined;
   const { text, truncated } = trimCapture(output);
   const droveForMs = Date.now() - droveFrom;
+  const missed = captured
+    ? Object.entries(captured)
+        .filter(([, v]) => v === null)
+        .map(([k]) => k)
+    : [];
   const note =
     outcome === 'overflowed'
       ? `the drive wrote more than ${Math.round(LOG_MAX_BYTES / 1024 / 1024)} MiB and was stopped — no exit code is reported because it never gave one, and a run this command had to stop is not evidence about the diff either way. Quieten the script, or have it manage its own output file.`
       : outcome === 'completed'
         ? `drove for ${Math.round(droveForMs / 1000)}s and reached its sentinel with exit ${exitCode}${readyAfterMs === null ? '' : ` (ready after ${Math.round(readyAfterMs / 1000)}s)`}${truncated ? '; the capture was trimmed at the head, so early output is missing' : ''}`
         : `the drive did not finish within ${args.timeout}s — the capture below is PARTIAL, and a partial capture is not evidence that the run produced nothing. Raise --timeout, or give the script a smaller job.`;
+
+  // Named, not merely counted. A `null` capture is the case where a witness is
+  // about to quote a value the run never produced, and the reader needs to know
+  // WHICH one before deciding whether the rest still stands.
+  const captureNote =
+    missed.length > 0
+      ? ` — no output matched --capture ${missed.map((n) => JSON.stringify(n)).join(', ')}, so ${missed.length === 1 ? 'that value is' : 'those values are'} null rather than measured; anything addressed by ${missed.length === 1 ? 'it' : 'them'} was addressed by assumption`
+      : '';
 
   return {
     outcome,
@@ -427,7 +594,8 @@ export function runDrive(args: DriveArgs): DriveReport {
     output: text,
     truncated,
     killedStale,
-    note,
+    ...(captured ? { captured } : {}),
+    note: `${note}${captureNote}`,
   };
 }
 
@@ -467,6 +635,12 @@ export const driveCommand: CommandModule = {
         default: `qr-${process.pid}`,
         describe:
           'tmux server name — namespaced so runs cannot capture each other',
+      })
+      .option('capture', {
+        type: 'array',
+        string: true,
+        describe:
+          'name=<regex> read back out of this run\'s own output, e.g. baseUrl="listening on (http://\\S+)". Repeatable. Group 1 when the pattern has one, the whole match otherwise; null when nothing matched. Use it for anything the service CHOSE rather than was told — above all the address it actually bound.',
       })
       .option('out', {
         type: 'string',
