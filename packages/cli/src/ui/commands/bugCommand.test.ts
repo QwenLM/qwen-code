@@ -54,6 +54,10 @@ describe('bugCommand', () => {
     vi.clearAllMocks();
   });
 
+  it('opts in to running during streaming', () => {
+    expect(bugCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('should generate the default GitHub issue URL', async () => {
     const mockContext = createMockCommandContext({
       services: {

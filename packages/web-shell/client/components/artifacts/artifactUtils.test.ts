@@ -3,10 +3,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  artifactKindLabel,
   downloadWorkspaceFile,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   getReviewDownloadMimeType,
+  isDownloadOnlyWorkspaceArtifact,
+  isOfficeDocumentPath,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -15,6 +18,59 @@ import {
 describe('artifactUtils', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('labels office documents from path or kind', () => {
+    expect(artifactKindLabel('file', 'data/table.xlsx')).toBe('Excel');
+    expect(artifactKindLabel('document', 'brief.docx')).toBe('Word');
+    expect(artifactKindLabel('document', 'deck.pptx')).toBe('PowerPoint');
+    expect(artifactKindLabel('document')).toBe('Document');
+    expect(isOfficeDocumentPath('reports/a.XLSX')).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'a.xlsx',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'pdf',
+        workspacePath: 'paper.pdf',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'image',
+        workspacePath: 'photo.png',
+      }),
+    ).toBe(false);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'notes.md',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects directory stats before reading bytes', async () => {
+    const readFileBytes = vi.fn();
+    const statFile = vi.fn().mockResolvedValue({
+      sizeBytes: 0,
+      modifiedMs: 1,
+      type: 'directory',
+    });
+
+    await expect(
+      readWorkspaceFileAsBlob(
+        readFileBytes,
+        'exports',
+        'application/octet-stream',
+        {
+          statFile,
+        },
+      ),
+    ).rejects.toThrow('Directories cannot be opened');
+    expect(readFileBytes).not.toHaveBeenCalled();
   });
 
   it('resolves parent path segments', () => {
