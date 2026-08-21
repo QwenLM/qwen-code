@@ -760,6 +760,26 @@ function a1Cause(err: unknown): string {
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
+/** The post-batch head re-read, stated ONCE for both disclosure paths:
+ *  did the MR head move away from the composed `commitId`? Undefined when
+ *  the re-read itself failed — "could not verify" is not "verified
+ *  stable", and a read failure degrades to unknown; it never masks the
+ *  outcome it reports on (the post failure on the partial path, the post
+ *  itself on the success path). */
+function headMovedSinceCompose(
+  prNumber: number,
+  ownerRepo: string,
+  commitId: string,
+): boolean | undefined {
+  try {
+    const after = mrView(prNumber, ownerRepo);
+    const afterHead = (after.sourceBranch ?? '').trim();
+    return afterHead !== '' && afterHead !== commitId;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Post a composed review to an Aone MR. The verdict mapping is the
  * design's D6: APPROVE runs the native `mr approve` AFTER the summary
@@ -874,19 +894,9 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       !summaryPosted && postedIds.length === req.comments.length
         ? `; the summary did NOT land`
         : '';
-    // The same mid-batch drift the success path re-reads for: an amend
-    // pushed during the batch orphans the landed pins. Re-read tolerantly
-    // — a read failure degrades to unknown, it never masks the post
-    // failure — so the partial report carries the disclosure instead of
-    // silently dropping the warning the moment a write also fails.
-    let headMovedDuringPost: boolean | undefined;
-    try {
-      const after = mrView(req.prNumber, req.ownerRepo);
-      const afterHead = (after.sourceBranch ?? '').trim();
-      headMovedDuringPost = afterHead !== '' && afterHead !== req.commitId;
-    } catch {
-      headMovedDuringPost = undefined;
-    }
+    // The same mid-batch drift disclosure the success path carries: an
+    // amend pushed during the batch orphans the landed pins, and a write
+    // failure must not silently drop the warning.
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
@@ -897,7 +907,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       ids,
       summaryPosted,
       true,
-      headMovedDuringPost,
+      headMovedSinceCompose(req.prNumber, req.ownerRepo, req.commitId),
     );
   }
 
@@ -933,20 +943,13 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     approveError,
     // The drift gate above is check-then-post; the batch is N+1 sequential
     // execs (minutes for a long review), so a head that moves DURING it
-    // slips the gate. Re-read once and disclose — the success report must
-    // not claim the pins held. A read failure after a successful post must
-    // not fail the post, and leaves the field UNDEFINED: "could not
-    // verify" is not "verified stable", and submit discloses the two
-    // states differently.
-    headMovedDuringPost: (() => {
-      try {
-        const after = mrView(req.prNumber, req.ownerRepo);
-        const afterHead = (after.sourceBranch ?? '').trim();
-        return afterHead !== '' && afterHead !== req.commitId;
-      } catch {
-        return undefined;
-      }
-    })(),
+    // slips the gate — re-read once and disclose; the success report must
+    // not claim the pins held, and a read failure must not fail the post.
+    headMovedDuringPost: headMovedSinceCompose(
+      req.prNumber,
+      req.ownerRepo,
+      req.commitId,
+    ),
     webUrl: view.detailUrl ?? '',
   };
 }

@@ -494,21 +494,66 @@ function inconsistencies(
   return problems;
 }
 
+interface SubmitRunOptions {
+  /** Append the model/version attribution footer (the `review.attribution` setting). */
+  attribution?: boolean;
+  /** The standing `review.comment` setting, for the authorization gate. */
+  defaultComment?: boolean;
+  /**
+   * The standing `review.severityFloor` setting, raw — handed to the
+   * authorization gate's args re-parse so the floor enforcement below can
+   * prefer the OPERATOR'S recorded floor over the state's transcription.
+   */
+  defaultSeverityFloor?: string;
+}
+
+/**
+ * A refusal, made terminal: `refuse` never returns, so a gate that has
+ * said no cannot fall through toward the write. The exit-3 helper used
+ * to return and rely on every call site adding its own `return;` —
+ * leaving the guarantee to convention, the thing this file exists to
+ * stop believing.
+ */
+class SubmitRefusal extends Error {
+  constructor(
+    message: string,
+    readonly reason: string,
+  ) {
+    super(message);
+    this.name = 'SubmitRefusal';
+  }
+}
+
+function refuse(message: string, reason: string): never {
+  throw new SubmitRefusal(message, reason);
+}
+
 export function runSubmit(
   args: SubmitArgs,
   cliVersion = 'unknown',
-  opts: {
-    /** Append the model/version attribution footer (the `review.attribution` setting). */
-    attribution?: boolean;
-    /** The standing `review.comment` setting, for the authorization gate. */
-    defaultComment?: boolean;
-    /**
-     * The standing `review.severityFloor` setting, raw — handed to the
-     * authorization gate's args re-parse so the floor enforcement below can
-     * prefer the OPERATOR'S recorded floor over the state's transcription.
-     */
-    defaultSeverityFloor?: string;
-  } = {},
+  opts: SubmitRunOptions = {},
+): void {
+  try {
+    submit(args, cliVersion, opts);
+  } catch (err) {
+    if (!(err instanceof SubmitRefusal)) throw err;
+    // Every refusal in this command speaks one shape: a stderr line, the
+    // `{"posted": false}` JSON on stdout, exit 3. Written ONCE here for
+    // every gate — Step 7 treats it as a complete, correct outcome; a
+    // refusal escaping as a thrown failure would surface as a failed
+    // command an agent might retry or route around.
+    writeStderrLine(err.message);
+    writeStdoutLine(
+      JSON.stringify({ posted: false, reason: err.reason }, null, 2),
+    );
+    process.exitCode = 3;
+  }
+}
+
+function submit(
+  args: SubmitArgs,
+  cliVersion: string,
+  opts: SubmitRunOptions,
 ): void {
   const { attribution = true, defaultComment = false } = opts;
 
@@ -535,16 +580,6 @@ export function runSubmit(
       `Cannot read review JSON ${args.review}: ${(err as Error).message}`,
     );
   }
-
-  // Every refusal in this command speaks one shape: a stderr line, the
-  // `{"posted": false}` JSON on stdout, exit 3. One helper, used by every
-  // gate — seven inline copies of the same tail is how one site eventually
-  // forgets the exit code.
-  const refuse = (message: string, reason: string): void => {
-    writeStderrLine(message);
-    writeStdoutLine(JSON.stringify({ posted: false, reason }, null, 2));
-    process.exitCode = 3;
-  };
 
   const auth = authorization(args, defaultComment);
   if (!auth.ok) {
@@ -579,7 +614,6 @@ export function runSubmit(
         `authorisation for one. ${advice}`,
       auth.why,
     );
-    return;
   }
 
   // Which PLATFORM this write lands on. Evidence precedence mirrors the
@@ -635,7 +669,6 @@ export function runSubmit(
         `saved report.`,
       'host-flag-empty',
     );
-    return;
   }
   if (
     explicitHost !== undefined &&
@@ -653,7 +686,6 @@ export function runSubmit(
         `The findings are in the terminal output and the saved report.`,
       'target-platform-conflict',
     );
-    return;
   }
   const overrideHostless =
     !args.userAuthorized &&
@@ -682,7 +714,6 @@ export function runSubmit(
         `report.`,
       'target-platform-unbound',
     );
-    return;
   }
   // The cwd arm probes the origin's host through the SAME canonical
   // predicate — it must not delegate to the registry's detection, which
@@ -741,7 +772,6 @@ export function runSubmit(
           `findings are in the terminal output and the saved report.`,
         'invalid-host',
       );
-      return;
     }
     setGhHost(boundHost);
     // Nothing bound means the gh child INHERITS the ambient env — and an
@@ -763,7 +793,6 @@ export function runSubmit(
           `The findings are in the terminal output and the saved report.`,
         'ambient-gh-host-aone',
       );
-      return;
     }
   }
 
@@ -1015,7 +1044,6 @@ export function runSubmit(
             `the findings are in the terminal output and the saved report.`,
           'aone-post-refused',
         );
-        return;
       }
       // A mid-batch failure: part of the review IS on the MR. The JSON
       // carries the structured counts AonePartialPostError exists for —
