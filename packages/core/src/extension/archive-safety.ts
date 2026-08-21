@@ -12,6 +12,8 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 const MAX_REPORTED_ENTRY_PATH_LENGTH = 200;
 const MAX_REPORTED_LINK_ENTRIES = 10;
 const MAX_LINK_ENTRIES = 100;
+const MAX_ARCHIVE_ENTRIES = 100_000;
+const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
 
 function formatEntryPath(entryPath: string): string {
   const sanitized = stripAnsiAndControl(entryPath);
@@ -25,8 +27,21 @@ export async function assertTarArchiveHasNoLinks(
 ): Promise<void> {
   const unsupportedLinkPaths: string[] = [];
   let unsupportedLinkCount = 0;
-  let linkLimitError: Error | undefined;
+  let entryCount = 0;
+  let expandedBytes = 0;
+  let validationError: Error | undefined;
   const onReadEntry = (entry: tar.ReadEntry) => {
+    entryCount += 1;
+    expandedBytes += entry.size;
+    if (entryCount > MAX_ARCHIVE_ENTRIES) {
+      validationError ??= new Error(
+        `Tar archive contains more than ${MAX_ARCHIVE_ENTRIES} entries.`,
+      );
+    } else if (expandedBytes > MAX_ARCHIVE_EXPANDED_BYTES) {
+      validationError ??= new Error(
+        `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
+      );
+    }
     if (entry.type === 'SymbolicLink' || entry.type === 'Link') {
       unsupportedLinkCount += 1;
       const unsupportedLinkPath =
@@ -34,11 +49,8 @@ export async function assertTarArchiveHasNoLinks(
       if (unsupportedLinkPaths.length < MAX_REPORTED_LINK_ENTRIES) {
         unsupportedLinkPaths.push(unsupportedLinkPath);
       }
-      if (
-        unsupportedLinkCount > MAX_LINK_ENTRIES &&
-        linkLimitError === undefined
-      ) {
-        linkLimitError = new Error(
+      if (unsupportedLinkCount > MAX_LINK_ENTRIES) {
+        validationError ??= new Error(
           `Tar archive contains more than ${MAX_LINK_ENTRIES} unsupported link entries: ${unsupportedLinkPaths.join(', ')}`,
         );
       }
@@ -58,7 +70,7 @@ export async function assertTarArchiveHasNoLinks(
   } else {
     await tar.t({ file, onReadEntry });
   }
-  if (linkLimitError) throw linkLimitError;
+  if (validationError) throw validationError;
   if (unsupportedLinkCount > 0) {
     const entryLabel =
       unsupportedLinkCount === 1

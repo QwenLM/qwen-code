@@ -155,7 +155,7 @@ Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity wi
 
 #### From Git Repository
 
-Public Git repository installs and update checks require Git 2.37 or newer. Qwen Code uses the `http.curloptResolve` setting introduced in Git 2.37 to pin public network connections to validated DNS results. If your distribution ships an older Git version, upgrade Git or install a local/archive release instead.
+Git 2.37 or newer is required for credentialed, non-GitHub, nested marketplace, submodule, and Git LFS sources because Qwen Code uses `http.curloptResolve` to pin Git connections to validated DNS results. On older Git versions, Qwen Code supports only anonymous public `https://github.com/{owner}/{repo}[.git]` root repositories by resolving the requested ref to a commit and downloading GitHub's source archive with the same public-network and archive-safety checks.
 
 ```bash
 qwen extensions install https://github.com/github/github-mcp-server

@@ -52,6 +52,7 @@ const mockGit = {
   path: vi.fn(),
 };
 const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
+const mockDownloadPublicGitHubArchiveFallback = vi.hoisted(() => vi.fn());
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 const mockDownloadFromNpmRegistry = vi.hoisted(() => vi.fn());
 
@@ -68,6 +69,8 @@ vi.mock('./github.js', async (importOriginal) => {
   return {
     ...actual,
     downloadFromArchiveUrl: mockDownloadFromArchiveUrl,
+    downloadPublicGitHubArchiveFallback:
+      mockDownloadPublicGitHubArchiveFallback,
     downloadFromGitHubRelease: vi
       .fn()
       .mockRejectedValue(new Error('Mocked GitHub release download failure')),
@@ -219,6 +222,7 @@ describe('extension tests', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
     Object.values(mockGit).forEach((fn) => fn.mockReset());
     mockDownloadFromArchiveUrl.mockReset();
+    mockDownloadPublicGitHubArchiveFallback.mockReset();
     mockExtractArchiveFile.mockReset();
     mockDownloadFromNpmRegistry.mockReset();
     mockGit.revparse.mockResolvedValue('sample-commit');
@@ -540,6 +544,34 @@ describe('extension tests', () => {
       expect(
         fs.existsSync(path.join(installed.path, 'qwen-extension.json')),
       ).toBe(false);
+    });
+
+    it('installs an anonymous public GitHub extension through the old-Git archive fallback', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadPublicGitHubArchiveFallback.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          writeExtractedExtension(destination, 'old-git-extension');
+          return '0123456789abcdef0123456789abcdef01234567';
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+
+      const installed = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/obra/superpowers',
+        },
+        async () => {},
+      );
+
+      expect(installed.installMetadata).toMatchObject({
+        type: 'git',
+        source: 'https://github.com/obra/superpowers',
+        gitCommit: '0123456789abcdef0123456789abcdef01234567',
+      });
+      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalled();
+      expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
     it('persists a credentialed one-time install as a source-free snapshot', async () => {
@@ -3273,6 +3305,46 @@ describe('extension tests', () => {
       ).rejects.toMatchObject({ code: 'extension_credential_unavailable' });
       expect(mockGit.clone).not.toHaveBeenCalled();
       expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
+
+    it('updates an old-Git public GitHub extension through a new archive SHA', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        version: '1.0.0',
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/owner/repo',
+          gitCommit: '0123456789abcdef0123456789abcdef01234567',
+        },
+      });
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadPublicGitHubArchiveFallback.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '2.0.0' }),
+          );
+          return '89abcdef0123456789abcdef0123456789abcdef';
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await manager.updateExtension(
+        extension,
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+        () => {},
+      );
+
+      expect(manager.getLoadedExtensions()[0]?.installMetadata).toMatchObject({
+        source: 'https://github.com/owner/repo',
+        type: 'git',
+        gitCommit: '89abcdef0123456789abcdef0123456789abcdef',
+      });
+      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalled();
+      expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
     it('applies the update network policy without mutating cached metadata', async () => {

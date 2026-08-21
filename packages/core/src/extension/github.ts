@@ -53,6 +53,10 @@ interface GithubReleaseData {
   zipball_url?: string;
 }
 
+interface GitHubCommitData {
+  sha: string;
+}
+
 interface Asset {
   name: string;
   browser_download_url: string;
@@ -136,6 +140,16 @@ function getGitHubCredential(source: string): GitCredential | undefined {
   return undefined;
 }
 
+async function isPinnedGitSupported(): Promise<boolean> {
+  const { simpleGit } = await loadSimpleGit();
+  const version = await simpleGit().version();
+  return (
+    version.major > MINIMUM_PINNED_GIT_VERSION.major ||
+    (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
+      version.minor >= MINIMUM_PINNED_GIT_VERSION.minor)
+  );
+}
+
 async function assertPinnedGitSupported(): Promise<void> {
   const { simpleGit } = await loadSimpleGit();
   const version = await simpleGit().version();
@@ -148,7 +162,7 @@ async function assertPinnedGitSupported(): Promise<void> {
       .filter((component) => component !== undefined)
       .join('.');
     throw new Error(
-      `Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git ${detectedVersion}. Upgrade Git, or install the extension from a local path or archive instead.`,
+      `Public extension Git installs require Git 2.37 or newer unless the source is an anonymous public GitHub root repository; found Git ${detectedVersion}. Upgrade Git for credentialed, non-GitHub, nested, submodule, or Git LFS installs.`,
     );
   }
 }
@@ -327,6 +341,117 @@ export function parseGitHubRepoForReleases(source: string): {
   return { owner, repo };
 }
 
+function parseAnonymousPublicGitHubRepo(source: string): {
+  owner: string;
+  repo: string;
+} {
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error('Older-Git fallback requires a valid GitHub HTTPS URL.');
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== 'github.com' ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      'Older-Git fallback only supports anonymous https://github.com/{owner}/{repo}[.git] sources.',
+    );
+  }
+  const match = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url.pathname);
+  if (!match || !match[1] || !match[2]) {
+    throw new Error(
+      'Older-Git fallback only supports a GitHub repository root URL.',
+    );
+  }
+  return { owner: match[1], repo: match[2] };
+}
+
+export async function shouldUsePublicGitHubArchiveFallback(
+  installMetadata: ExtensionInstallMetadata,
+): Promise<boolean> {
+  if (
+    installMetadata.type !== 'git' ||
+    installMetadata.networkPolicy !== 'public' ||
+    installMetadata.credentialPersistence ||
+    installMetadata.marketplaceConfig ||
+    installMetadata.pluginName ||
+    installMetadata.externalContent
+  ) {
+    return false;
+  }
+  try {
+    parseAnonymousPublicGitHubRepo(installMetadata.source);
+  } catch {
+    return false;
+  }
+  return !(await isPinnedGitSupported());
+}
+
+async function assertArchivePreservesGitSemantics(destination: string) {
+  const pending = [destination];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    for (const entry of await fs.promises.readdir(directory, {
+      withFileTypes: true,
+    })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.name === '.gitmodules') {
+        throw new Error(
+          'Older-Git fallback does not support repositories with submodules.',
+        );
+      } else if (entry.name === '.gitattributes') {
+        const attributes = await fs.promises.readFile(entryPath, 'utf8');
+        if (/(?:^|\s)filter=lfs(?:\s|$)/m.test(attributes)) {
+          throw new Error(
+            'Older-Git fallback does not support repositories using Git LFS.',
+          );
+        }
+      }
+    }
+  }
+}
+
+export async function downloadPublicGitHubArchiveFallback(
+  installMetadata: ExtensionInstallMetadata,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { owner, repo } = parseAnonymousPublicGitHubRepo(
+    installMetadata.source,
+  );
+  const ref = installMetadata.ref || 'HEAD';
+  const commitData = await fetchJson<GitHubCommitData>(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+    signal,
+    'public',
+    false,
+  );
+  if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
+    throw new Error('GitHub returned an invalid commit SHA.');
+  }
+  const archivePath = path.join(destination, 'github-source.tar.gz');
+  await downloadFile(
+    `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tar.gz/${commitData.sha}`,
+    archivePath,
+    { includeGitHubToken: false, networkPolicy: 'public' },
+    0,
+    signal,
+  );
+  await extractArchiveFile(archivePath, destination, signal);
+  await fs.promises.unlink(archivePath);
+  await assertArchivePreservesGitSemantics(destination);
+  return commitData.sha.toLowerCase();
+}
+
 async function fetchReleaseFromGithub(
   owner: string,
   repo: string,
@@ -477,6 +602,26 @@ export async function checkForExtensionUpdate(
         installMetadata.credentialPersistence === 'stored'
           ? (await resolveStoredGitCredential(extension.path)).credential
           : undefined;
+      if (await shouldUsePublicGitHubArchiveFallback(installMetadata)) {
+        if (!installMetadata.gitCommit) {
+          return ExtensionUpdateState.NOT_UPDATABLE;
+        }
+        const { owner, repo } = parseAnonymousPublicGitHubRepo(
+          installMetadata.source,
+        );
+        const commitData = await fetchJson<GitHubCommitData>(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(installMetadata.ref || 'HEAD')}`,
+          signal,
+          'public',
+          false,
+        );
+        if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
+          return ExtensionUpdateState.ERROR;
+        }
+        return commitData.sha.toLowerCase() === installMetadata.gitCommit
+          ? ExtensionUpdateState.UP_TO_DATE
+          : ExtensionUpdateState.UPDATE_AVAILABLE;
+      }
       const { simpleGit } = await loadSimpleGit();
       if (installMetadata.networkPolicy === 'public') {
         await assertPinnedGitSupported();
@@ -794,6 +939,7 @@ async function fetchJson<T>(
   url: string,
   signal?: AbortSignal,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  includeGitHubToken = true,
 ): Promise<T> {
   const timeoutError = new Error('Timed out fetching GitHub API response');
   const timeoutController = new AbortController();
@@ -809,7 +955,7 @@ async function fetchJson<T>(
     'User-Agent': 'gemini-cli',
   };
   const token = getGitHubToken();
-  if (token) {
+  if (includeGitHubToken && token) {
     headers.Authorization = `token ${token}`;
   }
   let target;

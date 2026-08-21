@@ -40,9 +40,11 @@ import {
   cloneFromGit,
   downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  downloadPublicGitHubArchiveFallback,
   extractArchiveFile,
   isSupportedArchivePath,
   parseGitHubRepoForReleases,
+  shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
@@ -2039,6 +2041,14 @@ export class ExtensionManager {
             signal,
             gitCredential,
             gitCredential.persistence === 'one_time',
+          );
+        } else if (
+          await shouldUsePublicGitHubArchiveFallback(installMetadata)
+        ) {
+          installMetadata.gitCommit = await downloadPublicGitHubArchiveFallback(
+            installMetadata,
+            tempDir,
+            signal,
           );
         } else {
           try {

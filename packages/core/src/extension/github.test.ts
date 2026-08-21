@@ -10,6 +10,7 @@ import {
   cloneFromGit,
   downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  downloadPublicGitHubArchiveFallback,
   extractArchiveFile,
   extractFile,
   findReleaseAsset,
@@ -332,7 +333,7 @@ describe('git extension helpers', () => {
           '/dest',
         ),
       ).rejects.toThrow(
-        'Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git 2.34.1. Upgrade Git, or install the extension from a local path or archive instead.',
+        'Public extension Git installs require Git 2.37 or newer unless the source is an anonymous public GitHub root repository; found Git 2.34.1. Upgrade Git for credentialed, non-GitHub, nested, submodule, or Git LFS installs.',
       );
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
@@ -617,6 +618,153 @@ describe('git extension helpers', () => {
     });
   });
 
+  describe('old-Git public GitHub archive fallback', () => {
+    it.each([
+      ['HEAD', undefined],
+      ['branch', 'feature/test'],
+      ['tag', 'v1.2.3'],
+      ['commit', '0123456789abcdef0123456789abcdef01234567'],
+    ])(
+      'resolves %s to a commit and downloads anonymously',
+      async (_kind, ref) => {
+        vi.stubEnv('GITHUB_TOKEN', 'must-not-be-sent');
+        vi.spyOn(dns, 'lookup').mockResolvedValue([
+          { address: '8.8.8.8', family: 4 },
+        ] as never);
+        const tempDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'old-git-fallback-test-'),
+        );
+        const sourceDir = path.join(tempDir, 'source');
+        const destination = path.join(tempDir, 'destination');
+        await fs.mkdir(path.join(sourceDir, 'repo-archive'), {
+          recursive: true,
+        });
+        await fs.mkdir(destination);
+        await fs.writeFile(
+          path.join('' + sourceDir, 'repo-archive', EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
+        );
+        const archivePath = path.join(tempDir, 'source.tar.gz');
+        await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
+          'repo-archive',
+        ]);
+        const archive = await fs.readFile(archivePath);
+        const sha = 'abcdef0123456789abcdef0123456789abcdef01';
+        mockHttpsGet
+          .mockImplementationOnce(((_url, options, callback) => {
+            expect(String(_url)).toContain(
+              `/commits/${encodeURIComponent(ref || 'HEAD')}`,
+            );
+            expect(options).not.toHaveProperty('headers.Authorization');
+            callResponseCallback(
+              options,
+              callback,
+              createResponse(JSON.stringify({ sha })),
+            );
+            return createRequestMock();
+          }) as typeof https.get)
+          .mockImplementationOnce(((_url, options, callback) => {
+            expect(String(_url)).toBe(
+              `https://codeload.github.com/owner/repo/tar.gz/${sha}`,
+            );
+            expect(options).not.toHaveProperty('headers.Authorization');
+            callResponseCallback(options, callback, createResponse(archive));
+            return createRequestMock();
+          }) as typeof https.get);
+
+        try {
+          await expect(
+            downloadPublicGitHubArchiveFallback(
+              {
+                type: 'git',
+                source: 'https://github.com/owner/repo.git',
+                ...(ref ? { ref } : {}),
+                networkPolicy: 'public',
+              },
+              destination,
+            ),
+          ).resolves.toBe(sha);
+          expect(
+            fsSync.existsSync(
+              path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            ),
+          ).toBe(true);
+        } finally {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each([
+      'http://github.com/owner/repo',
+      'https://gitlab.com/owner/repo',
+      'https://user:pass@github.com/owner/repo',
+      'https://github.com:8443/owner/repo',
+      'https://github.com/owner/repo/path',
+      'https://github.com/owner/repo?ref=main',
+      'https://github.com/owner/repo#readme',
+    ])(
+      'rejects an ineligible source without network access: %s',
+      async (source) => {
+        await expect(
+          downloadPublicGitHubArchiveFallback(
+            { type: 'git', source, networkPolicy: 'public' },
+            '/dest',
+          ),
+        ).rejects.toThrow('Older-Git fallback');
+        expect(mockHttpsGet).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['.gitmodules', '[submodule "nested"]'],
+      ['.gitattributes', '*.bin filter=lfs diff=lfs merge=lfs -text'],
+    ])('rejects archives containing %s', async (unsafeFile, contents) => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'old-git-unsafe-test-'),
+      );
+      const sourceDir = path.join(tempDir, 'source');
+      const destination = path.join(tempDir, 'destination');
+      await fs.mkdir(path.join(sourceDir, 'repo-archive'), { recursive: true });
+      await fs.mkdir(destination);
+      await fs.writeFile(
+        path.join(sourceDir, 'repo-archive', EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
+      );
+      await fs.writeFile(
+        path.join(sourceDir, 'repo-archive', unsafeFile),
+        contents,
+      );
+      const archivePath = path.join(tempDir, 'source.tar.gz');
+      await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
+        'repo-archive',
+      ]);
+      const archive = await fs.readFile(archivePath);
+      const sha = 'abcdef0123456789abcdef0123456789abcdef01';
+      mockHttpsResponses(JSON.stringify({ sha }), archive);
+
+      try {
+        await expect(
+          downloadPublicGitHubArchiveFallback(
+            {
+              type: 'git',
+              source: 'https://github.com/owner/repo',
+              networkPolicy: 'public',
+            },
+            destination,
+          ),
+        ).rejects.toThrow(
+          unsafeFile === '.gitmodules' ? 'submodules' : 'Git LFS',
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('checkForExtensionUpdate', () => {
     it.skipIf(process.platform === 'win32')(
       'does not try to extract uploaded archive metadata sources',
@@ -689,6 +837,42 @@ describe('git extension helpers', () => {
         ...overrides,
       };
     }
+
+    it.each([
+      [
+        'same',
+        '0123456789abcdef0123456789abcdef01234567',
+        ExtensionUpdateState.UP_TO_DATE,
+      ],
+      [
+        'different',
+        '89abcdef0123456789abcdef0123456789abcdef',
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+      ],
+    ])(
+      'checks old-Git public GitHub SHA when remote is %s',
+      async (_case, remoteSha, expected) => {
+        mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+        vi.spyOn(dns, 'lookup').mockResolvedValue([
+          { address: '8.8.8.8', family: 4 },
+        ] as never);
+        mockHttpsResponses(JSON.stringify({ sha: remoteSha }));
+        const result = await checkForExtensionUpdate(
+          createExtension({
+            installMetadata: {
+              type: 'git',
+              source: 'https://github.com/owner/repo',
+              gitCommit: '0123456789abcdef0123456789abcdef01234567',
+              networkPolicy: 'public',
+            },
+          }),
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(expected);
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+      },
+    );
 
     it('should return NOT_UPDATABLE for non-git extensions', async () => {
       const extension = createExtension({
