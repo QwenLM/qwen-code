@@ -2108,7 +2108,17 @@ export class DingtalkChannel extends ChannelBase {
     // bakes `prepared.text` — receipts included — into a surface it can no
     // longer amend, so a `sendReplyFiles` failure landing after it left a
     // permanent receipt for a file that never arrives, with no correction.
-    await this.sendReplyFiles(chatId, prepared.files);
+    try {
+      await this.sendReplyFiles(chatId, prepared.files);
+    } catch (error) {
+      // R10-1: the throw used to exit before `closeOutput`, leaking the
+      // segment's presentation in the presenter's `segments` map forever
+      // and never delivering even the display-sanitized text. The empty
+      // text keeps R8-1's intent — the fallback sanitizer strips markers,
+      // so no receipt survives the failed delivery.
+      await presenter.closeOutput(segment.segmentId, '', reason, segment);
+      throw error;
+    }
     const delivered = await presenter.closeOutput(
       segment.segmentId,
       prepared.text,
@@ -2120,6 +2130,12 @@ export class DingtalkChannel extends ChannelBase {
     // delivery above; `closeOutput` then answers false on terminality, and
     // the fallback would POST the baked receipts after the terminal card.
     if (!presenter.acceptsLateDelivery(segment.runId)) return;
+    // R10-3: a run COMPLETING during the prepare finalizes the continuity
+    // card retaining this segment's content; the fallback would deliver the
+    // same content a second time. Files already went out above.
+    if (presenter.terminalCardRetained(segment.runId, segment.segmentId)) {
+      return;
+    }
     // The files already went out above — the fallback must not resend them.
     await this.sendPreparedResponse(
       chatId,

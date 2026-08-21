@@ -24,6 +24,7 @@ import type {
   DingtalkCardCallback,
   DingtalkCardCallbackResult,
 } from './interactive-card-types.js';
+import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -5577,18 +5578,22 @@ describe('DingtalkChannel outbound file delivery', () => {
       const closeOutput = vi.fn().mockResolvedValue(false);
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      // R10-3: a live run's card retained nothing — the fallback delivers.
+      const terminalCardRetained = vi.fn().mockReturnValue(false);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalCardRetained: typeof terminalCardRetained;
           };
         }
       ).interactionPresenter = {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalCardRetained,
       };
       const segment = {
         channelName: 'dingtalk',
@@ -5684,10 +5689,13 @@ describe('DingtalkChannel outbound file delivery', () => {
   });
 
   it('keeps receipts off the display when boundary delivery fails', async () => {
-    // R8-1 flip: when `sendReplyFiles` throws (the R5-1 missing-webhook
-    // shape), `closeOutput` must never run — no finalized receipt survives a
-    // delivery that did not happen. ChannelBase logs the throw; the hook
-    // surfaces it here.
+    // R10-1: when `sendReplyFiles` throws (the R5-1 missing-webhook shape),
+    // the throw must not exit before `closeOutput` — that leaked the
+    // segment's presentation in the presenter's uncapped `segments` map
+    // forever and never delivered even the display-sanitized text. The
+    // empty-text close keeps R8-1's intent: the fallback sanitizer strips
+    // markers, so no receipt survives a delivery that did not happen.
+    // ChannelBase logs the rethrown error; the hook surfaces it here.
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
@@ -5733,7 +5741,12 @@ describe('DingtalkChannel outbound file delivery', () => {
       ).rejects.toThrow(/no delivered notice: report\.txt/);
 
       expect(uploadCalls()).toHaveLength(1);
-      expect(closeOutput).not.toHaveBeenCalled();
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'response_boundary',
+        segment,
+      );
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -5758,6 +5771,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const isRunActive = vi.fn().mockReturnValue(false);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      // R10-3: the card retained nothing — the fallback still delivers.
+      const terminalCardRetained = vi.fn().mockReturnValue(false);
       (
         channel as unknown as {
           interactionPresenter: {
@@ -5765,6 +5780,7 @@ describe('DingtalkChannel outbound file delivery', () => {
             segmentContent: typeof segmentContent;
             isRunActive: typeof isRunActive;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalCardRetained: typeof terminalCardRetained;
           };
         }
       ).interactionPresenter = {
@@ -5772,6 +5788,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         segmentContent,
         isRunActive,
         acceptsLateDelivery,
+        terminalCardRetained,
       };
       const segment = {
         channelName: 'dingtalk',
@@ -5802,6 +5819,66 @@ describe('DingtalkChannel outbound file delivery', () => {
       ).toMatchObject({
         markdown: { text: expect.stringContaining('[File sent: report.txt]') },
       });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not resend boundary text retained by the completed card', async () => {
+    // R10-3: the run COMPLETES during the boundary's multi-second prepare —
+    // `terminalizeRun` finalizes the continuity card retaining the segment's
+    // content, `closeOutput` answers false on terminality, and the
+    // unconditional fallback POSTed the same content again as a separate
+    // message. The files still go out (R8-4); only the retained text is
+    // suppressed.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalCardRetained = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalCardRetained: typeof terminalCardRetained;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+        terminalCardRetained,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(terminalCardRetained).toHaveBeenCalledWith('run-1', 'segment-1');
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(0);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -5914,6 +5991,51 @@ describe('DingtalkChannel outbound file delivery', () => {
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
+  });
+
+  it('delivers the final text of a run the presenter never registered', async () => {
+    // R11-5: a run whose inbound correlation was missing (no msgId) or
+    // FIFO-evicted before `started` is never registered with the presenter.
+    // `acceptsLateDelivery` answered false for any unrecorded runId, so the
+    // final response text was silently dropped after `closeOutput` answered
+    // false — while files still went out and the turn booked completed. The
+    // pre-PR fallback delivered unconditionally; a real (unmocked) presenter
+    // proves the adapter-level delivery end to end.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const { markdownCalls } = stubFileReplyFetch();
+    (
+      channel as unknown as {
+        interactionPresenter: DingtalkInteractionPresenter;
+      }
+    ).interactionPresenter = new DingtalkInteractionPresenter({});
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-unregistered',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    await getCompleteHook(channel)(
+      'cid-1',
+      'final answer text',
+      'session-1',
+      segment,
+    );
+
+    expect(markdownCalls()).toHaveLength(1);
+    expect(
+      JSON.parse(String((markdownCalls()[0]![1] as RequestInit).body)),
+    ).toMatchObject({
+      markdown: { text: expect.stringContaining('final answer text') },
+    });
   });
 
   it('clears the segment presentation when the boundary gate suppresses delivery', async () => {

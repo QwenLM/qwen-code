@@ -202,7 +202,8 @@ describe('DingtalkInteractionPresenter', () => {
     presenter.registerRun('run-d', 'owner-1', target);
 
     expect(presenter.acceptsLateDelivery('run-1')).toBe(true);
-    expect(presenter.acceptsLateDelivery('run-missing')).toBe(false);
+    // R11-5: no record at all means nothing is known to suppress.
+    expect(presenter.acceptsLateDelivery('run-missing')).toBe(true);
 
     presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
     presenter.terminalizeRun('run-c', 'completed');
@@ -221,6 +222,69 @@ describe('DingtalkInteractionPresenter', () => {
       ).toBe(false);
     });
     expect(presenter.acceptsLateDelivery('run-d')).toBe(true);
+  });
+
+  it('delivers the fallback for a run the presenter never registered', () => {
+    // R11-5: registration needs the inbound correlation; a run whose
+    // envelope carried no msgId — or whose entry was FIFO-evicted before
+    // `started` — completes with no presenter record at all. The fallback
+    // gate then dropped the final text while files still went out. The
+    // pre-PR fallback delivered unconditionally; only a KNOWN
+    // cancelled/failed terminal may suppress.
+    const { presenter } = createHarness();
+
+    expect(presenter.acceptsLateDelivery('run-missing')).toBe(true);
+
+    // Known terminals still suppress...
+    presenter.registerRun('run-x', 'owner-1', target);
+    presenter.terminalizeRun('run-x', 'cancelled', 'cancel_command');
+    presenter.registerRun('run-y', 'owner-1', target);
+    presenter.terminalizeRun('run-y', 'failed', 'boom');
+    expect(presenter.acceptsLateDelivery('run-x')).toBe(false);
+    expect(presenter.acceptsLateDelivery('run-y')).toBe(false);
+  });
+
+  it('records the segment retained by the completed card', async () => {
+    // R10-3: completing during a boundary's multi-second prepare finalizes
+    // the continuity card retaining the ACTIVE segment's content; a boundary
+    // close still in flight must not deliver that same segment again — but
+    // only a segment the card actually retained qualifies.
+    const { presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-A'), 'boundary content');
+    presenter.appendOutput(segment('segment-B'), 'active content');
+
+    presenter.terminalizeRun('run-1', 'completed');
+
+    await vi.waitFor(() => {
+      expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(true);
+    });
+    expect(presenter.terminalCardRetained('run-1', 'segment-A')).toBe(false);
+
+    // A cancelled terminal retains nothing for fallback suppression.
+    presenter.registerRun('run-2', 'owner-1', target);
+    presenter.appendOutput(segment('segment-C', { runId: 'run-2' }), 'content');
+    presenter.terminalizeRun('run-2', 'cancelled', 'cancel_command');
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-2',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.terminalCardRetained('run-2', 'segment-C')).toBe(false);
+
+    // Completing without any output retained nothing either.
+    presenter.registerRun('run-3', 'owner-1', target);
+    presenter.terminalizeRun('run-3', 'completed');
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-3',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.terminalCardRetained('run-3', 'segment-A')).toBe(false);
   });
 
   it('removes stale segment presentations on a terminal close', async () => {

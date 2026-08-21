@@ -87,11 +87,15 @@ export class DingtalkInteractionPresenter {
   /**
    * R8-4: why a run terminalized, kept past the run's post-finalization
    * deletion — a late boundary close arriving after it still needs the
-   * reason to decide whether delivery is allowed.
+   * reason to decide whether delivery is allowed. R10-3: for a completed
+   * run, also which segment's content the continuity card retained.
    */
   private readonly terminalReasons = new Map<
     string,
-    'completed' | 'failed' | 'cancelled'
+    {
+      reason: 'completed' | 'failed' | 'cancelled';
+      retainedSegmentId?: string;
+    }
   >();
 
   constructor(private readonly options: DingtalkInteractionPresenterOptions) {}
@@ -198,12 +202,24 @@ export class DingtalkInteractionPresenter {
    * the boundary's multi-second prepare was in flight dropped the uploaded
    * files whole. A completed run's chat target is still valid for delivery —
    * only cancel/fail terminals suppress it — and the answer must survive the
-   * run's post-finalization deletion.
+   * run's post-finalization deletion. R11-5: a run the presenter never
+   * registered (its inbound correlation missing or evicted before `started`)
+   * has no record at all; the pre-PR fallback delivered it unconditionally,
+   * so only a KNOWN cancelled/failed terminal may suppress.
    */
   acceptsLateDelivery(runId: string): boolean {
-    return (
-      this.isRunActive(runId) || this.terminalReasons.get(runId) === 'completed'
-    );
+    if (this.isRunActive(runId)) return true;
+    const reason = this.terminalReasons.get(runId)?.reason;
+    return reason === undefined || reason === 'completed';
+  }
+
+  /**
+   * R10-3: whether this segment's content was retained on the continuity
+   * card when the run completed — a boundary fallback delivering it again
+   * would show the same content twice.
+   */
+  terminalCardRetained(runId: string, segmentId: string): boolean {
+    return this.terminalReasons.get(runId)?.retainedSegmentId === segmentId;
   }
 
   closeOutput(
@@ -336,7 +352,7 @@ export class DingtalkInteractionPresenter {
   ): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
-    this.terminalReasons.set(runId, terminal);
+    this.terminalReasons.set(runId, { reason: terminal });
     while (this.terminalReasons.size > 1000) {
       const oldest = this.terminalReasons.keys().next().value;
       if (oldest === undefined) break;
@@ -390,12 +406,18 @@ export class DingtalkInteractionPresenter {
         // last boundary) leaves the eagerly created card running forever.
         const statusContext = run.statusContext;
         if (statusContext) {
-          await this.options.statusCards?.complete(
+          const retained = await this.options.statusCards?.complete(
             statusContext.segmentId,
             '',
             (retained) =>
               retained ? this.withSenderPrefix(run, retained) : retained,
           );
+          // R10-3: the card kept the active segment's content — a boundary
+          // close still in flight must not deliver that segment again.
+          if (retained && activeSegmentId) {
+            const entry = this.terminalReasons.get(runId);
+            if (entry) entry.retainedSegmentId = activeSegmentId;
+          }
         }
       }
     });
