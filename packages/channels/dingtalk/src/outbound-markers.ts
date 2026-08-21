@@ -1,3 +1,5 @@
+import { maskCode, openFenceAt } from './markdown-state.js';
+
 export interface OutboundMediaMarker {
   start: number;
   end: number;
@@ -78,112 +80,6 @@ const COMPLETED_MARKER_PATTERN = new RegExp(
   `^\\[${MARKER_NAME_GROUP}[^\\S\\r\\n]*[^\\[\\]\\r\\n]+\\]$`,
   'iu',
 );
-
-function withoutQuotePrefix(line: string): string {
-  let offset = 0;
-  while (offset < line.length) {
-    let spaces = 0;
-    while (spaces < 4 && line[offset + spaces] === ' ') spaces++;
-    if (spaces > 3 || line[offset + spaces] !== '>') break;
-    offset += spaces + 1;
-    if (line[offset] === ' ') offset++;
-  }
-  return line.slice(offset);
-}
-
-function maskCode(text: string): string {
-  const masked = text.split('');
-  const blank = (start: number, end: number) => {
-    for (let i = start; i < end; i++) {
-      if (masked[i] !== '\n') masked[i] = ' ';
-    }
-  };
-
-  let fence: { character: '`' | '~'; length: number } | undefined;
-  let lineStart = 0;
-  let previousBlank = true; // start of document opens an indented block
-  let inIndentedCode = false;
-  while (lineStart < text.length) {
-    const newline = text.indexOf('\n', lineStart);
-    const lineEnd = newline === -1 ? text.length : newline;
-    const line = text.slice(lineStart, lineEnd).replace(/\r$/u, '');
-    const body = withoutQuotePrefix(line);
-    const blankLine = body.trim() === '';
-    if (fence) {
-      blank(lineStart, lineEnd);
-      const closing = body.match(/^ {0,3}(`+|~+)[\t ]*$/u)?.[1];
-      if (closing?.[0] === fence.character && closing.length >= fence.length) {
-        fence = undefined;
-      }
-    } else {
-      const opening = body.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
-      const delimiter = opening?.[1];
-      const info = opening?.[2] ?? '';
-      if (delimiter && (delimiter[0] !== '`' || !info.includes('`'))) {
-        fence = {
-          character: delimiter[0] as '`' | '~',
-          length: delimiter.length,
-        };
-        blank(lineStart, lineEnd);
-      } else if (
-        /^(?: {4}|\t)/u.test(body) &&
-        (previousBlank || inIndentedCode)
-      ) {
-        // R1-8: an indented line is a CommonMark indented code block only when
-        // it does not continue a paragraph or a list item — the block cannot
-        // interrupt one. Blanking every indented line hid genuine markers on
-        // list-continuation lines from every layer, so the absolute path
-        // shipped as literal text and the file was never delivered. Requiring
-        // a blank line to open the block (and letting consecutive indented
-        // lines continue it) keeps real indented code masked.
-        blank(lineStart, lineEnd);
-        inIndentedCode = true;
-      } else if (body.trim() !== '') {
-        inIndentedCode = false;
-      }
-    }
-    previousBlank = blankLine;
-    if (newline === -1) break;
-    lineStart = newline + 1;
-  }
-
-  let offset = 0;
-  while (offset < text.length) {
-    if (masked[offset] === '`') {
-      let runLength = 1;
-      while (masked[offset + runLength] === '`') runLength++;
-      const newline = text.indexOf('\n', offset + runLength);
-      // R1-9: a run of one or two backticks must find its closing run before
-      // the next newline. Without that bound a cross-line span masks whatever
-      // it covers — including a genuine same-line media marker — which every
-      // sanitizer then misses, so the absolute path ships as literal text and
-      // the media is never delivered. Longer runs keep spanning lines.
-      const searchLimit =
-        runLength < 3 && newline !== -1 ? newline : text.length;
-      let closing = offset + runLength;
-      while (closing < searchLimit) {
-        while (closing < searchLimit && masked[closing] !== '`') closing++;
-        let closingLength = 0;
-        while (masked[closing + closingLength] === '`') closingLength++;
-        if (closingLength === runLength) break;
-        closing += Math.max(1, closingLength);
-      }
-      if (closing >= searchLimit) closing = text.length;
-      const end =
-        closing < text.length
-          ? closing + runLength
-          : newline === -1
-            ? text.length
-            : newline;
-      blank(offset, end);
-      offset = end;
-      continue;
-    }
-    offset++;
-  }
-
-  return masked.join('');
-}
 
 /**
  * Step the backward `[` walk one bracket to the left.
@@ -447,54 +343,6 @@ function markerSafeTruncationStart(text: string, start: number): number {
 }
 
 /**
- * The fence delimiter open at `offset`, or undefined outside a fenced block.
- *
- * A retained tail that begins inside a fenced code block has inverted fence
- * parity: {@link maskCode} reads the block's CLOSING fence as an opening one
- * and stops masking real code while unmasking real prose, so a genuine
- * `[FILE: /abs/path]` outside any block survives sanitisation as literal
- * text.
- *
- * R1-2: fence delimiters are matched on the QUOTE-STRIPPED line body, exactly
- * as {@link maskCode} sees them. Matching the raw line made a blockquoted
- * fence invisible here while maskCode masked it, so a cut inside the quoted
- * block emitted no re-opener and the tail's quoted CLOSING fence read as an
- * opening one downstream — the parity inversion this function exists to
- * prevent.
- */
-function openFenceAt(text: string, offset: number): string | undefined {
-  let fence: { character: '`' | '~'; length: number } | undefined;
-  let lineStart = 0;
-  while (lineStart < offset) {
-    const newline = text.indexOf('\n', lineStart);
-    const lineEnd = newline === -1 ? text.length : newline;
-    const line = text.slice(lineStart, lineEnd).replace(/\r$/u, '');
-    const body = withoutQuotePrefix(line);
-    if (fence) {
-      const closing = body.match(/^ {0,3}(`+|~+)[\t ]*$/u)?.[1];
-      if (closing?.[0] === fence.character && closing.length >= fence.length) {
-        fence = undefined;
-      }
-    } else {
-      const opening = body.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
-      const delimiter = opening?.[1];
-      if (
-        delimiter &&
-        (delimiter[0] !== '`' || !(opening?.[2] ?? '').includes('`'))
-      ) {
-        fence = {
-          character: delimiter[0] as '`' | '~',
-          length: delimiter.length,
-        };
-      }
-    }
-    if (newline === -1) break;
-    lineStart = newline + 1;
-  }
-  return fence ? fence.character.repeat(fence.length) : undefined;
-}
-
-/**
  * The retained tail always starts a fresh line — the truncation marker ends
  * with a newline — so when the cut drops the prose prefix of a mid-line
  * backtick/tilde run, the run becomes a line-start fence OPENER that was
@@ -543,6 +391,7 @@ export function truncateOutboundMediaText(
   // Re-open a fence the cut landed inside, so the tail keeps the parity every
   // downstream consumer assumes: the code masker, and DingTalk's own renderer.
   let reopen: string | undefined;
+  let snapped = false;
   // R1-3: the re-opener has to be RESERVED, not prepended on top of a tail
   // already sized to the whole budget — that returned up to
   // `limit + fence.length + 1` characters and broke the `<= limit` guarantee
@@ -558,8 +407,27 @@ export function truncateOutboundMediaText(
       reopen = undefined;
       continue;
     }
-    reopen = openFenceAt(text, start);
-    if (!reopen) break;
+    const fence = openFenceAt(text, start);
+    if (!fence) {
+      reopen = undefined;
+      break;
+    }
+    // A quoted fence closes only on a quoted line. Re-opening with a bare
+    // delimiter above a tail whose first line lost its `> ` leaves the block
+    // open to end of text, so the closing `> ```<` reads as content and every
+    // marker after the block is masked out of the finder's reach — the exact
+    // parity inversion the re-opener exists to prevent. Start the tail on a
+    // whole quoted line and re-open with the prefix the block actually has.
+    if (fence.quoted && !snapped) {
+      snapped = true;
+      const lineEnd = text.indexOf('\n', start);
+      if (lineEnd !== -1) {
+        start = markerSafeTruncationStart(text, lineEnd + 1);
+        reopen = undefined;
+        continue;
+      }
+    }
+    reopen = fence.quoted ? `> ${fence.delimiter}` : fence.delimiter;
     const budget = limit - truncationMarker.length - reopen.length - 1;
     if (budget <= 0) {
       // R2-4: breaking with `reopen` still set prepended an UNRESERVED
