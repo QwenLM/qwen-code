@@ -47,7 +47,7 @@ interface AoneMrView {
     detailUrl?: string;
     title?: string;
     description?: string;
-    author?: { username?: string };
+    author?: unknown;
     state?: string;
   };
 }
@@ -598,6 +598,157 @@ export const aoneReader: ReviewPlatformReader = {
     };
   },
 };
+
+// ---------------------------------------------------------------------------
+// Comment / status reads — the Aone backing for `comment-status` and
+// `presubmit` (Phase 3's dedup/self-PR slice of
+// docs/design/2026-08-13-review-platform-provider-abstraction.md). Aone has
+// ONE flat comment collection per MR (inline comments, replies, and global
+// summary comments all in `mr comment list`); threading rides `parentNoteId`,
+// thread state rides `closed`/`outdated`. Comments carry NO commit anchor —
+// the commit_id half of GitHub's classification has no input here, and the
+// consumers map around it (presubmit keys staleness on `outdated` instead).
+// ---------------------------------------------------------------------------
+
+/** One entry of `a1 repo mr comment list --mr <id> -f json` (the fields the
+ *  consumers read; the text is in `note`, `body` stays empty on known a1
+ *  versions but is tolerated). */
+export interface AoneMrComment {
+  id: number;
+  note?: string;
+  body?: string;
+  path?: string;
+  line?: number | null;
+  /** 'right' (new side) or 'left' (old side). */
+  side?: string;
+  /** The discussion was resolved. */
+  closed?: boolean;
+  /** The anchor no longer maps to the live head's diff (a past amend moved
+   *  the code). */
+  outdated?: boolean;
+  /** Set on replies; points at the thread root. */
+  parentNoteId?: number | null;
+  isAiComment?: boolean;
+  isDraft?: boolean;
+  createdAt?: string;
+  created_at?: string;
+  author?: unknown;
+}
+
+/** The account name an a1 payload carries, tolerant across the shapes a1
+ *  emits ({username} / {account} / {login} / {name} / a bare string). ''
+ *  when none is readable — the consumers' identity gates decide what an
+ *  unknown account means (never a silent self-match). */
+export function aoneAccountName(author: unknown): string {
+  if (typeof author === 'string') return author.trim();
+  if (author !== null && typeof author === 'object') {
+    const o = author as Record<string, unknown>;
+    for (const key of ['username', 'account', 'login', 'name']) {
+      const v = o[key];
+      if (typeof v === 'string' && v.trim() !== '') return v.trim();
+    }
+  }
+  return '';
+}
+
+/** The MR's author account and live head SHA (`sourceBranch` IS the head
+ *  under AGit-Flow). One call answers both halves presubmit and
+ *  comment-status need (self-PR detection / authorReplied + drift). */
+export function getMrAuthorAndHead(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author: aoneAccountName(view.author),
+    headSha: (view.sourceBranch ?? '').trim(),
+  };
+}
+
+/** The MR's flat comment list (inline + replies + global). Draft
+ *  (unpublished) entries are dropped at the read site so BOTH consumers —
+ *  the comment-status index and presubmit's dedup — never classify a
+ *  comment nobody can see: a leftover draft in the finding shape would
+ *  otherwise overlap-drop a genuinely new finding, silently withholding
+ *  it. Only an explicit `true` reads as unpublished — an unreadable draft
+ *  state stays in (fail toward the visible-comment reading). */
+export function listMrComments(
+  prNumber: number,
+  ownerRepo: string,
+): AoneMrComment[] {
+  checkOwnerRepo(ownerRepo);
+  const comments = a1Json<AoneMrComment[] | null>(
+    'repo',
+    'mr',
+    'comment',
+    'list',
+    '--mr',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+  );
+  return (comments ?? []).filter((c) => c.isDraft !== true);
+}
+
+/** The reviewing account, as `a1 auth whoami -f json` reports it. */
+export function aoneWhoami(): string {
+  const out = a1Json<unknown>('auth', 'whoami');
+  return aoneAccountName(out);
+}
+
+/** Locate a `checks` array in an `a1 repo mr status` answer: the top level
+ *  first, then one nesting level down (a1 wraps payloads differently across
+ *  subcommands). Entries that are not objects are dropped — a classifier
+ *  reading a string entry as a record would report every gate as pending on
+ *  a key typo, and the drop keeps the shape contract honest. `null` means
+ *  NO checks array was recognizable at all — distinct from a found-but-empty
+ *  array, which is a real "no gates exist" statement. */
+function extractStatusChecks(
+  out: unknown,
+): Array<Record<string, unknown>> | null {
+  const containers: unknown[] = [out];
+  if (out !== null && typeof out === 'object' && !Array.isArray(out)) {
+    for (const v of Object.values(out as Record<string, unknown>)) {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        containers.push(v);
+      }
+    }
+  }
+  for (const container of containers) {
+    const checks = (container as Record<string, unknown>)['checks'];
+    if (Array.isArray(checks)) {
+      return checks.filter(
+        (e): e is Record<string, unknown> =>
+          e !== null && typeof e === 'object' && !Array.isArray(e),
+      );
+    }
+  }
+  return null;
+}
+
+/** The MR's merge-gate / CI checks (`a1 repo mr status <id> -f json`).
+ *  A found-but-empty array stays `[]` — the GitHub contract's "no CI at
+ *  all" shape, which the classifier reads as `no_checks` with zero totals
+ *  and does NOT downgrade. `undefined` means a1 answered but no
+ *  recognizable `checks` array was present — the caller maps that
+ *  unreadable gate state to pending, never to the all-clear. */
+export function getMrStatusChecks(
+  prNumber: number,
+  ownerRepo: string,
+): Array<Record<string, unknown>> | undefined {
+  checkOwnerRepo(ownerRepo);
+  const out = a1Json<unknown>(
+    'repo',
+    'mr',
+    'status',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+  );
+  const checks = extractStatusChecks(out);
+  return checks ?? undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Write path — the Aone half of `qwen review submit` (Phase 3 of

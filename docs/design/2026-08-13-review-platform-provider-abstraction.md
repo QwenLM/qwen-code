@@ -354,9 +354,21 @@ Enterprise paragraph.
     approve-failure and oversized refusals name the USER as the manual
     actor; the completion contract reads `partial`/`approved`; and the
     repeat-round caveats (no dedup backing, no self-PR detection) are
-    documented for the user. Still open: dedup/self-PR backing for Aone,
-    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
-    render-adjudication carve-out.
+    documented for the user. **Landed (2026-08-21): the dedup/self-PR
+    backing for Aone** — `comment-status` and `presubmit` route an Aone
+    target at the a1 reads (`mr view` author+head, `mr status` gates,
+    `mr comment list`, `auth whoami`) and reuse the SAME pure
+    classification core the GitHub path pins, so the buckets, the
+    downgrade flags, and the report schema stay one contract. The a1
+    shape differences map onto the GitHub inputs: threads ride
+    `parentNoteId`, a `closed` thread is the engaged (resolved) bucket,
+    an `outdated` thread takes the stale bucket (its line was rewritten
+    — a new finding there still posts), comments carry NO commit anchor
+    (code facts degrade to `unknown`; nothing is stale by commit), and
+    drift has no compare API (anchorsAtRisk fails safe). The
+    context-unavailable cap stays until `pr-context` lands. Still open:
+    pr-context Aone backing, `composeUrl`, cleanup audit, AI-comment
+    marking (Q4), the render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

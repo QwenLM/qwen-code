@@ -28,6 +28,16 @@ import {
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
 import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
+import {
+  aoneAccountName,
+  aoneWhoami,
+  getMrAuthorAndHead,
+  getMrStatusChecks,
+  listMrComments,
+  type AoneMrComment,
+} from './lib/platform/aone.js';
 
 interface FindingAnchor {
   path: string;
@@ -472,6 +482,147 @@ export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   };
 }
 
+/**
+ * Aone merge-gate / CI states → the same verdict classes classifyCi emits.
+ * `a1 repo mr status` reports the gates that decide `readyToMerge`
+ * (discussion, approver_number, test, ai_comment, …); the classifier reads
+ * whatever entries arrive, tolerant on key spelling, and never lets an
+ * unreadable state read as a pass — an unrecognized word lands with the
+ * pending class, which caps an Approve exactly like a still-running check.
+ */
+const AONE_CHECK_PASS = new Set([
+  'success',
+  'succeeded',
+  'pass',
+  'passed',
+  'ok',
+  'satisfied',
+  'green',
+  'done',
+]);
+const AONE_CHECK_FAIL = new Set([
+  'failure',
+  'failed',
+  'fail',
+  'error',
+  'errored',
+  'unsatisfied',
+  'blocked',
+  'red',
+  'rejected',
+]);
+const AONE_CHECK_NOT_RUN = new Set([
+  'skipped',
+  'neutral',
+  'stale',
+  'waived',
+  'disabled',
+  'not_applicable',
+]);
+
+function aoneCheckName(c: Record<string, unknown>, index: number): string {
+  for (const key of ['name', 'context', 'check', 'title']) {
+    const v = c[key];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return `check-${index + 1}`;
+}
+
+function aoneCheckState(c: Record<string, unknown>): string {
+  // A value that lands in a known word set beats an unrecognized word in
+  // another key: `status: 'completed'` beside `conclusion: 'success'` must
+  // read as passed, not as still-running (the lifecycle-words-first reading
+  // would cap every Approve on that MR forever). Verdict keys lead; when no
+  // value is recognized the first non-empty one is returned, and the
+  // classifier's pending bucket keeps that shape fail-closed.
+  let fallback = '';
+  for (const key of ['conclusion', 'result', 'state', 'status']) {
+    const v = c[key];
+    if (typeof v !== 'string' || v.trim() === '') continue;
+    const norm = v.trim().toLowerCase();
+    if (
+      AONE_CHECK_PASS.has(norm) ||
+      AONE_CHECK_FAIL.has(norm) ||
+      AONE_CHECK_NOT_RUN.has(norm)
+    ) {
+      return norm;
+    }
+    if (fallback === '') fallback = norm;
+  }
+  return fallback;
+}
+
+export function classifyAoneChecks(
+  checks: ReadonlyArray<Record<string, unknown>>,
+): {
+  class: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
+  failedCheckNames: string[];
+  skippedCheckNames: string[];
+  totalChecks: number;
+} {
+  const failedCheckNames: string[] = [];
+  const skippedCheckNames: string[] = [];
+  let hasPending = false;
+  let executed = 0;
+  checks.forEach((c, i) => {
+    const name = aoneCheckName(c, i);
+    const state = aoneCheckState(c);
+    if (AONE_CHECK_FAIL.has(state)) {
+      failedCheckNames.push(name);
+    } else if (AONE_CHECK_NOT_RUN.has(state)) {
+      skippedCheckNames.push(name);
+    } else if (AONE_CHECK_PASS.has(state)) {
+      executed += 1;
+    } else {
+      // pending or unrecognized — neither is a pass.
+      hasPending = true;
+    }
+  });
+  let cls: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
+  if (failedCheckNames.length > 0) {
+    cls = 'any_failure';
+  } else if (checks.length === 0) {
+    cls = 'no_checks';
+  } else if (hasPending) {
+    cls = 'all_pending';
+  } else if (executed === 0) {
+    cls = 'no_checks';
+  } else {
+    cls = 'all_pass';
+  }
+  return {
+    class: cls,
+    failedCheckNames: [...new Set(failedCheckNames)],
+    skippedCheckNames: [...new Set(skippedCheckNames)],
+    totalChecks: checks.length,
+  };
+}
+
+/**
+ * One `a1 repo mr comment list` entry mapped into the GitHub-shaped input
+ * `classifyExistingComments` reads. a1 comments carry NO commit anchor, and
+ * an Aone thread is a live MR discussion across amends — so a thread whose
+ * line still maps rides `commit_id === commitSha` (current, overlap-eligible:
+ * the dedup this backing exists for), while a thread the platform marks
+ * `outdated` (its code was replaced by a past amend) takes the stale bucket —
+ * the same bucket GitHub's commit_id comparison hands a prior-commit anchor,
+ * so a genuinely new finding at the rewritten line still posts.
+ */
+export function aoneCommentToPresubmitComment(
+  c: AoneMrComment,
+  commitSha: string,
+): RawComment {
+  return {
+    id: c.id,
+    body: c.note ?? c.body ?? '',
+    path: c.path,
+    line: typeof c.line === 'number' ? c.line : undefined,
+    commit_id: c.outdated === true ? '' : commitSha,
+    in_reply_to_id: c.parentNoteId ?? undefined,
+    user: { login: aoneAccountName(c.author) },
+  };
+}
+
 function classifyExistingComments(
   qwenComments: RawComment[],
   repliedToIds: Set<number>,
@@ -762,7 +913,64 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     me,
   );
 
-  // --- Downgrade decisions ----------------------------------------------
+  writePresubmitReport({
+    prNumber,
+    commitSha,
+    ownerRepo,
+    outPath,
+    isSelfPr,
+    ciStatus,
+    qwenCommentCount: qwenComments.length,
+    buckets,
+    headDrift,
+    driftReason,
+    metaUnavailable,
+    findingsFileInvalid,
+  });
+}
+
+/** The CI/gate classification shape both platform classifiers emit. */
+interface CiClassification {
+  class: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
+  failedCheckNames: string[];
+  skippedCheckNames: string[];
+  totalChecks: number;
+}
+
+/**
+ * The downgrade decisions + report write, shared by both platform runners:
+ * the semantics the skill's Step 7 reads are one computation, never two
+ * copies that could drift between GitHub and Aone.
+ */
+function writePresubmitReport(input: {
+  prNumber: string;
+  commitSha: string;
+  ownerRepo: string;
+  outPath: string;
+  isSelfPr: boolean;
+  ciStatus: CiClassification;
+  qwenCommentCount: number;
+  buckets: ReturnType<typeof classifyExistingComments>;
+  headDrift: HeadDrift;
+  driftReason?: string;
+  metaUnavailable: boolean;
+  findingsFileInvalid: boolean;
+}): void {
+  const {
+    prNumber,
+    commitSha,
+    ownerRepo,
+    outPath,
+    isSelfPr,
+    ciStatus,
+    qwenCommentCount,
+    buckets,
+    headDrift,
+    driftReason,
+    metaUnavailable,
+    findingsFileInvalid,
+  } = input;
+
   const downgradeReasons: string[] = [];
   if (isSelfPr) downgradeReasons.push('self-PR');
   if (ciStatus.class === 'any_failure') {
@@ -801,7 +1009,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     isSelfPr,
     ciStatus,
     existingComments: {
-      total: qwenComments.length,
+      total: qwenCommentCount,
       byBucket: {
         stale: buckets.stale.length,
         resolved: buckets.resolved.length,
@@ -853,6 +1061,150 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   writeStdoutLine(`Wrote presubmit report to ${outPath}`);
 }
 
+/**
+ * The Aone runner. The platform differences: identity and head come from
+ * `mr view` (author username + `sourceBranch`), CI/gate state from
+ * `mr status`, existing comments from `mr comment list` — and there is no
+ * compare API, so a drifted head carries `compare: null` and the anchor-risk
+ * ruling fails safe to at-risk (the skill restarts at the new head — under
+ * AGit-Flow a moved head IS an amend that wants a re-review).
+ */
+async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
+  const {
+    pr_number: prNumber,
+    commit_sha: commitSha,
+    owner_repo: ownerRepo,
+    out_path: outPath,
+  } = args;
+  const newFindingsPath = args['new-findings'];
+
+  if (ownerRepo.indexOf('/') < 0) {
+    throw new Error('owner_repo must look like "owner/repo"');
+  }
+  const mrId = Number(prNumber);
+  if (!Number.isInteger(mrId) || mrId <= 0) {
+    throw new Error(
+      'pr_number must be a positive integer (the Aone global MR id)',
+    );
+  }
+
+  ensureAoneAuthenticated();
+
+  // --- Self-MR detection + live head (one mr view) ----------------------
+  // Same two failure classes as the GitHub path: an UNREADABLE mr view is
+  // fail-CLOSED (metaUnavailable — neither self-PR nor drift can be
+  // checked, so the Approve caps); a readable view with an absent author is
+  // fail-soft (isSelfPr false).
+  let mrAuthor = '';
+  let liveHeadSha = '';
+  let metaUnavailable = false;
+  try {
+    const facts = getMrAuthorAndHead(mrId, ownerRepo);
+    mrAuthor = facts.author;
+    liveHeadSha = facts.headSha;
+  } catch {
+    metaUnavailable = true;
+  }
+  const me = aoneWhoami();
+  const isSelfPr =
+    mrAuthor !== '' && mrAuthor.toLowerCase() === me.toLowerCase();
+
+  // --- Head drift ---------------------------------------------------------
+  // Aone has no compare endpoint — the delta would be a local
+  // `git diff <reviewed>..<live>` after re-fetching the ref (design D7),
+  // but presubmit does not re-fetch: `compare` stays null, which rules
+  // `anchorsAtRisk` true on ANY drift — the fail-safe default that sends
+  // the skill back to re-review the amended head.
+  const newFindings = newFindingsPath
+    ? parseFindingsFile(newFindingsPath)
+    : null;
+  const findingsFileInvalid =
+    newFindingsPath !== undefined && newFindings === null;
+  const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
+    commitSha,
+    liveHeadSha,
+    null,
+    newFindings === null ? null : newFindings.map((f) => f.path),
+  );
+
+  // --- CI / merge-gate status ---------------------------------------------
+  // An unreadable gate state (a1 answered but no recognizable checks array)
+  // must not collapse to `no_checks` with zero totals — that is the
+  // all-clear shape. It reads as pending instead, capping an Approve the
+  // same way a still-running check does. A TRANSPORT failure rethrows, the
+  // same shape the gh path gives its check-run fetch.
+  const checks = getMrStatusChecks(mrId, ownerRepo);
+  const ciStatus: CiClassification =
+    checks === undefined
+      ? {
+          class: 'all_pending',
+          failedCheckNames: [],
+          skippedCheckNames: [],
+          totalChecks: 0,
+        }
+      : classifyAoneChecks(checks);
+
+  // --- Existing Qwen Code comments --------------------------------------
+  // One flat a1 list carries inline findings, replies, AND global summary
+  // comments; the mapping and recognition signals are the GitHub ones (the
+  // footer is qwen's own provenance string and matches regardless of
+  // account; the short marker/severity shapes match only the reviewing
+  // account's own top-level comments).
+  const allRaw = listMrComments(mrId, ownerRepo);
+  const allComments = allRaw.map((c) =>
+    aoneCommentToPresubmitComment(c, commitSha),
+  );
+  const qwenComments = allComments.filter(
+    (c) =>
+      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id &&
+        me !== '' &&
+        (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
+        (carriesCommentMarker(c.body ?? '') || severityOf(c) !== null)),
+  );
+
+  const repliedToIds = new Set<number>();
+  for (const c of allRaw) {
+    if (typeof c.parentNoteId === 'number' && c.parentNoteId !== 0) {
+      repliedToIds.add(c.parentNoteId);
+    }
+    // Aone's `closed` marks a RESOLVED discussion — the engaged-thread
+    // equivalent of GitHub's replied-to. It lands in the resolved bucket,
+    // which the priority order above keeps OUT of the overlap drop: a
+    // resolved thread at a location does not bar a new finding there.
+    if (c.closed === true) {
+      repliedToIds.add(
+        typeof c.parentNoteId === 'number' && c.parentNoteId !== 0
+          ? c.parentNoteId
+          : c.id,
+      );
+    }
+  }
+
+  const buckets = classifyExistingComments(
+    qwenComments,
+    repliedToIds,
+    newFindings ?? [],
+    commitSha,
+    me,
+  );
+
+  writePresubmitReport({
+    prNumber,
+    commitSha,
+    ownerRepo,
+    outPath,
+    isSelfPr,
+    ciStatus,
+    qwenCommentCount: qwenComments.length,
+    buckets,
+    headDrift,
+    driftReason,
+    metaUnavailable,
+    findingsFileInvalid,
+  });
+}
+
 export const presubmitCommand: CommandModule = {
   command: 'presubmit <pr_number> <commit_sha> <owner_repo> <out_path>',
   describe:
@@ -882,7 +1234,7 @@ export const presubmitCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          'Host for this PR (GitHub Enterprise, or an Aone host to select the a1 backend). Routes every gh call in this command via GH_HOST; omit for github.com.',
       })
       .option('new-findings', {
         type: 'string',
@@ -890,7 +1242,12 @@ export const presubmitCommand: CommandModule = {
           "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
-    setGhHost((argv as { host?: string }).host);
+    const host = (argv as { host?: string }).host;
+    if (detectPlatformKind({ host }) === 'aone') {
+      await runPresubmitAone(argv as unknown as PresubmitArgs);
+      return;
+    }
+    setGhHost(host);
     await runPresubmit(argv as unknown as PresubmitArgs);
   },
 };

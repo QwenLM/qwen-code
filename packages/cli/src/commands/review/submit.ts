@@ -251,12 +251,15 @@ function compose(
   /**
    * The Aone write path FORCES context-unavailable, whatever the
    * model-written state claims: this phase has no Aone backing for
-   * pr-context/comment-status/presubmit, so no Aone run can have read the
-   * MR's existing discussion. Letting the state's `contextUnavailable`
-   * decide would let a forged or omitted field compose an APPROVE that the
-   * a1 path then turns into a REAL platform approval — the exact forgery
-   * class this command exists to defeat. The cap lives HERE, where
-   * `aoneWrite` is a fact, not in the state.
+   * pr-context, so no Aone run can have walked the MR's existing
+   * discussion through the context file (comment-status/presubmit are
+   * a1-backed, but they index and dedup — they do not substitute for
+   * Step 6's blocker re-check, which reads that file). Letting the
+   * state's `contextUnavailable` decide would let a forged or omitted
+   * field compose an APPROVE that the a1 path then turns into a REAL
+   * platform approval — the exact forgery class this command exists to
+   * defeat. The cap lives HERE, where `aoneWrite` is a fact, not in the
+   * state.
    */
   aoneWrite: boolean,
 ): {
