@@ -15031,6 +15031,9 @@ exit 1
         '轮未能推送任何内容',
       ],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
+      // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
+      // variables are gone) — its EN/ZH pairing stays pinned here.
+      ['HEADLINE', 'split or reduce the PR', '拆分或缩减该 PR'],
       [
         'HEADLINE',
         'deferred this item to a human under instruction',
@@ -15879,7 +15882,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -15889,15 +15892,19 @@ exit 1
       rmSync(dir, { recursive: true, force: true });
       // The block echoes ::warning:: log lines (the idle-timeout census), so
       // read the result off its sentinel — job-log noise must never be
-      // parsed as a field.
-      const [mark, consec, headline] = out
-        .slice(out.lastIndexOf('@@R@@') + 5)
+      // parsed as a field. The pre-sentinel half is the job-log surface the
+      // census warning targets; return it so tests can pin it.
+      const sentinelAt = out.lastIndexOf('@@R@@');
+      const [mark, consec, headline, headlineZh] = out
+        .slice(sentinelAt + 5)
         .split('|');
       return {
         mark,
         consec: Number(consec),
         terminal: mark === '100',
         headline,
+        headlineZh,
+        log: out.slice(0, sentinelAt),
       };
     };
 
@@ -16046,6 +16053,12 @@ exit 1
     expect(idleStreak.headline).toContain(
       'consecutive rounds that pushed nothing',
     );
+    // ...and the TERMINAL run's job log still names the wedged runner: the
+    // census warning runs outside the cap's terminal guard precisely so an
+    // all-idle stop — which lands on the consecutive breaker's headline —
+    // keeps its only infra signal. Moving the echo back under the guard
+    // suppresses the warning here and must fail.
+    expect(idleStreak.log).toContain(`::warning::#1: ${cap} silent-sandbox`);
     // A window whose BUDGET timeouts alone reach the cap still trips, and
     // the count it reports is the budget one — not the total, which would
     // re-inflate the number the exclusion just corrected.
@@ -16061,6 +16074,19 @@ exit 1
     // learns the runner misbehaved on a PR stopped for an unrelated reason.
     expect(mixedTrips.headline).toContain('do NOT count toward this cap');
     expect(mixedTrips.headline).toContain('raise the agent time budget');
+    // The ZH headline interpolates the same budget-only count — pin both
+    // halves, or a ${BUDGET_TIMEOUT_N} → ${TIMEOUT_N} mutation on the ZH
+    // line alone ships green while the comment's Chinese half re-inflates
+    // the number the exclusion just corrected.
+    expect(mixedTrips.headlineZh).toContain(`${timeoutCap} 次时间预算耗尽`);
+    expect(mixedTrips.headlineZh).not.toContain(
+      `${timeoutCap + 1} 次时间预算耗尽`,
+    );
+    // The idle census ::warning:: is the only observability left for
+    // excluded idle timeouts — one idle round in this window warns exactly
+    // once (deleting the echo, flipping -gt 0, or swapping the count each
+    // fail here).
+    expect(mixedTrips.log).toContain('::warning::#1: 1 silent-sandbox');
     // One idle round is enough to hold a would-be-capped window open: cap-1
     // budget priors plus an idle current round is cap-1 budget timeouts, not
     // cap. Deleting the IDLE_N increment (or the subtraction) terminates
@@ -16070,8 +16096,10 @@ exit 1
     });
     expect(idleCurrentOnly.terminal).toBe(false);
     expect(idleCurrentOnly.headline).toBe('orig');
-    // A window WITHOUT idle rounds says nothing about the sandbox.
+    // A window WITHOUT idle rounds says nothing about the sandbox — in the
+    // headline or the job log.
     expect(interleaved.headline).not.toContain('silent-sandbox');
+    expect(interleaved.log).not.toContain('::warning');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -16141,9 +16169,18 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       'IDLE_N="$(grep -c \'AutoFix ran out of time before finishing (idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
     );
-    expect('AutoFix ran out of time before finishing (idle-timeout').toContain(
-      'AutoFix ran out of time before finishing',
-    );
+    // ...checked on the needles extracted from the workflow pins above,
+    // not on literals — a literal-vs-literal comparison is true by
+    // construction and would stay green whatever the workflow says.
+    const timeoutNeedle = reviewAddressReportStep.match(
+      /TIMEOUT_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    const idleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(timeoutNeedle).toBeTruthy();
+    expect(idleNeedle).toBeTruthy();
+    expect(idleNeedle).toContain(timeoutNeedle);
     // The cap gates on the budget-only count, never the total.
     expect(reviewAddressReportStep).toContain(
       'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))',

@@ -124,6 +124,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [70. review-address · Report dry-run / failure — -c drops any partial multi-byte sequence a byte-level head -c may have split, so the…](#af-070)
 - [71. review-address · Report dry-run / failure — Bilingual companion. Repo convention is English first, Chinese in a collapsed <details>.…](#af-071)
 - [72. review-address · Report dry-run / failure — Flip the status comment out of "working" so a finished round never leaves a live-looking…](#af-072)
+- [73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.…](#af-073)
 
 ---
 
@@ -2137,9 +2138,15 @@ loose needle could otherwise match provider error text that
 API_ERROR_DETAIL puts on the same first line and drive the difference
 negative. And the all-idle remedy branch is gone as unreachable: the
 guard now fires only when BUDGET_TIMEOUT_N alone reaches the cap, so a
-counted window always holds more budget timeouts than idle ones.
+tripped window always holds at least TIMEOUT_WINDOW_CAP genuine budget
+timeouts — idle rounds can outnumber budget ones in it, but the budget
+remedy applies because those budget timeouts exist, not because they
+are the majority.
 
 Idle rounds stay visible through a job-log ::warning:: rather than a PR
 comment — the signal belongs to whoever owns the runners, and infra
-noise should not spend a comment on someone's PR.
+noise should not spend a comment on someone's PR. The census and its
+warning run outside the cap's terminal guard: the all-idle shape stops
+via the consecutive breaker with that breaker's headline, and the
+terminal run's log is exactly where the wedged runner must be named.
 ```
