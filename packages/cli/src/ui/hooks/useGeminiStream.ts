@@ -377,6 +377,7 @@ enum StreamProcessingStatus {
 interface StreamProcessingResult {
   status: StreamProcessingStatus;
   scheduledToolContinuation: boolean;
+  userPromptBlocked: boolean;
 }
 
 const EDIT_TOOL_NAMES = new Set([
@@ -735,13 +736,6 @@ export const useGeminiStream = (
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
-  // Set when this submission's stream yielded UserPromptSubmitBlocked: a
-  // user hook blocked the request, so the model never received it. The
-  // post-stream dispatch treats this as a delivery failure so payloads
-  // drained into the submission (teammate envelopes, steer input) are
-  // restored instead of being mistaken for delivered. Reset at the start
-  // of every submission, like lastPromptErroredRef.
-  const userPromptBlockedRef = useRef(false);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -2395,11 +2389,6 @@ export const useGeminiStream = (
       value: { reason: string; originalPrompt: string },
       userMessageTimestamp: number,
     ) => {
-      // The hook blocked the request before any model call: count this
-      // submission as a delivery failure so drained payloads (teammate
-      // envelopes, steer input) are restored to their queues instead of
-      // being treated as delivered by the post-stream dispatch.
-      userPromptBlockedRef.current = true;
       if (pendingHistoryItemRef.current) {
         commitItemInOrder(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -2456,6 +2445,7 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       let scheduledToolContinuation = false;
+      let userPromptBlocked = false;
       let assistantOutputStarted =
         pendingHistoryItemRef.current?.type === 'gemini' ||
         pendingHistoryItemRef.current?.type === 'gemini_content';
@@ -2705,6 +2695,7 @@ export const useGeminiStream = (
               return {
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
+                userPromptBlocked,
               };
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
@@ -2880,6 +2871,7 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
+              userPromptBlocked = true;
               handleUserPromptSubmitBlockedEvent(
                 event.value,
                 userMessageTimestamp,
@@ -2992,6 +2984,7 @@ export const useGeminiStream = (
           return {
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
+            userPromptBlocked,
           };
         }
 
@@ -3084,6 +3077,7 @@ export const useGeminiStream = (
       return {
         status: StreamProcessingStatus.Completed,
         scheduledToolContinuation,
+        userPromptBlocked,
       };
     },
     [
@@ -3781,7 +3775,6 @@ export const useGeminiStream = (
 
         const finalQueryToSend = queryToSend;
         goalTerminalErrorRef.current = false;
-        userPromptBlockedRef.current = false;
         if (submitType !== SendMessageType.Goal) {
           lastPromptRef.current = finalQueryToSend;
           lastPromptErroredRef.current = false;
@@ -4038,7 +4031,7 @@ export const useGeminiStream = (
           if (
             lastPromptErroredRef.current ||
             goalTerminalErrorRef.current ||
-            userPromptBlockedRef.current
+            processingResult.userPromptBlocked
           ) {
             metadata?.onDeliveryFailed?.();
           } else {
@@ -5282,21 +5275,12 @@ export const useGeminiStream = (
           })),
         );
       }
-      // Snapshot of GeminiChat's user-content push counter, taken
-      // before the submission. GeminiChat pushes the submission's user
-      // content once, BEFORE any model attempt, and rolls the push back
-      // only on setup errors — so the counter advancing past this
-      // snapshot is the signal that the drained envelopes reached the
-      // session history (were accepted). Same acceptance signal
-      // `settleSteerInput` uses in client.ts. Pre-submit failure edges
-      // (the cancel/preempt checks below, admission failure, hook
-      // block) leave the counter unchanged and stay distinguishable
-      // from post-acceptance failures.
-      const teammatePushCountBeforeSubmit =
-        geminiClient?.getChat().getUserContentPushCount() ?? 0;
-      // Settle the drained batch exactly once. Idempotent because
-      // submitQuery can invoke both failure callbacks for one rejection,
-      // and a cancel/preempt check may race the submission.
+      // Settle the drained batch exactly once. The settlement carrier below
+      // is passed through the existing `steerInput` option so GeminiClient
+      // decides acceptance at send entry, next to the actual history push.
+      // This avoids a hook-wide/global counter snapshot spanning submitQuery's
+      // admission and UserPromptSubmit-hook awaits, where a concurrent /btw
+      // submission could otherwise supply the observed push.
       const settleDrainedTeammates = (accepted: boolean) => {
         if (!drainedTeammates || drainedTeammates.entries.length === 0) {
           return;
@@ -5329,17 +5313,20 @@ export const useGeminiStream = (
         );
         restore();
       };
-      const restoreDrainedTeammates = () => {
-        // Delivery-failure callbacks fire both for pre-submit failures
-        // and for failures AFTER the request was accepted (user cancel
-        // mid-stream, terminal API error). Only the former must requeue:
-        // once accepted, the envelopes are already in the session
-        // history and the Idle drain would deliver them a second time.
-        const accepted =
-          (geminiClient?.getChat().getUserContentPushCount() ?? 0) >
-          teammatePushCountBeforeSubmit;
-        settleDrainedTeammates(accepted);
-      };
+      const submissionSettlement: SteerInput | undefined =
+        drainedSteer || drainedTeammates
+          ? {
+              parts: drainedSteer?.parts ?? [],
+              accept: () => {
+                drainedSteer?.accept();
+                settleDrainedTeammates(true);
+              },
+              restore: () => {
+                drainedSteer?.restore();
+                settleDrainedTeammates(false);
+              },
+            }
+          : undefined;
 
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
@@ -5365,13 +5352,10 @@ export const useGeminiStream = (
       }
 
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
-        steerInput: drainedSteer,
-        onDelivered: () => {
-          drainedSteer?.accept();
-          settleDrainedTeammates(true);
-        },
+        steerInput: submissionSettlement,
+        onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {
-          restoreDrainedTeammates();
+          submissionSettlement?.restore();
           endToolInteraction(
             'error',
             'tool continuation admission failed',
@@ -5379,8 +5363,7 @@ export const useGeminiStream = (
           );
         },
         onDeliveryFailed: () => {
-          drainedSteer?.restore();
-          restoreDrainedTeammates();
+          submissionSettlement?.restore();
           endToolInteraction(
             'error',
             'tool continuation delivery failed',

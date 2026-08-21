@@ -1617,10 +1617,25 @@ describe('useGeminiStream', () => {
         mockManager,
       );
 
-      const utils = renderTestHook(
-        initialToolCalls,
-        new MockedGeminiClientClass(mockConfig),
-      );
+      const client = new MockedGeminiClientClass(mockConfig);
+      client.sendMessageStream = (...args: any[]) => {
+        const stream = mockSendMessageStream(...args);
+        const settlement = args[3]?.steerInput as SteerInput | undefined;
+        return (async function* () {
+          let blocked = false;
+          try {
+            for await (const event of stream) {
+              blocked ||=
+                event.type === ServerGeminiEventType.UserPromptSubmitBlocked;
+              yield event;
+            }
+          } finally {
+            if (blocked) settlement?.restore();
+            else settlement?.accept();
+          }
+        })();
+      };
+      const utils = renderTestHook(initialToolCalls, client);
 
       const leaderCallback = () => {
         const callback = (
@@ -1901,7 +1916,7 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('records boundary-delivered teammate envelopes via the chat-recording path', async () => {
+    it('delivers and records every envelope in a boundary batch', async () => {
       const recordNotification = vi.fn();
       mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
         recordThought: vi.fn(),
@@ -1915,9 +1930,13 @@ describe('useGeminiStream', () => {
 
       const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
         renderBusyMultiRoundTask([createExecutingToolCall()]);
+      const secondModelText =
+        '<teammate_message>second update</teammate_message>';
+      const secondDisplay = '**scout-tests** reported back';
 
       act(() => {
         leaderCallback()(teammateModelText, teammateDisplay);
+        leaderCallback()(secondModelText, secondDisplay);
       });
 
       const completed = createCompletedToolCall();
@@ -1927,15 +1946,31 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        [
+          ...completed.response.responseParts,
+          { text: teammateModelText },
+          { text: secondModelText },
+        ],
+        expect.any(AbortSignal),
+        'prompt-id-teammate-rounds',
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: teammateDisplay },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: secondDisplay },
+        expect.any(Number),
+      );
 
       // The ToolResult submission never reaches the Teammate-keyed
       // recordNotification branch in client.ts, so the boundary
-      // settlement journals the envelope explicitly — same record
-      // shape the Idle Teammate path produces — keeping a resumed
-      // session from losing the `● …` item and the envelope.
+      // settlement journals the complete batch explicitly.
       expect(recordNotification).toHaveBeenCalledWith(
-        [{ text: teammateModelText }],
-        teammateDisplay,
+        [{ text: teammateModelText }, { text: secondModelText }],
+        `${teammateDisplay}; ${secondDisplay}`,
         undefined,
         undefined,
       );
