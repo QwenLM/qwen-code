@@ -119,6 +119,14 @@ export class MessageDisplayDispatcher {
     }
   }
 
+  restartAttempt(preserveText: boolean, nowMs: number = Date.now()): void {
+    if (this.finished || preserveText) {
+      return;
+    }
+    this.state = createInitialMessageDisplayState(nowMs);
+    this.pending = null;
+  }
+
   /**
    * Close out this message: dispatch the `is_final: true` payload (skipped
    * when no text ever streamed — a tool-call-only message — or when the turn

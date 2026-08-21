@@ -1275,8 +1275,8 @@ describe('Turn', () => {
           },
         };
         yield {
+          type: StreamEventType.CHUNK,
           value: {
-            type: StreamEventType.CHUNK,
             candidates: [
               {
                 content: { parts: [{ text: 'Second part' }] },

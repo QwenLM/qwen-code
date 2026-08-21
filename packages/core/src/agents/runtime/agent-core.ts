@@ -65,7 +65,7 @@ import {
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
 } from '../../utils/tool-result-boundary-diagnostics.js';
-import { FinishReason } from '../../core/genai-compat.js';
+import { ModelStreamAttemptState } from '../../core/model-stream-attempt-state.js';
 import type {
   Content,
   Part,
@@ -948,13 +948,7 @@ export class AgentCore {
           timestamp: Date.now(),
         } as AgentRoundEvent);
 
-        const functionCalls: FunctionCall[] = [];
-        let roundText = '';
-        let roundThoughtText = '';
-        let lastUsage: GenerateContentResponseUsageMetadata | undefined =
-          undefined;
-        let currentResponseId: string | undefined = undefined;
-        let wasOutputTruncated = false;
+        const attemptState = new ModelStreamAttemptState();
         let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
@@ -966,132 +960,101 @@ export class AgentCore {
             };
           }
 
-          // Handle retry events — reset all per-attempt state so a successful
-          // retry does not inherit stale data (e.g. wasOutputTruncated) from a
-          // previous attempt that may have hit MAX_TOKENS.
-          if (streamEvent.type === 'retry') {
-            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+          const transition = attemptState.accept(streamEvent);
+          if (transition.type === 'attempt_reset') {
+            const resetEvent: ServerGeminiStreamEvent =
+              transition.reason === 'retry'
+                ? {
+                    type: GeminiEventType.Retry,
+                    isContinuation:
+                      transition.retryInfo.isContinuation === true,
+                  }
+                : {
+                    type: GeminiEventType.ModelFallback,
+                    fromModel: transition.info.fromModel,
+                    toModel: transition.info.toModel,
+                    statusCode: transition.info.statusCode,
+                    fallbackIndex: transition.info.fallbackIndex,
+                  };
+            if (checkSubagentLoop(resetEvent)) {
               terminateMode = AgentTerminateMode.LOOP_DETECTED;
               loopDetectedInStream = true;
               break;
             }
-            if (streamEvent.maxOutputTokensEscalated !== undefined) {
-              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            if (
+              transition.reason === 'retry' &&
+              transition.retryInfo.maxOutputTokensEscalated !== undefined
+            ) {
+              stickyMaxOutputTokens =
+                transition.retryInfo.maxOutputTokensEscalated;
             }
-            functionCalls.length = 0;
-            roundText = '';
-            roundThoughtText = '';
-            lastUsage = undefined;
-            currentResponseId = undefined;
-            wasOutputTruncated = false;
             continue;
           }
 
-          // GeminiChat already mutated its own history; surface to the debug
-          // log so subagent compactions show up alongside the main session's.
-          if (streamEvent.type === 'compressed') {
+          if (transition.type === 'compressed') {
             this.runtimeContext
               .getDebugLogger()
               .debug(
                 `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
-                  `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+                  `tokens ${transition.info.originalTokenCount} -> ${transition.info.newTokenCount}`,
               );
             continue;
           }
 
-          // Handle chunk events
-          if (streamEvent.type === 'chunk') {
-            const resp = streamEvent.value;
-            // Track the response ID for tool call correlation
-            if (resp.responseId) {
-              currentResponseId = resp.responseId;
-            }
-            const chunkFunctionCalls = resp.functionCalls ?? [];
-            functionCalls.push(...chunkFunctionCalls);
-            if (
-              resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
-            ) {
-              wasOutputTruncated = true;
-            }
-            const content = resp.candidates?.[0]?.content;
-            const parts = content?.parts || [];
-            for (const p of parts) {
-              const txt = p.text;
-              const isThought = p.thought ?? false;
-              if (txt && isThought) roundThoughtText += txt;
-              if (txt && !isThought) roundText += txt;
-              if (txt)
-                this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
-                  subagentId: this.subagentId,
-                  runId,
-                  round: turnCounter,
-                  text: txt,
-                  thought: isThought,
-                  timestamp: Date.now(),
-                });
-            }
-            if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+          const resp = transition.response;
+          const chunkFunctionCalls = transition.functionCalls;
+          for (const part of transition.textParts) {
+            this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+              subagentId: this.subagentId,
+              runId,
+              round: turnCounter,
+              text: part.text,
+              thought: part.thought,
+              timestamp: Date.now(),
+            });
+          }
 
-            const thoughtSummary = getThoughtSummary(resp);
+          const thoughtSummary = getThoughtSummary(resp);
+          if (
+            thoughtSummary &&
+            checkSubagentLoop({
+              type: GeminiEventType.Thought,
+              value: thoughtSummary,
+            })
+          ) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            loopDetectedInStream = true;
+            break;
+          }
+
+          const responseText = getResponseText(resp);
+          if (
+            responseText &&
+            checkSubagentLoop({
+              type: GeminiEventType.Content,
+              value: responseText,
+            })
+          ) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            loopDetectedInStream = true;
+            break;
+          }
+
+          const currentAttempt = attemptState.snapshot();
+          for (const fc of chunkFunctionCalls) {
+            const toolName = String(fc.name);
             if (
-              thoughtSummary &&
               checkSubagentLoop({
-                type: GeminiEventType.Thought,
-                value: thoughtSummary,
-              })
-            ) {
-              terminateMode = AgentTerminateMode.LOOP_DETECTED;
-              loopDetectedInStream = true;
-              break;
-            }
-
-            const responseText = getResponseText(resp);
-            if (
-              responseText &&
-              checkSubagentLoop({
-                type: GeminiEventType.Content,
-                value: responseText,
-              })
-            ) {
-              terminateMode = AgentTerminateMode.LOOP_DETECTED;
-              loopDetectedInStream = true;
-              break;
-            }
-
-            for (const fc of chunkFunctionCalls) {
-              const toolName = String(fc.name);
-              if (
-                checkSubagentLoop({
-                  type: GeminiEventType.ToolCallRequest,
-                  value: {
-                    callId: fc.id ?? `${toolName}-${Date.now()}`,
-                    providerCallId: getProviderToolCallId(fc),
-                    name: toolName,
-                    args: (fc.args ?? {}) as Record<string, unknown>,
-                    isClientInitiated: false,
-                    prompt_id: promptId,
-                    response_id: currentResponseId,
-                    wasOutputTruncated,
-                  },
-                })
-              ) {
-                terminateMode = AgentTerminateMode.LOOP_DETECTED;
-                loopDetectedInStream = true;
-                break;
-              }
-            }
-            if (loopDetectedInStream) {
-              break;
-            }
-
-            const finishReason = resp.candidates?.[0]?.finishReason;
-            if (
-              finishReason &&
-              checkSubagentLoop({
-                type: GeminiEventType.Finished,
+                type: GeminiEventType.ToolCallRequest,
                 value: {
-                  reason: finishReason,
-                  usageMetadata: resp.usageMetadata,
+                  callId: fc.id ?? `${toolName}-${Date.now()}`,
+                  providerCallId: getProviderToolCallId(fc),
+                  name: toolName,
+                  args: (fc.args ?? {}) as Record<string, unknown>,
+                  isClientInitiated: false,
+                  prompt_id: promptId,
+                  response_id: currentAttempt.responseId,
+                  wasOutputTruncated: currentAttempt.wasOutputTruncated,
                 },
               })
             ) {
@@ -1100,20 +1063,40 @@ export class AgentCore {
               break;
             }
           }
+          if (loopDetectedInStream) {
+            break;
+          }
+
+          const finishReason = transition.finishReason;
+          if (
+            finishReason &&
+            checkSubagentLoop({
+              type: GeminiEventType.Finished,
+              value: {
+                reason: finishReason,
+                usageMetadata: resp.usageMetadata,
+              },
+            })
+          ) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            loopDetectedInStream = true;
+            break;
+          }
         }
 
         if (loopDetectedInStream) {
           break;
         }
 
-        if (roundText || roundThoughtText || lastUsage) {
+        const attempt = attemptState.snapshot();
+        if (attempt.text || attempt.thoughtText || attempt.usageMetadata) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
             runId,
             round: turnCounter,
-            text: roundText,
-            thoughtText: roundThoughtText,
-            usageMetadata: lastUsage,
+            text: attempt.text,
+            thoughtText: attempt.thoughtText,
+            usageMetadata: attempt.usageMetadata,
             timestamp: Date.now(),
           } as AgentRoundTextEvent);
         }
@@ -1129,19 +1112,23 @@ export class AgentCore {
         }
 
         // Update token usage if available
-        if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+        if (attempt.usageMetadata) {
+          this.recordTokenUsage(
+            attempt.usageMetadata,
+            turnCounter,
+            roundStreamStart,
+          );
         }
 
-        if (functionCalls.length > 0) {
+        if (attempt.functionCalls.length > 0) {
           const toolCallResult = await this.processFunctionCalls(
-            functionCalls,
+            attempt.functionCalls,
             roundAbortController,
             promptId,
             turnCounter,
             toolsList,
-            currentResponseId,
-            wasOutputTruncated,
+            attempt.responseId,
+            attempt.wasOutputTruncated,
             handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
           );
@@ -1192,7 +1179,7 @@ export class AgentCore {
               turnCounter,
             );
             if (waitResult.terminateMode) {
-              finalText = roundText.trim();
+              finalText = attempt.text.trim();
               terminateMode = waitResult.terminateMode;
               break;
             }
@@ -1202,8 +1189,8 @@ export class AgentCore {
               continue;
             }
 
-            if (roundText && roundText.trim().length > 0) {
-              finalText = roundText.trim();
+            if (attempt.text && attempt.text.trim().length > 0) {
+              finalText = attempt.text.trim();
               break;
             }
             currentMessages = [
@@ -1219,8 +1206,8 @@ export class AgentCore {
             continue;
           } else {
             // No tool calls — treat this as the model's final answer.
-            if (roundText && roundText.trim().length > 0) {
-              finalText = roundText.trim();
+            if (attempt.text && attempt.text.trim().length > 0) {
+              finalText = attempt.text.trim();
               // Emit ROUND_END for the final round so all consumers see it.
               // Previously this was skipped, requiring AgentInteractive to
               // compensate with an explicit flushStreamBuffers() call.

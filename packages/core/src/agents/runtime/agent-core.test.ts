@@ -8,7 +8,11 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import type {
+  FunctionDeclaration,
+  GenerateContentConfig,
+  GenerateContentResponse,
+} from '@google/genai';
 import {
   AgentCore,
   extractParentToolNames,
@@ -49,7 +53,7 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../../utils/invocation-context.js';
-import { GeminiChat } from '../../core/geminiChat.js';
+import { GeminiChat, StreamEventType } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
 import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
 
@@ -420,6 +424,111 @@ describe('AgentCore.runInAgentFrames', () => {
     }, otherView);
 
     expect(observed).toBe(ownView);
+  });
+});
+
+describe('AgentCore model stream attempts', () => {
+  function createCore(): AgentCore {
+    const runtimeContext = {
+      getSessionId: () => 'session',
+      getSkipLoopDetection: () => true,
+      getDebugLogger: () => ({ debug: vi.fn() }),
+    } as unknown as Config;
+    return new AgentCore(
+      'attempt-agent',
+      runtimeContext,
+      { renderedSystemPrompt: 'system', initialMessages: [] },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+  }
+
+  function createChat(events: unknown[]): GeminiChat {
+    return {
+      getHistoryFunctionResponseIds: () => new Set<string>(),
+      getHistoryToolCallFingerprints: () => new Map<string, string>(),
+      sendMessageStream: vi.fn().mockResolvedValue(
+        (async function* () {
+          for (const event of events) yield event;
+        })(),
+      ),
+    } as unknown as GeminiChat;
+  }
+
+  it('preserves accumulated text for continuation retries', async () => {
+    const core = createCore();
+    const chat = createChat([
+      {
+        type: StreamEventType.CHUNK,
+        value: {
+          candidates: [{ content: { parts: [{ text: 'first half ' }] } }],
+        } as GenerateContentResponse,
+      },
+      { type: StreamEventType.RETRY, isContinuation: true },
+      {
+        type: StreamEventType.CHUNK,
+        value: {
+          candidates: [{ content: { parts: [{ text: 'second half' }] } }],
+        } as GenerateContentResponse,
+      },
+    ]);
+
+    const result = await core.runReasoningLoop(
+      chat,
+      [{ role: 'user', parts: [{ text: 'continue' }] }],
+      [],
+      new AbortController(),
+    );
+
+    expect(result.text).toBe('first half second half');
+  });
+
+  it('discards the previous attempt when the model falls back', async () => {
+    const core = createCore();
+    const chat = createChat([
+      {
+        type: StreamEventType.CHUNK,
+        value: {
+          responseId: 'primary-response',
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: 'stale answer' },
+                  { text: 'stale thought', thought: true },
+                ],
+              },
+            },
+          ],
+        } as GenerateContentResponse,
+      },
+      {
+        type: StreamEventType.MODEL_FALLBACK,
+        info: {
+          fromModel: 'primary',
+          toModel: 'fallback',
+          fallbackIndex: 1,
+        },
+      },
+      {
+        type: StreamEventType.CHUNK,
+        value: {
+          candidates: [{ content: { parts: [{ text: 'fallback answer' }] } }],
+        } as GenerateContentResponse,
+      },
+    ]);
+
+    const result = await core.runReasoningLoop(
+      chat,
+      [{ role: 'user', parts: [{ text: 'fallback' }] }],
+      [],
+      new AbortController(),
+    );
+
+    expect(result.text).toBe('fallback answer');
+    expect(core.getMessages()).toEqual([
+      expect.objectContaining({ content: 'fallback answer' }),
+    ]);
   });
 });
 

@@ -3454,10 +3454,11 @@ export class GeminiClient {
             event.type === GeminiEventType.ModelFallback
           ) {
             hasToolCalls = false;
-            agentOutput.restartAttempt(
+            const preserveText =
               event.type === GeminiEventType.Retry &&
-                event.isContinuation === true,
-            );
+              event.isContinuation === true;
+            agentOutput.restartAttempt(preserveText);
+            messageDisplay?.restartAttempt(preserveText);
           }
           if (event.type === GeminiEventType.Content) {
             agentOutput.appendText(event.value);
