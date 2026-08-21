@@ -568,7 +568,30 @@ describe('Qwen native history loading', () => {
       ).sessions.has(sessionId),
     ).toBe(true);
 
-    await refresh(workspace);
+    // The prune has to be auditable: the ratchet that permits it lives in
+    // memory and resets on restart, so a post-restart "my session vanished"
+    // report is only traceable if the removal names the mirror it took.
+    const infos: unknown[][] = [];
+    const originalInfo = logger.info;
+    logger.info = (...args: unknown[]) => {
+      infos.push(args);
+    };
+    try {
+      await refresh(workspace);
+    } finally {
+      logger.info = originalInfo;
+    }
+
+    expect(
+      infos.filter((args) =>
+        args.some(
+          (arg) =>
+            typeof arg === 'string' &&
+            arg.includes('[external-prune]') &&
+            arg.includes(sessionId),
+        ),
+      ),
+    ).toHaveLength(1);
     expect(
       (
         manager as unknown as { sessions: Map<string, unknown> }
