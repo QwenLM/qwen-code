@@ -126,23 +126,29 @@ describe('mapProviderStatus reasoning preview', () => {
   });
 
   it.each([
-    undefined,
-    [],
-    [
-      {
-        id: 'reasoning_effort',
-        currentValue: 'xhigh',
-        options: [{ value: 'default' }, { value: 'xhigh' }],
-      },
-    ],
-    [
-      {
-        id: 'reasoning_effort',
-        currentValue: 'bogus',
-        options: [{ value: 'none' }, { value: 'low' }],
-      },
-    ],
-  ])('ignores absent or incompatible preview %j', (configOptions) => {
+    { name: 'absent', configOptions: undefined },
+    { name: 'empty', configOptions: [] },
+    {
+      name: 'missing Thinking off',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'default' }, { value: 'xhigh' }],
+        },
+      ],
+    },
+    {
+      name: 'unknown current value',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'bogus',
+          options: [{ value: 'none' }, { value: 'low' }],
+        },
+      ],
+    },
+  ])('ignores $name preview', ({ configOptions }) => {
     const result = mapProviderStatus(
       workspaceProvidersWithConfigOptions(configOptions),
     );

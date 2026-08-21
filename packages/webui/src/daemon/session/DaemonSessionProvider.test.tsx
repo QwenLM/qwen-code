@@ -9010,6 +9010,8 @@ describe('DaemonSessionProvider', () => {
       },
     });
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
   });
 
   it('uses recent HTTP status when heartbeat threshold ends with transport failure', async () => {
@@ -9222,6 +9224,8 @@ describe('DaemonSessionProvider', () => {
         errorStatus: status,
       });
       expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.context).toBeUndefined();
+      expect(connection?.reasoning).toBeUndefined();
     },
   );
 
@@ -10381,6 +10385,8 @@ describe('DaemonSessionProvider', () => {
     });
     expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
         'Daemon session is not connected',
@@ -10592,6 +10598,8 @@ describe('DaemonSessionProvider', () => {
         },
       });
       expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.context).toBeUndefined();
+      expect(connection?.reasoning).toBeUndefined();
       expect(blocks[0]).toMatchObject({
         kind: 'user',
         text: 'keep transcript',
@@ -11969,6 +11977,8 @@ describe('DaemonSessionProvider', () => {
     // Connection should be disconnected with no sessionId.
     expect(connection?.status).toBe('disconnected');
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
   });
 
   it('aborts in-flight prompt when session_closed arrives mid-stream', async () => {

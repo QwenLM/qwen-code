@@ -2510,6 +2510,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -2656,6 +2658,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                context: undefined,
+                reasoning: undefined,
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -2682,6 +2686,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -3011,6 +3017,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        context: undefined,
+                        reasoning: undefined,
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,

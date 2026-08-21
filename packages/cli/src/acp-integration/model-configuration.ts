@@ -46,7 +46,10 @@ const MODEL_CONFIGURATIONS: Readonly<
   },
 };
 
-const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+export const REASONING_EFFORT_DEFAULT = 'default';
+export const REASONING_EFFORT_NONE = 'none';
+
+export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
@@ -71,9 +74,9 @@ export function buildModelReasoningConfigOption(
 
   const currentValue =
     state.enabled === false
-      ? 'none'
+      ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
-        ? 'default'
+        ? REASONING_EFFORT_DEFAULT
         : (reasoning.efforts.find((effort) => effort === state.effort) ??
           reasoning.defaultEffort);
 
@@ -86,14 +89,14 @@ export function buildModelReasoningConfigOption(
     currentValue,
     options: [
       {
-        value: 'none',
+        value: REASONING_EFFORT_NONE,
         name: 'Thinking off',
         description: 'Disable thinking for this session',
       },
       ...(reasoning.toggleOnly
         ? [
             {
-              value: 'default',
+              value: REASONING_EFFORT_DEFAULT,
               name: 'Thinking on',
               description: 'Use the model or provider thinking default',
             },

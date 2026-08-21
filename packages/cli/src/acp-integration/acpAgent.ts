@@ -122,7 +122,6 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
-  type ReasoningEffort,
   type ResumedSessionData,
   type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
@@ -259,6 +258,9 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NAMES,
+  REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
@@ -420,16 +422,6 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
-const ACP_REASONING_EFFORT_DEFAULT = 'default';
-const ACP_REASONING_EFFORT_NONE = 'none';
-const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max',
-};
-
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -5988,17 +5980,17 @@ class QwenAgent implements Agent {
             ? undefined
             : modelReasoning.efforts;
           const selected =
-            value === ACP_REASONING_EFFORT_NONE
-              ? ACP_REASONING_EFFORT_NONE
+            value === REASONING_EFFORT_NONE
+              ? REASONING_EFFORT_NONE
               : modelReasoning.toggleOnly
-                ? value === ACP_REASONING_EFFORT_DEFAULT
-                  ? ACP_REASONING_EFFORT_DEFAULT
+                ? value === REASONING_EFFORT_DEFAULT
+                  ? REASONING_EFFORT_DEFAULT
                   : undefined
                 : effortValues?.find((effort) => effort === value);
           if (!selected) {
             const choices = [
-              ACP_REASONING_EFFORT_NONE,
-              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+              REASONING_EFFORT_NONE,
+              ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
             ];
             throw RequestError.invalidParams(
               undefined,
@@ -6006,9 +5998,9 @@ class QwenAgent implements Agent {
             );
           }
           const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === ACP_REASONING_EFFORT_NONE) {
+          if (selected === REASONING_EFFORT_NONE) {
             generation.reasoning = false;
-          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+          } else if (selected === REASONING_EFFORT_DEFAULT) {
             generation.reasoning = undefined;
           } else {
             const current = generation.reasoning;
@@ -6020,13 +6012,13 @@ class QwenAgent implements Agent {
           break;
         }
         const effort =
-          value === ACP_REASONING_EFFORT_DEFAULT
+          value === REASONING_EFFORT_DEFAULT
             ? undefined
             : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+        if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
           throw RequestError.invalidParams(
             undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+            `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
           );
         }
         if (!applyReasoningEffort(session.getConfig(), effort)) {
@@ -13230,16 +13222,16 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
+      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
       options: [
         {
-          value: ACP_REASONING_EFFORT_DEFAULT,
+          value: REASONING_EFFORT_DEFAULT,
           name: 'Default',
           description: 'Use the model or provider default',
         },
         ...REASONING_EFFORT_TIERS.map((effort) => ({
           value: effort,
-          name: ACP_REASONING_EFFORT_NAMES[effort],
+          name: REASONING_EFFORT_NAMES[effort],
           description:
             'Providers map or clamp the requested tier for the active model',
         })),

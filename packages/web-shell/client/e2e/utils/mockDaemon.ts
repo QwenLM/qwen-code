@@ -70,6 +70,7 @@ export interface WebShellDaemonScenario {
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  contextDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -376,6 +377,7 @@ export function createWebShellDaemonScenario(
     },
     events: overrides.events ?? [],
     state,
+    contextDelayMs: overrides.contextDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -1533,6 +1535,11 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'context') {
+      if (scenario.contextDelayMs) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, scenario.contextDelayMs),
+        );
+      }
       await json(route, {
         v: 1,
         sessionId,

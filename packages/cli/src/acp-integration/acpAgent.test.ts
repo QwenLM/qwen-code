@@ -6929,6 +6929,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
         {
           id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Route One',
+          authType: 'openai',
+          baseUrl: 'https://one.example/v1',
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Route Two',
+          authType: 'openai',
+          baseUrl: 'https://two.example/v1',
+        },
+        {
+          id: 'qwen3.8-max',
           runtimeSnapshotId: 'runtime-qwen3.8-max',
           label: 'Runtime Qwen 3.8 Max',
           authType: 'qwen',
@@ -6956,6 +6968,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const models = (
       status['providers'] as Array<{
         models: Array<{
+          modelId: string;
           baseModelId: string;
           isRuntime: boolean;
           configOptions?: unknown[];
@@ -6984,6 +6997,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .filter((model) => model !== stable)
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
+    expect(
+      models.filter((model) => model.modelId.startsWith('qwen-route:v1:')),
+    ).toHaveLength(2);
 
     mockConnectionState.resolve();
     await agentPromise;

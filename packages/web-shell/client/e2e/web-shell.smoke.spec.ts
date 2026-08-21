@@ -223,23 +223,7 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   const scenario = createWebShellDaemonScenario({
     currentModel: 'qwen3.8-max',
     state: {
-      configOptions: [
-        {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          type: 'select',
-          currentValue: 'xhigh',
-          options: [
-            { value: 'none', name: 'Thinking off' },
-            { value: 'low', name: 'Low' },
-            { value: 'medium', name: 'Medium' },
-            { value: 'xhigh', name: 'Extra high' },
-          ],
-          _meta: {
-            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
-          },
-        },
-      ],
+      configOptions: qwen38ReasoningConfigOptions(),
     },
   });
   const daemon = await installScenario(page, scenario, testInfo);
@@ -482,19 +466,10 @@ test('does not fall back to welcome preview when live context lacks reasoning @s
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
     currentModel: 'qwen3.8-max',
+    contextDelayMs: 2_000,
     state: {
       configOptions: [],
-      models: {
-        currentModelId: 'qwen3.8-max',
-        availableModels: [
-          {
-            modelId: 'qwen3.8-max',
-            baseModelId: 'qwen3.8-max',
-            name: 'qwen3.8-max',
-            contextLimit: 131_072,
-          },
-        ],
-      },
+      models: undefined,
     },
     providers: {
       providers: [
@@ -541,6 +516,18 @@ test('does not fall back to welcome preview when live context lacks reasoning @s
         ).length,
     )
     .toBe(1);
+  await expect
+    .poll(
+      () =>
+        daemon.requests.some(
+          (request) =>
+            request.method === 'GET' &&
+            /^\/session\/[^/]+\/context\/?$/.test(request.path),
+        ),
+      { timeout: 1_000 },
+    )
+    .toBe(true);
+  await expect(modelButton).not.toContainText('Extra High', { timeout: 1_000 });
   await contextResponse;
   await expect(modelButton).toContainText('qwen3.8-max');
   await expect(modelButton).not.toContainText('Extra High');
