@@ -139,6 +139,19 @@ import {
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
+/**
+ * A queued teammate→leader message. `modelText` is the full nonce-tagged
+ * envelope sent to the leader's model; `display` is the compact `● …`
+ * line shown to the user in its place — the same two-text split the
+ * unified notification queue uses, so teammate reports don't dump the
+ * whole raw envelope into the conversation as a user bubble.
+ */
+interface TeammateQueueEntry {
+  modelText: string;
+  display: string;
+  displayed?: boolean;
+}
+
 interface ToolContinuationOwner {
   promptId: string;
   signal: AbortSignal;
@@ -652,6 +665,12 @@ export const useGeminiStream = (
     },
     [goalQueueRef],
   );
+  // Teammate message queue. Declared here (above `handleCompletedTools`)
+  // because the tool-round boundary drains it (#8172): in a multi-round
+  // task `streamingState` never reaches Idle between rounds, so waiting
+  // for the Idle drain would hold teammate messages for the whole task.
+  const teammateQueueRef = useRef<TeammateQueueEntry[]>([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForGemini
   // added (if any). Reset to null at the start of every turn (including
@@ -5190,8 +5209,46 @@ export const useGeminiStream = (
         }
       }
 
+      // Teammate messages get the same round-boundary delivery (#8172):
+      // waiting for `streamingState === Idle` holds them for the entire
+      // multi-round task because back-to-back tool rounds never reach
+      // Idle. Append after the tool-response parts (same ordering as
+      // steer above) so `tool_result` blocks lead the user message. The
+      // Idle drain stays as the fallback for turns that end without
+      // another tool round.
+      let drainedTeammates: TeammateQueueEntry[] | undefined;
+      if (
+        !continuationOwner?.survivesGenerationChange &&
+        !continuationWasCancelled() &&
+        teammateQueueRef.current.length > 0
+      ) {
+        drainedTeammates = teammateQueueRef.current.splice(0);
+        for (const entry of drainedTeammates) {
+          if (!entry.displayed) {
+            addItem(
+              { type: 'notification' as const, text: entry.display },
+              Date.now(),
+            );
+            entry.displayed = true;
+          }
+        }
+        responsesToSend.push(
+          ...drainedTeammates.map((entry) => ({ text: entry.modelText })),
+        );
+      }
+      // Idempotent: submitQuery can invoke both failure callbacks for one
+      // rejection, and a cancel/preempt check may race the submission.
+      const restoreDrainedTeammates = () => {
+        if (!drainedTeammates || drainedTeammates.length === 0) return;
+        teammateQueueRef.current.unshift(...drainedTeammates);
+        drainedTeammates = undefined;
+        // Re-arm the Idle drain in case no further state change happens.
+        setTeammateTrigger((n) => n + 1);
+      };
+
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
+        restoreDrainedTeammates();
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -5203,6 +5260,7 @@ export const useGeminiStream = (
       }
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
+        restoreDrainedTeammates();
         await failClosedGoalTurn(
           toolGoalBinding,
           'Goal tool continuation was preempted',
@@ -5215,6 +5273,7 @@ export const useGeminiStream = (
         steerInput: drainedSteer,
         onDelivered: drainedSteer?.accept,
         onAdmissionFailed: () => {
+          restoreDrainedTeammates();
           endToolInteraction(
             'error',
             'tool continuation admission failed',
@@ -5223,6 +5282,7 @@ export const useGeminiStream = (
         },
         onDeliveryFailed: () => {
           drainedSteer?.restore();
+          restoreDrainedTeammates();
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
@@ -5712,15 +5772,9 @@ export const useGeminiStream = (
   ]);
 
   // ─── Teammate message integration ─────────────────────────
-  // Each entry carries the full nonce-tagged envelope (`modelText`,
-  // sent to the leader's model) and a compact `display` line (shown
-  // to the user in its place) — the same two-text split the unified
-  // notification queue uses, so teammate reports no longer dump the
-  // whole raw envelope into the conversation as a user bubble.
-  const teammateQueueRef = useRef<
-    Array<{ modelText: string; display: string; displayed?: boolean }>
-  >([]);
-  const [teammateTrigger, setTeammateTrigger] = useState(0);
+  // The queue state (`teammateQueueRef` / `teammateTrigger`) is declared
+  // near the top of the hook so `handleCompletedTools` can drain it at
+  // tool-round boundaries (#8172).
 
   // Subscribe to TeamManager's leader message callback.
   // Track the bound manager so we can detach the callback

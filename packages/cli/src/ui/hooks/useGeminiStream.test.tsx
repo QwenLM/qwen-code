@@ -1493,6 +1493,318 @@ describe('useGeminiStream', () => {
     expect(capturedRuntimeView).toBeUndefined();
   });
 
+  // ─── Teammate delivery at tool-round boundaries (#8172) ───────────────
+  // In a multi-round agentic task, streamingState never reaches Idle
+  // between rounds (tool calls are continuously scheduled/executing or
+  // terminal-but-unsubmitted), so teammate messages must be injected at
+  // the tool-round boundary (next ToolResult submission) instead of
+  // waiting for the whole task to finish.
+  describe('teammate messages during multi-round tool tasks (#8172)', () => {
+    const teammateModelText =
+      '<teammate_message_abcdef0123456789 from="scout-cli">\n' +
+      'found a blocker, stop and check this\n' +
+      '</teammate_message_abcdef0123456789>';
+    const teammateDisplay = '**scout-cli** reported back';
+
+    const createExecutingToolCall = (): TrackedExecutingToolCall =>
+      ({
+        request: {
+          callId: 'call-long-task-1',
+          name: 'run_long_task',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-teammate-rounds',
+        },
+        status: 'executing',
+        responseSubmittedToGemini: false,
+        tool: {
+          name: 'run_long_task',
+          displayName: 'run_long_task',
+          description: 'long task',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+        startTime: Date.now(),
+        liveOutput: '...',
+      }) as TrackedExecutingToolCall;
+
+    const createCompletedToolCall = (
+      callId = 'call-long-task-1',
+    ): TrackedCompletedToolCall => ({
+      request: {
+        callId,
+        name: 'run_long_task',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-teammate-rounds',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: callId,
+              name: 'run_long_task',
+              response: { result: 'round done' },
+            },
+          },
+        ],
+        error: undefined,
+        errorType: undefined,
+        resultDisplay: 'round done',
+      },
+      tool: {
+        name: 'run_long_task',
+        displayName: 'run_long_task',
+        description: 'long task',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'Mock description',
+      } as unknown as AnyToolInvocation,
+      startTime: Date.now(),
+      endTime: Date.now(),
+    });
+
+    function renderBusyMultiRoundTask(initialToolCalls: TrackedToolCall[]) {
+      const mockManager = { setLeaderMessageCallback: vi.fn() };
+      (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
+        mockManager,
+      );
+
+      let currentToolCalls = initialToolCalls;
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [
+          currentToolCalls,
+          mockScheduleToolCalls,
+          mockMarkToolsAsSubmitted,
+        ];
+      });
+
+      const client = new MockedGeminiClientClass(mockConfig);
+      const utils = renderHook(
+        (props: { toolCalls: TrackedToolCall[] }) => {
+          currentToolCalls = props.toolCalls;
+          return useGeminiStream(
+            client,
+            [],
+            mockAddItem,
+            mockConfig,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+            undefined, // midTurnDrainRef
+          );
+        },
+        { initialProps: { toolCalls: initialToolCalls } },
+      );
+
+      const leaderCallback = () => {
+        const callback = (
+          mockManager.setLeaderMessageCallback as Mock
+        ).mock.calls.at(-1)?.[0] as
+          | ((modelText: string, display: string) => void)
+          | undefined;
+        expect(callback).toBeDefined();
+        return callback!;
+      };
+
+      return {
+        result: utils.result,
+        rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
+          utils.rerender({ toolCalls }),
+        leaderCallback,
+        completeToolRound: async (completed: TrackedToolCall[]) => {
+          expect(
+            capturedOnComplete,
+            'useReactToolScheduler onComplete was never registered',
+          ).toBeDefined();
+          await act(async () => {
+            await capturedOnComplete?.(completed);
+          });
+        },
+      };
+    }
+
+    it('injects queued teammate messages into the next tool-round submission instead of waiting for the whole task', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      // A teammate message arrives while the round's tools are executing.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // streamingState is Responding, so the message queues instead of
+      // interrupting the round — no immediate submission.
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The round completes. The calls stay terminal-but-unsubmitted in
+      // the display state (the next round is pending), so streamingState
+      // never reaches Idle between rounds.
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      // The ToolResult round submission carries the queued teammate
+      // envelope appended after the tool-response parts (tool_result
+      // blocks must lead the user message).
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        [...completed.response.responseParts, { text: teammateModelText }],
+        expect.any(AbortSignal),
+        'prompt-id-teammate-rounds',
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+
+      // The compact `● …` notification line renders at delivery time.
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: teammateDisplay },
+        expect.any(Number),
+      );
+
+      // When the task finally ends and the state reaches Idle, nothing
+      // is delivered a second time.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('still delivers queued teammate messages at Idle when the task ends without another tool round', async () => {
+      const { rerenderWithToolCalls, leaderCallback } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The task ends without scheduling another tool round.
+      rerenderWithToolCalls([]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          teammateModelText,
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({
+            type: SendMessageType.Teammate,
+            notificationDisplayText: teammateDisplay,
+          }),
+        );
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not lose queued teammate messages when the round boundary was cancelled', async () => {
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The user cancels the turn mid-task before the round completes.
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      // The cancelled boundary must not carry the queued message away in
+      // a tool-result submission.
+      for (const call of mockSendMessageStream.mock.calls) {
+        const query = call[0];
+        if (Array.isArray(query)) {
+          expect(
+            query.some(
+              (part) =>
+                typeof part === 'object' &&
+                part !== null &&
+                (part as Part).text === teammateModelText,
+            ),
+          ).toBe(false);
+        }
+      }
+
+      // The message still reaches the leader once the state settles.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          teammateModelText,
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({ type: SendMessageType.Teammate }),
+        );
+      });
+    });
+
+    it('delivers later teammate messages after an earlier round-boundary delivery', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // A second message arrives while the task is still busy; the
+      // boundary drain above must not have swallowed it.
+      const secondModelText =
+        '<teammate_message>second update</teammate_message>';
+      const secondDisplay = 'second update';
+      act(() => {
+        leaderCallback()(secondModelText, secondDisplay);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // The task ends; the Idle fallback delivers the second message.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toBe(secondModelText);
+    });
+  });
+
   it('should not submit tool responses if not all tool calls are completed', () => {
     const toolCalls: TrackedToolCall[] = [
       {
