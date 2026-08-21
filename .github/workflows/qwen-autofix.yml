@@ -2546,10 +2546,13 @@ jobs:
           BUSY_ENUM_OK=1
           LIVE_RUNS=''
           BUSY_ENUM_ERR="$(mktemp)"
-          for LIVE_STATUS in in_progress queued; do
-            if ! PART="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-              --status "${LIVE_STATUS}" --limit 50 --json databaseId \
-              --jq '.[].databaseId' 2>> "${BUSY_ENUM_ERR}")"; then
+          for LIVE_STATUS in in_progress queued pending; do
+            # Runs API, not `gh run list --status`: gh validates --status
+            # against a client-side allow-list that rejects 'pending' before
+            # 2.65.0; the API filter is server-side on every gh version.
+            # The REST envelope's field is `id`, NOT the gh-CLI `databaseId`.
+            if ! PART="$(gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50" \
+              --jq '.workflow_runs[].id' 2>> "${BUSY_ENUM_ERR}")"; then
               BUSY_ENUM_OK=0
               break
             fi
