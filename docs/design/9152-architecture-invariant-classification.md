@@ -38,7 +38,10 @@ package. Node and the TypeScript compiler reject `require()` at runtime and
 ### 3. Prettier formatting
 
 **Mechanically enforced.** `lint-staged` runs Prettier via the `pre-commit`
-hook (`scripts/pre-commit.js`). CI runs `npm run format` as part of preflight.
+hook (`scripts/pre-commit.js`). CI checks formatting with
+`node scripts/lint.js --prettier` (the `Run Prettier` step in
+`.github/workflows/ci.yml`); `npm run format` is the local write-mode command,
+not the CI check.
 
 ### 4. No `any` types
 
@@ -68,7 +71,8 @@ legitimate exceptions. The reviewer checklist covers this.
 
 **Mechanically enforced.** `check-file/filename-naming-convention` in
 `eslint.config.js` enforces `KEBAB_CASE` for `*.ts`. Legacy camelCase files
-are allowlisted in `eslint.config.js`. `PascalCase.tsx` is the existing
+are allowlisted in `eslint.legacy-filenames.mjs`, which `eslint.config.js`
+imports. `PascalCase.tsx` is the existing
 convention but is not separately enforced — a `.tsx` file in kebab-case would
 pass the rule. **Gap:** add `PASCAL_CASE` for `*.tsx` or accept the convention
 as socially enforced. Low priority — React tooling and imports naturally
@@ -101,6 +105,26 @@ It requires judgment about scope, confidence, and downstream consumers —
 exactly the kind of decision that cannot be approximated mechanically. The
 gate is enforced through the triage skill and reviewer judgment.
 
+### 13. Daemon routes classified by ownership scope
+
+**Review-only.** AGENTS.md's Code Review section requires the reviewer to
+classify every added or changed daemon route — process-global,
+legacy-primary, selected-runtime, live-session-owner, or persisted-workspace
+— and to verify every downstream consumer matches that scope. Deciding which
+runtime a route serves is judgment no lint rule can approximate. The Code
+Review section is loaded verbatim into every `/review` agent, so the
+checklist carries this.
+
+### 14. Workspace-scoped routes must not fall back to the primary runtime
+
+**Review-only.** AGENTS.md's Code Review section requires verifying that a
+workspace-scoped route stays inside the resolved runtime — environment,
+bridge, service, filesystem, trust boundary, and failure paths — and that
+unknown, untrusted, ambiguous, bootstrapping, draining, or removed states
+follow their declared failure semantics instead of falling back to the
+primary runtime. Whether a failure path honors those semantics is a judgment
+call; the reviewer checklist covers this.
+
 ---
 
 ## Architecture issues
@@ -124,10 +148,13 @@ exactly, including order. This covers the SDK ↔ core drift.
 
 **Gap:** the issue also identifies drift in Python and Java SDKs, and in
 desktop's `cyclablePermissionModes`. PR #9003 (in progress) addresses Python
-and Java. Desktop's `cyclablePermissionModes` is an intentionally different
-domain (allow-all/safe/ask/auto-edit) — the drift test explicitly excludes it
-to avoid false positives. This is the correct decision. **No further guard
-needed for desktop.** The Python/Java gap closes when #9003 merges.
+and Java. Desktop is simply not covered by the drift test — it asserts
+`DAEMON_APPROVAL_MODES` is sequence-equal to core's `APPROVAL_MODES` and
+never mentions desktop or `cyclablePermissionModes`. That is the correct
+decision: desktop's `cyclablePermissionModes` is an intentionally different
+domain (allow-all/safe/ask/auto-edit), so there is no shared contract to
+drift-check. **No further guard needed for desktop.** The Python/Java gap
+closes when #9003 merges.
 
 ### #9146: utils/ must be a leaf layer
 
@@ -156,6 +183,18 @@ before the code is moved.
 
 This is the reusable drift-guard pattern (see below).
 
+### #9152: the excluded desktop workspace stays excluded
+
+**Mechanically enforced.** Issue #9152's inventory of existing mechanical
+guards names `scripts/check-desktop-isolation.js` alongside the three guards
+above. The script — run in CI as `npm run check:desktop-isolation` (the
+`Check desktop workspace isolation` step in `.github/workflows/ci.yml`) —
+fails if `packages/desktop` or `packages/desktop-shell` re-enters the root
+npm workspace set, if `package-lock.json` gains desktop entries, or if
+desktop-only dependencies (`electron`, `electron-builder`, `@sentry/cli`,
+`@sentry/electron`, `@sentry/vite-plugin`) are installed in root
+`node_modules`. **No gap.**
+
 ---
 
 ## #4063 structural problems
@@ -167,11 +206,13 @@ guard. Two exceptions:
 
 ### #4063 item 5: Barrel export self-references (core modules import from `'../index.js'`)
 
-**Mechanically enforced — gap (on feature branch, not main).** An
-`eslint-rules/no-core-root-barrel-import.js` rule exists on the
-`lane4-rebase` branch but has **not merged to `main`**. The rule blocks
-`packages/core/src/**` from importing the root barrel `../index.js`. **Action:
-merge the rule or record why it was deferred.**
+**Mechanically enforced — gap (in open PRs, not on main).** An
+`eslint-rules/no-core-root-barrel-import.js` rule exists in two open PRs —
+#8139 (branch `lane3-core-root-barrel`) and #9635 (branch
+`codex/pr-9152-root-barrel-cleanup`) — but has **not merged to `main`**. The
+rule blocks `packages/core/src/**` from importing the root barrel
+`../index.js`. **Action: merge one of the PRs carrying the rule, or record
+why it was deferred.**
 
 ### #4063 item 2: Config god-object
 
@@ -226,7 +267,9 @@ demonstrates that the copy-paste cost exceeds the abstraction cost.
 
 `check-voice-guard-sync.js` remains as-is. Its AST-based mirror-set
 extraction is specific to the voice-code CLI ↔ desktop mirroring problem and
-does not generalize to contract drift.
+does not generalize to contract drift. It is also slated for deletion with
+the Electron tree in PR #9085 (still open), as #9152 notes; when #9085 lands
+the guard goes with it, and the pattern survives only in the two tests above.
 
 ---
 
@@ -247,18 +290,22 @@ does not generalize to contract drift.
 | Conventional Commits | AGENTS.md | Not worth enforcing | — | ✅ (by design) |
 | Node ≥22 | AGENTS.md | Mechanical | `package.json` `"engines"` | ✅ |
 | Core modules maintainer-only | AGENTS.md | Review-only | Two-tier gate | ✅ (by design) |
+| Daemon routes classified by ownership | AGENTS.md (Code Review) | Review-only | Reviewer checklist | ✅ (by design) |
+| Workspace-scoped routes never fall back to primary | AGENTS.md (Code Review) | Review-only | Reviewer checklist | ✅ (by design) |
 | acp-integration off serve/ | #8084 | Mechanical | `no-restricted-imports` + boundary test | ❌ PR #9144 open |
 | Approval-mode SDK ↔ core drift | #9145 | Mechanical | `approval-mode-drift.test.ts` | ⚠️ Partial (Python/Java in #9003) |
 | utils/ is a leaf layer | #9146 | Mechanical (partial) | `no-restricted-imports` (serve/ only) | ⚠️ Intentionally incremental |
 | Cross-package constants agree | #9151 | Mechanical | `cross-package-contracts.test.js` | ✅ Closed |
-| No core root barrel self-import | #4063 | Mechanical | `no-core-root-barrel-import.js` | ❌ On feature branch, not merged |
+| Desktop workspace stays excluded | #9152 inventory | Mechanical | `scripts/check-desktop-isolation.js` (CI) | ✅ |
+| No core root barrel self-import | #4063 | Mechanical | `no-core-root-barrel-import.js` | ❌ In open PRs #8139/#9635, not merged |
 | Config god-object | #4063 | Review-only | Two-tier gate | ✅ (by design) |
 
 ## Open actions
 
 1. **Merge PR #9144** — closes the #8084 guard gap (acp-integration → serve/).
-2. **Merge `no-core-root-barrel-import.js`** from `lane4-rebase` or record
-   why it was deferred — closes the #4063 item 5 guard gap.
+2. **Merge `no-core-root-barrel-import.js`** by landing one of the open PRs
+   that carry it (#8139 or #9635), or record why it was deferred — closes the
+   #4063 item 5 guard gap.
 3. **Track #9003** — when it merges, the #9145 Python/Java drift gap closes.
 4. **Extend `utils/` leaf guard** directory by directory as #9146 steps 5-7
    land — no premature blocking.
