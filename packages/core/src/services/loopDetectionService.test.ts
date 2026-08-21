@@ -35,6 +35,7 @@ const FILE_READ_WINDOW = 15;
 const GLOBAL_DUPLICATE_THRESHOLD = 6;
 const SHELL_COMMAND_STAGNATION_THRESHOLD = 8;
 const ALTERNATING_PATTERN_CYCLES = 3;
+const MAX_TRACKED_TOOL_REQUESTS = 500;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
@@ -2239,6 +2240,67 @@ describe('LoopDetectionService', () => {
       expect(
         service.recordToolResultByCallId('never-seen', taskListResult('x')),
       ).toBe(false);
+    });
+
+    it('keeps task_list pairing evidence alive through a flood of non-stateful callIds', () => {
+      // Pins the `&& stateful` condition of the requestByCallId population
+      // guard (checkAlwaysOnSafeties). If it is dropped, every callId-carrying
+      // call of a large turn accumulates its full args in the map, the
+      // eviction past MAX_TRACKED_TOOL_REQUESTS discards the oldest entry —
+      // here the task_list request itself — and its result can never pair,
+      // so the result-aware consecutive guard loses its evidence and halts
+      // productive polling (the #9450 false positive re-shipped).
+      const floodEvent = (i: number): ServerGeminiToolCallRequestEvent => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          name: 'tool_b',
+          args: { step: i },
+          callId: `flood-${i}`,
+          isClientInitiated: false,
+          prompt_id: 'test-prompt-id',
+        },
+      });
+
+      // Request #1 of the task_list streak.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-1'))).toBe(false);
+
+      // A turn large enough to overflow the callId pairing map with
+      // non-stateful entries — only possible if the stateful condition goes.
+      for (let i = 0; i < MAX_TRACKED_TOOL_REQUESTS + 10; i++) {
+        expect(service.checkAlwaysOnSafeties(floodEvent(i))).toBe(false);
+      }
+
+      // Resume the identical task_list streak; the interrupted streak
+      // restarts its result evidence.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-2'))).toBe(false);
+
+      // Results arrive through the callId pairing, each poll returning a
+      // changed board. The pre-flood request (tl-1) must still pair even
+      // though the flood filled the map past its cap.
+      expect(
+        service.recordToolResultByCallId('tl-1', taskListResult('v1', 'tl-1')),
+      ).toBe(false);
+      expect(
+        service.recordToolResultByCallId('tl-2', taskListResult('v2', 'tl-2')),
+      ).toBe(false);
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-3'))).toBe(false);
+      expect(
+        service.recordToolResultByCallId('tl-3', taskListResult('v3', 'tl-3')),
+      ).toBe(false);
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-4'))).toBe(false);
+      expect(
+        service.recordToolResultByCallId('tl-4', taskListResult('v4', 'tl-4')),
+      ).toBe(false);
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-5'))).toBe(false);
+
+      // 5th request of the resumed streak: the result-aware guard wants all
+      // 4 prior results as evidence. With the stateful condition intact,
+      // tl-1's changed result survived the flood, the evidence is complete,
+      // and the changed results keep the polling alive. Without `&& stateful`
+      // tl-1 was evicted by the flood, evidence falls to 3 < 4, and the
+      // guard fails safe into a halt.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('tl-6'))).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('counts global duplicates on (call, result) pairs when heuristics run', () => {
