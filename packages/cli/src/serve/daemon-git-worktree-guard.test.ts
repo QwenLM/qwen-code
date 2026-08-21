@@ -1753,6 +1753,10 @@ it -C ${outsideRepo} reset --hard`,
     // A heredoc body must not launder a tracked cwd.
     () =>
       `cd ${plainOutsidePath}; cat <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ngit() { true; }\nEOF\ngit reset --hard`,
     // A `-C` inside a function body is seen when the body spans segments.
     () => `f() { true; git -C ${plainOutsidePath} reset --hard; }; f`,
   ])('denies the round-9 critical form %#', async (build) => {
@@ -1774,6 +1778,17 @@ it -C ${outsideRepo} reset --hard`,
       'tar -xf a.tar && git commit -m x',
       'cat <<EOF\nhello\nEOF',
       'f() { true; git status; }; f',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
+  it('keeps valid compound heredoc openers parseable', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'cat <<EOF && echo done\nhello\nEOF',
+      'cat <<EOF | bash\necho done\nEOF',
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }

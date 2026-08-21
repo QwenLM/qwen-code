@@ -10,9 +10,9 @@ import { parse } from 'shell-quote';
 import {
   GitWorktreeService,
   isWithinRoot,
+  projectHeredocBodiesForStateTracking,
   realpathNearestExistingAsync,
   splitCommands,
-  stripHeredocBodies,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
@@ -2089,8 +2089,9 @@ async function evaluateCommandWithCwd(
     return undefined;
   };
 
-  const segments = splitCommands(stripHeredocBodies(command));
-  const separators = readTopLevelSeparators(stripHeredocBodies(command));
+  const projectedCommand = projectHeredocBodiesForStateTracking(command);
+  const segments = splitCommands(projectedCommand);
+  const separators = readTopLevelSeparators(projectedCommand);
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;

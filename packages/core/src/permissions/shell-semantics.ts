@@ -35,10 +35,7 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  splitCompoundCommandSegments,
-  stripHeredocBodies,
-} from './rule-parser.js';
+import { splitCompoundCommandSegmentsForStateTracking } from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2186,7 +2183,7 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegmentsForStateTracking(command);
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;

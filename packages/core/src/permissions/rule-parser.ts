@@ -674,80 +674,189 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  */
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
-/**
- * Scan one line for heredoc openers (`<<EOF`, `<<-'PY'`, `<<"TAG"` all count;
- * `<<<` here-strings do not). Quote state is threaded across lines because an
- * unclosed string makes the next physical line string content, not a new
- * command line, so a `<<` seen there opens nothing.
- *
- * Soundness contract: anything this scanner cannot prove is left visible
- * (reported via `unsafe`), never swallowed. A `#` outside quotes starts a
- * comment and ends scanning; `<<` inside `$(( ))` / `(( ))` is a shift
- * operator, not a heredoc; a trailing unquoted backslash means the logical
- * line continues and the body boundary is not provable; a heredoc feeding a
- * shell interpreter (its body IS executed shell) is reported but never
- * stripped by the caller.
- */
-interface HeredocScan {
-  delimiters: Array<{ delim: string; stripTabs: boolean }>;
+interface HeredocDelimiter {
+  delimiter: string;
+  stripTabs: boolean;
+}
+
+interface SimpleHeredocLine {
+  receiver: string;
+  delimiters: HeredocDelimiter[];
+}
+
+interface HeredocProjection {
+  command: string;
+  ambiguous: boolean;
+  bodyPlaceholders: Array<{ placeholder: string; line: string }>;
+}
+
+const HEREDOC_DATA_CONSUMERS = new Set([
+  'cat',
+  'head',
+  'node',
+  'perl',
+  'python',
+  'ruby',
+  'tail',
+  'tee',
+]);
+
+function parseSimpleHeredocLine(
+  line: string,
+): SimpleHeredocLine | 'none' | null {
+  if (!line.includes('<<')) return null;
+
+  const masked = [...line];
+  const delimiters: HeredocDelimiter[] = [];
+  let quote: "'" | '"' | undefined;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      if (ch === '\\' || ch === '$' || ch === '`') return null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\' || ch === '$' || ch === '`' || ch === '#') return null;
+    if (ch !== '<' || line[i + 1] !== '<') {
+      if (/[;&|()<>]/.test(ch)) return null;
+      continue;
+    }
+    if (line[i + 2] === '<') return null;
+
+    const operatorStart = i;
+    i += 2;
+    let stripTabs = false;
+    if (line[i] === '-') {
+      stripTabs = true;
+      i++;
+    }
+    while (line[i] === ' ' || line[i] === '\t') i++;
+
+    const delimiterQuote = line[i] === "'" || line[i] === '"' ? line[i] : '';
+    if (delimiterQuote) i++;
+    const delimiterStart = i;
+    if (delimiterQuote) {
+      while (i < line.length && line[i] !== delimiterQuote) {
+        if (line[i] === '\\' || line[i] === '$' || line[i] === '`') return null;
+        i++;
+      }
+      if (line[i] !== delimiterQuote) return null;
+    } else {
+      while (i < line.length && /[A-Za-z0-9_./,:+-]/.test(line[i]!)) i++;
+    }
+
+    const delimiter = line.slice(delimiterStart, i);
+    if (delimiter.length === 0) return null;
+    if (delimiterQuote) i++;
+    if (i < line.length && !/[ \t<]/.test(line[i]!)) return null;
+
+    delimiters.push({ delimiter, stripTabs });
+    for (let j = operatorStart; j < i; j++) masked[j] = ' ';
+    i--;
+  }
+
+  if (quote !== undefined) return null;
+  if (delimiters.length === 0) return 'none';
+  let words: ReturnType<typeof parse>;
+  try {
+    words = parse(masked.join(''));
+  } catch {
+    return null;
+  }
+  if (words.some((word) => typeof word !== 'string')) return null;
+  const receiver = words.find(
+    (word) =>
+      typeof word === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word),
+  );
+  if (typeof receiver !== 'string') return null;
+  return {
+    receiver: receiver.split('/').pop()!,
+    delimiters,
+  };
+}
+
+function receiverConsumesData(receiver: string): boolean {
+  return (
+    HEREDOC_DATA_CONSUMERS.has(receiver) ||
+    /^python\d+(?:\.\d+)*$/.test(receiver)
+  );
+}
+
+function projectHeredocBodies(
+  command: string,
+  stripAllSimpleBodies: boolean,
+): HeredocProjection {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  const bodyPlaceholders: Array<{ placeholder: string; line: string }> = [];
+  let placeholderPrefix = '__QWEN_HEREDOC_BODY_';
+  while (command.includes(placeholderPrefix)) placeholderPrefix += '_';
+  let pending: HeredocDelimiter[] = [];
+  let keepPendingBody = false;
+
+  for (const line of lines) {
+    const comparableLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (pending.length > 0) {
+      const current = pending[0]!;
+      const terminator = current.stripTabs
+        ? comparableLine.replace(/^\t+/, '')
+        : comparableLine;
+      if (terminator === current.delimiter) {
+        pending = pending.slice(1);
+      } else if (keepPendingBody) {
+        const placeholder = `${placeholderPrefix}${bodyPlaceholders.length}__`;
+        kept.push(placeholder);
+        bodyPlaceholders.push({ placeholder, line });
+      }
+      continue;
+    }
+
+    kept.push(line);
+    if (!line.includes('<<')) continue;
+
+    const parsed = parseSimpleHeredocLine(comparableLine);
+    if (parsed === null) {
+      return { command, ambiguous: true, bodyPlaceholders: [] };
+    }
+    if (parsed === 'none') continue;
+    pending = parsed.delimiters;
+    keepPendingBody =
+      !stripAllSimpleBodies && !receiverConsumesData(parsed.receiver);
+  }
+
+  if (pending.length > 0) {
+    return { command, ambiguous: true, bodyPlaceholders: [] };
+  }
+  return {
+    command: kept.join('\n'),
+    ambiguous: false,
+    bodyPlaceholders,
+  };
+}
+
+interface StateTrackingHeredocScan {
+  delimiters: HeredocDelimiter[];
   unsafe: boolean;
   inSingle: boolean;
   inDouble: boolean;
 }
 
-const HEREDOC_SHELL_INTERPRETERS = new Set([
-  'sh',
-  'bash',
-  'zsh',
-  'dash',
-  'ash',
-  'ksh',
-]);
-const HEREDOC_WRAPPER_WORDS = new Set([
-  'env',
-  'command',
-  'exec',
-  'builtin',
-  'noglob',
-  'time',
-  'nohup',
-  'sudo',
-  'doas',
-]);
-
-function heredocReceiverIsShell(line: string): boolean {
-  // Peel assignment prefixes (FOO=1) and wrapper words (sudo, env A=B, ...) to
-  // the real command word; then compare its basename.
-  const words = line.split(/\s+/).filter(Boolean);
-  let i = 0;
-  while (i < words.length) {
-    const w = words[i]!;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
-      i++;
-      continue;
-    }
-    const base = w.split('/').pop()!;
-    if (HEREDOC_WRAPPER_WORDS.has(base)) {
-      i++;
-      continue;
-    }
-    return HEREDOC_SHELL_INTERPRETERS.has(base);
-  }
-  return false;
-}
-
-function getHeredocDelimiters(
+function findStateTrackingHeredocDelimiters(
   line: string,
   state: { inSingle: boolean; inDouble: boolean },
-): HeredocScan {
-  const delimiters: Array<{ delim: string; stripTabs: boolean }> = [];
+): StateTrackingHeredocScan {
+  const delimiters: HeredocDelimiter[] = [];
   let { inSingle, inDouble } = state;
   let escaped = false;
   let arithmeticDepth = 0;
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
-
     if (escaped) {
       escaped = false;
       continue;
@@ -772,9 +881,7 @@ function getHeredocDelimiters(
       inDouble = true;
       continue;
     }
-    if (ch === '#') {
-      break; // comment to end of line
-    }
+    if (ch === '#') break;
     if (ch === '(' && line[i + 1] === '(') {
       arithmeticDepth++;
       i++;
@@ -785,104 +892,92 @@ function getHeredocDelimiters(
       i++;
       continue;
     }
-    if (arithmeticDepth > 0) {
-      continue; // `<<` in arithmetic is a shift, not a heredoc
-    }
-    if (ch !== '<' || line[i + 1] !== '<') {
+    if (arithmeticDepth > 0 || ch !== '<' || line[i + 1] !== '<') {
       continue;
     }
     if (line[i + 2] === '<') {
-      i += 2; // here-string
+      i += 2;
       continue;
     }
 
     let wordStart = i + 2;
-    let stripTabs = false;
-    if (line[wordStart] === '-') {
-      stripTabs = true;
-      wordStart++;
-    }
-    while (line[wordStart] === ' ' || line[wordStart] === '\t') {
-      wordStart++;
-    }
+    const stripTabs = line[wordStart] === '-';
+    if (stripTabs) wordStart++;
+    while (line[wordStart] === ' ' || line[wordStart] === '\t') wordStart++;
 
     const quote = line[wordStart];
     const quoted = quote === "'" || quote === '"';
     if (quoted) wordStart++;
-
-    // bash reads the delimiter as a word: unquoted, it runs to the next shell
-    // metacharacter; quoted, to the closing quote. Anything else (or nothing)
-    // is not a heredoc we can prove.
     let wordEnd = wordStart;
     while (wordEnd < line.length) {
       const wordCh = line[wordEnd]!;
-      if (quoted ? wordCh === quote : /[\s;&|<>()$`'"\\]/.test(wordCh)) {
+      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./,:+-]/.test(wordCh)) {
         break;
       }
       wordEnd++;
     }
     if (quoted && line[wordEnd] !== quote) {
-      return { delimiters, unsafe: true, inSingle, inDouble };
+      return {
+        delimiters,
+        unsafe: true,
+        inSingle,
+        inDouble,
+      };
     }
-
     if (wordEnd > wordStart) {
-      delimiters.push({ delim: line.slice(wordStart, wordEnd), stripTabs });
-      i = wordEnd;
-    } else {
-      i += 1; // bare `<<` with no word: skip the operator, open nothing
+      delimiters.push({
+        delimiter: line.slice(wordStart, wordEnd),
+        stripTabs,
+      });
     }
+    i = wordEnd;
   }
 
-  // A trailing unquoted backslash continues the logical line: the heredoc body
-  // starts only after the continuation completes, which this scanner cannot
-  // prove. An unclosed quote puts the next line inside a string. Both bail.
   const trailingContinuation =
     !inSingle && !inDouble && /\\$/.test(line.replace(/\\\\$/, ''));
-  const unsafe = trailingContinuation || inSingle || inDouble;
-  return { delimiters, unsafe, inSingle, inDouble };
+  return {
+    delimiters,
+    unsafe: trailingContinuation || inSingle || inDouble,
+    inSingle,
+    inDouble,
+  };
 }
 
-/**
- * Remove heredoc bodies line by line, keeping the line that opens them.
- * Heredoc bodies are stdin, not commands: anything between the opening line
- * and the delimiter line must survive splitting untouched instead of being
- * evaluated as shell segments of its own.
- *
- * Two visibility rules keep deny/ask rules able to see everything bash would
- * execute: a heredoc feeding a shell interpreter (bash/sh/...) is never
- * stripped because its body is real shell, and any opening line the scanner
- * cannot fully prove (comments, arithmetic, continuations, multi-line quotes)
- * leaves the whole construct visible.
- */
-export function stripHeredocBodies(command: string): string {
-  const lines = command.split('\n');
+function projectCompoundHeredocsForStateTracking(command: string): string {
   const kept: string[] = [];
-  const pending: Array<{ delim: string; stripTabs: boolean }> = [];
+  const pending: HeredocDelimiter[] = [];
   let quoteState = { inSingle: false, inDouble: false };
 
-  for (const line of lines) {
+  for (const line of command.split('\n')) {
+    const comparableLine = line.endsWith('\r') ? line.slice(0, -1) : line;
     if (pending.length > 0) {
-      const p = pending[0]!;
-      const match = p.stripTabs
-        ? line.replace(/^\t+/, '') === p.delim // bash strips leading TABS only
-        : line === p.delim; // plain << wants an exact line
-      if (match) pending.shift();
+      const current = pending[0]!;
+      const terminator = current.stripTabs
+        ? comparableLine.replace(/^\t+/, '')
+        : comparableLine;
+      if (terminator === current.delimiter) pending.shift();
       continue;
     }
 
     kept.push(line);
-    const scan = getHeredocDelimiters(line, quoteState);
+    const scan = findStateTrackingHeredocDelimiters(comparableLine, quoteState);
     quoteState = { inSingle: scan.inSingle, inDouble: scan.inDouble };
-    if (scan.unsafe || scan.delimiters.length === 0) {
-      continue;
-    }
-    if (heredocReceiverIsShell(line)) {
-      continue; // the body is shell code; deny/ask rules must keep seeing it
-    }
-    pending.push(...scan.delimiters);
+    if (!scan.unsafe) pending.push(...scan.delimiters);
   }
 
   return kept.join('\n');
+}
+
+/**
+ * State trackers need heredoc stdin removed even when a child shell executes
+ * it. The strict permission projection rejects compound openers, but these
+ * consumers accepted them before the shared parser was introduced.
+ */
+export function projectHeredocBodiesForStateTracking(command: string): string {
+  const projected = projectHeredocBodies(command, true);
+  return projected.ambiguous
+    ? projectCompoundHeredocsForStateTracking(command)
+    : projected.command;
 }
 
 /**
@@ -947,15 +1042,7 @@ export interface CompoundCommandSegment {
   terminator: string;
 }
 
-/**
- * Split a compound shell command into its individual simple commands, keeping
- * the operator that terminated each one.
- *
- * See {@link splitCompoundCommand} for the string-only form and for examples;
- * that function strips heredoc bodies first, so the two are the same split
- * only for heredoc-free input.
- */
-export function splitCompoundCommandSegments(
+function splitCompoundCommandSegmentsRaw(
   command: string,
 ): CompoundCommandSegment[] {
   const segments: CompoundCommandSegment[] = [];
@@ -1032,6 +1119,53 @@ export function splitCompoundCommandSegments(
 }
 
 /**
+ * Split a compound shell command into its individual simple commands, keeping
+ * the operator that terminated each one. Heredoc bodies are removed only for
+ * simple commands with a known non-shell receiver. Retained body lines are
+ * split in isolation so child quoting cannot hide later parent commands. If an
+ * opener needs shell grammar this parser does not model, each physical line
+ * stays visible independently.
+ */
+export function splitCompoundCommandSegments(
+  command: string,
+): CompoundCommandSegment[] {
+  const projected = projectHeredocBodies(command, false);
+  if (projected.ambiguous) {
+    return command
+      .split(/\r?\n/)
+      .flatMap((line) => splitCompoundCommandSegmentsRaw(line));
+  }
+  const bodies = new Map(
+    projected.bodyPlaceholders.map(({ placeholder, line }) => [
+      placeholder,
+      line,
+    ]),
+  );
+  return splitCompoundCommandSegmentsRaw(projected.command).flatMap(
+    (segment) => {
+      const bodyLine = bodies.get(segment.command);
+      if (bodyLine === undefined) return [segment];
+      const bodySegments = splitCompoundCommandSegmentsRaw(bodyLine);
+      const last = bodySegments.at(-1);
+      if (last !== undefined && last.terminator === '') {
+        bodySegments[bodySegments.length - 1] = {
+          ...last,
+          terminator: segment.terminator,
+        };
+      }
+      return bodySegments;
+    },
+  );
+}
+
+export function splitCompoundCommandSegmentsForStateTracking(
+  command: string,
+): CompoundCommandSegment[] {
+  const projected = projectHeredocBodiesForStateTracking(command);
+  return splitCompoundCommandSegmentsRaw(projected);
+}
+
+/**
  * Split a compound shell command into its individual simple commands
  * by splitting on unquoted shell operators (&&, ||, ;, |, etc.).
  *
@@ -1049,9 +1183,9 @@ export function splitCompoundCommandSegments(
  *   "python - <<'PY'\nimport os\nPY"  → ["python - <<'PY'"]  (heredoc body is stdin)
  */
 export function splitCompoundCommand(command: string): string[] {
-  const commands = splitCompoundCommandSegments(
-    stripHeredocBodies(command),
-  ).map((segment) => segment.command);
+  const commands = splitCompoundCommandSegments(command).map(
+    (segment) => segment.command,
+  );
   return commands.length > 0 ? commands : [command];
 }
 
