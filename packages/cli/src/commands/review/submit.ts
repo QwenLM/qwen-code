@@ -57,7 +57,11 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
-import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
+import {
+  parseReceiptCommentIds,
+  parseReceiptIds,
+  parseReceiptObject,
+} from './lib/receipt.js';
 import {
   composeReview,
   normalizeSeverityFloor,
@@ -117,6 +121,22 @@ function readReceiptIds(
 }
 
 /**
+ * The whole prior receipt object — the merge source for a rewrite. The
+ * receipt file is keyed by PR number alone but carries an axis per
+ * platform (review ids on GitHub, comment ids on Aone), so a writer that
+ * rebuilt it from only its own axis would un-vouch the other platform's
+ * sanctioned writes for a same-numbered target. Absent or unreadable is
+ * an empty object, never a throw — best-effort like every receipt read.
+ */
+function readReceiptObject(receiptPath: string): Record<string, unknown> {
+  try {
+    return parseReceiptObject(readFileSync(receiptPath, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Receipt for cleanup's Aone bypass audit: EVERY comment this session was
  * authorised to post, by id — the Aone twin of the gh receipt below. There
  * submit posts a *review* and the audit flags issue comments it never
@@ -135,7 +155,12 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
     mkdirSync(REVIEW_TMP_DIR, { recursive: true });
     atomicWriteFileSync(
       receiptPath,
-      `${JSON.stringify({ commentIds, event, postedAt: new Date().toISOString() })}\n`,
+      `${JSON.stringify({
+        ...readReceiptObject(receiptPath),
+        commentIds,
+        event,
+        postedAt: new Date().toISOString(),
+      })}\n`,
     );
   } catch {
     /* audit metadata only — the post itself succeeded */
@@ -1161,7 +1186,12 @@ export function runSubmit(
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
       atomicWriteFileSync(
         receiptPath,
-        `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
+        `${JSON.stringify({
+          ...readReceiptObject(receiptPath),
+          reviewIds,
+          event,
+          postedAt: new Date().toISOString(),
+        })}\n`,
       );
     }
   } catch {

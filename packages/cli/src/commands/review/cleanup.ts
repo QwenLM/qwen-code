@@ -187,7 +187,12 @@ export interface RawAoneComment {
  * day, yet sorts after any `…T23:00Z` boundary string). Three: a resolved
  * comment's `updatedAt` is the resolution instant, indistinguishable from a
  * body edit — so the edited arm skips resolved comments entirely; a
- * posted-then-resolved bypass is still caught by the posted arm.
+ * posted-then-resolved bypass is still caught by the posted arm. That skip
+ * opens the third disclosed residual: an EDIT of an UNVOUCHED pre-window
+ * comment is invisible once its discussion is resolved — the `--resolved`
+ * union lists it, but the posted arm keys on creation inside the window and
+ * the edited arm drops resolved comments, so a resolved comment is judged
+ * by creation only (design doc #9617).
  */
 export function findUnsanctionedAoneComments(
   comments: RawAoneComment[],
@@ -381,7 +386,8 @@ function readAoneSubmitReceipt(target: string): Set<number> {
  * on stderr while `err.message` is often the generic "Command failed" wrap.
  * a1 fails differently — a pretty-printed JSON error OBJECT on stderr whose
  * first non-empty line is the opening brace; the `message` field is the
- * cause there, so it wins when present. */
+ * cause there, so it wins when present, and an object carrying no usable
+ * one is flattened whole — the line scan would render just the brace. */
 function briefErrorLine(err: unknown): string {
   const stderr = (err as { stderr?: unknown }).stderr;
   if (typeof stderr === 'string') {
@@ -390,6 +396,7 @@ function briefErrorLine(err: unknown): string {
       if (typeof parsed.message === 'string' && parsed.message.trim() !== '') {
         return parsed.message.trim();
       }
+      return JSON.stringify(parsed);
     } catch {
       // Not a JSON error object — fall through to the line scan.
     }

@@ -1236,6 +1236,8 @@ describe('runCleanup — bypass-write audit', () => {
     // The relay instruction is the sentence that actually moves the warning to
     // a human — the rest of the audit is inert without it, so pin it here.
     expect(warnings.join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings.join('\n')).toContain('writes to the PR');
   });
 
   it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {
@@ -1406,6 +1408,29 @@ describe('findUnsanctionedAoneComments', () => {
     expect(got.posted.map((c) => c.id)).toEqual([1]);
   });
 
+  it('excludes a vouched comment from the EDITED arm too, not only the posted one', () => {
+    // The vouch sits in the shared `relevant` filter: a submit-posted
+    // comment whose updatedAt bumps inside the window (a hand-edit of
+    // submit's own summary, or a backend state flip) must not be flagged
+    // as an edited bypass.
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 9,
+          // 2026-07-23T23:00Z — before the window …
+          createdAt: '2026-07-24T07:00:00+08:00',
+          // … bumped at 2026-07-24T01:10Z — inside it.
+          updatedAt: '2026-07-24T09:10:00+08:00',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set([9]),
+    );
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
+  });
+
   it('classifies a pre-window comment edited inside the window as an edit', () => {
     const got = findUnsanctionedAoneComments(
       [
@@ -1550,9 +1575,19 @@ describe('runCleanup — Aone bypass-write audit', () => {
     );
     expect(warnings().join('\n')).not.toContain('778');
     expect(warnings().join('\n')).toContain('qwen review submit');
+    // The union dedupes by id: BOTH queries returned comment 777, and the
+    // relayed lines flag it once, under a header counting it once.
+    expect(
+      warnings().filter((l) => l.includes('posted comment 777')),
+    ).toHaveLength(1);
+    expect(warnings().join('\n')).toContain(
+      'warning: 1 comment(s) by the reviewing account on maxcompute/odps_src MR 123',
+    );
     // The footer names the account and the relay instruction, as on GitHub.
     expect(warnings().join('\n')).toContain('(reviewer)');
     expect(warnings().join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings().join('\n')).toContain('writes to the MR');
   });
 
   it('flags a posted-then-RESOLVED bypass through the --resolved union half', () => {
@@ -1612,7 +1647,7 @@ describe('runCleanup — Aone bypass-write audit', () => {
     mocks.readFileSync.mockImplementation((path: string) => {
       if (String(path).endsWith('submit-receipt.json')) {
         // reviewIds on the same receipt must not vouch for a comment.
-        return JSON.stringify({ commentIds: [777], reviewIds: [778] });
+        return JSON.stringify({ commentIds: [777, 779], reviewIds: [778] });
       }
       return aoneFetchReport;
     });
@@ -1629,12 +1664,22 @@ describe('runCleanup — Aone bypass-write audit', () => {
         author: { username: 'reviewer' },
         createdAt: '2026-07-24T17:03:00+08:00',
       },
+      {
+        id: 779,
+        note: 'sanctioned summary, bumped inside the window',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T07:00:00+08:00', // pre-window
+        updatedAt: '2026-07-24T17:10:00+08:00', // in-window bump
+      },
     ]);
 
     runCleanup('pr-123');
 
     expect(warnings().join('\n')).not.toContain('777');
     expect(warnings().join('\n')).toContain('posted comment 778');
+    // The vouch also covers the EDITED arm: a vouched comment whose
+    // updatedAt moves inside the window is no edited bypass.
+    expect(warnings().join('\n')).not.toContain('779');
   });
 
   it('stays silent when the window is clean', () => {
@@ -1729,6 +1774,33 @@ describe('runCleanup — Aone bypass-write audit', () => {
     runCleanup('pr-123');
 
     expect(warnings().join('\n')).toContain('posted comment 11');
+  });
+
+  it('audits from auditSince when drift restarts pushed fetchedAt forward', () => {
+    // The Aone twin of the gh drift test: fetchedAt 10:00Z but auditSince
+    // 08:00Z → boundary 07:58Z; a comment at 08:30Z sits inside the
+    // auditSince window yet outside any fetchedAt-based one.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'maxcompute/odps_src',
+        fetchedAt: '2026-07-24T10:00:00Z',
+        auditSince: '2026-07-24T08:00:00Z',
+        host: 'gitlab.alibaba-inc.com',
+      }),
+    );
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 12,
+        note: 'posted during the abandoned attempt',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T16:30:00+08:00', // 08:30Z
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain('posted comment 12');
   });
 
   it('passes host undefined to the dispatch for a hostless report (the cwd-origin fall-through)', () => {
@@ -1870,6 +1942,38 @@ describe('runCleanup — Aone bypass-write audit', () => {
       .map((c) => String(c[0]))
       .filter((l) => l.startsWith('note: bypass audit skipped'));
     expect(notes.join('\n')).toContain('merge request not found: 999999999');
+    expect(notes.join('\n')).not.toContain('skipped ({)');
+  });
+
+  it('flattens a message-less JSON error object instead of paging its opening brace', () => {
+    // The `message` field is the cause when present; an error object
+    // without one must still reach the operator as more than the
+    // pretty-print's opening brace.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: JSON.stringify(
+            {
+              schemaVersion: 'a1.error/v1',
+              code: 'COMMAND_FAILED',
+              retryable: false,
+              exitCode: 1,
+            },
+            null,
+            2,
+          ),
+        },
+      );
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('"code":"COMMAND_FAILED"');
     expect(notes.join('\n')).not.toContain('skipped ({)');
   });
 });

@@ -21,6 +21,7 @@ import {
 } from 'vitest';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -1082,5 +1083,23 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
     ).not.toThrow();
     expect(process.exitCode).toBe(3);
     expect(existsSync(receiptPath())).toBe(false);
+  });
+
+  it('preserves the review-id axis a gh submit vouched for the same PR number', () => {
+    // The receipt file is keyed by PR number alone but carries an axis per
+    // platform; an Aone rewrite that kept only its own axis would un-vouch
+    // a same-numbered gh submit's own reviews — the audit would then flag
+    // submit's sanctioned writes as bypasses.
+    mkdirSync(join(tmp, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewIds: [500], event: 'COMMENT', postedAt: 'x' }),
+    );
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([11, 12]);
+    expect(receipt.reviewIds).toEqual([500]);
   });
 });
