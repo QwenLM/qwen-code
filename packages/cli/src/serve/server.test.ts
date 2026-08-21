@@ -23712,6 +23712,36 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('reads and exports the active copy of an exact persisted conflict', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(sid, 'archived');
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exported = await request(app)
+        .get(`/session/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain(sid);
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+    });
+
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       const bridge = fakeBridge({

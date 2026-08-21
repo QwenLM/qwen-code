@@ -1314,6 +1314,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             assertRuntimeGenerationOpen?.();
@@ -1642,11 +1643,13 @@ export function registerSessionRoutes(
   ): Promise<WorkspaceRuntime | undefined> => {
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
+      allowActiveConflict = false,
     ): Promise<boolean> => {
       const location = await assertSessionLoadable(
         runtime.workspaceCwd,
         sessionId,
         runtime.sessionRuntimeBaseDir,
+        { allowActiveConflict },
       );
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
@@ -1738,7 +1741,7 @@ export function registerSessionRoutes(
       const runtime = workspaceRegistry.primary;
       if (loadError === undefined) return runtime;
       try {
-        if (await activeInRuntime(runtime)) return runtime;
+        if (await activeInRuntime(runtime, true)) return runtime;
       } catch (err) {
         recordLoadError(err);
       }
@@ -1784,7 +1787,7 @@ export function registerSessionRoutes(
       }
       let active = false;
       try {
-        active = await activeInRuntime(liveOwner.runtime);
+        active = await activeInRuntime(liveOwner.runtime, true);
       } catch (err) {
         recordLoadError(err);
       }
@@ -1796,6 +1799,34 @@ export function registerSessionRoutes(
         return undefined;
       }
       if (active) {
+        if (isInternalWorkspaceRuntime(liveOwner.runtime)) {
+          const ordinaryCollisions: WorkspaceRuntime[] = [];
+          for (const ordinaryRuntime of workspaceRegistry.list()) {
+            const ordinaryService =
+              createWorkspaceRuntimeSessionService(ordinaryRuntime);
+            if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
+              ordinaryCollisions.push(ordinaryRuntime);
+            }
+          }
+          if (
+            internalEntry &&
+            internalGeneration &&
+            !assertCurrentInternalGeneration(
+              internalEntry,
+              internalGeneration,
+              res,
+            )
+          ) {
+            return undefined;
+          }
+          if (ordinaryCollisions.length > 0) {
+            sendAmbiguousSessionOwner(res, route, sessionId, [
+              liveOwner.runtime,
+              ...ordinaryCollisions,
+            ]);
+            return undefined;
+          }
+        }
         setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
         return liveOwner.runtime;
       }
@@ -1807,7 +1838,7 @@ export function registerSessionRoutes(
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
       try {
-        if (await activeInRuntime(runtime)) {
+        if (await activeInRuntime(runtime, true)) {
           return runtime;
         }
       } catch (err) {
@@ -3961,6 +3992,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             const codec = getTranscriptCursorCodec(runtime);
