@@ -498,11 +498,14 @@ describe('qwen-autofix workflow', () => {
     // validates that flag against a client-side allow-list that rejects
     // 'pending' before 2.65.0, so a runner whose gh lags the hosted images
     // would exit 1 and silently fail-close EVERY scan; the API filter is
-    // server-side on every gh version.
+    // server-side on every gh version. The jq filter must read the REST
+    // envelope's `id` — the gh-CLI `databaseId` field does not exist in the
+    // API payload, and an empty read would silently un-busy every scan.
     expect(reviewScanJob).toContain(
       'gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50"',
     );
-    expect(reviewScanJob).toContain("--jq '.workflow_runs[].databaseId'");
+    expect(reviewScanJob).toContain("--jq '.workflow_runs[].id'");
+    expect(reviewScanJob).not.toContain('.workflow_runs[].databaseId');
     expect(reviewScanJob).not.toContain(
       'gh run list --repo "${REPO}" --workflow qwen-autofix.yml',
     );
@@ -4034,7 +4037,7 @@ describe('qwen-autofix workflow', () => {
     expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
     // A jobs-view failure mid-enumeration fails closed the same way.
     const viewFailed = runEnum({
-      listAnswer: JSON.stringify({ workflow_runs: [{ databaseId: 101 }] }),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewError: 'HTTP 500',
     });
     expect(viewFailed.candidates).toBe('');
@@ -4042,7 +4045,7 @@ describe('qwen-autofix workflow', () => {
     expect(viewFailed.fleet).toContain('HTTP 500');
     // A healthy enumeration accumulates the busy set and keeps candidates.
     const ok = runEnum({
-      listAnswer: JSON.stringify({ workflow_runs: [{ databaseId: 101 }] }),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewAnswer: JSON.stringify({
         jobs: [
           { name: 'review-address (101, round 2)', status: 'in_progress' },
