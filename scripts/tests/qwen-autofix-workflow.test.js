@@ -11197,7 +11197,7 @@ exit 1
       expect(argStart, 'gate step lacks the env -i launch').toBeGreaterThan(-1);
       const argList = step.slice(argStart, step.indexOf('bash --norc'));
       const passed = (
-        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       )
         .map((m) => m.split('=')[0])
         .sort();
@@ -12806,7 +12806,7 @@ exit 1
       // Delimited tokens, not substrings: match `NAME=value` up to the line
       // continuation, so a value swap or an extra entry is visible.
       const assignments = (
-        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       ).map((m) => m.trim());
       const passed = assignments.map((m) => m.split('=')[0]);
       // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
