@@ -1590,4 +1590,64 @@ describe('ToolRegistry proxy schema presentation ledger', () => {
     expect(snapshot.get('alpha')).toBe('fp-a');
     expect(snapshot.has('bravo')).toBe(false);
   });
+
+  it('restoreProxySchemaPresentationSnapshot rolls the ledger back to the snapshot', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+    // A batch's tool_search commits after the snapshot was captured…
+    registry.commitProxySchemaPresentations([
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(true);
+
+    // …and the send-failure rollback drops the batch's marks while keeping
+    // the pre-batch state.
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(true);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(false);
+  });
+
+  it('skips a restore whose snapshot predates a ledger clear', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+    registry.commitProxySchemaPresentations([
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+    // Compression / truncation / setHistory clear the ledger between the
+    // snapshot and the rollback…
+    registry.clearProxySchemaPresentations();
+
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+
+    // …so the restore must stay a no-op: re-adding the snapshot would
+    // resurrect marks whose backing tool_search results were summarized out
+    // of active history, reopening the #6721 gate on an invisible schema.
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(false);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(false);
+    expect(registry.getProxySchemaPresentationSnapshot().size).toBe(0);
+  });
+
+  it('clearRevealedDeferredTools also invalidates pending snapshots', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+
+    // /clear drops revealed tools AND the presentation ledger.
+    registry.clearRevealedDeferredTools();
+
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(false);
+  });
 });

@@ -498,6 +498,14 @@ type RunToolResult = {
    * reference (#6721).
    */
   presentationSnapshot?: ReadonlyMap<string, string>;
+  /**
+   * The ledger generation captured together with `presentationSnapshot`
+   * (see ToolRegistry.getProxySchemaPresentationGeneration). The rollback
+   * is skipped if the generation advanced since — an intervening ledger
+   * clear (e.g. mid-send compression) already invalidated the snapshot,
+   * and restoring it would resurrect marks the clear deliberately dropped.
+   */
+  presentationSnapshotGeneration?: number;
 };
 
 type MidTurnDrainResult = {
@@ -4836,6 +4844,11 @@ export class Session implements SessionContext {
             let pendingPresentationSnapshot:
               | ReadonlyMap<string, string>
               | undefined;
+            // Ledger generation at the time the snapshot was captured; an
+            // intervening clear (e.g. mid-send compression) advances it and
+            // turns the restore into a no-op (the clear already invalidated
+            // the snapshot).
+            let pendingPresentationGeneration = 0;
             let presentationSendChat: GeminiChat | undefined;
             let presentationPushCountBeforeSend = 0;
 
@@ -5029,7 +5042,12 @@ export class Session implements SessionContext {
                   // threw before the push), roll the presentation ledger back
                   // to the pre-batch snapshot. Otherwise the marks survive and
                   // a later model-emitted tool_call passes the #6721
-                  // fail-closed gate and executes on guessed arguments.
+                  // fail-closed gate and executes on guessed arguments. The
+                  // generation check makes the restore a no-op when a ledger
+                  // clear (e.g. this send's own compression) intervened —
+                  // restoring across a clear would resurrect marks whose
+                  // backing tool_search results were summarized out of active
+                  // history.
                   if (
                     pendingPresentationSnapshot &&
                     (!presentationSendChat ||
@@ -5044,6 +5062,7 @@ export class Session implements SessionContext {
                         .getToolRegistry()
                         .restoreProxySchemaPresentationSnapshot(
                           pendingPresentationSnapshot,
+                          pendingPresentationGeneration,
                         );
                     } catch {
                       // Ignore — see above.
@@ -5171,6 +5190,8 @@ export class Session implements SessionContext {
                   // the tool run into history, so a discarded snapshot there
                   // is harmless.)
                   pendingPresentationSnapshot = toolRun.presentationSnapshot;
+                  pendingPresentationGeneration =
+                    toolRun.presentationSnapshotGeneration ?? 0;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
                       stopReason: rejectOnLoopDetected
@@ -5602,6 +5623,9 @@ export class Session implements SessionContext {
     // catch below rolls the ledger back to this snapshot so the batch's
     // committed marks do not outlive the schema they reference (#6721).
     let pendingPresentationSnapshot: ReadonlyMap<string, string> | undefined;
+    // Ledger generation at snapshot capture; an intervening clear (e.g.
+    // mid-send compression) advances it and makes the restore a no-op.
+    let pendingPresentationGeneration = 0;
     const preservePendingMessage = (message: Content) => {
       if (initialSend) return;
       const preservedParts = (message.parts ?? []).filter(
@@ -6086,7 +6110,11 @@ export class Session implements SessionContext {
         // the push), roll the presentation ledger back to the pre-batch
         // snapshot. Otherwise the marks survive and a later model-emitted
         // tool_call passes the #6721 fail-closed gate and executes on
-        // guessed arguments.
+        // guessed arguments. The generation check makes the restore a no-op
+        // when a ledger clear (e.g. this send's own compression) intervened
+        // after the snapshot was captured — restoring across a clear would
+        // resurrect marks whose backing tool_search results were summarized
+        // out of active history.
         if (
           pendingPresentationSnapshot &&
           (!providerSendChat ||
@@ -6100,6 +6128,7 @@ export class Session implements SessionContext {
               .getToolRegistry()
               .restoreProxySchemaPresentationSnapshot(
                 pendingPresentationSnapshot,
+                pendingPresentationGeneration,
               );
           } catch {
             // Ignore — see above.
@@ -6227,6 +6256,8 @@ export class Session implements SessionContext {
         // early returns above preserve the tool run into history, so they
         // need no rollback and are skipped by setting this after them.
         pendingPresentationSnapshot = toolRun.presentationSnapshot;
+        pendingPresentationGeneration =
+          toolRun.presentationSnapshotGeneration ?? 0;
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -8970,6 +9001,13 @@ export class Session implements SessionContext {
     const presentationSnapshot = this.config
       .getToolRegistry()
       .getProxySchemaPresentationSnapshot();
+    // Captured with the snapshot: if a ledger clear (compression,
+    // truncation, ...) happens before the send-failure rollback runs, the
+    // generation mismatch makes the restore a no-op instead of resurrecting
+    // marks the clear deliberately dropped.
+    const presentationSnapshotGeneration = this.config
+      .getToolRegistry()
+      .getProxySchemaPresentationGeneration();
     // Schema presentations delivered by this batch's tool_search results,
     // committed only once the batch aggregates into a returned result
     // (every runToolCalls return path either sends the parts to the model
@@ -9032,7 +9070,12 @@ export class Session implements SessionContext {
         })),
       };
       if (orderedRecords.length === 0) {
-        return { ...result, repeatedToolFailureBatch, presentationSnapshot };
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          presentationSnapshot,
+          presentationSnapshotGeneration,
+        };
       }
       const finalized = await finalizeToolResponses(
         this.config,
@@ -9060,6 +9103,7 @@ export class Session implements SessionContext {
         parts: finalized.flatMap((entry) => entry.responseParts),
         repeatedToolFailureBatch,
         presentationSnapshot,
+        presentationSnapshotGeneration,
       };
     };
     let skippedToolCallCounter = 0;

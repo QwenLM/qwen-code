@@ -213,6 +213,13 @@ export class ToolRegistry {
   // guessed arguments against an unseen or since-changed schema are
   // rejected and re-presented instead of executed.
   private proxySchemaPresentations: Map<string, string> = new Map();
+  // Monotonic counter incremented on every ledger clear. Rollback snapshots
+  // capture it; a restore that would cross an intervening clear is skipped —
+  // the clear (compression / microcompaction / rewind / setHistory) evicted
+  // the backing tool_search results from active history, so restoring the
+  // snapshot would resurrect marks for schemas the model can no longer see
+  // and reopen the #6721 gate on them.
+  private proxySchemaPresentationGeneration = 0;
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -867,7 +874,7 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
-    this.proxySchemaPresentations.clear();
+    this.clearProxySchemaPresentations();
   }
 
   /**
@@ -882,6 +889,18 @@ export class ToolRegistry {
    */
   clearProxySchemaPresentations(): void {
     this.proxySchemaPresentations.clear();
+    // Invalidate every snapshot captured before this clear (see
+    // restoreProxySchemaPresentationSnapshot).
+    this.proxySchemaPresentationGeneration++;
+  }
+
+  /**
+   * Generation of the presentation ledger. Captured together with a
+   * snapshot; if it has advanced by restore time, an intervening clear
+   * invalidated the snapshot and the restore must be skipped.
+   */
+  getProxySchemaPresentationGeneration(): number {
+    return this.proxySchemaPresentationGeneration;
   }
 
   /**
@@ -913,10 +932,19 @@ export class ToolRegistry {
    * before the history push): without the rollback the ledger mark survives
    * while the schema never reached the model, letting a later `tool_call`
    * pass the #6721 gate and execute on guessed arguments.
+   *
+   * `generation` is the value {@link getProxySchemaPresentationGeneration}
+   * returned when the snapshot was captured. If the generation has advanced
+   * since, an intervening ledger clear (compression, microcompaction,
+   * rewind/truncation, setHistory) deliberately dropped these marks — the
+   * backing tool_search results may have been summarized out of active
+   * history — so the restore becomes a no-op instead of resurrecting them.
    */
   restoreProxySchemaPresentationSnapshot(
     snapshot: ReadonlyMap<string, string>,
+    generation: number,
   ): void {
+    if (generation !== this.proxySchemaPresentationGeneration) return;
     this.proxySchemaPresentations = new Map(snapshot);
   }
 

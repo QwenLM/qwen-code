@@ -490,14 +490,20 @@ describe('Session', () => {
     markProxySchemaPresented: ReturnType<typeof vi.fn>;
     hasPresentedProxySchema: ReturnType<typeof vi.fn>;
     getProxySchemaPresentationSnapshot: ReturnType<typeof vi.fn>;
+    getProxySchemaPresentationGeneration: ReturnType<typeof vi.fn>;
     commitProxySchemaPresentations: ReturnType<typeof vi.fn>;
     clearProxySchemaPresentations: ReturnType<typeof vi.fn>;
+    restoreProxySchemaPresentationSnapshot: ReturnType<typeof vi.fn>;
   };
   // Backing store for the mocked presentation ledger. Tests that expect a
   // wrapper call to pass issue #6721's gate seed it (or deliver a
   // tool_search result carrying proxySchemaPresentations, which the daemon
   // commits at batch finalization).
   let presentedProxySchemas: Map<string, string>;
+  // Mirrors ToolRegistry's ledger generation: bumped on every clear,
+  // captured with snapshots, and a restore across an intervening clear is a
+  // no-op (issue #6721 rollback must not resurrect cleared marks).
+  let presentationGeneration: number;
   let mockWorkflowRunRegistry: {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
@@ -764,6 +770,7 @@ describe('Session', () => {
     };
 
     presentedProxySchemas = new Map<string, string>();
+    presentationGeneration = 0;
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
@@ -785,6 +792,7 @@ describe('Session', () => {
       getProxySchemaPresentationSnapshot: vi.fn(
         () => new Map(presentedProxySchemas),
       ),
+      getProxySchemaPresentationGeneration: vi.fn(() => presentationGeneration),
       commitProxySchemaPresentations: vi.fn(
         (
           presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
@@ -796,7 +804,16 @@ describe('Session', () => {
       ),
       clearProxySchemaPresentations: vi.fn(() => {
         presentedProxySchemas.clear();
+        presentationGeneration++;
       }),
+      restoreProxySchemaPresentationSnapshot: vi.fn(
+        (snapshot: ReadonlyMap<string, string>, generation: number) => {
+          // Mirrors the real registry: a clear since the snapshot was
+          // captured invalidates the restore.
+          if (generation !== presentationGeneration) return;
+          presentedProxySchemas = new Map(snapshot);
+        },
+      ),
     };
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
@@ -29502,6 +29519,140 @@ describe('Session', () => {
       expect(result.stopAfterPermissionCancel).toBe(false);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         2,
+      );
+    });
+  });
+
+  describe('deferred proxy-schema ledger rollback (#6721)', () => {
+    function mockToolWithBuild(name: string, build: ReturnType<typeof vi.fn>) {
+      return {
+        name,
+        kind: core.Kind.Read,
+        displayName: name,
+        description: name,
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+    }
+
+    // Registers a tool_search whose result carries the cron_create schema
+    // as pending presentations (committed at batch finalization, mirroring
+    // the real delivery contract).
+    function setUpToolSearchCarryingCronSchema() {
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: '<functions>cron_create</functions>',
+          returnDisplay: 'Loaded cron_create',
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const toolsByName = new Map<string, ReturnType<typeof mockToolWithBuild>>(
+        [
+          [
+            core.ToolNames.TOOL_SEARCH,
+            mockToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+          ],
+        ],
+      );
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+    }
+
+    function toolSearchStream() {
+      return createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'search_call',
+                name: core.ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+
+    it('does not resurrect marks across a mid-send compression clear (main loop)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      // Simulate what compression does to the ledger: tryCompressChat applies
+      // the compressed history via setHistory, which clears the ledger (and
+      // bumps its generation), then the send throws before the push. The
+      // rollback must NOT restore the pre-batch snapshot across that clear —
+      // the backing tool_search results were just summarized out of active
+      // history, so resurrecting the marks would reopen the #6721 gate on
+      // invisible schemas.
+      mockGeminiClient.tryCompressChat = vi.fn().mockImplementation(() => {
+        mockToolRegistry.clearProxySchemaPresentations();
+        return Promise.resolve({
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockRejectedValueOnce(new Error('send blew up'));
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'compress and fail' }],
+        }),
+      ).rejects.toThrow('send blew up');
+
+      // The batch committed its mark, the compression clear dropped it, and
+      // the send-failure rollback stayed a no-op across the clear.
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+      expect(presentedProxySchemas.size).toBe(0);
+      // The restore was attempted with the stale generation and refused.
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).toHaveBeenCalled();
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+    });
+
+    it('rolls the ledger back on main-loop send failure without an intervening clear', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('send blew up'));
+        });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'tool then fail' }],
+        }),
+      ).rejects.toThrow('send blew up');
+
+      expect(markAtCarryingSend).toBe('fp');
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
       );
     });
   });
