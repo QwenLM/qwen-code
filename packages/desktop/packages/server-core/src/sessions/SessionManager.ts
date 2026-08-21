@@ -3425,6 +3425,15 @@ export class SessionManager implements ISessionManager {
       if (!everListed.has(managed.sdkSessionId)) continue
       if (managed.isProcessing) continue
 
+      // Audit the deletion. The ratchet that permits it lives in memory and
+      // resets on restart, so without a record a "my session vanished" report
+      // after a restart cannot be traced back to the refresh that pruned it.
+      sessionLog.info(
+        `[external-prune] removing mirror ${managed.id} for workspace ` +
+          `${workspace.id} (${connectionSlug}): absent from a listing that ` +
+          `previously included it`,
+      )
+
       this.sessions.delete(managed.id)
       removed = true
       unregisterSessionScopedToolCallbacks(managed.id)
