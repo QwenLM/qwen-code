@@ -11198,35 +11198,73 @@ exit 1
     // while every token-level pin stayed green (R2-1). Anchoring the chain
     // on the LD_* prefix pins the one channel env -i cannot block; the
     // body-side unset and PATH export that protect the pre-launch digest
-    // check are pinned with it (R3-1, R2-2).
+    // check are pinned with it (R3-1, R2-2). The shapes AROUND the chain
+    // are closed by pinning the run body's whole statement list with
+    // comments stripped: a prefix command word that demotes the whole chain
+    // to one command's argv (the gate never executes and a forged outcome
+    // survives), a command appended or inserted around the launch, a
+    // demotion of the pinned block into a never-run arm, a commented-out or
+    // relocated statement — each adds, drops, reorders, or renames a
+    // statement here (R4-2, R4-3, R4-4). Within the chain, separators allow
+    // only bash whitespace — space/tab after the continuation newline: JS
+    // `\s` also matches a blank line, which splits the chain into two
+    // commands (the orphaned env -i prints and exits 0 while the rest runs
+    // with the FULL step environment), and NBSP/U+2028, which glue into the
+    // next operand and rename it; the statement list sees neither shape
+    // (blank lines filter out, trim strips a leading NBSP), so only this
+    // pin closes them (R4-1).
+    const gateLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
+      'WORKDIR="${WORKDIR}"',
+      'BRANCH="${BRANCH}"',
+      'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
+      'CI="${CI:-true}"',
+      'KISS_AUDIT="${KISS_AUDIT:-false}"',
+      'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    ];
     const gateLaunchPin = new RegExp(
-      [
-        'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
-        '/usr/bin/env -i',
-        'PATH="${TRUSTED_PATH}"',
-        'HOME="${HOME}"',
-        'RUNNER_TEMP="${RUNNER_TEMP}"',
-        'WORKDIR="${WORKDIR}"',
-        'BRANCH="${BRANCH}"',
-        'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
-        'CI="${CI:-true}"',
-        'KISS_AUDIT="${KISS_AUDIT:-false}"',
-        'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
-        'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
-      ]
+      gateLaunchTokens
         .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join(' \\\\\n\\s*'),
+        .join(' \\\\\n[ \\t]*'),
     );
+    // The digest check executes in the PARENT shell before the clean child
+    // exists, so its own defenses — the TRUSTED_PATH export and the LD_*
+    // unset — and their order live in the pinned statement list: a
+    // commented copy matched a bare toContain, and a planted LD_PRELOAD or
+    // PATH reached the sha256sum exec (R4-4). The digest line is pinned
+    // whole and per step — a workflow-wide count accepts relocation out of
+    // the gates, and `|| true` accepts a digest mismatch under bash -e
+    // (R4-3, the resanitize sibling's doctrine).
+    const gateDigestCheck =
+      'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null';
+    const gateBodyStatements = [
+      'export PATH="${TRUSTED_PATH}"',
+      'unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH',
+      gateDigestCheck,
+      ...gateLaunchTokens.map((token, index) =>
+        index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
+      ),
+    ];
     for (const step of [
       reviewVerificationGateStep,
       repairVerificationGateStep,
     ]) {
       expect(step).toMatch(gateLaunchPin);
+      expect(
+        step
+          .slice(step.indexOf('run: |-') + 'run: |-'.length)
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '' && !line.startsWith('#')),
+      ).toEqual(gateBodyStatements);
       // Exactly one launch per step: a second, unpinned `bash --norc` (the
       // pinned block demoted into a never-run arm) must fail here (R2-1).
       expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
-      expect(step).toContain('unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH');
-      expect(step).toContain('export PATH="${TRUSTED_PATH}"');
     }
     expect(
       reviewVerifyGate.indexOf(
