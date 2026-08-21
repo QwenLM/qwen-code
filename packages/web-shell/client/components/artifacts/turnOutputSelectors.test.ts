@@ -22,6 +22,152 @@ function toolGroup(id: string, tools: ACPToolCall[]): ToolGroupMessage {
 }
 
 describe('turnOutputSelectors', () => {
+  it('attaches expanded directory files to the recorded folder turn', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'scheduler_timeline_daily' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        title: 'day1.xlsx',
+        workspacePath: 'scheduler_timeline_daily/day1.xlsx',
+      },
+      {
+        id: 'artifact-2',
+        title: 'day2.xlsx',
+        workspacePath: 'scheduler_timeline_daily/nested/day2.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual(
+      artifacts,
+    );
+  });
+
+  it('does not attach later artifacts under a previously recorded directory', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const expanded = {
+      id: 'artifact-1',
+      workspacePath: 'reports/day1.xlsx',
+      toolCallId: 'call-1',
+    };
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    };
+    const artifacts = [expanded, later] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual([
+      expanded,
+    ]);
+    expect(getArtifactsByTurn(messages, artifacts).get('u2')).toEqual([later]);
+  });
+
+  it('ignores a failed record_artifact when grouping by directory prefix', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'failed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    } as DaemonSessionArtifact;
+
+    expect(getArtifactsByTurn(messages, [later]).get('u1')).toBeUndefined();
+    expect(getArtifactsByTurn(messages, [later]).get('u2')).toEqual([later]);
+  });
+
+  it('does not treat a sibling path as a recorded directory child', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: 'reports-old/summary.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toBeUndefined();
+  });
+
+  it('groups expanded directory children through the workspace cwd', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: '/workspace/project/reports' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: 'reports/day1.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(
+      getArtifactsByTurn(messages, artifacts, '/workspace/project').get('u1'),
+    ).toEqual(artifacts);
+  });
+
   it('groups artifacts by the turn that recorded them', () => {
     const messages = [
       userMessage('u1', 'make report'),

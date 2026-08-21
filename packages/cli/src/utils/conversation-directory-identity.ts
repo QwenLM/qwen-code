@@ -67,21 +67,20 @@ export type ConversationDirectoryIdentityFailureReason =
 
 export class ConversationDirectoryIdentityError extends Error {
   override readonly name = 'ConversationDirectoryIdentityError';
-  override readonly cause?: unknown;
 
   constructor(
     readonly scope: ConversationDirectoryIdentityScope,
     readonly reason: ConversationDirectoryIdentityFailureReason,
     cause?: unknown,
   ) {
-    super(`Conversation ${scope} identity validation failed: ${reason}`);
-    if (cause !== undefined) {
-      Object.defineProperty(this, 'cause', {
-        configurable: true,
-        enumerable: false,
-        value: cause,
-      });
-    }
+    // Passing the options bag through to Error keeps `cause` a non-enumerable
+    // own property that exists only when one was provided; a class field
+    // declaration would define an enumerable `cause: undefined` on every
+    // instance instead.
+    super(
+      `Conversation ${scope} identity validation failed: ${reason}`,
+      cause !== undefined ? { cause } : undefined,
+    );
   }
 }
 

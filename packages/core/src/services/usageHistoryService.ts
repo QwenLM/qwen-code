@@ -370,7 +370,11 @@ async function rebuildFromSessionJsonl(
     const chatsDir = path.join(projectsDir, projDir, 'chats');
     let files: string[];
     try {
-      files = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.jsonl'));
+      // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
+      // transcript — only real session JSONL files carry usage evidence.
+      files = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
     } catch (e) {
       debugLogger.debug(
         `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,

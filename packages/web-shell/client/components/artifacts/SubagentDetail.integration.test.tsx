@@ -134,6 +134,13 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     turnFileChanges: expect.any(Map),
     turnArtifacts: expect.any(Map),
   });
+  // The subagent prompt renders as the transcript's own user bubble (like the
+  // main agent), not as a separate overview block: the first user message is
+  // not hidden and no standalone prompt panel is shown.
+  expect(latestMessageListProps.current?.['hideFirstUserMessage']).toBe(
+    undefined,
+  );
+  expect(container.querySelector('pre[class*="prompt"]')).toBeNull();
   expect(messagesFromBlocks).toHaveBeenCalledWith(
     expect.any(Function),
     animationFrameBlocks,
