@@ -2063,6 +2063,37 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('describes a chanting halt as output-or-reasoning repetition', async () => {
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Chant',
+      'prompt-id-chanting-loop',
+    );
+
+    expect(exitCode).toBe(1);
+    // Reasoning-stream chants fire CHANTING_IDENTICAL_SENTENCES while
+    // getResponseText filters reasoning out of visible output, so the
+    // headless label must name both channels — a halt on an empty stdout
+    // with an "output"-only label reads as a detector misfire.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the model repeated the same sentence in its output or reasoning',
+      ),
+    );
+  });
+
   it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
     setupMetricsMock();
     const events: ServerGeminiStreamEvent[] = [
