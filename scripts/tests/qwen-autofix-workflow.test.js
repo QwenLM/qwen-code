@@ -494,7 +494,18 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'for LIVE_STATUS in in_progress queued pending',
     );
-    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    // The union calls the runs API directly, not `gh run list --status`: gh
+    // validates that flag against a client-side allow-list that rejects
+    // 'pending' before 2.65.0, so a runner whose gh lags the hosted images
+    // would exit 1 and silently fail-close EVERY scan; the API filter is
+    // server-side on every gh version.
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50"',
+    );
+    expect(reviewScanJob).toContain("--jq '.workflow_runs[].databaseId'");
+    expect(reviewScanJob).not.toContain(
+      'gh run list --repo "${REPO}" --workflow qwen-autofix.yml',
+    );
     expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its
     // matrix, so review-address REVALIDATES the watermark against LIVE
@@ -3958,7 +3969,7 @@ describe('qwen-autofix workflow', () => {
             '  esac',
             'done',
             'set -- "${positional[@]}"',
-            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            'if [[ "$1" == "api" ]]; then',
             '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
             '  payload="${ENUM_LIST_ANSWER}"',
             'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
@@ -4023,7 +4034,7 @@ describe('qwen-autofix workflow', () => {
     expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
     // A jobs-view failure mid-enumeration fails closed the same way.
     const viewFailed = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ databaseId: 101 }] }),
       viewError: 'HTTP 500',
     });
     expect(viewFailed.candidates).toBe('');
@@ -4031,7 +4042,7 @@ describe('qwen-autofix workflow', () => {
     expect(viewFailed.fleet).toContain('HTTP 500');
     // A healthy enumeration accumulates the busy set and keeps candidates.
     const ok = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ databaseId: 101 }] }),
       viewAnswer: JSON.stringify({
         jobs: [
           { name: 'review-address (101, round 2)', status: 'in_progress' },

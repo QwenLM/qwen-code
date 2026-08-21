@@ -896,7 +896,14 @@ the per-PR group it should have skipped. Pending runs cost one
 extra jobs-view each and match nothing until their matrix
 materialises. Filtered this way the limit applies to LIVE runs
 only (at most a handful), and one jobs-view per live run stays
-cheap.
+cheap. The enumeration calls the runs API directly, not `gh run
+list --status`: gh validates --status against a client-side
+allow-list that only accepts 'pending' from 2.65.0 onward, while
+the self-hosted ecs-qwen pool (already used by the issue-autofix,
+build-cli, and review-address sibling jobs) lags the hosted
+images — an older gh exits 1 on the flag and FAIL-CLOSED below
+then silently empties every scan. The API's status filter is
+server-side on every gh version.
 
 FAIL-CLOSED: any enumeration failure (the run list, or one run's
 jobs view) empties THIS scan's candidate set. Measured 2026-08-16
