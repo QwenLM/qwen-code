@@ -4513,11 +4513,8 @@ describe('multi-workspace session dispatch', () => {
       const conflict = await request(trusted.app)
         .get(`/workspaces/secondary-id/session/${conflictId}/export`)
         .set('Host', host());
-      expect(conflict.status).toBe(409);
-      expect(conflict.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: conflictId,
-      });
+      expect(conflict.status).toBe(200);
+      expect(conflict.text).toContain('conflicting secondary');
 
       const invalidFormat = await request(trusted.app)
         .get(
