@@ -22,4 +22,8 @@ describe('CUA SDK release workflow', () => {
     );
     expect(workflow).not.toMatch(/spctl[^\n]+\|\| true/u);
   });
+
+  it('retries transient Debian mirror failures', () => {
+    expect(workflow.match(/apt-get -o Acquire::Retries=3/g)).toHaveLength(2);
+  });
 });
