@@ -4955,7 +4955,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5006,7 +5005,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5040,7 +5038,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5597,7 +5594,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 

@@ -55,9 +55,7 @@ vi.mock('./openaiContentGenerator/index.js', () => ({
         (async function* () {
           yield {};
         })(),
-      countTokens: async () => ({ totalTokens: 1 }),
       embedContent: async () => ({ embeddings: [] }),
-      useSummarizedThinking: () => false,
     });
     const gate = openaiMockState.constructionGates[attempt];
     if (!gate) {
@@ -88,12 +86,8 @@ vi.mock('../qwen/qwenContentGenerator.js', () => ({
       qwenMockState.constructorModels.push(generatorConfig.model);
     }
 
-    async countTokens() {
-      return { totalTokens: 1 };
-    }
-
-    useSummarizedThinking() {
-      return false;
+    async embedContent() {
+      return { embeddings: [] };
     }
   },
 }));
@@ -131,7 +125,7 @@ describe('createContentGenerator', () => {
 
     const mockGenerator = {
       models: {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+        embedContent: vi.fn().mockResolvedValue({ embeddings: [] }),
       },
     } as unknown as GoogleGenAI;
     vi.mocked(GoogleGenAI).mockImplementation(() => mockGenerator as never);
@@ -144,9 +138,8 @@ describe('createContentGenerator', () => {
       mockConfig,
     );
     expect(GoogleGenAI).not.toHaveBeenCalled();
-    expect(generator.useSummarizedThinking()).toBe(true);
 
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
@@ -173,7 +166,7 @@ describe('createContentGenerator', () => {
     } as unknown as Config;
     const mockGenerator = {
       models: {
-        countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+        embedContent: vi.fn().mockResolvedValue({ embeddings: [] }),
       },
     } as unknown as GoogleGenAI;
     vi.mocked(GoogleGenAI).mockImplementation(() => mockGenerator as never);
@@ -186,7 +179,7 @@ describe('createContentGenerator', () => {
       mockConfig,
     );
     expect(GoogleGenAI).not.toHaveBeenCalled();
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
@@ -219,10 +212,9 @@ describe('createContentGenerator', () => {
     );
 
     expect(openaiMockState.createCount).toBe(0);
-    expect(generator.useSummarizedThinking()).toBe(false);
     await Promise.all([
-      generator.countTokens({ model: 'test-model', contents: 'one' }),
-      generator.countTokens({ model: 'test-model', contents: 'two' }),
+      generator.embedContent({ model: 'test-model', contents: 'one' }),
+      generator.embedContent({ model: 'test-model', contents: 'two' }),
     ]);
     expect(openaiMockState.createCount).toBe(1);
   });
@@ -231,18 +223,14 @@ describe('createContentGenerator', () => {
     const generator: ContentGenerator = {
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn(),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn(),
     };
 
     await expect(preloadContentGenerator(generator)).resolves.toBeUndefined();
     resetPreloadedContentGenerator(generator);
     expect(generator.generateContent).not.toHaveBeenCalled();
     expect(generator.generateContentStream).not.toHaveBeenCalled();
-    expect(generator.countTokens).not.toHaveBeenCalled();
     expect(generator.embedContent).not.toHaveBeenCalled();
-    expect(generator.useSummarizedThinking).not.toHaveBeenCalled();
   });
 
   it('loads a provider once across concurrent preload and first use', async () => {
@@ -264,7 +252,7 @@ describe('createContentGenerator', () => {
 
     await Promise.all([
       preloadContentGenerator(generator),
-      generator.countTokens({ model: 'test-model', contents: 'hello' }),
+      generator.embedContent({ model: 'test-model', contents: 'hello' }),
     ]);
 
     expect(openaiMockState.createCount).toBe(1);
@@ -289,7 +277,7 @@ describe('createContentGenerator', () => {
 
     await preloadContentGenerator(generator);
     resetPreloadedContentGenerator(generator);
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
@@ -315,12 +303,12 @@ describe('createContentGenerator', () => {
     );
 
     await preloadContentGenerator(generator);
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'first',
     });
     resetPreloadedContentGenerator(generator);
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'second',
     });
@@ -353,7 +341,7 @@ describe('createContentGenerator', () => {
 
     const preload = preloadContentGenerator(generator);
     await vi.waitFor(() => expect(openaiMockState.createCount).toBe(1));
-    const firstUse = generator.countTokens({
+    const firstUse = generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
@@ -361,7 +349,7 @@ describe('createContentGenerator', () => {
     releaseConstruction();
 
     await expect(preload).resolves.toBeUndefined();
-    await expect(firstUse).resolves.toEqual({ totalTokens: 1 });
+    await expect(firstUse).resolves.toEqual({ embeddings: [] });
     expect(openaiMockState.createCount).toBe(1);
   });
 
@@ -399,22 +387,22 @@ describe('createContentGenerator', () => {
     );
     await vi.waitFor(() => expect(openaiMockState.createCount).toBe(1));
     resetPreloadedContentGenerator(generator);
-    const firstUse = generator.countTokens({
+    const firstUse = generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
     await vi.waitFor(() => expect(openaiMockState.createCount).toBe(2));
 
     releaseFirstUse();
-    await expect(firstUse).resolves.toEqual({ totalTokens: 1 });
+    await expect(firstUse).resolves.toEqual({ embeddings: [] });
     releasePreload();
     await expect(discardedPreload).resolves.toBe(preloadError);
     await expect(
-      generator.countTokens({
+      generator.embedContent({
         model: 'test-model',
         contents: 'still uses the replacement',
       }),
-    ).resolves.toEqual({ totalTokens: 1 });
+    ).resolves.toEqual({ embeddings: [] });
     expect(openaiMockState.createCount).toBe(2);
   });
 
@@ -435,7 +423,7 @@ describe('createContentGenerator', () => {
     await preloadContentGenerator(generator);
     generatorConfig.model = 'coder-model';
     resetPreloadedContentGenerator(generator);
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'coder-model',
       contents: 'hello',
     });
@@ -470,7 +458,7 @@ describe('createContentGenerator', () => {
     await preloadContentGenerator(generator);
     workingDir = '/workspace/after';
     resetPreloadedContentGenerator(generator);
-    await generator.countTokens({
+    await generator.embedContent({
       model: 'test-model',
       contents: 'hello',
     });
@@ -507,7 +495,7 @@ describe('createContentGenerator', () => {
       (error: unknown) => error,
     );
     const firstUseError = await generator
-      .countTokens({ model: 'test-model', contents: 'hello' })
+      .embedContent({ model: 'test-model', contents: 'hello' })
       .catch((error: unknown) => error);
 
     expect(preloadError).toBeInstanceOf(Error);
@@ -534,8 +522,7 @@ describe('createContentGenerator', () => {
 
     expect(qwenMockState.oauthCount).toBe(1);
     expect(qwenMockState.constructorCount).toBe(0);
-    expect(generator.useSummarizedThinking()).toBe(false);
-    await generator.countTokens({ model: 'test-model', contents: 'hello' });
+    await generator.embedContent({ model: 'test-model', contents: 'hello' });
     expect(qwenMockState.constructorCount).toBe(1);
   });
 
@@ -638,7 +625,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
       mockConfig,
     );
     await expect(
-      generator.countTokens({ model: 'test-model', contents: 'hello' }),
+      generator.embedContent({ model: 'test-model', contents: 'hello' }),
     ).rejects.toThrow('network timeout');
   });
 
@@ -688,7 +675,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
         },
         mockConfig,
       );
-      await generator.countTokens({ model: 'test-model', contents: 'hello' });
+      await generator.embedContent({ model: 'test-model', contents: 'hello' });
       expect.unreachable('should have thrown');
     } catch (error) {
       expect(error).toBeInstanceOf(Error);

@@ -562,7 +562,6 @@ describe('Gemini Client (client.ts)', () => {
       generateContent: mockGenerateContentFn,
       generateContentStream: vi.fn(),
       batchEmbedContents: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
     } as unknown as ContentGenerator;
 
     // Because the GeminiClient constructor kicks off an async process (startChat)

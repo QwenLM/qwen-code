@@ -5,8 +5,6 @@
  */
 
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -33,7 +31,7 @@ import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
- * Interface abstracting the core functionalities for generating content and counting tokens.
+ * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
   generateContent(
@@ -46,11 +44,7 @@ export interface ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>>;
 
-  countTokens(request: CountTokensParameters): Promise<CountTokensResponse>;
-
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
-
-  useSummarizedThinking(): boolean;
 }
 
 export enum AuthType {
@@ -403,10 +397,7 @@ class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
   private preloadedOnly = false;
 
-  constructor(
-    private readonly loader: () => Promise<ContentGenerator>,
-    private readonly summarizedThinking: boolean,
-  ) {}
+  constructor(private readonly loader: () => Promise<ContentGenerator>) {}
 
   private getGenerator(): Promise<ContentGenerator> {
     this.generatorPromise ??= this.loader();
@@ -451,20 +442,10 @@ class LazyContentGenerator implements ContentGenerator {
     );
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return (await this.getGeneratorForUse()).countTokens(request);
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return (await this.getGeneratorForUse()).embedContent(request);
-  }
-
-  useSummarizedThinking(): boolean {
-    return this.summarizedThinking;
   }
 }
 
@@ -564,22 +545,19 @@ export async function createContentGenerator(
     throw wrapProviderLoadError(error, authType);
   }
 
-  return new LazyContentGenerator(
-    async () => {
-      try {
-        const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
-          loadBaseGenerator(),
-          import('./loggingContentGenerator/index.js'),
-        ]);
-        return new LoggingContentGenerator(
-          baseGenerator,
-          config,
-          generatorConfig,
-        );
-      } catch (error) {
-        throw wrapProviderLoadError(error, authType);
-      }
-    },
-    authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI,
-  );
+  return new LazyContentGenerator(async () => {
+    try {
+      const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
+        loadBaseGenerator(),
+        import('./loggingContentGenerator/index.js'),
+      ]);
+      return new LoggingContentGenerator(
+        baseGenerator,
+        config,
+        generatorConfig,
+      );
+    } catch (error) {
+      throw wrapProviderLoadError(error, authType);
+    }
+  });
 }
