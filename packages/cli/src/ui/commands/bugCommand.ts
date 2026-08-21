@@ -23,6 +23,7 @@ export const bugCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   argumentHint: '<description>',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const bugDescription = (args || '').trim();
     const systemInfo = await getExtendedSystemInfo(context);

@@ -173,7 +173,13 @@ export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
-  readonly replaySnapshot: DaemonReplaySnapshot;
+  /**
+   * Not `readonly`: {@link consumeReplaySnapshot} swaps it for an empty
+   * snapshot once the provider has injected it into the transcript store,
+   * releasing the raw wire events (tens of MiB on busy sessions) instead of
+   * retaining them for the session client's lifetime.
+   */
+  replaySnapshot: DaemonReplaySnapshot;
   readonly replaySnapshotComplete: boolean;
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
@@ -405,6 +411,19 @@ export class DaemonSessionClient {
 
   get eventEpoch(): string | undefined {
     return this.lastSeenEpoch;
+  }
+
+  /**
+   * Returns the retained replay snapshot and drops the client's reference
+   * to it. Call once the snapshot has been injected into a transcript
+   * store; the raw wire events are no longer needed (SSE continues from
+   * `lastEventId`, and older history is served by pagination) and can
+   * otherwise pin tens of MiB per session client.
+   */
+  consumeReplaySnapshot(): DaemonReplaySnapshot {
+    const snapshot = this.replaySnapshot;
+    this.replaySnapshot = { compactedReplay: [], liveJournal: [] };
+    return snapshot;
   }
 
   setLastEventId(lastEventId: number | undefined): void {
