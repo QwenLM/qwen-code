@@ -306,21 +306,6 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
   );
 }
 
-export function OpenTuiAuthDialog({ config, onClose }: P) {
-  useEsc(onClose);
-  const model = config?.getModel?.() ?? 'n/a';
-  return (
-    <Shell title="Auth" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Active model:" value={model} />
-        <text fg={C.dim}>
-          {'Credentials resolved from settings/env; use /model to switch.'}
-        </text>
-      </box>
-    </Shell>
-  );
-}
-
 export function OpenTuiTrustDialog({ config, onClose }: P) {
   useEsc(onClose);
   const trusted = config?.isTrustedFolder?.() ?? false;

@@ -63,7 +63,6 @@ import {
 } from './dialogs-memory-status.js';
 import {
   OpenTuiEditorDialog,
-  OpenTuiAuthDialog,
   OpenTuiTrustDialog,
   OpenTuiDeleteDialog,
   OpenTuiResumeDialog,
@@ -75,6 +74,7 @@ import {
   OpenTuiSubagentListDialog,
 } from './dialogs-misc.js';
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
+import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import {
   addPermissionRule,
   applyMcpServerAction,
@@ -521,6 +521,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          notify={notify}
         />
       )}
       {dialog.dialog === 'trust' && (
