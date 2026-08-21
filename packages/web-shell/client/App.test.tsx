@@ -368,6 +368,7 @@ const {
         | { data: string; media_type: string }[]
         | undefined,
       streamingState: 'idle' as StreamingState,
+      sessionHasActivePrompt: false,
       blocks: [] as unknown[],
       messages: [] as unknown[],
       queuedPromptHoldHistory: [] as boolean[],
@@ -394,6 +395,7 @@ const {
         }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
       latestBtwMessageProps: null as {
         question: string;
@@ -800,6 +802,7 @@ vi.mock('./components/MessageList', async () => {
         }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        terminalBackgroundShellTaskIds?: ReadonlySet<string>;
         welcomeHeader?: React.ReactNode;
       },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
@@ -1136,6 +1139,7 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
+  useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
 }));
 
 vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
@@ -1175,10 +1179,17 @@ vi.doMock('./components/StatusBar', async () => {
 vi.doMock('./components/StreamingStatus', async () => {
   const React = await import('react');
   return {
-    StreamingStatus: ({ startedAt }: { startedAt?: number }) =>
+    StreamingStatus: ({
+      startedAt,
+      hasActivePrompt,
+    }: {
+      startedAt?: number;
+      hasActivePrompt?: boolean;
+    }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
+        'data-has-active-prompt': String(hasActivePrompt === true),
       }),
   };
 });
@@ -1780,6 +1791,13 @@ describe('task activity key', () => {
             args: { is_background: true },
           },
           {
+            callId: 'promoted-shell',
+            toolName: 'run_shell_command',
+            status: 'completed',
+            args: { is_background: false },
+            rawOutput: 'Promoted to background: bg_1234abcd',
+          },
+          {
             callId: 'monitor-call',
             toolName: 'monitor',
             status: 'completed',
@@ -1790,7 +1808,7 @@ describe('task activity key', () => {
     ] satisfies Message[];
 
     expect(getTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|monitor-call:completed',
+      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|promoted-shell:completed|monitor-call:completed',
     );
   });
 
@@ -4761,6 +4779,7 @@ beforeEach(() => {
   testState.inputAnnotations = undefined;
   testState.promptImages = undefined;
   testState.streamingState = 'idle';
+  testState.sessionHasActivePrompt = false;
   testState.blocks = [];
   testState.messages = [];
   testState.queuedPromptHoldHistory = [];
@@ -5351,6 +5370,76 @@ describe('App composer footer renderer', () => {
         child.getAttribute('data-web-shell-composer'),
       ),
     );
+  });
+});
+
+describe('App conversation indicator keep-alive (#9487)', () => {
+  it('keeps the indicator mounted and composer running through a silent gap', async () => {
+    const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      composerFooterProps.push(props);
+      return <div data-testid="composer-footer" />;
+    };
+    const { container, rerender } = renderApp({
+      renderComposerFooter: ComposerFooter,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(false);
+
+    // Silent mid-turn gap: streamingState is idle while the daemon still
+    // reports the in-flight prompt.
+    testState.sessionHasActivePrompt = true;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    const status = container.querySelector('[data-testid="streaming-status"]');
+    expect(status).not.toBeNull();
+    expect(status?.getAttribute('data-has-active-prompt')).toBe('true');
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(true);
+
+    testState.sessionHasActivePrompt = false;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(false);
+  });
+
+  it('lets Escape cancel during a silent gap the daemon still owns', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    mockSessionActions.cancel.mockClear();
+
+    const pressEscape = () => {
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+
+    // Fully idle, no daemon prompt: Escape has nothing to cancel.
+    pressEscape();
+    pressEscape();
+    expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+
+    testState.sessionHasActivePrompt = true;
+    rerender();
+    await flush();
+
+    pressEscape(); // arm the two-press cancel
+    pressEscape(); // confirm it
+    expect(mockSessionActions.cancel).toHaveBeenCalled();
   });
 });
 
@@ -7814,6 +7903,36 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('passes terminal background shell task ids to the message list', async () => {
+    const running: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'Running shell',
+      description: 'Running shell',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'npm run dev',
+      cwd: '/tmp/project',
+    };
+    testState.backgroundTasks = [
+      running,
+      {
+        ...running,
+        id: 'shell-completed',
+        status: 'completed',
+      },
+    ];
+
+    renderApp();
+    await flush();
+
+    expect([
+      ...(testState.latestMessageListProps?.terminalBackgroundShellTaskIds ??
+        []),
+    ]).toEqual(['shell-completed']);
   });
 
   it('controls the built-in chat header actions through header items', () => {
