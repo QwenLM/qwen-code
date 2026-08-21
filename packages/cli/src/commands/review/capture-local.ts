@@ -216,16 +216,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // unhashed and two captures differing only in which head file git paired as
   // the source would compare as "no changes".
   //
-  // DEFENSIVE at this commit, not a live fix: the local capture diffs `HEAD`
-  // against the worktree and nothing else, and `git diff -M HEAD` renders a
-  // move as delete + add rather than pairing it (measured — a staged move of
-  // a 95%-similar file still comes back as two sections). So no local plan
-  // carries `renameFrom` today. The line is here because the cost is one
-  // set union and the failure it prevents is silent, and because the moment
-  // this capture grows a `--cached` range — the obvious next step for staged
-  // review — renames appear and the anchor would be wrong without it. There
-  // is deliberately no test: none could be written that exercises this rather
-  // than passing for another reason.
+  // LIVE, not defensive. An earlier version of this comment claimed the
+  // opposite on the strength of a measurement that did not hold: the pinned
+  // flags include `--find-renames` (`lib/diff-flags.ts`), and the capture's
+  // own command over a staged `git mv` renders one rename section, not two —
+  // `similarity index 100%` for a pure move and `95%` for a move with a small
+  // edit. Local plans therefore DO carry `renameFrom`, which is what makes
+  // the slice filter below a live fix rather than a spare part.
   const planPaths = [
     ...new Set(
       fullPlan.files.flatMap((f) =>
@@ -351,7 +348,22 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       diffBytes = sliceDiffByLines(
         capture.diff,
         fullPlan.files
-          .filter((f) => keep.has(f.path))
+          // Either SIDE of a rename keeps the section. A rename section is
+          // labelled with its NEW path, while `changedSince` reports the
+          // deleted SOURCE — its recorded identity is UNHASHABLE, which never
+          // equals itself, so the source is in `keep` on every round and the
+          // target is in none. Matching `f.path` alone cut the whole section:
+          // a zero-byte slice, a plan with no chunks, `deltaFiles` naming a
+          // path no section carries, and the branch below still printing
+          // "Their sections are in scope". The stop sentence cannot fire
+          // either (`stateChanged` is non-empty), and the candidate re-records
+          // the same state, so every round repeats it — a review cycle spun
+          // over an empty diff with no convergence until HEAD moves.
+          .filter(
+            (f) =>
+              keep.has(f.path) ||
+              (f.renameFrom !== undefined && keep.has(f.renameFrom)),
+          )
           .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
       );
       plan = buildDiffPlan(diffBytes.toString('utf8'));

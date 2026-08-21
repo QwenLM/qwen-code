@@ -376,6 +376,42 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — a staged move across rounds', () => {
+  it('keeps the rename section when only its deleted SOURCE is in scope', () => {
+    // The capture's pinned flags include `--find-renames`, so a staged move
+    // comes back as ONE section labelled with the NEW path — a comment here
+    // once claimed otherwise on the strength of a measurement that did not
+    // hold. `changedSince` reports the deleted SOURCE (its recorded identity
+    // is UNHASHABLE, which never equals itself), so on the round after the
+    // move the keep-set holds the source and no section is labelled with it.
+    // Matching the new side alone cut the whole section: a zero-byte slice, a
+    // plan with no chunks, `deltaFiles` naming a path no section carries, and
+    // the "their sections are in scope" line printed over it. The stop
+    // sentence cannot fire either, and the candidate re-records the same
+    // state — so the cycle repeats until HEAD moves.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'round 1 work');
+    git('mv', CHANGED, 'src/moved.ts');
+
+    const round1 = capture();
+    expect(round1.files.map((f) => f.path)).toContain('src/moved.ts');
+    const cache = promoteCandidate(round1, 'model-a');
+
+    // Round 2: nothing moved since round 1.
+    const round2 = capture({ cache, model: 'model-a' });
+    const scope = round2.incremental?.scope;
+    expect(scope).toBeDefined();
+    // The source is what changed since the anchor…
+    expect(scope!.deltaFiles).toContain(CHANGED);
+    // …and the section it names is PUBLISHED, not sliced away.
+    const sliced = readFileSync(join(repo, round2.diffPath), 'utf8');
+    expect(sliced).toContain(`rename from ${CHANGED}`);
+    expect(sliced).toContain('rename to src/moved.ts');
+    expect(round2.chunks.length).toBeGreaterThan(0);
+  });
+});
+
 describe('capture-local — identity soundness and refusal contract', () => {
   it.skipIf(process.platform === 'win32')(
     'an exec-bit flip alone is a change — bytes equal, mode not',
