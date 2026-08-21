@@ -397,7 +397,7 @@ export async function buildTaskPrompt(projectRoot: string): Promise<string> {
     '',
     existingLine,
     '',
-    'Use `ls` and `read_file` to inspect existing skills before writing.',
+    'Use `read_file` to inspect the existing skill files listed above before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
     `New skills you create MUST live at \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\` — the \`${AUTO_SKILL_DIR_PREFIX}\` directory prefix is mandatory so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` (no prefix). The frontmatter MUST include 'source: auto-skill':`,
     '',
@@ -439,12 +439,7 @@ export async function runSkillReviewByAgent(params: {
         ? params.timeoutMs / 60_000
         : (params.config.getMemoryAgentTimeoutMinutes() ??
           DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.LS,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.EDIT],
     extraHistory: buildAgentHistory(params.history),
   });
 

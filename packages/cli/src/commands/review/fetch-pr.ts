@@ -51,7 +51,14 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
-import { narrowToDelta } from './lib/narrow-diff.js';
+import type { NarrowSelection } from './lib/narrow-diff.js';
+import { assembleSections, selectNarrowing } from './lib/narrow-diff.js';
+import type {
+  IncrementalScope,
+  WidenedScope,
+} from './lib/incremental-scope.js';
+import { widenScope } from './lib/incremental-scope.js';
+import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -312,6 +319,14 @@ export interface IncrementalDecision {
    * out of the PR's diff.
    */
   diffBase?: string;
+  /**
+   * Which files the published scope holds and why, present exactly when the
+   * scope is the narrowed one. `deltaFiles` are what the round touched;
+   * `interaction[]` are still-clean files the one-hop widening pulled back
+   * in, each with the edges that did it, so a chunk brief can point its agent
+   * at the seam rather than order a from-scratch re-review.
+   */
+  scope?: IncrementalScope;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -1241,6 +1256,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let scopedDelta = false;
     /** The PR's own hunks, narrowed to what changed since the anchor. */
     let narrowed: Buffer | null = null;
+    /** What the narrowing selected, before the widening adds to it. */
+    let selection: NarrowSelection | null = null;
+    /** The selection plus one import hop, and the record of why. */
+    let widened: WidenedScope | null = null;
     if (anchor?.diffBase) {
       // An anchor that resolved to the merge base names the range already in
       // hand: re-running the identical `git diff` would spend the capture (and
@@ -1302,7 +1321,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // large long-lived PR `--since` exists for. That is infrastructure,
         // and a re-run can succeed, so this one keeps `capture-failed`.
         demote('capture-failed');
-      } else if ((narrowed = narrowToDelta(fullBytes, deltaBytes)) === null) {
+      } else if (
+        (selection = selectNarrowing(fullBytes, deltaBytes)) === null
+      ) {
         // The narrowing found nothing it could publish — all safe, because
         // keeping the full range costs a wider review and never a wrong one:
         // the "undo per feedback" round whose commits put lines back the way
@@ -1315,9 +1336,30 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // or a rename), so narrowing would drop a change the PR's diff
         // displays.
         demote('nothing-to-narrow');
+      } else if (
+        // One import hop past what the round touched. The narrowing is sound
+        // in one direction only: a caller cleared against the callee's OLD
+        // shape is unchanged by definition, so no delta capture shows it, and
+        // a scope holding only the touched files retires that seam at the
+        // next re-anchor. The widening never narrows — with no edge to follow
+        // it returns the narrowing's own paths — so the unwidened round is
+        // the floor rather than a second path that could disagree with it.
+        ((widened = widenScope({
+          anchor: anchor.diffBase ?? anchor.incremental.since,
+          selection,
+          readWorktree: containedWorktreeReader(wt),
+        })),
+        (narrowed = assembleSections(selection, widened.paths)) === null)
+      ) {
+        // `assembleSections` selects nothing only when the widened set names
+        // no section the full capture carries, which the guards above already
+        // rule out — but it is the same "nothing to publish" either way, and
+        // the full range is the safe answer to it.
+        demote('nothing-to-narrow');
       } else {
         if (publish(narrowed)) {
           scopedDelta = true;
+          anchor.incremental.scope = widened.scope;
           // The published hunks are byte-identical hunks of
           // `mergeBaseSha..head`, so that range is what downstream consumers
           // recomputing their own diffs must probe (Agent 7's test-efficacy
