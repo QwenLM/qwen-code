@@ -1202,6 +1202,21 @@ function toCount(value: unknown, field: string): number {
   return value;
 }
 
+/**
+ * `toCount`'s acceptance as a total function: the count when `toCount`
+ * accepts the value, undefined when it would throw. A caller OUTSIDE this
+ * boundary that merges into a count without owning the refusal — submit's
+ * Aone anchor gate — decides "merge or leave for compose" through the SAME
+ * acceptance table, so the two reads can never drift.
+ */
+export function tryToCount(value: unknown): number | undefined {
+  try {
+    return toCount(value, '');
+  } catch {
+    return undefined;
+  }
+}
+
 function toStringList(value: unknown, field: string): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
@@ -1765,7 +1780,7 @@ function collapseEntry(entry: string): string {
 }
 
 /** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
-const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
+export const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
 
 /**
  * A model-written entry list as EVERY consumer sees it: one line per entry,

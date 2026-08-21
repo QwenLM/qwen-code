@@ -91,8 +91,24 @@ For an Aone target, `/review --comment` inline anchoring is:
   it is absent or unreadable the Aone post refuses WHOLE — an irreversible
   write the boundary cannot vouch for is the one thing the write gate must
   not perform. The refusal names the remedy (re-run the review where the
-  diff is captured) and the findings stay in the terminal/report. (GitHub
-  needs no such condition: its server holds the diff.)
+  diff is captured) and the findings stay in the terminal/report. A
+  `--dry-run` preview is the exception: it writes nothing by definition, so
+  the rationale cannot apply — it skips the gate with a disclosure (anchors
+  unchecked) and reports `wouldPost: false` with `reason:
+'aone-diff-missing'`. The exit-3 refusal stays reserved for the real
+  write. (GitHub needs no such condition: its server holds the diff.)
+
+One doctrine for relocated entries: a gate relocation lands the entry in
+`state.bodyCriticals` and deliberately inherits compose-review's treatment
+of the MODEL's OWN body Criticals — the whole-entry deterministic-tag scan
+included. The deferral channel's relocated entries are exempted from that
+scan because they carry a structured `source` field the exemption keys on;
+a gate relocation carries no provenance beyond the claim line, and a tag
+there was written by the same model that drafts body Criticals directly —
+which receive exactly that scan. The bounded divergence (the same claim can
+classify differently by which channel relocated it) is accepted: the
+alternative would key compose's verification split on transit rather than
+provenance.
 
 The first three bullets make removed-line findings well-defined:
 resolve-anchors already reports a snippet quoted from `-` lines as
@@ -124,20 +140,32 @@ side?, startSide?}`, report valid / invalid-with-reason. Reuses
    body entry keeps its attribution) and incrementing
    `state.suggestionsDiscarded` per discarded Suggestion; disclose each on
    stderr. The verdict is then composed over the corrected set, so
-   `C`/`S`, the event, and the body stay one computation. The relocated
-   entry is the marker-stripped CLAIM line — single-line by construction,
-   which is what compose-review's entry ingestion carries (an inline
-   body's fenced code block never enters the one-line channel; the full
-   text stays in the terminal and the saved report). Two merge guards keep
-   the degrade from laundering garbage the compose gates own: a
-   `bodyCriticals` that is neither absent nor an array STANDS THE WHOLE
-   GATE DOWN when a relocation needs it (a raw spread would shatter a
-   string into per-character junk entries or throw a bare TypeError — the
+   `C`/`S`, the event, and the body stay one computation. The removal
+   keeps the model-authored comment indices, and the consistency gate's
+   refusals cite THOSE — a renumbered index would point the re-compose
+   loop at the wrong comment. The relocated entry is the marker-stripped
+   CLAIM line — single-line by construction, which is what compose-review's
+   entry ingestion carries. The claim extraction strips a leading marker
+   RUN, not a single marker (a looping model drafts stacked markers, and
+   compose quotes the entry as-is behind the template marker), and a claim
+   line that IS a fence delimiter (a marker-alone body leading into a
+   fence) falls back to the `finding` placeholder — the entry's
+   `path:line — ` prefix would hide the delimiter from compose's
+   line-anchored fence refusal, so the gate refuses to carry it; the full
+   text stays in the terminal and the saved report. One stand-down keeps
+   the degrade from laundering garbage the compose gates own: ANY degrade
+   that touches the payload stands the WHOLE gate down when `bodyCriticals`
+   is garbage (neither absent nor an array of strings — a raw merge would
+   shatter a string into per-character junk entries or pollute compose's
+   pinned refusal with the gate's own entry) or `suggestionsDiscarded` is
+   a shape compose's counter refuses — the countability test reads
+   compose's OWN acceptance table (its `toCount`, exported as the total
+   `tryToCount`), so the two reads of the field can never drift. The
    payload reaches compose unchanged and dies its pinned field-naming
-   death), and a `suggestionsDiscarded` of `null` merges from zero
-   (compose's counter reads null as absent) while any other non-number
-   non-array shape stays untouched for compose to refuse. Missing diff →
-   exit-3 refusal (`reason: 'aone-post-refused'`), before anything writes.
+   death; absence and `null` both merge from zero. Missing diff → exit-3
+   refusal (`reason: 'aone-post-refused'`) for the real write, before
+   anything writes; a `--dry-run` preview skips the gate instead
+   (disclosed, `wouldPost: false`, `reason: 'aone-diff-missing'`).
    The GitHub path is untouched: its server performs this validation, and
    its recovery loop is prose-driven by design.
 3. **`lib/platform/aone.ts`** — `AoneInlineComment.line`'s doc states the
@@ -167,16 +195,16 @@ side?, startSide?}`, report valid / invalid-with-reason. Reuses
 
 ### Failure shapes, enumerated
 
-| Shape                                                                            | Outcome                                                                                         |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Anchor inside a new-side hunk                                                    | posts, as today                                                                                 |
-| Anchor outside every hunk / file not in diff / non-RIGHT side, severity Critical | relocated into the body, counted toward `C`, disclosed                                          |
-| Same, severity Suggestion                                                        | discarded, counted toward `S`, disclosed                                                        |
-| Same, UNMARKED comment                                                           | untouched — the existing consistency gate refuses it                                            |
-| Malformed shape (missing path/line, reversed range, renders-as-nothing body)     | untouched — the consistency gate's refusal stands; the gate rules anchors, not shapes           |
-| Relocation needed but `state.bodyCriticals` is garbage (non-array)               | whole gate stands down — compose's pinned field-naming refusal fires over the untouched payload |
-| Captured diff absent/unreadable                                                  | exit-3 refusal, whole batch, nothing written                                                    |
-| Mid-batch a1 failure                                                             | unchanged (`AonePartialPostError`, do-not-re-run)                                               |
+| Shape                                                                                   | Outcome                                                                                                                                                       |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anchor inside a new-side hunk                                                           | posts, as today                                                                                                                                               |
+| Anchor outside every hunk / file not in diff / non-RIGHT side, severity Critical        | relocated into the body, counted toward `C`, disclosed                                                                                                        |
+| Same, severity Suggestion                                                               | discarded, counted toward `S`, disclosed                                                                                                                      |
+| Same, UNMARKED comment                                                                  | untouched — the existing consistency gate refuses it                                                                                                          |
+| Malformed shape (missing path/line, reversed range, renders-as-nothing body)            | untouched — the consistency gate's refusal stands; the gate rules anchors, not shapes                                                                         |
+| Any degrade, but `state.bodyCriticals` is garbage or `suggestionsDiscarded` uncountable | whole gate stands down — compose's pinned field-naming refusal fires over the untouched payload                                                               |
+| Captured diff absent/unreadable                                                         | exit-3 refusal, whole batch, nothing written; a `--dry-run` preview skips the gate (disclosed) and reports `wouldPost: false` (`reason: 'aone-diff-missing'`) |
+| Mid-batch a1 failure                                                                    | unchanged (`AonePartialPostError`, do-not-re-run)                                                                                                             |
 
 ## Scope boundaries
 

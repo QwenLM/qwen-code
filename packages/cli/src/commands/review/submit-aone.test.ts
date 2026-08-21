@@ -1197,6 +1197,84 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(input['bodyCriticals']).toHaveLength(1);
   });
 
+  it('relocates a stacked-marker draft without leaking the second marker into the entry', () => {
+    // A looping model drafts stacked markers, and every other strip
+    // iterates to a fixpoint. Compose quotes the relocated entry as-is
+    // behind the template marker — a carried second marker would post
+    // inside the blocker line, visibly Suggestion-marked in the record.
+    const stacked = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** **[Suggestion]** Off-by-one in the loop bound.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(stacked) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:4 — Off-by-one in the loop bound.',
+    ]);
+  });
+
+  it('relocates a marker-alone body leading into a fence as the placeholder — no raw delimiter in the entry', () => {
+    // The claim line is the FIRST marker-stripped line — for a body whose
+    // substance opens with a fence, that is the fence delimiter. Compose's
+    // fence refusal is line-anchored and the entry always carries its
+    // `path:line — ` prefix, so the delimiter would sail through and post
+    // as junk; the placeholder replaces it.
+    const fenced = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]**\n```ts\nconst offByOne = 1;\n```\nThe claim hides behind the fence.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(fenced) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+  });
+
+  it('relocates an empty-claim draft through the placeholder (attribution off)', () => {
+    // A body whose substance sits AFTER a separator the strip eats
+    // (marker, then newline+colon) reduces the claim line to '' — the
+    // placeholder keeps the entry from posting as a dangling `path:line — `.
+    const emptyClaim = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]**\n:\n',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
+        defaultComment: false,
+        attribution: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+  });
+
   it('merges gate discards into an existing suggestionsDiscarded count', () => {
     const withPrior = {
       commit_id: 'abc123',
@@ -1264,6 +1342,36 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
+  it('cites the MODEL-AUTHORED comment index in the refusal after the gate renumbers the array', () => {
+    // The gate relocates comments[0] (well-formed, unanchorable), leaving
+    // the malformed comments[1] at post-gate position 0. The refusal must
+    // name index 1 — the re-compose loop fixes the comment the index names
+    // in the model's JSON, and the renumbered index would point it at the
+    // already-relocated Critical.
+    const renumbered = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** Well-formed but unanchorable.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: null,
+          body: '**[Critical]** The malformed one.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/comments\[1\] has no usable `line`/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
   it('leaves a REVERSED multi-line range to the consistency gate — a shape error, not an anchor one', () => {
     // Both numbers sit inside the hunk, but the range ends before it
     // begins: the operator is owed the shape refusal, not a silent
@@ -1324,6 +1432,103 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     const out = postedJson();
     expect(out['anchorsRelocated']).toBe(0);
     expect(out['anchorsDiscarded']).toBe(0);
+  });
+
+  it('stands the WHOLE gate down when bodyCriticals is an array carrying a NON-STRING', () => {
+    // Array.isArray alone is not compose's acceptance: ingestEntryList
+    // refuses an array carrying a non-string, and a relocation merged into
+    // it would pollute compose's pinned refusal with the gate's own entry.
+    // The stand-down leaves the payload untouched instead.
+    const garbageArray = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** Real blocker on a bad anchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: [42] },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(garbageArray) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    // Untouched: the garbage array reaches compose exactly as written —
+    // no gate entry merged into it.
+    expect(input['bodyCriticals']).toEqual([42]);
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    const out = postedJson();
+    expect(out['anchorsRelocated']).toBe(0);
+    expect(out['anchorsDiscarded']).toBe(0);
+  });
+
+  it('stands the WHOLE gate down over garbage bodyCriticals even when ONLY a discard needs it', () => {
+    // The stand-down keys on ANY degrade that touches the payload, not
+    // only relocation: a discard-only gate would remove the comment and
+    // announce the discard before compose throws over the garbage field —
+    // a degrade that the refusal then unpublishes.
+    const garbageBcDiscard = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: 'blocker' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(garbageBcDiscard) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toBe('blocker');
+    // Untouched: the unanchorable Suggestion was NOT discarded.
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    expect(postedJson()['anchorsDiscarded']).toBe(0);
+  });
+
+  it('merges gate discards into an integer-but-not-SAFE suggestionsDiscarded — compose accepts it, so the gate must', () => {
+    // The gate's merge and compose's counter read ONE acceptance table
+    // (tryToCount): an integer past MAX_SAFE_INTEGER is not safe but IS an
+    // integer compose's toCount accepts, so the gate merges into it —
+    // leaving it untouched would drop the gate's discards from the posted
+    // total while compose happily counts the raw number.
+    const unsafeCount = Number.MAX_SAFE_INTEGER + 1;
+    const unsafeState = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9998,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor too.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: unsafeCount },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(unsafeState) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe(unsafeCount + 2);
   });
 
   it('merges gate discards from zero when suggestionsDiscarded is null', () => {
@@ -1426,6 +1631,36 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       );
       expect(stderrMock).toHaveBeenCalledWith(
         expect.stringContaining('captured diff'),
+      );
+    } finally {
+      renameSync(aside, diffPath);
+    }
+  });
+
+  it('a dry run with a MISSING capture skips the gate, discloses, and reports it would NOT post', () => {
+    // The missing-capture refusal exists to vouch for an irreversible
+    // write; a dry run writes nothing, so it skips the gate instead of
+    // refusing — and reports honestly that the real post would refuse.
+    const aside = `${diffPath}.aside`;
+    renameSync(diffPath, aside);
+    try {
+      expect(() =>
+        runSubmit(base({ dryRun: true }), 'unknown', {
+          defaultComment: false,
+        }),
+      ).not.toThrow();
+      expect(submitAoneMock).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+      const out = postedJson();
+      expect(out.wouldPost).toBe(false);
+      expect(out.reason).toBe('aone-diff-missing');
+      // The gate never ran: no counts...
+      expect(out['anchorsRelocated']).toBeUndefined();
+      expect(out['anchorsDiscarded']).toBeUndefined();
+      // ...and the preview still composes the authored payload.
+      expect(composeMock).toHaveBeenCalledTimes(1);
+      expect(stderrMock).toHaveBeenCalledWith(
+        expect.stringContaining('Aone anchor check: SKIPPED'),
       );
     } finally {
       renameSync(aside, diffPath);
@@ -1564,11 +1799,12 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(input['suggestionsDiscarded']).toBe(3);
   });
 
-  it('leaves a GARBAGE suggestionsDiscarded untouched for compose to refuse', () => {
-    // A shape that is neither number nor array nor absent is compose's to
-    // refuse with a field-naming error. The gate must pass it through RAW —
-    // laundering it into its own discard count would post a number compose
-    // owes a loud refusal for.
+  it('stands the WHOLE gate down over a GARBAGE suggestionsDiscarded — compose owns the refusal', () => {
+    // A shape compose's counter refuses is not a count the gate may merge
+    // into — and stripping the comment ahead of compose's refusal would
+    // announce a degrade that the refusal then unpublishes, over a payload
+    // compose never saw unchanged. The stand-down leaves the WHOLE payload
+    // untouched: the comment, the garbage field, and no disclosure.
     const garbageCount = {
       commit_id: 'abc123',
       comments: [
@@ -1587,7 +1823,12 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['suggestionsDiscarded']).toBe('two');
-    expect(postedJson()['anchorsDiscarded']).toBe(1);
+    // Untouched: the unanchorable Suggestion was NOT discarded.
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    expect(postedJson()['anchorsDiscarded']).toBe(0);
   });
 
   it('merges a relocated Critical into an EXISTING bodyCriticals array, keeping order', () => {

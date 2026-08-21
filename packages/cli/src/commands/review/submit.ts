@@ -59,8 +59,10 @@ import {
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import {
+  ENTRY_FENCE_DELIMITER_RE,
   composeReview,
   normalizeSeverityFloor,
+  tryToCount,
   type ComposeReviewInput,
 } from './compose-review.js';
 import {
@@ -84,6 +86,7 @@ import {
   carriedClaimLine,
   countInlineFindings,
   severityOf,
+  stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import { validateNewSideAnchors } from './lib/anchors.js';
 import {
@@ -132,11 +135,20 @@ function isDiffLine(n: unknown): n is number {
  * newline), so compose-review's one-line entry ingestion carries it as-is.
  */
 function relocatedAoneCriticalEntry(c: ReviewComment): string {
-  const claim = typeof c.body === 'string' ? carriedClaimLine(c.body) : null;
+  const rawClaim = typeof c.body === 'string' ? carriedClaimLine(c.body) : null;
+  // A looping model drafts stacked markers and every other strip iterates
+  // to a fixpoint; compose quotes this entry as-is behind the template
+  // marker, so a carried second marker would post inside the blocker line.
+  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
   // The gate only relocates bodies with substance past the marker, but the
-  // claim line itself can still be empty (content on a later line) — the
-  // placeholder keeps the entry from posting as a dangling `path:line — `.
-  return `${c.path ?? '(no path)'}:${c.line} — ${claim || 'finding'}`;
+  // claim line itself can still be empty (content on a later line) or a
+  // fence delimiter (a marker-alone body leading into a fence) — junk the
+  // one-line channel cannot carry, since the entry's `path:line — ` prefix
+  // hides the delimiter from compose's line-anchored fence refusal. Both
+  // fall back to the placeholder instead of posting dangling or raw.
+  const visible =
+    claim !== null && !ENTRY_FENCE_DELIMITER_RE.test(claim) ? claim : null;
+  return `${c.path ?? '(no path)'}:${c.line} — ${visible || 'finding'}`;
 }
 
 interface SubmitArgs {
@@ -505,6 +517,13 @@ function inconsistencies(
   payload: ReviewPayload,
   event: string,
   attribution: boolean,
+  /**
+   * The model-authored index of each comment, once a removal ahead of
+   * this gate has renumbered the array — the refusal cites the authored
+   * index, the one that names the culprit in the model's own payload
+   * JSON, not its post-removal position.
+   */
+  authoredIndices?: number[],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -523,7 +542,9 @@ function inconsistencies(
   // each of these discards every blocker in the review along with itself. The
   // API is the wrong place to find out.
   comments.forEach((c, i) => {
-    problems.push(...commentShapeProblems(c, i, attribution));
+    problems.push(
+      ...commentShapeProblems(c, authoredIndices?.[i] ?? i, attribution),
+    );
   });
   return problems;
 }
@@ -769,6 +790,15 @@ export function runSubmit(
   // stay one computation. (docs/design/2026-08-21-review-aone-removed-line-anchoring.md)
   let anchorsRelocated = 0;
   let anchorsDiscarded = 0;
+  // True only on a dry run whose gate could not run (the captured diff is
+  // missing): the preview composes but reports it would NOT post.
+  let anchorsUnchecked = false;
+  // The model-authored indices of payload.comments, kept once a removal
+  // ahead of the consistency gate renumbers the array — the refusal text
+  // cites these, so the re-compose loop fixes the comment the index names
+  // in the model's own payload JSON. Undefined while no removal has run
+  // (the identity).
+  let authoredIndices: number[] | undefined;
   if (aoneWrite) {
     // The captured diff is the ONLY view of the MR this boundary can
     // validate against — the platform's own read-back cannot tell a
@@ -776,134 +806,162 @@ export function runSubmit(
     // for every in-EOF line). Its absence therefore refuses the WHOLE
     // post: an irreversible write the boundary cannot vouch for is the
     // one thing it must not perform. (GitHub needs no such condition —
-    // its server holds the diff.)
+    // its server holds the diff.) A dry run is the exception: it writes
+    // nothing, so the rationale cannot apply — it skips the gate with a
+    // disclosure and reports that the real post would refuse.
     const diffRel = tmpFile(`pr-${args.pr}`, 'diff.txt');
-    let diffText: string;
+    let diffText: string | undefined;
     try {
       diffText = readFileSync(diffRel, 'utf8');
     } catch {
-      writeStderrLine(
-        `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
-          `Aone Code: the Aone platform validates no inline anchor, so ` +
-          `this write path validates every one against the review's ` +
-          `captured diff — and ${diffRel} does not exist or cannot be ` +
-          `read. Re-run the review so the diff is captured. Nothing was ` +
-          `written; the findings are in the terminal output and the ` +
-          `saved report.`,
-      );
-      writeStdoutLine(
-        JSON.stringify({ posted: false, reason: 'aone-post-refused' }, null, 2),
-      );
-      process.exitCode = 3;
-      return;
-    }
-    // A diff that parses to no files (corrupt capture) validates nothing:
-    // every anchor then fails as "file is not in the diff" and the degrade
-    // below discloses each one — safe, and visibly anomalous, without a
-    // second refusal shape.
-    const comments = payload.comments ?? [];
-    const verdicts = validateNewSideAnchors(
-      diffText,
-      comments.map((c) => ({
-        path: c.path ?? '',
-        line: c.line ?? 0,
-        startLine: c.start_line,
-        side: c.side,
-        startSide: c.start_side,
-      })),
-    );
-    const kept: ReviewComment[] = [];
-    const relocated: string[] = [];
-    const disclosures: string[] = [];
-    comments.forEach((c, i) => {
-      const sev = severityOf(c);
-      // Comments too malformed to anchor are not the gate's to dispose — the
-      // consistency gate below owns those refusals, unchanged, and the gate
-      // reads the SAME shape list (commentShapeProblems) that gate reports,
-      // so the two cannot drift: whatever the consistency gate would loudly
-      // refuse, the gate leaves to it. The gate rules only WELL-FORMED
-      // anchors. A single-line comment on a declared non-RIGHT side is
-      // well-formed but unanchorable on Aone — relocating it is the point.
-      if (
-        commentShapeProblems(c, i, attribution).length > 0 ||
-        verdicts[i]?.valid === true
-      ) {
-        kept.push(c);
+      if (!args.dryRun) {
+        writeStderrLine(
+          `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
+            `Aone Code: the Aone platform validates no inline anchor, so ` +
+            `this write path validates every one against the review's ` +
+            `captured diff — and ${diffRel} does not exist or cannot be ` +
+            `read. Re-run the review so the diff is captured. Nothing was ` +
+            `written; the findings are in the terminal output and the ` +
+            `saved report.`,
+        );
+        writeStdoutLine(
+          JSON.stringify(
+            { posted: false, reason: 'aone-post-refused' },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 3;
         return;
       }
-      const at = `${c.path}:${c.line}`;
-      if (sev === 'critical') {
-        relocated.push(relocatedAoneCriticalEntry(c));
-        disclosures.push(
-          `  relocated into the summary body: ${at} — ` +
-            `${verdicts[i]?.reason ?? 'unanchorable'}`,
-        );
-      } else {
-        anchorsDiscarded++;
-        disclosures.push(
-          `  discarded: ${at} — ${verdicts[i]?.reason ?? 'unanchorable'}`,
+      anchorsUnchecked = true;
+      writeStderrLine(
+        `Aone anchor check: SKIPPED — ${diffRel} does not exist or ` +
+          `cannot be read, and the gate validates anchors against that ` +
+          `captured diff. --dry-run writes nothing, so the preview ` +
+          `composes the payload AS AUTHORED (anchors unchecked); the ` +
+          `real post refuses until the review is re-run and the diff ` +
+          `is captured.`,
+      );
+    }
+    if (diffText !== undefined) {
+      // A diff that parses to no files (corrupt capture) validates nothing:
+      // every anchor then fails as "file is not in the diff" and the degrade
+      // below discloses each one — safe, and visibly anomalous, without a
+      // second refusal shape.
+      const comments = payload.comments ?? [];
+      const verdicts = validateNewSideAnchors(
+        diffText,
+        comments.map((c) => ({
+          path: c.path ?? '',
+          line: c.line ?? 0,
+          startLine: c.start_line,
+          side: c.side,
+          startSide: c.start_side,
+        })),
+      );
+      const kept: ReviewComment[] = [];
+      const keptIndices: number[] = [];
+      const relocated: string[] = [];
+      const disclosures: string[] = [];
+      comments.forEach((c, i) => {
+        const sev = severityOf(c);
+        // Comments too malformed to anchor are not the gate's to dispose — the
+        // consistency gate below owns those refusals, unchanged, and the gate
+        // reads the SAME shape list (commentShapeProblems) that gate reports,
+        // so the two cannot drift: whatever the consistency gate would loudly
+        // refuse, the gate leaves to it. The gate rules only WELL-FORMED
+        // anchors. A single-line comment on a declared non-RIGHT side is
+        // well-formed but unanchorable on Aone — relocating it is the point.
+        if (
+          commentShapeProblems(c, i, attribution).length > 0 ||
+          verdicts[i]?.valid === true
+        ) {
+          kept.push(c);
+          keptIndices.push(i);
+          return;
+        }
+        const at = `${c.path}:${c.line}`;
+        if (sev === 'critical') {
+          relocated.push(relocatedAoneCriticalEntry(c));
+          disclosures.push(
+            `  relocated into the summary body: ${at} — ` +
+              `${verdicts[i]?.reason ?? 'unanchorable'}`,
+          );
+        } else {
+          anchorsDiscarded++;
+          disclosures.push(
+            `  discarded: ${at} — ${verdicts[i]?.reason ?? 'unanchorable'}`,
+          );
+        }
+      });
+      anchorsRelocated = relocated.length;
+      const state = payload.state ?? ({} as ComposeReviewInput);
+      const bc = state.bodyCriticals;
+      // The stand-down: ANY degrade that touches the payload must not run
+      // over a field compose owns when that field is garbage. Relocating
+      // into a `bodyCriticals` that is not an array of strings shatters a
+      // string into per-character junk entries — each counted toward `C`
+      // and posted — or pollutes compose's pinned field-naming refusal
+      // with the gate's own entry; discarding ahead of an uncountable
+      // `suggestionsDiscarded` announces a degrade that compose's refusal
+      // then unpublishes. Either way the terminal would name a degrade
+      // that did not survive, over a payload compose never saw unchanged.
+      // Stand the WHOLE gate down instead: the payload reaches compose
+      // unchanged and dies the pinned death; nothing posts either way,
+      // and the findings stay in the saved report. The countability test
+      // reads compose's OWN acceptance table (tryToCount), so the two
+      // reads of the field can never drift.
+      const bcGarbage =
+        bc !== undefined &&
+        bc !== null &&
+        (!Array.isArray(bc) || bc.some((e) => typeof e !== 'string'));
+      const sdCount = tryToCount(state.suggestionsDiscarded);
+      const standDown =
+        (anchorsRelocated > 0 || anchorsDiscarded > 0) &&
+        (bcGarbage || sdCount === undefined);
+      if (standDown) {
+        anchorsRelocated = 0;
+        anchorsDiscarded = 0;
+      } else if (anchorsRelocated > 0 || anchorsDiscarded > 0) {
+        // The discard count merges into the state's own — the model may
+        // have discarded unanchorable findings upstream (resolve-anchors'
+        // unmatched dispose) and the body's sentence names the TOTAL.
+        // Absence and `null` both count zero for compose, so both merge
+        // from zero here.
+        const mergedDiscarded =
+          anchorsDiscarded === 0
+            ? undefined
+            : (sdCount ?? 0) + anchorsDiscarded;
+        payload = {
+          ...payload,
+          comments: kept,
+          state: {
+            ...state,
+            ...(anchorsRelocated > 0
+              ? {
+                  bodyCriticals: [
+                    ...(Array.isArray(bc) ? bc : []),
+                    ...relocated,
+                  ],
+                }
+              : {}),
+            ...(mergedDiscarded !== undefined
+              ? { suggestionsDiscarded: mergedDiscarded }
+              : {}),
+          },
+        };
+        // The removal renumbers the array the consistency gate below
+        // reports on; keep the authored indices so the refusal names the
+        // comment the re-compose loop must fix.
+        authoredIndices = keptIndices;
+        writeStderrLine(
+          `Aone anchor check: ${anchorsRelocated + anchorsDiscarded} inline ` +
+            `comment(s) cannot be anchored to the MR's new side (Aone Code ` +
+            `performs no server-side anchor validation):\n` +
+            disclosures.join('\n'),
         );
       }
-    });
-    anchorsRelocated = relocated.length;
-    const state = payload.state ?? ({} as ComposeReviewInput);
-    const bc = state.bodyCriticals;
-    // A model-written `bodyCriticals` that is neither absent nor an array
-    // is compose's to refuse with a field-naming error. Spreading it
-    // anyway would shatter a STRING into per-character junk entries —
-    // each counted toward `C` and posted — or throw a bare TypeError over
-    // a number, preempting compose's informative one. When a relocation
-    // needs that merge, stand the WHOLE gate down: the payload reaches
-    // compose unchanged and dies the pinned death; nothing posts either
-    // way, and the findings stay in the saved report. (A discard-only
-    // gate never touches the field and proceeds.)
-    const relocateBlocked =
-      anchorsRelocated > 0 &&
-      bc !== undefined &&
-      bc !== null &&
-      !Array.isArray(bc);
-    if (relocateBlocked) {
-      anchorsRelocated = 0;
-      anchorsDiscarded = 0;
-    } else if (anchorsRelocated > 0 || anchorsDiscarded > 0) {
-      // The discard count merges into the state's own — the model may
-      // have discarded unanchorable findings upstream (resolve-anchors'
-      // unmatched dispose) and the body's sentence names the TOTAL.
-      // `null` means "absent" to compose's counter too, so it merges
-      // from zero; any other non-number non-array shape stays untouched
-      // for compose to refuse, exactly as today.
-      const sd = state.suggestionsDiscarded;
-      const mergedDiscarded =
-        anchorsDiscarded === 0
-          ? undefined
-          : Array.isArray(sd)
-            ? sd.length + anchorsDiscarded
-            : typeof sd === 'number' && Number.isSafeInteger(sd) && sd >= 0
-              ? sd + anchorsDiscarded
-              : sd === undefined || sd === null
-                ? anchorsDiscarded
-                : undefined;
-      payload = {
-        ...payload,
-        comments: kept,
-        state: {
-          ...state,
-          ...(anchorsRelocated > 0
-            ? {
-                bodyCriticals: [...(Array.isArray(bc) ? bc : []), ...relocated],
-              }
-            : {}),
-          ...(mergedDiscarded !== undefined
-            ? { suggestionsDiscarded: mergedDiscarded }
-            : {}),
-        },
-      };
-      writeStderrLine(
-        `Aone anchor check: ${anchorsRelocated + anchorsDiscarded} inline ` +
-          `comment(s) cannot be anchored to the MR's new side (Aone Code ` +
-          `performs no server-side anchor validation):\n` +
-          disclosures.join('\n'),
-      );
     }
   }
 
@@ -1005,10 +1063,13 @@ export function runSubmit(
   // refuses below).
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
+    const comments = payload.comments ?? [];
+    const base = authoredIndices ?? comments.map((_, i) => i);
     payload = {
       ...payload,
-      comments: (payload.comments ?? []).filter((_, i) => !drop.has(i)),
+      comments: comments.filter((_, i) => !drop.has(i)),
     };
+    authoredIndices = base.filter((_, i) => !drop.has(i));
     writeStderrLine(
       `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
         `drafted past the resolved critical floor were moved into the ` +
@@ -1016,7 +1077,12 @@ export function runSubmit(
     );
   }
 
-  const problems = inconsistencies(payload, event, attribution);
+  const problems = inconsistencies(
+    payload,
+    event,
+    attribution,
+    authoredIndices,
+  );
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
@@ -1078,14 +1144,21 @@ export function runSubmit(
       JSON.stringify(
         {
           posted: false,
-          wouldPost: true,
+          // A dry run whose gate could not run (missing capture) composes
+          // the preview but reports the real post would refuse — the
+          // reason distinguishes it from both a would-post and the
+          // real write's exit-3 refusal shape.
+          wouldPost: !anchorsUnchecked,
+          ...(anchorsUnchecked ? { reason: 'aone-diff-missing' } : {}),
           target,
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
           // Aone-only gate counts — the GitHub server performs this
           // validation itself; the fields exist only where the gate ran.
-          ...(aoneWrite ? { anchorsRelocated, anchorsDiscarded } : {}),
+          ...(aoneWrite && !anchorsUnchecked
+            ? { anchorsRelocated, anchorsDiscarded }
+            : {}),
         },
         null,
         2,

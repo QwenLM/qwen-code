@@ -926,10 +926,13 @@ describe('resolveAnchors (batch)', () => {
 });
 
 /**
- * Two hunks in one file (new-side [1-4] and [21-22]) plus a pure-deletion
+ * Two hunks in one file (new-side [1-4] and [22-23]) plus a pure-deletion
  * file — the shapes the Aone anchor gate must tell apart: in-hunk anchors,
  * the gap between hunks, and a file whose every hunk occupies no new-side
- * line.
+ * line. The second header is byte-exact git output: after the +1 delta of
+ * the first hunk, a count-0 insertion after old line 20 occupies new-side
+ * lines 22-23 (`git diff -U0` probed in a scratch repo replicating these
+ * shapes) — the fixture must teach the count-0 geometry git actually emits.
  */
 const MULTI_DIFF = [
   'diff --git a/multi.ts b/multi.ts',
@@ -941,7 +944,7 @@ const MULTI_DIFF = [
   '+x',
   ' b',
   ' c',
-  '@@ -20,0 +21,2 @@',
+  '@@ -20,0 +22,2 @@',
   '+y',
   '+z',
   'diff --git a/gone.ts b/gone.ts',
