@@ -172,13 +172,22 @@ export function ensureAoneAuthenticated(): void {
     // possible. Absent evidence, not evidence of absence: fall through to
     // the auth check rather than refusing an a1 whose `--version` this
     // check merely cannot read — disclosed, like the unparseable-output
-    // arm below.
-    const why = (err instanceof Error ? err.message : String(err)).split(
+    // arm below. The cause extraction mirrors the whoami catch's: an
+    // execFileSync failure message BEGINS with the fixed preamble
+    // "Command failed: a1 --version", so line zero is the preamble, not
+    // the cause — segfault, unsupported flag and permission failure must
+    // stay distinguishable in the one place fail-open promises disclosure.
+    const lines = (err instanceof Error ? err.message : String(err)).split(
       '\n',
-    )[0];
+    );
+    const why =
+      lines
+        .slice(1)
+        .map((l) => l.trim())
+        .find(Boolean) ?? lines[0];
     process.stderr.write(
       `WARNING: the a1 version probe failed ` +
-        `(${JSON.stringify((why ?? '').slice(0, 80))}) — the review ` +
+        `(${JSON.stringify(why.slice(0, 80))}) — the review ` +
         `provider requires a1 >= ${A1_MIN_VERSION}; continuing without a ` +
         `floor ruling.\n`,
     );

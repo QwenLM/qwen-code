@@ -480,11 +480,24 @@ describe('aoneReader.composeUrl', () => {
     expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
   });
 
-  it('returns empty (never throws) when the fetch fails — a missing link must not fail a landed post', () => {
+  it('returns empty (never throws) when the fetch fails — but DISCLOSES it on stderr', () => {
+    // The degrade to '' stands (a missing link must not fail a consumer
+    // that owns the post's fate), but not silently: a failing lookup —
+    // auth expiry, a blip past the retry budget — must stay
+    // distinguishable from the designed coordinates-relay case. The cause
+    // extraction skips the execFileSync "Command failed: …" preamble line.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     a1JsonMock.mockImplementation(() => {
-      throw new Error('Command failed: a1 repo mr view 7\nnetwork\n');
+      throw new Error('Command failed: a1 repo mr view 7\nnetwork down\n');
     });
     expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('network down'),
+    );
+    stderrSpy.mockRestore();
   });
 
   it('refuses a malformed ownerRepo before any a1 call', () => {

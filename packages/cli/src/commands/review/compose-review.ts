@@ -55,6 +55,7 @@ import {
   gh,
   getGhHost,
   isOwnerRepo,
+  normalizeGhHostForUrl,
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
@@ -1047,18 +1048,14 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
   // plan recorded, else this run's routed host, else an operator-exported
   // GH_HOST — the same effective-host resolution `submit` posts through.
   // Defaulting to github.com 404s a GHE review's anchors, or lands them on
-  // a same-named public repo's different PR.
-  // Normalized before the github.com comparison below: hostnames are
-  // case-insensitive, :443 is the implicit port (leading zeros included),
-  // a trailing dot is the same DNS name, and www. fronts the same default
-  // instance — every one of these variants must land on the floor, or a
-  // `GH_HOST=www.github.com` run links an ordinal `comment 5` into a dead
-  // anchor.
-  const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
-    .toLowerCase()
-    .replace(/:0*443$/, '')
-    .replace(/\.$/, '')
-    .replace(/^www\.github\.com$/, 'github.com');
+  // a same-named public repo's different PR. The spelling normalisation
+  // rides the shared PR-page helper (its doc names the variants) — the
+  // same spelling the reader's composeUrl prints, so one run cannot emit
+  // two textual spellings of this PR page, and the github.com comparison
+  // below sees the folded form.
+  const host = normalizeGhHostForUrl(
+    resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com',
+  );
   const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
   // github.com's comment ids run long, so a short number after "comment"
   // reads likelier as an ordinal; a GHE instance's id space is its own and

@@ -390,22 +390,30 @@ Enterprise paragraph.
     line (`(prNumber, ownerRepo)` → the PR/MR page URL; the sketch's
     deeper comment-anchor variant stays future work): GitHub COMPOSES
     the PR-page URL from the routed host (deterministic grammar, no API
-    call); Aone is reader-backed — the platform's own `detailUrl`,
-    never assembled, because the owner/repo collapse to the last two
-    segments names a different repo for a nested-group project. `submit`
-    fills a receipt that carries no `url` through it on BOTH platforms,
-    so the skill's prose fallback shrank to the one case the reader
-    cannot serve (an Aone platform that returned no page link) — where
-    the coordinates relay stands. (b) `test-plan`'s body fetch routes
-    through the platform reader — the MR description on Aone, already
-    carried by the reader's fetch metadata, so the check runs on Aone
-    targets instead of being skipped, and no new API surface landed.
-    (c) Q1's version floor is enforced in `ensureAoneAuthenticated` —
-    resolved to 0.1.90, the version the platform facts were probed
-    against (nothing older was verified); presence → floor → auth, each
-    with its own remedy. Still open: dedup/self-PR backing for Aone,
-    cleanup audit, the ai_comment marking flag (a1-side), the
-    render-adjudication carve-out.
+    call), normalised through the ONE host-spelling helper the comment
+    anchors use (`normalizeGhHostForUrl`), and `submit` fills a GitHub
+    receipt that carries no `html_url` through it. Aone is reader-backed
+    — the platform's own `detailUrl`, never assembled, because the
+    owner/repo collapse to the last two segments names a different repo
+    for a nested-group project — but Aone's `submit` does NOT re-query
+    through it: the pre-write drift-gate read already carries the same
+    stable field, so a second fetch cannot add a link (round-2 review
+    R1-4), and an empty receipt rides the coordinates relay. (b)
+    `test-plan`'s body fetch routes through the platform reader — the
+    MR description on Aone, already carried by the reader's fetch
+    metadata, so the check runs on Aone targets instead of being
+    skipped, and no new API surface landed; the Aone arm runs the same
+    `ensureAuthenticated` gate every other a1-backed flow runs first
+    (round-2 review R1-5), and the handler wiring is pinned by a
+    handler-level test (R1-6). (c) Q1's version floor is enforced in
+    `ensureAoneAuthenticated` — resolved to 0.1.90, the version the
+    platform facts were probed against (nothing older was verified);
+    presence → floor → auth, each with its own remedy; both fail-open
+    arms (failed probe, unparseable output) disclose on stderr with the
+    CAUSE extracted past the execFileSync preamble (R1-1), and the
+    composeUrl failure arm discloses too (R1-2). Still open:
+    dedup/self-PR backing for Aone, cleanup audit, the ai_comment
+    marking flag (a1-side), the render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

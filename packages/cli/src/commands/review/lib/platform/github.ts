@@ -16,6 +16,7 @@ import {
   ghApi,
   ghRaw,
   isOwnerRepo,
+  normalizeGhHostForUrl,
   resolveGhHost,
 } from '../gh.js';
 import type {
@@ -279,8 +280,14 @@ export const githubReader: ReviewPlatformReader = {
     // github.com — the routing precedence this codebase applies, so the
     // composed link lands where the review ran (every submit write routes
     // a host before reaching here; gh's own hosts.yml fallback is
-    // unreachable through this pipeline).
-    const host = getGhHost() ?? resolveGhHost(undefined) ?? 'github.com';
+    // unreachable through this pipeline). The spelling rides the shared
+    // PR-page helper — the SAME normalization compose-review's comment
+    // anchors apply, so one run cannot print two textual spellings of the
+    // same page (`--host GHE.Corp:443` lands on `https://ghe.corp/…` in
+    // both).
+    const host = normalizeGhHostForUrl(
+      getGhHost() ?? resolveGhHost(undefined) ?? 'github.com',
+    );
     return `https://${host}/${ownerRepo}/pull/${prNumber}`;
   },
 };

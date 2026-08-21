@@ -58,6 +58,33 @@ describe('githubReader.composeUrl', () => {
     );
   });
 
+  it('normalizes the spelling exactly like the comment-anchor builder — one run, one textual spelling of the PR page', () => {
+    // HOSTNAME_RE admits uppercase and ports; without the shared
+    // normalization a `--host GHE.Corp:443` run printed
+    // `https://GHE.Corp:443/…` here while compose-review anchored
+    // `https://ghe.corp/…`.
+    setGhHost('GHE.Corp:443');
+    expect(githubReader.composeUrl(7, 'o/r')).toBe(
+      'https://ghe.corp/o/r/pull/7',
+    );
+    setGhHost('ghe.example.com.');
+    expect(githubReader.composeUrl(7, 'o/r')).toBe(
+      'https://ghe.example.com/o/r/pull/7',
+    );
+    setGhHost(undefined);
+    process.env['GH_HOST'] = 'WWW.GITHUB.COM';
+    expect(githubReader.composeUrl(7, 'o/r')).toBe(
+      'https://github.com/o/r/pull/7',
+    );
+  });
+
+  it('keeps a NON-default port — a GHE on :8443 serves its pages there', () => {
+    setGhHost('ghe.example.com:8443');
+    expect(githubReader.composeUrl(7, 'o/r')).toBe(
+      'https://ghe.example.com:8443/o/r/pull/7',
+    );
+  });
+
   it('refuses a malformed ownerRepo', () => {
     expect(() => githubReader.composeUrl(7, 'not-a-repo')).toThrow(TypeError);
     expect(() => githubReader.composeUrl(7, '../evil')).toThrow(TypeError);

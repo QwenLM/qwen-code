@@ -293,6 +293,14 @@ describe('ensureAoneAuthenticated — presence, version floor, auth', () => {
     expect(stderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('WARNING: the a1 version probe failed'),
     );
+    // The CAUSE rides the warning, not the execFileSync preamble: a
+    // `.split('\n')[0]` extraction would disclose the constant
+    // "Command failed: a1 --version" and drop "segfault" — the pitfall
+    // the whoami catch's comment documents.
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('segfault'));
+    expect(stderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('Command failed: a1 --version'),
+    );
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     stderrSpy.mockRestore();
   });

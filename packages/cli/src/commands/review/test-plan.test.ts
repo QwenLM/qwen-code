@@ -12,7 +12,14 @@
 // suite this review did not run) carry as much weight here as the positives.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,16 +27,23 @@ import yargs, { type Argv } from 'yargs';
 
 // The Aone half of the platform registry — mocked so the body-fetch routing
 // tests never reach a real `a1`. importOriginal keeps parseRemoteUrl and the
-// write-path exports the registry module re-exports untouched.
-const { aoneFetchMetaMock } = vi.hoisted(() => ({
+// write-path exports the registry module re-exports untouched. The auth
+// gate is mocked with it: the Aone route runs it before any fetch, and a
+// real one would exec the machine's actual a1.
+const { aoneFetchMetaMock, aoneEnsureAuthMock } = vi.hoisted(() => ({
   aoneFetchMetaMock: vi.fn(),
+  aoneEnsureAuthMock: vi.fn(),
 }));
 vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./lib/platform/aone.js')>();
   return {
     ...actual,
-    aoneReader: { ...actual.aoneReader, getFetchMeta: aoneFetchMetaMock },
+    aoneReader: {
+      ...actual.aoneReader,
+      getFetchMeta: aoneFetchMetaMock,
+      ensureAuthenticated: aoneEnsureAuthMock,
+    },
   };
 });
 
@@ -45,6 +59,7 @@ import {
   type TestPlanClaim,
   type TestPlanArgs,
 } from './test-plan.js';
+import { getGhHost, setGhHost } from './lib/gh.js';
 import type { BuildTestReport } from './build-test.js';
 
 describe('extractTestPlanSection', () => {
@@ -1028,6 +1043,9 @@ describe('platformBodyFetcher — the body fetch routes through the platform rea
   // metadata) backs it — no new API surface.
   beforeEach(() => {
     aoneFetchMetaMock.mockReset();
+    // A leaking throwing implementation (the refused-gate test below) would
+    // arm every later fetcher construction in this file.
+    aoneEnsureAuthMock.mockReset();
   });
 
   it('routes an Aone host at the reader: the MR description', () => {
@@ -1072,6 +1090,26 @@ describe('platformBodyFetcher — the body fetch routes through the platform rea
 
   it('routes a non-Aone host at the GitHub fetcher (behavior unchanged)', () => {
     expect(platformBodyFetcher('github.com')).toBe(fetchPrBody);
+    // The GitHub arm keeps its historical degrade — no auth gate.
+    expect(aoneEnsureAuthMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the auth gate BEFORE any fetch — a refused gate throws at fetcher construction', () => {
+    // Every other a1-backed flow gates first; a standalone invocation on a
+    // missing/stale/logged-out a1 must fail with the actionable message,
+    // not exit 0 into the generic "could not be fetched" note.
+    aoneEnsureAuthMock.mockImplementation(() => {
+      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    });
+    expect(() => platformBodyFetcher('gitlab.alibaba-inc.com')).toThrow(
+      /a1 CLI not found on PATH/,
+    );
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the gate when the a1 is fresh and authed', () => {
+    platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(aoneEnsureAuthMock).toHaveBeenCalledTimes(1);
   });
 
   describe('end to end through runTestPlan', () => {
@@ -1128,6 +1166,86 @@ describe('platformBodyFetcher — the body fetch routes through the platform rea
       expect(r.found).toBe(false);
       expect(r.note).toMatch(/could not be fetched/);
     });
+  });
+});
+
+describe('the handler wiring — the integration point of the Aone fix', () => {
+  // Nothing else in this file exercises testPlanCommand.handler: a revert
+  // to `runTestPlan(args)` (or a dropped `args.host`) would silently
+  // restore the pre-#9619 gh-direct body fetch on Aone targets while every
+  // test above stays green. Sibling suites pin their handlers the same way
+  // (comment-status.test.ts, pr-context.test.ts) — drive the real one.
+  let dir: string;
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    aoneFetchMetaMock.mockReset();
+    aoneEnsureAuthMock.mockReset();
+    dir = mkdtempSync(join(tmpdir(), 'qwen-test-plan-handler-'));
+    writeFileSync(join(dir, 'diff.txt'), 'diff');
+    savedGhHost = getGhHost();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    setGhHost(savedGhHost);
+    process.exitCode = undefined;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const argv = () =>
+    ({
+      plan: (() => {
+        const p = join(dir, 'plan.json');
+        writeFileSync(
+          p,
+          JSON.stringify({
+            files: [{ path: 'packages/cli/src/a.test.ts', kind: 'source' }],
+            diffPathAbsolute: join(dir, 'diff.txt'),
+          }),
+        );
+        return p;
+      })(),
+      pr: '29295886',
+      repo: 'maxcompute/odps_src',
+      worktree: dir,
+      out: join(dir, 'report.json'),
+      host: 'gitlab.alibaba-inc.com',
+    }) as never;
+
+  it('an Aone --host routes the body through the reader, gates first, and never touches gh', async () => {
+    aoneFetchMetaMock.mockReturnValue({
+      body: '## Test Plan\n\nAdded `packages/cli/src/a.test.ts`',
+    });
+    await testPlanCommand.handler?.(argv());
+    const report = JSON.parse(
+      readFileSync(join(dir, 'report.json'), 'utf8'),
+    ) as { found: boolean; claims: Array<{ verdict: string }> };
+    // The verdict is reachable ONLY through the Aone fetcher's body — the
+    // default fetchPrBody (gh pr view) never runs in this path.
+    expect(report.found).toBe(true);
+    expect(report.claims[0].verdict).toBe('reproduces');
+    expect(aoneEnsureAuthMock).toHaveBeenCalledTimes(1);
+    expect(aoneFetchMetaMock).toHaveBeenCalledWith(
+      29295886,
+      'maxcompute/odps_src',
+    );
+  });
+
+  it('a refused gate fails the command (exit 1) with the actionable message, before any fetch', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    aoneEnsureAuthMock.mockImplementation(() => {
+      throw new Error(
+        'a1 0.1.89 is older than the 0.1.90 this review provider requires',
+      );
+    });
+    await testPlanCommand.handler?.(argv());
+    expect(process.exitCode).toBe(1);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('older than the 0.1.90'),
+    );
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, 'report.json'))).toBe(false);
+    stderrSpy.mockRestore();
   });
 });
 

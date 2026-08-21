@@ -793,6 +793,14 @@ export function platformBodyFetcher(
 ): (ownerRepo: string, prNumber: string) => string {
   const platform = getPlatformReader({ host });
   if (platform.kind !== 'aone') return fetchPrBody;
+  // The auth gate every other a1-backed flow runs BEFORE its platform call
+  // — presence, the version floor, and the login check. Without it a
+  // standalone invocation on a missing/stale/logged-out a1 exits 0 with the
+  // generic "could not be fetched" note and no remedy; with it, the three
+  // states fail with the actionable install/upgrade/login messages the user
+  // docs promise ("at authentication time"). The GitHub arm keeps its
+  // historical degrade (a failed `gh pr view` reads as the unchecked note).
+  platform.ensureAuthenticated();
   return (ownerRepo: string, prNumber: string): string => {
     // The a1 seam is addressed by number; classify a malformed id before
     // the fetch so the degraded note names the invocation, not a platform

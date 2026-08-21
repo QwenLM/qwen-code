@@ -31,7 +31,6 @@ const {
   gitOptMock,
   authMock,
   submitAoneMock,
-  aoneComposeUrlMock,
   composeMock,
   stdoutMock,
   stderrMock,
@@ -43,7 +42,6 @@ const {
   gitOptMock: vi.fn(),
   authMock: vi.fn(),
   submitAoneMock: vi.fn(),
-  aoneComposeUrlMock: vi.fn(),
   composeMock: vi.fn(),
   stdoutMock: vi.fn(),
   stderrMock: vi.fn(),
@@ -83,16 +81,13 @@ vi.mock('./lib/git.js', async (importOriginal) => {
 // The a1 write seam — mocked so no test reaches a real `a1` (a write to a
 // platform is never a test fixture). importOriginal keeps the real
 // AonePartialPostError class, so submit's `instanceof` check reads the
-// same constructor the test throws. The reader's composeUrl is stubbed for
-// the same reason: the no-webUrl fallback arm consults it, and the real
-// one would fetch through a1.
+// same constructor the test throws.
 vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./lib/platform/aone.js')>();
   return {
     ...actual,
     submitAoneReview: submitAoneMock,
-    aoneReader: { ...actual.aoneReader, composeUrl: aoneComposeUrlMock },
   };
 });
 
@@ -228,9 +223,6 @@ describe('submit posts an authorised Aone target through a1', () => {
     // routing keys off the recorded/explicit host alone.
     gitOptMock.mockReturnValue(null);
     submitAoneMock.mockReturnValue({ ...AONE_RESULT });
-    // Default: the reader serves no link — the conservative branch. Tests
-    // that exercise the fallback's positive arm override it.
-    aoneComposeUrlMock.mockReturnValue('');
     composeMock.mockReturnValue({
       event: 'REQUEST_CHANGES',
       body: 'One confirmed blocker blocks the merge.',
@@ -961,42 +953,33 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
-  it('a receipt without webUrl falls back to the reader-backed composeUrl', () => {
-    // The pre-write read came up empty on the MR's own detailUrl; the
-    // reader-backed composeUrl re-queries the platform — it never
-    // ASSEMBLES a link (the nested-group collapse names a different repo).
-    submitAoneMock.mockReturnValue({ ...AONE_RESULT, webUrl: '' });
-    aoneComposeUrlMock.mockReturnValue(
-      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/1',
-    );
-    expect(() =>
-      runSubmit(base(), 'unknown', { defaultComment: false }),
-    ).not.toThrow();
-    expect(aoneComposeUrlMock).toHaveBeenCalledWith(1, 'maxcompute/odps_src');
-    expect(postedJson().url).toBe(
-      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/1',
-    );
-  });
-
-  it('the Aone success JSON carries NO url key when the reader serves none either', () => {
+  it('the Aone success JSON carries NO url key when the pre-write read served no detailUrl — and pays no re-query', () => {
+    // The receipt's webUrl IS the pre-write drift-gate read's detailUrl, a
+    // stable MR attribute — a re-fetch through the reader could not return
+    // a link that read lacked, so submit takes the receipt as-is (it would
+    // only pay a blocking a1 call on the flaky state that lost the field).
     // The url-ABSENCE arm is what SKILL.md Step 7's coordinates-relay keys
-    // on — emitting `"url": ""` would not satisfy "has no url". It is only
-    // reachable when the reader-backed fallback came up empty too.
+    // on — emitting `"url": ""` would not satisfy "has no url".
     submitAoneMock.mockReturnValue({ ...AONE_RESULT, webUrl: '' });
-    aoneComposeUrlMock.mockReturnValue('');
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(postedJson().posted).toBe(true);
     expect('url' in postedJson()).toBe(false);
+    // The pre-write read happened inside submitAoneReview (mocked here);
+    // submit itself made no further platform call for the link.
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
   });
 
-  it('a receipt WITH webUrl never consults composeUrl — no extra a1 call in the common case', () => {
+  it('relays the receipt webUrl in the stdout JSON and the Posted line', () => {
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(postedJson().url).toBe(AONE_RESULT.webUrl);
-    expect(aoneComposeUrlMock).not.toHaveBeenCalled();
+    const postedLine = stderrMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(AONE_RESULT.webUrl);
   });
 
   it('a REQUEST_CHANGES with zero inline Criticals says nothing mechanically blocks', () => {

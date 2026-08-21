@@ -75,7 +75,6 @@ import {
 import { gitOpt } from './lib/git.js';
 import {
   AonePartialPostError,
-  aoneReader,
   submitAoneReview,
   type AoneSubmitResult,
 } from './lib/platform/aone.js';
@@ -992,15 +991,16 @@ export function runSubmit(
       process.exitCode = 3;
       return;
     }
-    // URL for the Posted line: normally the receipt carries the MR's own
-    // detailUrl from the pre-write read; when it comes up empty, the
-    // reader-backed composeUrl re-queries the platform — it never ASSEMBLES
-    // a link (the nested-group owner/repo collapse could name a different
-    // repo). '' survives '': the skill then relays the target's coordinates.
-    const postedUrl =
-      result.webUrl !== ''
-        ? result.webUrl
-        : aoneReader.composeUrl(args.pr, args.repo);
+    // URL for the Posted line: the receipt's webUrl is the MR's own
+    // detailUrl, captured by submitAoneReview's pre-write drift-gate read.
+    // detailUrl is a stable attribute of the MR, so a re-query through the
+    // reader's composeUrl cannot return a link that read lacked — it would
+    // only pay a blocking a1 call (120 s deadline, transient retries) on
+    // exactly the flaky-platform state that lost the field. '' stays '':
+    // the skill relays the target's coordinates (and never assembles a
+    // link — the nested-group owner/repo collapse could name a different
+    // repo).
+    const postedUrl = result.webUrl;
     writeStderrLine(
       `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
         (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
