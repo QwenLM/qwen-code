@@ -29,12 +29,14 @@ import type { CommandModule } from 'yargs';
 import { isUnusableScriptEntry } from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, normalize, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
+import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
+import { safeTarget } from '../../utils/paths.js';
+import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
@@ -104,6 +106,28 @@ export type RunTargetClass =
   | { kind: 'file'; base: string }
   | { kind: 'local' };
 
+/**
+ * The repo-relative, normalised spelling of a user-typed path — the same
+ * identity `capture-local --file` derives before the child names anything.
+ *
+ * Falls back to a plain normalisation when the repo root cannot be resolved
+ * (no git, a detached invocation): the pin is then whatever the token
+ * spells, which is the pre-canonicalisation behaviour and no worse than it.
+ */
+function repoRelative(target: string): string {
+  const normalised = normalize(target).replace(/^\.\//, '');
+  const root = gitOpt('rev-parse', '--show-toplevel');
+  if (root === null) return normalised;
+  // Shared with `capture-local`'s own pathspec derivation (`repoRelativeOf`
+  // in lib/paths.ts) so the pin and the artifact it waits for cannot spell
+  // one file two ways — see that function for the two corners, a symlinked
+  // root prefix and a root-level `..foo.ts`, that a re-derivation here got
+  // wrong. A path genuinely outside the repo has no repo-relative spelling;
+  // leave it as the user typed it rather than pinning on a `..` walk.
+  const { rel, escapes } = repoRelativeOf(root, normalised);
+  return escapes ? normalised : rel;
+}
+
 export function classifyRunTarget(target?: string): RunTargetClass {
   if (!target) return { kind: 'local' };
   const { target: t } = parseReviewArgs(target);
@@ -111,14 +135,28 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     return { kind: 'pr', number: String(t.number) };
   }
   if (t.type === 'file') {
-    // The skill's `{target}` token for a file review is the file's basename
-    // (`--target <filename>` in the capture step), so that is the identity
-    // the child's artifact names carry. Trailing separators are stripped
+    // The skill's `{target}` token for a file review is the file's
+    // repo-relative path put through `safeTarget` — the same normalization
+    // the CLI applies when it derives filenames — so that is the identity
+    // the child's artifact names carry. It used to be the BASENAME, and the
+    // two diverge for every file in a subdirectory: the child would write
+    // `qwen-review-src_index.ts-composed.json` while the parent polled
+    // `qwen-review-index.ts-composed.json`, never matched, and reported "no
+    // composed verdict was produced" over a review that had already run (and
+    // with `--comment`, already posted). Trailing separators are stripped
     // first: a tab-completed `src/` classifies as a file target and reviews
-    // the directory, and a bare `.pop()` would return `''` — a pin
-    // (`qwen-review--composed.json`) no child artifact can ever carry.
-    const trimmed = t.path.replace(/[\\/]+$/, '');
-    return { kind: 'file', base: trimmed.split(/[\\/]/).pop() || trimmed };
+    // the directory, and the empty remainder would pin a name no child
+    // artifact can ever carry.
+    // The token is CANONICALISED before flattening, because the child
+    // canonicalises too: `capture-local --file` resolves the path against
+    // the caller's directory and re-bases it on the repo root, and SKILL.md
+    // names the artifacts from THAT. Flattening the raw token agreed only
+    // when the user typed the canonical repo-relative spelling — an absolute
+    // path, a `src/../src/foo.ts`, or a path typed from a subdirectory each
+    // produced a pin the child never writes: the same never-matching poll
+    // this pin was just fixed to avoid, for a new input class.
+    const trimmed = t.path.replace(/[\\/]+$/, '') || t.path;
+    return { kind: 'file', base: safeTarget(repoRelative(trimmed)) };
   }
   return { kind: 'local' };
 }
@@ -153,6 +191,49 @@ const escapeRe = (s: string): string =>
  * Only a per-run nonce in the child's artifact names could key these
  * apart, and the bundled skill, not this command, would have to mint it.
  */
+/**
+ * The capture's own "nothing to review" verdict for this target, if it wrote
+ * one this run.
+ *
+ * Read off the plan the CLI wrote, and fenced by the run epoch the same way
+ * every other artifact here is: a plan left by an earlier run must not make
+ * this one look decided.
+ */
+function nothingToReviewFrom(
+  cls: RunTargetClass,
+  cutoffMs: number,
+): { reason: string } | null {
+  const name = `qwen-review-${planStemFor(cls)}-plan.json`;
+  const found = newestArtifactSince(
+    REVIEW_TMP_DIR,
+    new RegExp(`^${escapeRe(name)}$`),
+    cutoffMs,
+  );
+  if (!found) return null;
+  try {
+    const plan = JSON.parse(readFileSync(found.path, 'utf8')) as {
+      nothingToReview?: { reason?: unknown };
+    };
+    const reason = plan.nothingToReview?.reason;
+    return typeof reason === 'string' && reason !== '' ? { reason } : null;
+  } catch {
+    return null; // unreadable or not JSON: no claim either way
+  }
+}
+
+/** The `<target>` slot in the plan's filename, per target class. */
+function planStemFor(cls: RunTargetClass): string {
+  switch (cls.kind) {
+    case 'pr':
+      return `pr-${cls.number}`;
+    case 'file':
+      return cls.base;
+    case 'local':
+    default:
+      return 'local';
+  }
+}
+
 export function composedNameFor(cls: RunTargetClass): string {
   switch (cls.kind) {
     case 'pr':
@@ -570,7 +651,15 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  const completed = composed !== null;
+  // A round the CAPTURE decided had nothing to review is complete, even
+  // though no composed verdict exists: `compose-review` is reached only from
+  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
+  // reported "Review did not complete" over a round whose own output was
+  // decided — a cached second round on an unchanged tree, or a clean tree
+  // whose earlier blocker the ledger still renders as standing. The signal is
+  // a field the CLI wrote into its own plan, not a sentence the model chose.
+  const stop = nothingToReviewFrom(targetClass, cutoffMs);
+  const completed = composed !== null || stop !== null;
   const result: RunReviewResult = {
     completed,
     event: composed?.event ?? null,

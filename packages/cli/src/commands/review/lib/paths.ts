@@ -9,8 +9,8 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
-import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -240,4 +240,67 @@ export function inertPath(p: string): string {
   // tail of a filename run as markup in the file the agent treats as
   // authoritative.
   return p.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u2500`]+/gu, ' ');
+}
+
+/**
+ * `realpathSync(p)`, or the same answer for a path whose leaf does not exist
+ * yet: resolve the deepest ancestor that does, then re-append what was walked
+ * past. A path with no existing ancestor at all (an unreachable mount, a
+ * hostile chain) comes back untouched — the caller's containment check still
+ * rules on it, and refusing to name it at all would fail reviews that work.
+ */
+function canonicalise(abs: string): string {
+  const walked: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return walked.length === 0 ? real : join(real, ...walked.reverse());
+    } catch {
+      const parent = resolve(cur, '..');
+      // `resolve('/', '..')` is `/`: the root is its own parent, so this is
+      // the termination condition, not a step.
+      if (parent === cur) return abs;
+      walked.push(cur.slice(parent.length).replace(/^[\\/]+/, ''));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Where a user-supplied path sits relative to the repository root — the ONE
+ * answer both the parent's artifact pin and the child's capture must read.
+ *
+ * `qwen review run <file>` pins the artifact name it polls for from this, and
+ * `capture-local --file` scopes the diff from it. When the two spell the same
+ * file differently the parent polls a name no child ever writes: the review
+ * runs, posts, and then reports "no composed verdict was produced". They drifted
+ * once already, and the two corners below are why one call site cannot be
+ * trusted to re-derive it.
+ *
+ * `resolve` does not follow symlinks while `rev-parse --show-toplevel` returns
+ * the CANONICAL root — on macOS `/tmp` is a symlink to `/private/tmp`, so a
+ * path typed under `/tmp` relativises against a root sharing no prefix with it
+ * and comes back as a `..` walk out of a repository it is plainly inside.
+ * `realpathSync` throws on a path not on disk yet, which a reviewed file may
+ * legitimately be (a brand-new untracked file is exactly that feature's
+ * subject) — so the canonicalisation resolves the nearest ancestor that DOES
+ * exist and re-appends the rest, which is what makes the symlinked prefix and
+ * the not-yet-created file hold at the same time rather than one at a time.
+ *
+ * And `rel.startsWith('..')` is not the containment check it looks like: a
+ * file called `..foo.ts` at the repository root relativises to `..foo.ts` and
+ * would be read as having escaped. What escapes is `..` itself, a path whose
+ * FIRST SEGMENT is `..`, or an absolute one (no relative spelling exists).
+ */
+export function repoRelativeOf(
+  repoRoot: string,
+  file: string,
+  from: string = process.cwd(),
+): { rel: string; abs: string; escapes: boolean } {
+  const abs = canonicalise(resolve(from, file));
+  const rel = relative(repoRoot, abs);
+  const escapes =
+    rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  return { rel, abs, escapes };
 }

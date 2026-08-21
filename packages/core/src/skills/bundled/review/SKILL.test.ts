@@ -186,6 +186,19 @@ describe('bundled review skill', () => {
     expect(skillBody()).toContain('`mergeBaseSha` on every other');
   });
 
+  it('never asks the orchestrator to derive the file-review target', () => {
+    // Two derivations of one name is how `qwen review run` came to poll for
+    // an artifact no child ever wrote. The parent canonicalises through
+    // `realpathSync`; a hand-applied recipe normalises characters and does
+    // not, so a symlink BELOW the repo root made them disagree and a review
+    // that had already run — and with --comment, already posted — reported
+    // no verdict. The command derives it now, from `--file`.
+    const body = skillBody();
+    expect(body).not.toContain("put through the CLI's own normalization");
+    expect(body).toContain('**Do not pass `--target` for a file review');
+    expect(body).toContain('derives it from `--file`');
+  });
+
   it('pins the same-model gate on both incremental-anchor paths', () => {
     // The gate is prompt-level, and it survived main's move of the scoping
     // into `fetch-pr --since` (#9100) with its wording rewritten: the cache
