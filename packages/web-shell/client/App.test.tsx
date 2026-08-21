@@ -10727,6 +10727,63 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('keeps the armed carry when /clear lands after creation set the session id but before the rename (#8977)', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    let finishCreate!: () => void;
+    const createBlocked = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    mockSessionActions.createSession.mockImplementation(async () => {
+      // The freshly allocated session becomes visible on the connection
+      // (session id set, title source still unset) before the create call
+      // itself resolves — the window a second /clear can land in.
+      mockConnection.sessionId = 'session-2';
+      await createBlocked;
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.titleSource = undefined;
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await flush();
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+
+    // A second /clear in the window where the connection already has the new
+    // session id but no title source yet must re-arm from the still-armed
+    // carry instead of dropping it.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    await act(async () => {
+      finishCreate();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledTimes(1);
+      });
+    });
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'My manual name',
+      { silent: true },
+    );
+  });
+
   it('does not carry an auto-generated title over /clear (#8977)', async () => {
     mockConnection.titleSource = 'auto';
     mockConnection.displayName = 'Auto generated name';

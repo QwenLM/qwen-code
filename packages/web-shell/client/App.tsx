@@ -9700,7 +9700,13 @@ export function App({
             const carryManualName = current.sessionId
               ? current.titleSource === 'manual' && current.displayName?.trim()
                 ? current.displayName
-                : undefined
+                : current.titleSource === undefined
+                  ? // In-flight deferred creation: the connection already
+                    // exposes the freshly allocated session id, but the carry
+                    // rename has not landed yet (no title source). Fall back
+                    // to the still-armed carry instead of dropping it.
+                    pendingManualTitleRef.current?.displayName
+                  : undefined
               : pendingManualTitleRef.current?.displayName;
             createNewSession(undefined, { carryManualName });
             return true;
