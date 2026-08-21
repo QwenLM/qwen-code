@@ -52,6 +52,52 @@ describe('workflow file size', () => {
   });
 });
 
+describe('workflow size growth ratchet', () => {
+  // The absolute gate is a ceiling: it only objects once a file is nearly at
+  // the wall, so growth accrues unremarked until one PR has to pay for
+  // everyone. qwen-autofix.yml regained 78 KB when its prose moved out and
+  // gave 25 KB back in one feature commit two days later. The ratchet turns
+  // that drift into a reviewed line.
+  const baselinePath = join(WORKFLOW_DIR, '.size-baseline');
+  const baseline = new Map(
+    readFileSync(baselinePath, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim() && !l.trimStart().startsWith('#'))
+      .map((l) => l.trim().split(/\s+/))
+      .map(([bytes, name]) => [name, Number(bytes)]),
+  );
+  const allowance = Number(
+    gateScript.match(
+      /GROWTH_ALLOWANCE="\$\{WORKFLOW_SIZE_GROWTH_ALLOWANCE:-(\d+)\}"/,
+    )?.[1],
+  );
+
+  it('reads a positive allowance from the gate script', () => {
+    expect(allowance).toBeGreaterThan(0);
+  });
+
+  it.each(workflowFiles)('%s has a baseline entry', (file) => {
+    expect(baseline.has(file.split('/').pop())).toBe(true);
+  });
+
+  it.each(workflowFiles)('%s is within its baseline allowance', (file) => {
+    const bytes = Buffer.byteLength(readFileSync(file));
+    const recorded = baseline.get(file.split('/').pop());
+    expect(bytes).toBeLessThanOrEqual(recorded + allowance);
+  });
+
+  it('records no file that no longer exists', () => {
+    const present = new Set(workflowFiles.map((f) => f.split('/').pop()));
+    expect([...baseline.keys()].filter((n) => !present.has(n))).toEqual([]);
+  });
+
+  it('keeps every baseline at or under the gate', () => {
+    // A baseline above the gate would let the ratchet pass a file the ceiling
+    // rejects, so the two gates can never disagree about what is allowed.
+    expect([...baseline].filter(([, b]) => b > gateBytes)).toEqual([]);
+  });
+});
+
 describe('qwen-autofix.yml design-record pointers', () => {
   const workflow = readFileSync(join(WORKFLOW_DIR, 'qwen-autofix.yml'), 'utf8');
   const doc = readFileSync(join(WORKFLOW_DIR, 'qwen-autofix.md'), 'utf8');
