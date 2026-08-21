@@ -14,6 +14,7 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -305,8 +306,20 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const validationError = validateTodos(candidateTodos);
       if (validationError) throw new Error(validationError);
       const finalTodos = candidateTodos as TodoItem[];
-      const approvedWorkflowRevision =
+      const boundWorkflowRevision =
         this.config.getSessionWorkflowPlanRevision?.();
+      // A revision captured while the session is still in PLAN mode is a
+      // pending draft: refining the membership before approval is ordinary
+      // drafting, not divergence. Only a revision that survived an
+      // exit_plan_mode approval (the mode has since left PLAN) constrains
+      // membership here — entering PLAN clears the revision on every
+      // mode-change route, so a revision observed in PLAN mode is necessarily
+      // still pending approval.
+      const approvedWorkflowRevision =
+        boundWorkflowRevision !== undefined &&
+        this.config.getApprovalMode() !== ApprovalMode.PLAN
+          ? boundWorkflowRevision
+          : undefined;
       const matchesApprovedTodoIds =
         !approvedWorkflowRevision ||
         (finalTodos.length === approvedWorkflowRevision.todoIds.length &&

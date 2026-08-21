@@ -12,6 +12,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -585,6 +586,8 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => undefined,
+        // An approved revision only exists after the mode has left PLAN.
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
           planId: 'approved-plan',
           sourceCallId: 'todo-call-1',
@@ -622,6 +625,8 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => undefined,
+        // An approved revision only exists after the mode has left PLAN.
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
           planId: 'approved-plan',
           sourceCallId: 'todo-call-1',
@@ -656,6 +661,56 @@ describe('TodoWriteTool', () => {
       expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
       expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
         'approved-plan',
+      );
+    });
+
+    it('keeps a pending Workflow draft when PLAN-mode refinement changes Todo IDs', async () => {
+      // The revision captured from the first plan emission is still pending
+      // approval while the session is in PLAN mode; refining the draft's
+      // membership is ordinary iteration and must neither clear the revision
+      // nor strip the workflow marker from the refined plan.
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'draft-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['first', 'second'],
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'draft-plan',
+          todos: [
+            { id: 'first', content: 'First', status: 'pending' },
+            { id: 'second', content: 'Second', status: 'pending' },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [
+            { id: 'first', content: 'First', status: 'pending' },
+            { id: 'second', content: 'Second', status: 'pending' },
+            { id: 'third', content: 'Third', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
+      // The draft keeps its identity so the approval stamps the refined plan.
+      expect((result.returnDisplay as { planId?: string }).planId).toBe(
+        'draft-plan',
       );
     });
 

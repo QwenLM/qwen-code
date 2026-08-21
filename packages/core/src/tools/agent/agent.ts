@@ -3820,6 +3820,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               lastUpdatedAt: new Date().toISOString(),
               lastError: undefined,
               resumeCount: hotContinuationCount,
+              // Mirror the resume-service twins (background-agent-resume.ts):
+              // the completed run's terminal summary must not survive into the
+              // continuation — a crash mid-continuation would otherwise let
+              // discovery restore run N-1's stats/activities as the live run's
+              // state.
+              stats: undefined,
+              recentActivities: undefined,
             });
 
             const nextContextState = new ContextState();
