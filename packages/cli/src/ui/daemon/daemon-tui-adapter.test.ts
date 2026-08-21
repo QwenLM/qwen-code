@@ -162,6 +162,50 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     ]);
   });
 
+  it('preserves a sanitized Advisor review as structured output', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-advisor',
+          kind: 'advisor',
+          title: 'Consult Advisor',
+          status: 'completed',
+          rawOutput: {
+            type: 'advisor_review',
+            verdict: 'Check\x1b]0;bad\x07 the edge case.',
+            risks: 'Retries may be missing.',
+            missingEvidence: 'No failing test output.',
+            recommendation: 'Add a regression test.',
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          tools: [
+            {
+              resultDisplay: {
+                type: 'advisor_review',
+                verdict: 'Check the edge case.',
+                risks: 'Retries may be missing.',
+                missingEvidence: 'No failing test output.',
+                recommendation: 'Add a regression test.',
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({

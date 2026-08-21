@@ -17,7 +17,11 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { mapAdvisorError, type AdvisorErrorCode } from './advisor-error.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  AdvisorReviewDisplay,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 
 export type AdvisorToolParams = Record<string, never>;
@@ -99,7 +103,8 @@ function advisorErrorResult(
   };
 }
 
-function advisorSuccessResult(advice: string): ToolResult {
+function advisorSuccessResult(review: AdvisorReview): ToolResult {
+  const advice = formatAdvisorReview(review);
   return {
     llmContent: [
       '<advisor_feedback>',
@@ -108,7 +113,10 @@ function advisorSuccessResult(advice: string): ToolResult {
       '',
       'This feedback is advisory only. Continue the task using normal tools and permission checks.',
     ].join('\n'),
-    returnDisplay: advice,
+    returnDisplay: {
+      type: 'advisor_review',
+      ...review,
+    } satisfies AdvisorReviewDisplay,
   };
 }
 
@@ -460,7 +468,7 @@ class AdvisorToolInvocation extends BaseToolInvocation<
       );
       const review = parseAdvisorReview(forkedResult.jsonResult);
       this.recordSuccess(promptId);
-      return advisorSuccessResult(formatAdvisorReview(review));
+      return advisorSuccessResult(review);
     } catch (error) {
       if (signal.aborted) throw error;
       const code = mapAdvisorError(error);

@@ -802,6 +802,33 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders structured Advisor feedback instead of stringified JSON', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="Consult Advisor"
+        resultDisplay={{
+          type: 'advisor_review',
+          verdict: 'Check the edge case.',
+          risks: 'Retries may be missing.',
+          missingEvidence: 'No failing test output.',
+          recommendation: 'Add a regression test.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Advisor feedback');
+    expect(output).toContain('Verdict');
+    expect(output).toContain('Risks');
+    expect(output).toContain('Missing evidence');
+    expect(output).toContain('Recommendation');
+    expect(output).toContain('MockMarkdown:Check the edge case.');
+    expect(output).not.toContain('"advisor_review"');
+  });
+
   it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {
     const diffResult = {
       fileDiff: '--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new',

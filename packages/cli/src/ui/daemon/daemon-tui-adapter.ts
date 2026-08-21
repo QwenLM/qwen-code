@@ -11,6 +11,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createDebugLogger,
+  isAdvisorReviewDisplay,
   isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -272,6 +273,11 @@ function formatToolResultDisplay(
     return sanitizeDisplayText(value);
   }
   if (isVisionBridgeNoticeDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
+  }
+  if (isAdvisorReviewDisplay(value)) {
     return sanitizeDaemonValue(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];

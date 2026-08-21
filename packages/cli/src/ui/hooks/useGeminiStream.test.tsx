@@ -5627,6 +5627,137 @@ describe('useGeminiStream', () => {
     ]);
   });
 
+  it('commits streamed text before scheduling a tool continuation', async () => {
+    const toolRequest = {
+      callId: 'advisor-call',
+      name: 'advisor',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-advisor',
+    };
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'I will ask the advisor before continuing.',
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: toolRequest,
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('review this change');
+    });
+
+    const textCommitIndex = mockAddItem.mock.calls.findIndex(
+      ([item]) =>
+        item.type === 'gemini' &&
+        item.text === 'I will ask the advisor before continuing.',
+    );
+    const scheduleOrder = mockScheduleToolCalls.mock.invocationCallOrder[0];
+
+    expect(textCommitIndex).toBeGreaterThanOrEqual(0);
+    expect(scheduleOrder).toBeDefined();
+    expect(mockAddItem.mock.invocationCallOrder[textCommitIndex]).toBeLessThan(
+      scheduleOrder!,
+    );
+  });
+
+  it('keeps a completed tool ahead of its streaming continuation', async () => {
+    const toolRequest = {
+      callId: 'advisor-continuation',
+      name: 'advisor',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-advisor-continuation',
+    };
+    let releaseContinuation!: () => void;
+    const continuationStarted = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
+    });
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: toolRequest,
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Here is the final answer.',
+          };
+          await continuationStarted;
+        })(),
+      );
+    const completedTool = {
+      request: toolRequest,
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: toolRequest.callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: toolRequest.callId,
+              name: toolRequest.name,
+              response: { output: 'advisor feedback' },
+            },
+          },
+        ],
+        resultDisplay: 'advisor feedback',
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'advisor',
+        displayName: 'Advisor',
+        description: 'Consult Advisor',
+        build: vi.fn(),
+      },
+      invocation: {
+        getDescription: () => 'Consult Advisor',
+      },
+    } as unknown as TrackedCompletedToolCall;
+
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('review this change');
+    });
+
+    const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+      | ((tools: TrackedCompletedToolCall[]) => Promise<void>)
+      | undefined;
+    let completionPromise: Promise<void> | undefined;
+    act(() => {
+      completionPromise = onComplete?.([completedTool]);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        result.current.pendingHistoryItems.map((item) => item.type),
+      ).toEqual(['tool_group', 'gemini']);
+    });
+
+    await act(async () => {
+      releaseContinuation();
+      await completionPromise;
+    });
+
+    const committedTypes = mockAddItem.mock.calls.map(([item]) => item.type);
+    expect(committedTypes.slice(-2)).toEqual(['tool_group', 'gemini']);
+  });
+
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
     // Race A repro: the chat-internal repair pass already synthesized a
     // functionResponse for this callId on the Retry push (because the
