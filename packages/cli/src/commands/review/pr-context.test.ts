@@ -1640,6 +1640,40 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.prevPosted).toBeUndefined();
   });
 
+  it("restores this account's own churn state beside its own volume", () => {
+    // The union exists so a foreign marker cannot erase own data, and the
+    // churn state is own data exactly the way the volume is: the own marker
+    // describes the SAME round the winner claims, so its streak is this
+    // account's certified count FOR that round. Restoring only the volume
+    // group dropped `churnRounds` for exactly the round it described, on
+    // the routine multi-bot event this union fires for — `prevLedgerFacts`
+    // then read 0 and the non-convergence blocker needed a full fresh
+    // streak to re-arm: a drive-by poster mirroring the round number each
+    // round suppressed it indefinitely, with no attacker involved at all.
+    const own =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-9","sev":"C","file":"a.ts","title":"certified"}' +
+      '],"posted":6,"churnRounds":4,"churnFresh":10,"churnInduced":6} -->';
+    // The foreign marker carries its OWN churn state as well: the seam
+    // strip must keep it out of the winner, and the restore must not let
+    // it outrank or keep out the own numbers.
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":99,"churnRounds":1,"churnFresh":2,"churnInduced":2} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    expect(found?.merged).toBe(true);
+    expect(found?.ledger.churnRounds).toBe(4);
+    expect(found?.ledger.churnFresh).toBe(10);
+    expect(found?.ledger.churnInduced).toBe(6);
+  });
+
   it('restores an own TRUE-ZERO volume even with nothing to merge', () => {
     // A clean own round — LGTM, findings empty, `posted: 0` — has a real
     // baseline, and zero survives the persistence chain precisely so it can

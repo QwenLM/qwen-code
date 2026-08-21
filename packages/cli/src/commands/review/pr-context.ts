@@ -982,7 +982,12 @@ export function recoverLedger(
     // The volume comes back whether or not there is a LIST to merge. The
     // union exists so a foreign marker cannot erase own data, and the
     // volume is own data too: this account's own marker was walked in the
-    // same pass and its counts are trustworthy. Gated on the list, an own
+    // same pass and its counts are trustworthy. The churn state is the same
+    // class and comes back the same way: the own streak is this account's
+    // certified count FOR the round the winner claims — the winner's own
+    // was stripped above, so nothing foreign enters — and dropping it
+    // blinded the non-convergence rule on exactly the merged rounds this
+    // branch protects. Gated on the list, an own
     // round that posted nothing — a clean LGTM, findings empty, `posted: 0`
     // — lost its true-zero baseline to any stranger's parseable marker, and
     // zero survives the whole persistence chain precisely so it can be one.
@@ -999,6 +1004,7 @@ export function recoverLedger(
       ledger = {
         ...ledger,
         ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
+        ...pickChurnState(bestOwn.ledger),
       };
     }
   }
@@ -1412,6 +1418,22 @@ function stripChurnState(ledger: Ledger): Ledger {
     ...rest
   } = ledger;
   return rest;
+}
+
+/**
+ * The convergence state group PRESENT in a ledger — the restore half of the
+ * strip above, for the union's same-round branch. The own marker describes
+ * the SAME round the winner claims, so its streak and census are this
+ * account's certified state for that round — no foreign state enters
+ * through this restore, and a census half cannot arrive alone because the
+ * marker parser reads the pair together.
+ */
+function pickChurnState(ledger: Ledger): Partial<Ledger> {
+  const out: Partial<Ledger> = {};
+  if (ledger.churnRounds !== undefined) out.churnRounds = ledger.churnRounds;
+  if (ledger.churnFresh !== undefined) out.churnFresh = ledger.churnFresh;
+  if (ledger.churnInduced !== undefined) out.churnInduced = ledger.churnInduced;
+  return out;
 }
 
 /**

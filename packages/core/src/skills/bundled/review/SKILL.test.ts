@@ -715,8 +715,9 @@ describe('bundled review skill', () => {
   it('pins the census contract and the module-owns-the-verdict split', () => {
     // The census is the numerator/denominator the non-convergence finding is
     // computed from, and three clauses have to survive together: what to
-    // count, that ABSENCE is not zero (the one input that silently retires a
-    // standing claim), and that the model does not get to rule on its own
+    // count, that ABSENCE is not zero (a zeros pair carries the streak but
+    // stamps a false measured round into the marker telemetry), and that the
+    // model does not get to rule on its own
     // numbers — without the last, the narrated-away-cap failure reappears
     // wearing a different hat.
     const body = skillBody();

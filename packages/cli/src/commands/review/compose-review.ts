@@ -1328,7 +1328,16 @@ export function composeReview(
   // `induced > fresh` — refused symmetric with the round-0 streak guard in
   // `prevLedgerFacts`. A legitimate round-1 census can only carry
   // `induced = 0`, which never trips the bar, so this changes no verdict.
-  const readCensus = prevRound === 0 ? null : churnCensusOf(input.convergence);
+  // Context-unavailable is the OTHER unmeasurable state: the fix-induced
+  // test's age operand cannot be computed without a context, so a census
+  // presented under it cannot have come from the mechanical test that
+  // defines "measured". SKILL tells the round to omit the field there; this
+  // refusal is the module's half, symmetric with round 1 — absence then
+  // carries the streak, exactly as an unmeasured round must.
+  const readCensus =
+    prevRound === 0 || input.contextUnavailable === true
+      ? null
+      : churnCensusOf(input.convergence);
   const churnCensus =
     readCensus !== null && readCensus.fresh > reportedThisRound
       ? null
@@ -1713,7 +1722,13 @@ function prevLedgerFacts(planPath: string | undefined): {
     // a side file with no usable round is a file this recovery cannot place,
     // and a streak attributed to round 0 would arm the non-convergence rule
     // on a round-1 review that has no predecessor to have churned against.
-    const churnRounds = round === 0 ? 0 : (streakOf(prev.churnRounds) ?? 0);
+    // Clamped to the file's own ROUND too, mirroring `parseLedger`'s marker
+    // read: the side file is the same untrusted shape arriving by another
+    // route — a planted or hand-edited file — and an unclamped streak arms
+    // the bar past every round the pull request ever ran, inflating the
+    // posted ordinal ("the 10000th round…") after a single counted one.
+    const churnRounds =
+      round === 0 ? 0 : Math.min(streakOf(prev.churnRounds) ?? 0, round);
     // Through the ledger's OWN admission test, not a local restatement of
     // two of its checks. The side file is the same untrusted shape as a
     // marker, arriving by a different route: a file written before the id

@@ -10256,4 +10256,60 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(body(12)).toContain('the 12th round counted');
     expect(body(21)).toContain('the 21st round counted');
   });
+
+  it('clamps a side-file streak to the file round, as the marker read does', () => {
+    // `parseLedger` clamps a recovered marker's streak to the marker's own
+    // round; the side file is the same untrusted shape arriving by another
+    // route (a planted or hand-edited file), and this read applied only the
+    // LEDGER_MAX_ROUND cap. An unclamped streak then armed the bar past
+    // every round the pull request ever ran — one honest above-bar round
+    // later, the blocker filed claiming a 10000-round streak after a single
+    // counted round, against the mechanism's documented bound that reaching
+    // the bar takes at least two above-bar rounds. The clamp restores the
+    // marker path's invariant: a streak cannot name more counted rounds
+    // than the file's round. The filing still needs this round's own
+    // above-bar census, so the worst a clamped plant reaches is the one
+    // round of earliness the mechanism documents for forged streaks.
+    prevLedger({ round: 5, churnRounds: 9999 });
+    const r = round({ fresh: 11, induced: 7 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(6);
+    expect(r.body).toContain('the 6th round counted against the churn bar');
+    expect(r.body).not.toContain('the 10000th');
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a census under context-unavailable, symmetric with round 1', () => {
+    // The census rule instructs omission under the context-unavailable
+    // state — the fix-induced test's age operand cannot be computed without
+    // a context, so a census presented in that state did not come from the
+    // mechanical test that defines "measured". Round 1, the other
+    // unmeasurable state, is refused by the module itself; this one was
+    // left to the model's obedience, and a census accepted under it filed
+    // the blocker while `cappedBy` carried 'context-unavailable' inert.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      contextUnavailable: true,
+      convergence: { fresh: 11, induced: 7 },
+      draftedComments: Array.from({ length: 11 }, (_, i) => ({
+        path: 'src/a.ts',
+        line: i + 1,
+        body: `**[Suggestion]** finding ${i + 1}`,
+      })),
+    });
+    expect(r.cappedBy).toContain('context-unavailable');
+    // Refused as no census at all — the streak carries, exactly as absence
+    // does — so nothing files and the cap is the only effect.
+    expect(r.body).not.toContain('is not converging');
+    expect(r.event).toBe('COMMENT');
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(1);
+    expect(l.churnFresh).toBeUndefined();
+    expect(l.churnInduced).toBeUndefined();
+  });
 });
