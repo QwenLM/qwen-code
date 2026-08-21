@@ -537,7 +537,10 @@ describe('AgentTool', () => {
         'an explicit false is rejected',
       );
       expect(properties.properties.run_in_background.description).toContain(
-        'explicit run_in_background: true and configured background defaults',
+        'explicit run_in_background: true is rejected',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
       );
     });
 
