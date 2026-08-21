@@ -4032,7 +4032,10 @@ export function App({
       return;
     }
     const snapshot = JSON.stringify(environmentAgentTasks, (key, value) =>
-      key === 'runtimeMs' || key === 'stats' || key === 'recentActivities'
+      key === 'runtimeMs' ||
+      key === 'stats' ||
+      key === 'recentActivities' ||
+      key === 'prompt'
         ? undefined
         : value,
     );
