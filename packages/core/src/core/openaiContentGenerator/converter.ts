@@ -1660,28 +1660,30 @@ export function convertOpenAIChunkToGemini(
       parts = parts.filter((part) => !getVisibleText(part));
       visibleText = '';
     }
-    // Replay defense for the demotion route (symmetric to replayedTagPrefix
-    // above): providers re-send deltas (see normalizeStreamingTextDelta) and
-    // replays shorter than its exact-repeat window pass through verbatim.
-    // Once a demotion consumed tag-bearing text, an exact re-send of that
-    // text — or of the currently held tag-fragment tail — must not re-enter
-    // the candidate machinery or the post-demotion gate: it would hard-fail a
-    // legitimate demoted turn, corrupt a held rest, or emit a duplicated tail
-    // fragment. Scoped to tag-shaped replays (a genuine chunk carrying a
-    // complete tag post-demotion fails closed anyway) so repeated prose is
-    // untouched.
+    // Short cumulative replays can pass through normalizeStreamingTextDelta
+    // verbatim. Detect them only from the complete accepted post-demotion
+    // sequence: equality is an exact replay, while a prefix-extending chunk is
+    // a cumulative superset whose already-accepted prefix must be stripped.
+    // Never infer replay from suffix equality — genuine adjacent deltas can
+    // repeat the same character or tag-like fragment.
     if (
       requestContext.inlineThinkingBlockDemoted === true &&
       visibleText &&
-      ((requestContext.pendingPostDemotionTagTail !== undefined &&
-        visibleText === requestContext.pendingPostDemotionTagTail) ||
-        (requestContext.postDemotionConsumedText !== undefined &&
-          requestContext.postDemotionConsumedText.endsWith(visibleText) &&
-          (THINKING_TAG_PATTERN.test(visibleText) ||
-            requestContext.pendingThinkingTagCandidate !== undefined)))
+      requestContext.postDemotionReplayText !== undefined
     ) {
-      parts = parts.filter((part) => !getVisibleText(part));
-      visibleText = '';
+      const replayText = requestContext.postDemotionReplayText;
+      if (visibleText === replayText) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        visibleText = '';
+      } else if (visibleText.startsWith(replayText)) {
+        visibleText = visibleText.slice(replayText.length);
+        parts = parts.filter((part) => !getVisibleText(part));
+        if (visibleText) parts.push({ text: visibleText });
+      }
+    }
+    if (requestContext.inlineThinkingBlockDemoted === true && visibleText) {
+      requestContext.postDemotionReplayText =
+        (requestContext.postDemotionReplayText ?? '') + visibleText;
     }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;
@@ -1769,11 +1771,10 @@ export function convertOpenAIChunkToGemini(
           extractLeadingBalancedThinkingBlocks(combinedCandidateText);
         if (balancedInlineThinkingBlocks) {
           requestContext.inlineThinkingBlockDemoted = true;
-          // Raw text the demotion consumed on this chunk, kept so an exact
-          // provider re-send of it can be dropped before the candidate
-          // machinery and the post-demotion gate (see the replay defense at
-          // the top of this block).
-          requestContext.postDemotionConsumedText = combinedCandidateText;
+          // Accumulate every accepted content delta from the first demotion so
+          // an exact cumulative replay (including one spanning later
+          // demotions) can be recognized without guessing from suffixes.
+          requestContext.postDemotionReplayText ??= combinedCandidateText;
           parts = parts.filter((part) => !getVisibleText(part));
           for (const innerThought of balancedInlineThinkingBlocks.innerThoughts) {
             parts.push(createOpenAIReasoningThoughtPart(innerThought));

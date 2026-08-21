@@ -2711,6 +2711,97 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
+    it('rejects a held post-demotion tag tail with a full tag word at clean stream EOF', async () => {
+      // The converter resolves pendingPostDemotionTagTail only on a chunk
+      // carrying finish_reason, so a clean EOF without a finish chunk would
+      // otherwise silently discard the held tail and skip the fail-closed
+      // retry its finish-chunk twin triggers.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '<thinking' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingPostDemotionTagTail = '<thinking';
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until EOF validation runs.
+        }
+      }).rejects.toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+    });
+
+    it('releases a held post-demotion sub-word tag tail as literal text at clean stream EOF', async () => {
+      // A sub-word fragment ('<T' — e.g. a generic type cut by max_tokens)
+      // can no longer become a tag once the stream has ended; the EOF
+      // backstop must emit it verbatim like the finish-time path, not drop
+      // it silently.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '<T' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingPostDemotionTagTail = '<T';
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<T' },
+      ]);
+    });
+
     it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',

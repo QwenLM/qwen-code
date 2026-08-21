@@ -107,15 +107,14 @@ export interface RequestContext {
    */
   pendingPostDemotionTagTail?: string;
   /**
-   * Raw content-channel text the inline thinking demotion machinery consumed
-   * on the demotion chunk (issue #9348). Providers re-send deltas (see
-   * normalizeStreamingTextDelta) and replays shorter than its exact-repeat
-   * window pass through verbatim, so an exact re-send of this consumed text
-   * is dropped before the candidate machinery / post-demotion gate — it
-   * would otherwise hard-fail a legitimate demoted turn with
-   * PROTOCOL_TAG_LEAK, corrupt a still-held rest, or duplicate thought parts.
+   * Full accepted content-channel sequence since the first inline thinking
+   * demotion (issue #9348). Short cumulative replays can pass through
+   * normalizeStreamingTextDelta verbatim, so this sequence provides exact
+   * replay evidence: an equal sequence is dropped and a prefix-extending
+   * sequence contributes only its new suffix. Individual suffix equality is
+   * deliberately insufficient because genuine adjacent deltas may repeat.
    */
-  postDemotionConsumedText?: string;
+  postDemotionReplayText?: string;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';

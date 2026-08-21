@@ -903,6 +903,25 @@ export class ContentGenerationPipeline {
         );
       }
 
+      if (context.pendingPostDemotionTagTail) {
+        const tail = context.pendingPostDemotionTagTail;
+        context.pendingPostDemotionTagTail = undefined;
+        if (/<\/?think(?:ing)?/i.test(tail)) {
+          throw new InvalidStreamError(
+            'Model response leaked thinking tags.',
+            'PROTOCOL_TAG_LEAK',
+          );
+        }
+        const response = new GenerateContentResponse();
+        response.candidates = [
+          {
+            content: { parts: [{ text: tail }], role: 'model' },
+            index: 0,
+          },
+        ];
+        yield response;
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
