@@ -375,14 +375,12 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
     return obj;
   }
 
+  const record = obj as Record<string, unknown>;
   if (
     !Array.isArray(obj) &&
-    typeof (obj as Record<string, unknown>)['data'] === 'string' &&
-    typeof (obj as Record<string, unknown>)['mimeType'] === 'string' &&
-    (obj as Record<string, unknown>)['mimeType']
-      .toString()
-      .toLowerCase()
-      .startsWith('image/')
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
   ) {
     return obj;
   }
