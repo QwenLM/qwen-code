@@ -1193,6 +1193,45 @@ describe('LiveTaskService', () => {
     expect(harness.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('rejects case twins inside the canonical live owner runtime', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440021';
+    const storageSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(sessionId, '/conversations');
+    persistedSessionOwners.set(storageSessionId, '/conversations');
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: storageSessionId },
+      }),
+    ).rejects.toThrow(
+      `Multiple persisted sessions match "${storageSessionId}" by case.`,
+    );
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: { threadId: storageSessionId, prompt: 'continue' },
+      }),
+    ).rejects.toThrow(
+      `Multiple persisted sessions match "${storageSessionId}" by case.`,
+    );
+    expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('batches mixed-case owner arbitration across live and persisted runtimes', async () => {
     const harness = makeHarness();
     const sessionIds = Array.from(
@@ -1268,6 +1307,188 @@ describe('LiveTaskService', () => {
       }),
     ).rejects.toBe(error);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports an owner conflict discovered while waiting', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440109';
+    const storageSessionId = sessionId.toUpperCase();
+    const healthySessionId = '550e8400-e29b-41d4-a716-446655440111';
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessionOwners.set(sessionId, '/conversations');
+    harness.summaries.set(healthySessionId, {
+      sessionId: healthySessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Healthy resident task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add(healthySessionId);
+    persistedSessions.set(healthySessionId, persisted(healthySessionId));
+    persistedSessionOwners.set(healthySessionId, '/conversations');
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const waiting = harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [
+          { threadId: storageSessionId },
+          { threadId: healthySessionId },
+        ],
+        timeoutMs: 120_000,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeEvents).toHaveBeenCalled());
+    persistedSessions.set(storageSessionId, persisted(storageSessionId));
+    persistedSessionOwners.set(storageSessionId, '/project');
+    harness.service.interruptWait('live-root');
+
+    await expect(waiting).resolves.toMatchObject({
+      polls: [
+        {
+          thread: { id: healthySessionId },
+        },
+      ],
+      errors: [
+        {
+          threadId: storageSessionId,
+          message: `Task id is ambiguous: ${storageSessionId}`,
+        },
+      ],
+    });
+  });
+
+  it('reports an owner lookup failure discovered while waiting', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440110';
+    const storageSessionId = sessionId.toUpperCase();
+    const error = Object.assign(new Error('EIO: project catalog unavailable'), {
+      code: 'EIO',
+    });
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessionOwners.set(sessionId, '/conversations');
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const waiting = harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: storageSessionId }],
+        timeoutMs: 120_000,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeEvents).toHaveBeenCalled());
+    sessionIdLookupErrors.set(`/project:${storageSessionId}`, error);
+    harness.service.interruptWait('live-root');
+
+    await expect(waiting).resolves.toMatchObject({
+      polls: [],
+      errors: [
+        {
+          threadId: storageSessionId,
+          message: error.message,
+        },
+      ],
+    });
+  });
+
+  it('reports an attached task that disappears while waiting', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440112';
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessionOwners.set(sessionId, '/conversations');
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const waiting = harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: sessionId }],
+        timeoutMs: 120_000,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeEvents).toHaveBeenCalled());
+    harness.resident.delete(sessionId);
+    harness.service.interruptWait('live-root');
+
+    await expect(waiting).resolves.toMatchObject({
+      polls: [],
+      errors: [
+        {
+          threadId: sessionId,
+          message: `No session with id "${sessionId}"`,
+        },
+      ],
+    });
+  });
+
+  it('isolates a task reaped after its refresh summary is read', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440113';
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Resident task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    });
+    harness.resident.add(sessionId);
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const waiting = harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: sessionId }],
+        timeoutMs: 120_000,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeEvents).toHaveBeenCalled());
+    vi.spyOn(harness.bridge, 'getSessionSummary').mockImplementationOnce(() => {
+      harness.resident.delete(sessionId);
+      return harness.summaries.get(sessionId)!;
+    });
+    harness.service.interruptWait('live-root');
+
+    await expect(waiting).resolves.toMatchObject({
+      polls: [],
+      errors: [
+        {
+          threadId: sessionId,
+          message: `No session with id "${sessionId}"`,
+        },
+      ],
+    });
   });
 
   it('keeps a resident task usable when its persisted alias scan fails', async () => {

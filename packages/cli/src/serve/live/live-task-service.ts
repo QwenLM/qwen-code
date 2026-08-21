@@ -788,19 +788,51 @@ export class LiveTaskService {
       located.map(({ target }) => target.threadId),
     );
     const refreshed = await Promise.all(
-      located.map(async ({ target, task }) => ({
-        target,
-        task: await this.locateTask(target.threadId, refreshedSessionIds).catch(
-          () => task,
-        ),
-      })),
+      located.map(async ({ target, task }) => {
+        try {
+          return {
+            ok: true as const,
+            target,
+            task: await this.locateTask(target.threadId, refreshedSessionIds),
+          };
+        } catch (error) {
+          if (
+            error instanceof SessionNotFoundError &&
+            task.summary.clientCount === 0
+          ) {
+            return { ok: true as const, target, task };
+          }
+          return {
+            ok: false as const,
+            error: {
+              threadId: target.threadId,
+              hostId: 'local' as const,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }),
     );
+    const polls = [];
+    for (const entry of refreshed) {
+      if (entry.ok) {
+        try {
+          polls.push(this.waitSnapshot(entry.target, entry.task));
+        } catch (error) {
+          errors.push({
+            threadId: entry.target.threadId,
+            hostId: 'local',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } else {
+        errors.push(entry.error);
+      }
+    }
     return {
       timedOut,
       wake,
-      polls: refreshed.map(({ target, task }) =>
-        this.waitSnapshot(target, task),
-      ),
+      polls,
       ...(errors.length > 0 ? { errors } : {}),
     };
   }
@@ -1243,7 +1275,10 @@ export class LiveTaskService {
     if (live.kind === 'found') {
       runtime = live.runtime;
       try {
-        persistedSessionId = await resolvePersistedSessionId(runtime, true);
+        persistedSessionId = await resolvePersistedSessionId(
+          runtime,
+          threadId === liveSessionId,
+        );
       } catch (error) {
         if (
           error instanceof SessionIdCaseConflictError &&
