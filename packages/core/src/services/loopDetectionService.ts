@@ -35,7 +35,26 @@ export { getToolCallRepeatKey };
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
-const MAX_HISTORY_LENGTH = 1000;
+// Kept large enough that the long-period rule below can still see
+// PERIODIC_OCCURRENCES_REQUIRED occurrences of a long (~700 char) repeated
+// unit after truncation.
+const MAX_HISTORY_LENGTH = 4000;
+
+// Long-period verbatim repetition detection (issue #1775). A unit repeated
+// verbatim spaces identical CONTENT_CHUNK_SIZE-grams exactly one unit-length
+// apart, which the clustered rule cannot see: its average-distance bound
+// (1.5 * CONTENT_CHUNK_SIZE) only admits repeat units up to ~75 chars, so a
+// chanted multi-sentence block (~300 chars in the report) spins forever.
+// Instead, require a run of occurrences at exactly equal spacing and then
+// verify the spanned region is genuinely periodic with that stride.
+const PERIODIC_OCCURRENCES_REQUIRED = 5;
+// The verified periodic span must be substantial before halting a turn.
+// Short-period chants stay below this and are the clustered rule's domain;
+// this keeps a small number of short-period repetitions (e.g. a phrase
+// emitted a handful of times before a markdown reset) out of the long-period
+// path while still firing early for long repeated units (~5th repetition for
+// the ~300-char block in the report).
+const MIN_PERIODIC_REGION_LENGTH = 1000;
 
 // Thought tracking
 const THOUGHT_REPEAT_THRESHOLD = 3;
@@ -302,6 +321,21 @@ export class LoopDetectionService {
       case GeminiEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
+        if (!this.loopDetected) {
+          // Also route the thought text into the content-repetition
+          // detector. OpenAI-compatible providers stream reasoning as
+          // thought parts, which getResponseText filters out of Content
+          // events, so a verbatim chant in the thinking stage never reaches
+          // checkContentLoop otherwise. The Thought-only check above
+          // compares whole stream deltas adjacently, which misaligned
+          // chunking defeats — the chunk-hash detectors accumulate the text
+          // across deltas and catch the repetition regardless of chunk
+          // boundaries (issues #9656, #1775).
+          const thoughtText = this.getThoughtText(event.value);
+          if (thoughtText) {
+            this.loopDetected = this.checkContentLoop(thoughtText);
+          }
+        }
         break;
       }
       default:
@@ -683,18 +717,69 @@ export class LoopDetectionService {
 
     existingIndices.push(this.lastContentIndex);
 
-    if (existingIndices.length < CONTENT_LOOP_THRESHOLD) {
+    return (
+      this.isClusteredChunkRepetition(existingIndices) ||
+      this.isPeriodicChunkRepetition(existingIndices)
+    );
+  }
+
+  /**
+   * The original chunk rule: the most recent CONTENT_LOOP_THRESHOLD
+   * occurrences of an identical chunk cluster within 1.5 chunk lengths.
+   * Only admits repeat units up to ~75 chars (see isPeriodicChunkRepetition
+   * for longer ones).
+   */
+  private isClusteredChunkRepetition(indices: number[]): boolean {
+    if (indices.length < CONTENT_LOOP_THRESHOLD) {
       return false;
     }
 
     // Analyze the most recent occurrences to see if they're clustered closely together
-    const recentIndices = existingIndices.slice(-CONTENT_LOOP_THRESHOLD);
+    const recentIndices = indices.slice(-CONTENT_LOOP_THRESHOLD);
     const totalDistance =
       recentIndices[recentIndices.length - 1] - recentIndices[0];
     const averageDistance = totalDistance / (CONTENT_LOOP_THRESHOLD - 1);
     const maxAllowedDistance = CONTENT_CHUNK_SIZE * 1.5;
 
     return averageDistance <= maxAllowedDistance;
+  }
+
+  /**
+   * Detects verbatim repetition of a long unit (issue #1775): a chant whose
+   * repeated block exceeds the clustered rule's 75-char window, such as the
+   * ~300-char analysis block looped in the report. A unit repeated verbatim
+   * re-emits each of its CONTENT_CHUNK_SIZE-grams at exactly one unit-length
+   * of spacing, so a run of equally-spaced occurrences marks a candidate
+   * period. Equal spacing alone could still interleave varying text between
+   * occurrences, so the spanned region is additionally verified to be
+   * exactly periodic with that stride before firing.
+   */
+  private isPeriodicChunkRepetition(indices: number[]): boolean {
+    if (indices.length < PERIODIC_OCCURRENCES_REQUIRED) {
+      return false;
+    }
+
+    const recent = indices.slice(-PERIODIC_OCCURRENCES_REQUIRED);
+    const stride = recent[1] - recent[0];
+    for (let i = 2; i < recent.length; i++) {
+      if (recent[i] - recent[i - 1] !== stride) {
+        return false;
+      }
+    }
+
+    const region = this.streamContentHistory.slice(
+      recent[0],
+      recent[recent.length - 1] + CONTENT_CHUNK_SIZE,
+    );
+    if (region.length < MIN_PERIODIC_REGION_LENGTH) {
+      return false;
+    }
+    for (let i = 0; i + stride < region.length; i++) {
+      if (region[i] !== region[i + stride]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -710,6 +795,18 @@ export class LoopDetectionService {
       originalIndex + CONTENT_CHUNK_SIZE,
     );
     return originalChunk === currentChunk;
+  }
+
+  /**
+   * Joins a thought summary back into raw text for the content-repetition
+   * detector. For reasoning streamed from OpenAI-compatible providers the
+   * subject is empty and the description is the reasoning delta, so this
+   * yields the reasoning text verbatim.
+   */
+  private getThoughtText(summary: ThoughtSummary): string {
+    return [summary.subject, summary.description]
+      .filter((part) => part.length > 0)
+      .join(' ');
   }
 
   /**

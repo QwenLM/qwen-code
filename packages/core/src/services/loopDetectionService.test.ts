@@ -601,12 +601,17 @@ describe('LoopDetectionService', () => {
     it('should not detect a loop if repetitions are very far apart', () => {
       service.reset('');
       const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
-      const fillerContent = generateRandomString(500);
 
       let isLoop = false;
       for (let i = 0; i < CONTENT_LOOP_THRESHOLD; i++) {
         isLoop = service.addAndCheck(createContentEvent(repeatedContent));
-        isLoop = service.addAndCheck(createContentEvent(fillerContent));
+        // A fresh filler each cycle: repetitions separated by VARYING
+        // content are not a loop. (Reusing one identical filler made the
+        // whole stream byte-periodic, which the long-period rule for
+        // issue #1775 correctly treats as a chant.)
+        isLoop = service.addAndCheck(
+          createContentEvent(generateRandomString(500)),
+        );
       }
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
@@ -1196,6 +1201,146 @@ describe('LoopDetectionService', () => {
         mockConfig,
         expect.objectContaining({ loop_type: 'repetitive_thoughts' }),
       );
+    });
+  });
+
+  describe('Long verbatim repetition loops (issue #1775)', () => {
+    // The report shows one multi-sentence analysis block (~300 chars)
+    // chanted verbatim many times without the turn halting. The repeated
+    // unit is far longer than the clustered chunk rule's 75-char window,
+    // and on OpenAI-compatible providers such chants often run in the
+    // reasoning stream, which only reaches the service as Thought events.
+    // These tests stream the repeated block with deliberately misaligned
+    // deltas (a size that does not divide the unit) so no two adjacent
+    // deltas are identical, matching real token-stream chunking.
+    const CHANTED_UNIT =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+    const DELTA = 17;
+
+    const streamAsMisalignedThoughtDeltas = (
+      text: string,
+      deltaSize = DELTA,
+    ): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += deltaSize) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + deltaSize)),
+        );
+      }
+      return detected;
+    };
+
+    const streamAsMisalignedContentDeltas = (
+      text: string,
+      deltaSize = DELTA,
+    ): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += deltaSize) {
+        detected = service.addAndCheck(
+          createContentEvent(text.slice(i, i + deltaSize)),
+        );
+      }
+      return detected;
+    };
+
+    it('unit shape sanity: the chanted block exceeds the cluster window', () => {
+      expect(CHANTED_UNIT.length % DELTA).not.toBe(0);
+      expect(CHANTED_UNIT.length).toBeGreaterThan(CONTENT_CHUNK_SIZE * 1.5);
+    });
+
+    it('detects the long chant in the reasoning/thought channel', () => {
+      service.reset('');
+      const detected = streamAsMisalignedThoughtDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects the long chant on the visible content channel', () => {
+      service.reset('');
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects an even longer (~550-char) repeated unit', () => {
+      service.reset('');
+      // Same symptom class as the follow-up comment on the issue, whose
+      // repeated block is roughly half a kilobyte. Well inside the history
+      // window the long-period rule retains (see MAX_HISTORY_LENGTH).
+      const longUnit =
+        "Now I'm implementing the fix by modifying the version comparison " +
+        "logic to use the API's supportedIosVersions field when available, " +
+        'falling back to the static table only if the API does not have ' +
+        'that information. I realize the core issue: if the device is ' +
+        'already on the newest major release and the table claims a lower ' +
+        'maximum, the comparison correctly evaluates to false. The real ' +
+        'problem is that the static table values are stale and do not ' +
+        'match what the API reports, so I need to prioritize the API data.';
+      expect(longUnit.length).toBeGreaterThan(500);
+      expect(longUnit.length % DELTA).not.toBe(0);
+
+      const detected = streamAsMisalignedThoughtDeltas(longUnit.repeat(20));
+      expect(detected).toBe(true);
+    });
+
+    it('does not halt on a long, varied reasoning stream', () => {
+      service.reset('');
+      let text = '';
+      for (let i = 0; i < 200; i++) {
+        text += `Step ${i}: consider aspect ${i * 7 + 3} of the problem. `;
+      }
+      expect(streamAsMisalignedThoughtDeltas(text)).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not halt when identical chunks recur at an even stride but intervening text varies', () => {
+      service.reset('');
+      // A fixed 50-char anchor reappearing every 200 chars with VARYING
+      // same-length filler between occurrences: equal-stride occurrences
+      // without a genuinely periodic region must not fire.
+      const anchor =
+        'The quick brown fox jumps over the lazy dog again! '.slice(
+          0,
+          CONTENT_CHUNK_SIZE,
+        );
+      // Pseudo-random, internally aperiodic filler that still has the SAME
+      // length for every seed, so anchor occurrences stay exactly 200 chars
+      // apart. (A modular padding like `(seed + k*7) % 26` is periodic with
+      // period 26 and the existing clustered rule rightly halts on it.)
+      const filler = (seed: number, length: number): string => {
+        let state = ((seed + 1) * 2654435761) >>> 0;
+        let out = `Varying filler number ${seed} `;
+        while (out.length < length) {
+          state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+          out += String.fromCharCode(97 + ((state >>> 16) % 26));
+        }
+        return out;
+      };
+
+      let text = '';
+      for (let i = 0; i < 6; i++) {
+        text += anchor + filler(i, 150);
+      }
+      expect(streamAsMisalignedContentDeltas(text, CONTENT_CHUNK_SIZE)).toBe(
+        false,
+      );
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not halt on fewer than five occurrences of a long unit', () => {
+      service.reset('');
+      // Four full repetitions only yield four equally-spaced occurrences
+      // of any one chunk — below the long-period threshold.
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(4));
+      expect(detected).toBe(false);
     });
   });
 
