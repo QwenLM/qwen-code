@@ -1845,6 +1845,7 @@ export class Config {
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
+  private reasoningDisabledByUser = false;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
@@ -2489,6 +2490,9 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+    this.reasoningDisabledByUser =
+      params.generationConfig?.reasoning === false &&
+      params.generationConfigSources?.['reasoning']?.kind !== 'modelProviders';
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -3775,7 +3779,7 @@ export class Config {
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
-    const priorReasoningDisabled = priorReasoning === false;
+    const priorReasoningDisabled = this.reasoningDisabledByUser;
 
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
@@ -4662,6 +4666,7 @@ export class Config {
   }
 
   setReasoningDisabled(disabled: boolean): void {
+    this.reasoningDisabledByUser = disabled;
     const reasoning = disabled ? false : undefined;
     const applyDisabled = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
@@ -4838,11 +4843,12 @@ export class Config {
       return;
     }
 
-    // Reasoning is a session preference. Capture the effort or disabled state
-    // before the rebuild so switching models does not silently drop it.
+    // Capture the session override before the rebuild so switching models does
+    // not silently drop it. A model preset can also supply `reasoning: false`,
+    // so disabled state must use the explicit-user marker rather than the live
+    // value alone.
     const priorReasoningEffort = this.getReasoningEffort();
-    const priorReasoningDisabled =
-      this.contentGeneratorConfig.reasoning === false;
+    const priorReasoningDisabled = this.reasoningDisabledByUser;
 
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
@@ -4868,10 +4874,11 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
-      // Deliberately does NOT copy `reasoning`: the session preference is
-      // restored below. Copying it here would overwrite the live choice with
-      // the new model's default before the restore.
+      // Apply the target model's default before restoring any session override.
+      // Otherwise a preset-derived disable from the outgoing model leaks into
+      // the new model even when the user never changed the control.
       this.contentGeneratorConfig.model = config.model;
+      this.contentGeneratorConfig.reasoning = config.reasoning;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
@@ -4891,6 +4898,11 @@ export class Config {
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('reasoning' in sources) {
+        this.contentGeneratorConfigSources['reasoning'] = sources['reasoning'];
+      } else {
+        delete this.contentGeneratorConfigSources['reasoning'];
       }
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =

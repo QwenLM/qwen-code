@@ -4920,6 +4920,125 @@ describe('Server Config (config.ts)', () => {
       expect(config.getReasoningEffort()).toBe('high');
     });
 
+    it.each([
+      {
+        name: 'drops a preset disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        initialReasoning: false as const,
+        initialSource: 'modelProviders' as const,
+        expected: undefined,
+      },
+      {
+        name: 'drops a preset disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        initialReasoning: false as const,
+        initialSource: 'modelProviders' as const,
+        expected: undefined,
+      },
+      {
+        name: 'preserves a user disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        userDisabled: true,
+        expected: false as const,
+      },
+      {
+        name: 'preserves a user disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        userDisabled: true,
+        expected: false as const,
+      },
+      {
+        name: 'uses the target preset after Default on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        clearDisabled: true,
+        targetReasoning: { effort: 'low' as const },
+        expected: { effort: 'low' as const },
+      },
+      {
+        name: 'uses the target preset after Default on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        clearDisabled: true,
+        targetReasoning: { effort: 'low' as const },
+        expected: { effort: 'low' as const },
+      },
+    ])(
+      '$name',
+      async ({
+        authType,
+        requiresRefresh,
+        initialReasoning,
+        initialSource,
+        userDisabled,
+        clearDisabled,
+        targetReasoning,
+        expected,
+      }) => {
+        const config = new Config({
+          ...baseParams,
+          ...(initialReasoning === undefined
+            ? {}
+            : { generationConfig: { reasoning: initialReasoning } }),
+          ...(initialSource
+            ? {
+                generationConfigSources: {
+                  reasoning: { kind: initialSource },
+                },
+              }
+            : {}),
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'model-a',
+            authType,
+            reasoning: initialReasoning,
+          } as ContentGeneratorConfig,
+          sources: initialSource ? { reasoning: { kind: initialSource } } : {},
+        });
+        await config.refreshAuth(authType);
+        if (userDisabled) {
+          config.setReasoningDisabled(true);
+        } else if (clearDisabled) {
+          config.setReasoningDisabled(true);
+          config.setReasoningDisabled(false);
+        }
+
+        const generation = config.getModelsConfig().getGenerationConfig();
+        generation.reasoning = targetReasoning;
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'model-b',
+            authType,
+            reasoning: targetReasoning,
+          } as ContentGeneratorConfig,
+          sources: targetReasoning
+            ? { reasoning: { kind: 'modelProviders' } }
+            : {},
+        });
+
+        await (
+          config as unknown as {
+            handleModelChange: (
+              authType: AuthType,
+              requiresRefresh: boolean,
+            ) => Promise<void>;
+          }
+        ).handleModelChange(authType, requiresRefresh);
+
+        expect(config.getContentGeneratorConfig().reasoning).toEqual(expected);
+        expect(
+          config.getModelsConfig().getGenerationConfig().reasoning,
+        ).toEqual(expected);
+      },
+    );
+
     it('should fire auth_success notification hook when hooks are enabled', async () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({
