@@ -34,6 +34,7 @@ import {
   _setMcpFetchForTest,
   addMCPStatusChangeListener,
   attemptAutomaticMcpOAuth,
+  connectAndDiscover,
   connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
   createTransport,
@@ -99,6 +100,38 @@ function cfgWithResources(): Config {
       removeResourcesByServer: vi.fn(),
     }),
   } as unknown as Config;
+}
+
+function mockAppOnlyMcpServer(): void {
+  const methodNotFound = Object.assign(new Error('Method not found'), {
+    code: -32601,
+  });
+  vi.mocked(ClientLib.Client).mockReturnValue({
+    connect: vi.fn(),
+    registerCapabilities: vi.fn(),
+    setRequestHandler: vi.fn(),
+    getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+    request: vi.fn().mockRejectedValue(methodNotFound),
+    listTools: vi.fn().mockResolvedValue({
+      tools: [
+        {
+          name: 'internal_refresh',
+          _meta: { ui: { visibility: ['app'] } },
+        },
+      ],
+    }),
+    getInstructions: vi.fn(),
+    close: vi.fn(),
+  } as unknown as ClientLib.Client);
+  vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+    {} as SdkClientStdioLib.StdioClientTransport,
+  );
+  vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+    tool: () =>
+      Promise.resolve({
+        functionDeclarations: [{ name: 'internal_refresh' }],
+      }),
+  } as unknown as GenAiLib.CallableTool);
 }
 
 describe('mcp-client', () => {
@@ -2102,6 +2135,48 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // Registries strictly untouched even on throw — pure method invariant.
       expect(toolRegistry.registerTool).not.toHaveBeenCalled();
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('keeps a server with only app-visible tools connected', async () => {
+      mockAppOnlyMcpServer();
+      const client = new McpClient(
+        'app-only-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot).toEqual({ tools: [], prompts: [], resources: [] });
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+    });
+
+    it('keeps standalone discovery connected for app-visible-only tools', async () => {
+      mockAppOnlyMcpServer();
+      const serverName = `app-only-standalone-${Date.now()}`;
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        toolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
     });
 
     it('discoverAndReturn throws when called before connect()', async () => {

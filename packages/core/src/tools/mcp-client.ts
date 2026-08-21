@@ -397,6 +397,10 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
     { name, version: '0.0.1' },
     {
       versionNegotiation: mcpVersionNegotiationFor(cfg),
+      // Keep listing until the server ends pagination. The SDK still stops on
+      // repeated cursors, while its default 64-page cap turns larger valid
+      // catalogs into a discovery failure that this module reports as empty.
+      listMaxPages: 0,
       capabilities: {
         extensions: {
           [MCP_APPS_EXTENSION_ID]: {
@@ -682,10 +686,10 @@ export class McpClient {
       // requests by JSON-RPC id) to save round-trips per server at startup.
       // Each helper retries transient errors internally, then swallows
       // permanent errors and returns [], so Promise.all never rejects here.
-      const [prompts, resources, discoveredTools] = await Promise.all([
+      const [prompts, resources, toolDiscovery] = await Promise.all([
         listMcpPrompts(this.serverName, this.client),
         listMcpResources(this.serverName, this.client),
-        discoverTools(
+        discoverToolsWithMetadata(
           this.serverName,
           this.serverConfig,
           this.client,
@@ -693,12 +697,13 @@ export class McpClient {
           { applyConfigFilters: opts?.applyConfigFilters ?? true },
         ),
       ]);
-      const tools = applyListingAppResourceUi(discoveredTools, resources);
+      const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
       if (
         prompts.length === 0 &&
         tools.length === 0 &&
-        resources.length === 0
+        resources.length === 0 &&
+        !toolDiscovery.hadVisibilityFilteredTools
       ) {
         throw new Error('No prompts, tools, or resources found on the server.');
       }
@@ -1378,13 +1383,21 @@ export async function connectAndDiscover(
       mcpClient,
       cliConfig.getResourceRegistry(),
     );
-    const tools = applyListingAppResourceUi(
-      await discoverTools(mcpServerName, mcpServerConfig, mcpClient, cliConfig),
-      resources,
+    const toolDiscovery = await discoverToolsWithMetadata(
+      mcpServerName,
+      mcpServerConfig,
+      mcpClient,
+      cliConfig,
     );
+    const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
     // If we found no prompts, resources, or tools, it's a failed discovery
-    if (prompts.length === 0 && resources.length === 0 && tools.length === 0) {
+    if (
+      prompts.length === 0 &&
+      resources.length === 0 &&
+      tools.length === 0 &&
+      !toolDiscovery.hadVisibilityFilteredTools
+    ) {
       throw new Error('No prompts, tools, or resources found on the server.');
     }
 
@@ -1451,6 +1464,29 @@ export async function discoverTools(
   cliConfig: Config,
   opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
+  return (
+    await discoverToolsWithMetadata(
+      mcpServerName,
+      mcpServerConfig,
+      mcpClient,
+      cliConfig,
+      opts,
+    )
+  ).tools;
+}
+
+type ToolDiscoveryResult = {
+  tools: DiscoveredMCPTool[];
+  hadVisibilityFilteredTools: boolean;
+};
+
+async function discoverToolsWithMetadata(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  mcpClient: Client,
+  cliConfig: Config,
+  opts?: { applyConfigFilters?: boolean },
+): Promise<ToolDiscoveryResult> {
   try {
     const { mcpToTool } = await import('@google/genai');
     const listedTools: Array<
@@ -1488,7 +1524,7 @@ export async function discoverTools(
 
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
-      return [];
+      return { tools: [], hadVisibilityFilteredTools: false };
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
@@ -1514,6 +1550,7 @@ export async function discoverTools(
     const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
     const applyConfigFilters = opts?.applyConfigFilters ?? true;
     const discoveredTools: DiscoveredMCPTool[] = [];
+    let hadVisibilityFilteredTools = false;
     for (const funcDecl of tool.functionDeclarations) {
       try {
         if (!funcDecl.name) {
@@ -1543,6 +1580,7 @@ export async function discoverTools(
           (mcpTool) => mcpTool.name === funcDecl.name,
         );
         if (listed && !isMcpToolVisibleToModel(listed)) {
+          hadVisibilityFilteredTools = true;
           continue;
         }
 
@@ -1573,7 +1611,7 @@ export async function discoverTools(
         );
       }
     }
-    return discoveredTools;
+    return { tools: discoveredTools, hadVisibilityFilteredTools };
   } catch (error) {
     if (!isMethodNotFound(error)) {
       debugLogger.error(
@@ -1582,7 +1620,7 @@ export async function discoverTools(
         )}`,
       );
     }
-    return [];
+    return { tools: [], hadVisibilityFilteredTools: false };
   }
 }
 
