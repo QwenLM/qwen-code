@@ -13,18 +13,24 @@ import path from 'node:path';
 const TEST_OR_FIXTURE_SEGMENTS = new Set(['__tests__', 'fixtures']);
 
 function isCoreProductionFile(filename) {
-  if (!filename || filename === '<input>' || filename === '<text>') return false;
+  if (!filename || filename === '<input>' || filename === '<text>')
+    return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
   const marker = 'packages/core/src/';
   const start = normalized.indexOf(marker);
   if (start < 0) return false;
   const relativePath = normalized.slice(start + marker.length);
   const segments = relativePath.split('/');
-  return !segments.some((segment) => TEST_OR_FIXTURE_SEGMENTS.has(segment)) &&
-    !/\.test\.[cm]?[jt]sx?$/.test(relativePath);
+  return (
+    !segments.some((segment) => TEST_OR_FIXTURE_SEGMENTS.has(segment)) &&
+    !/\.test\.[cm]?[jt]sx?$/.test(relativePath)
+  );
 }
 
+const CORE_PACKAGE_SPECIFIER = '@qwen-code/qwen-code-core';
+
 function resolvesToCoreRootBarrel(filename, importedPath) {
+  if (importedPath === CORE_PACKAGE_SPECIFIER) return true;
   if (!importedPath.startsWith('.')) return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
   const marker = 'packages/core/src/';
@@ -56,16 +62,33 @@ export default {
       return {};
     }
 
-    function checkSource(node) {
+    function reportIfBarrel(sourceNode, importedPath) {
       if (
-        node.source &&
-        typeof node.source.value === 'string' &&
-        resolvesToCoreRootBarrel(filename, node.source.value)
+        typeof importedPath === 'string' &&
+        resolvesToCoreRootBarrel(filename, importedPath)
       ) {
         context.report({
-          node: node.source,
+          node: sourceNode,
           messageId: 'noCoreRootBarrelImport',
         });
+      }
+    }
+
+    function checkSource(node) {
+      if (node.source && typeof node.source.value === 'string') {
+        reportIfBarrel(node.source, node.source.value);
+      }
+    }
+
+    function checkDynamicImport(node) {
+      const source = node.source;
+      if (source.type === 'Literal') {
+        reportIfBarrel(source, source.value);
+      } else if (
+        source.type === 'TemplateLiteral' &&
+        source.quasis.length === 1
+      ) {
+        reportIfBarrel(source, source.quasis[0].value.cooked);
       }
     }
 
@@ -73,9 +96,7 @@ export default {
       ImportDeclaration: checkSource,
       ExportNamedDeclaration: checkSource,
       ExportAllDeclaration: checkSource,
-      ImportExpression(node) {
-        if (node.source.type === 'Literal') checkSource(node);
-      },
+      ImportExpression: checkDynamicImport,
     };
   },
 };
