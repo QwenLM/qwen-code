@@ -9,9 +9,10 @@ implementation rationale behind each gate, see the design record:
 
 The autofix loop stops implementing non-Critical feedback once a PR has
 completed `CRITICAL_ONLY_AFTER_ROUND` (5) change-producing rounds. From there
-only Critical findings, `Request changes` reviews, failed checks, and base
-conflicts drive code changes; everything else is recorded in a
-`Deferred non-Critical feedback` section and left for a human.
+only Critical findings, `Request changes` reviews, in-budget maintainer
+feedback, failed checks, and base conflicts drive code changes; everything
+else is recorded in a `Deferred non-Critical feedback` section and left for a
+human.
 
 That counter is **window-scoped**, and engaging takeover opens a fresh window.
 So a PR that had already absorbed nine rounds of ordinary human review got five
@@ -44,8 +45,9 @@ more change-producing round(s) instead of a full fresh 5. …
 
 Who may issue it is unchanged from the bare command: the PR author on an in-repo
 PR (holding triage+ _at the time of the comment_), or any write+ collaborator.
-The same refusals apply — a non-`main` base, `autofix/skip`, and a fork without
-maintainer-edit access are all declined out loud.
+The same refusals apply — a non-`main` base, `autofix/skip`, a fork without
+maintainer-edit access, and a fork whose author lacks write+ on this repository
+are all declined out loud.
 
 ### Picking N
 
@@ -57,8 +59,9 @@ to review.
 You do not have to be precise. The seed only decides how much suggestion budget
 remains, and you can always re-seed (below). When unsure, err toward the higher
 number: the tail of a long-running PR is where suggestion churn hurts most, and
-Critical findings, `Request changes` reviews, failed checks, and base-conflict
-resolution keep flowing regardless of the seed.
+Critical findings, `Request changes` reviews, in-budget maintainer feedback,
+failed checks, and base-conflict resolution keep flowing regardless of the
+seed.
 
 | You type | Counter starts at | Suggestion-capable rounds left                 |
 | -------- | ----------------- | ---------------------------------------------- |
@@ -112,9 +115,11 @@ cap is 100, so a seed of 4 leaves 96.
 ## Accepted and rejected forms
 
 The literal prefix must match `@qwen-code /takeover` byte-for-byte and the tail
-must be a bare 1–2 digit integer. Leading and trailing whitespace on the comment
-is trimmed; nothing else is tolerated, and anything unrecognized fails closed to
-"not an exact command" — no label, no seed, no partial effect.
+must be a bare 1–2 digit integer. Leading spaces and tabs on the first line, and
+all trailing whitespace, are trimmed — but a blank line before the command is
+not, so it must start the comment's first line. Nothing else is tolerated, and
+anything unrecognized fails closed to "not an exact command" — no label, no
+seed, no partial effect.
 
 | Body                                 | Result                                      |
 | ------------------------------------ | ------------------------------------------- |
@@ -127,6 +132,7 @@ is trimmed; nothing else is tolerated, and anything unrecognized fails closed to
 | `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected             |
 | `@qwen-code /takeover  from 4`       | **nothing** — double space                  |
 | `please @qwen-code /takeover from 4` | **nothing** — must start the comment        |
+| blank line, then the command         | **nothing** — must start the first line     |
 | `@qwen-code /takeover from 4 please` | **nothing** — must end the comment          |
 
 ## Reading the result
