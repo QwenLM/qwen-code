@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
 import type {
-ToolExecutionStatus,
-  ToolCallConfirmationDetails,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
+  ToolExecutionStatus,
+} from './turn.js';
+import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,

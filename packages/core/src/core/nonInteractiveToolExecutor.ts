@@ -6,7 +6,7 @@
 
 import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
 import type { Config } from '../config/config.js';
-import type { RuntimeContentGeneratorView } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,
