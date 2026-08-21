@@ -907,6 +907,20 @@ export class ToolRegistry {
   }
 
   /**
+   * Roll the presentation ledger back to a previously captured snapshot.
+   * Used when a delivery surface committed presentations for a batch whose
+   * carrying tool result then failed to enter active history (the send threw
+   * before the history push): without the rollback the ledger mark survives
+   * while the schema never reached the model, letting a later `tool_call`
+   * pass the #6721 gate and execute on guessed arguments.
+   */
+  restoreProxySchemaPresentationSnapshot(
+    snapshot: ReadonlyMap<string, string>,
+  ): void {
+    this.proxySchemaPresentations = new Map(snapshot);
+  }
+
+  /**
    * Stable fingerprint of a tool's current schema. The `tool_call` proxy
    * compares the fingerprint recorded when tool_search delivered the schema
    * against the live schema at call time (issue #6721's fail-closed gate).

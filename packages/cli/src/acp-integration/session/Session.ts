@@ -489,6 +489,15 @@ type RunToolResult = {
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  /**
+   * The proxy-schema presentation ledger as of BATCH START (before this
+   * batch's tool_search results committed their presentations). If the
+   * carrying functionResponse message then fails to enter active history
+   * (send throws before the history push), the caller rolls the ledger back
+   * to this snapshot so the committed marks do not outlive the schema they
+   * reference (#6721).
+   */
+  presentationSnapshot?: ReadonlyMap<string, string>;
 };
 
 type MidTurnDrainResult = {
@@ -5537,6 +5546,12 @@ export class Session implements SessionContext {
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
+    // The presentation-ledger snapshot captured at the start of the most
+    // recent tool batch whose carrying functionResponse message has not yet
+    // been delivered. If that send throws before pushing to history, the
+    // catch below rolls the ledger back to this snapshot so the batch's
+    // committed marks do not outlive the schema they reference (#6721).
+    let pendingPresentationSnapshot: ReadonlyMap<string, string> | undefined;
     const preservePendingMessage = (message: Content) => {
       if (initialSend) return;
       const preservedParts = (message.parts ?? []).filter(
@@ -5900,6 +5915,10 @@ export class Session implements SessionContext {
         }
 
         const responseStream = sendResult.responseStream;
+        // The carrying message was accepted by the send path, so the batch's
+        // committed presentations are now backed by history — drop the
+        // rollback snapshot (a later batch will set a fresh one).
+        pendingPresentationSnapshot = undefined;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
@@ -6011,6 +6030,31 @@ export class Session implements SessionContext {
             { ...messageForPreservation, parts: preservedParts },
             true,
           );
+        }
+        // If a tool batch's presentations were committed but the message
+        // carrying them never reached active history (the send threw before
+        // the push), roll the presentation ledger back to the pre-batch
+        // snapshot. Otherwise the marks survive and a later model-emitted
+        // tool_call passes the #6721 fail-closed gate and executes on
+        // guessed arguments.
+        if (
+          pendingPresentationSnapshot &&
+          (!providerSendChat ||
+            (providerSendChat.getUserContentPushCount?.() ?? 0) <=
+              userContentPushCountBeforeSend)
+        ) {
+          // Test doubles may expose a registry without the restore API; a
+          // ledger rollback must never break the send-failure path.
+          try {
+            this.config
+              .getToolRegistry()
+              .restoreProxySchemaPresentationSnapshot(
+                pendingPresentationSnapshot,
+              );
+          } catch {
+            // Ignore — see above.
+          }
+          pendingPresentationSnapshot = undefined;
         }
         const isControlledCancellation =
           pendingSend.signal.aborted &&
@@ -6126,6 +6170,13 @@ export class Session implements SessionContext {
           options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
+        // The batch's presentations were committed in runToolCalls; track the
+        // pre-batch snapshot so the carrying message's send-failure path can
+        // roll them back if the message never reaches active history. Cleared
+        // once the carrying send succeeds (below). The stop/loop-detected
+        // early returns above preserve the tool run into history, so they
+        // need no rollback and are skipped by setting this after them.
+        pendingPresentationSnapshot = toolRun.presentationSnapshot;
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -8931,7 +8982,7 @@ export class Session implements SessionContext {
         })),
       };
       if (orderedRecords.length === 0) {
-        return { ...result, repeatedToolFailureBatch };
+        return { ...result, repeatedToolFailureBatch, presentationSnapshot };
       }
       const finalized = await finalizeToolResponses(
         this.config,
@@ -8958,6 +9009,7 @@ export class Session implements SessionContext {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
         repeatedToolFailureBatch,
+        presentationSnapshot,
       };
     };
     let skippedToolCallCounter = 0;
